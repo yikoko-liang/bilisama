@@ -1,0 +1,9 @@
+# 纯聊天：会主动起话题，但不接弹幕（L1）
+
+[interaction.speak]
+danmaku = false
+gift = false
+super_chat = false
+guard_buy = false
+vip_enter = false
+proactive = true

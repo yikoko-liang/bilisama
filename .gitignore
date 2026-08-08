@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# 运行时产物
+data/
+logs/
+config/s2s/*.json
+desktop/resources/vendor/
+desktop/node_modules/

@@ -1,0 +1,16 @@
+# 调试用：只跟主播对话（L0），不连直播间
+active_profile = "debug"
+
+[interaction]
+chattiness = "low"
+
+[interaction.speak]
+danmaku = false
+gift = false
+super_chat = false
+guard_buy = false
+vip_enter = false
+proactive = false
+
+[runtime]
+log_level = "debug"

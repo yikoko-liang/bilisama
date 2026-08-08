@@ -1,0 +1,8 @@
+# 大场面：进房欢迎全开、话痨度高（L4）
+
+[interaction]
+chattiness = "high"
+
+[interaction.speak]
+entry = true
+follow = true

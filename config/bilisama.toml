@@ -1,0 +1,113 @@
+# BiliSama 配置。这是唯一的真相源，密钥除外（密钥在系统钥匙串里）。
+#
+# 有几类值刻意不在这里：
+#   - 冷场阈值、弹幕窗口、打分门槛、冷却、回复长度 —— 由 chattiness 派生，
+#     跑 `bilisama config chattiness` 看三档分别是多少
+#   - 任何密钥 —— 只留一个引用名，值在钥匙串
+#
+# config/s2s/bilisama-s2s.json 是从 [speech.s2s] 渲染出来的产物，不要手改。
+
+config_version = 1
+active_profile = "normal"
+
+[room]
+room_id = 0
+platform = "bilibili"
+credential_ref = ""
+
+[speech]
+provider = "s2s"                        # s2s | dashscope | openai_ga
+
+[speech.s2s]
+endpoint = "ws://127.0.0.1:8765/v1/realtime"
+managed = true                          # false = 你自己在别处跑，这里只填地址
+llm_base_url = "http://127.0.0.1:9010/v1"
+llm_model = "our-s2t-v1"
+patches = ["text_modality", "raw_instructions"]
+tts_placeholder = "kokoro"              # 纯文本模式下它不合成音频，但结构上必须在
+
+# 判停三件套。字段名跟上游 vad_arguments.py 逐字对齐，CI 有一条门禁对账。
+# smart_turn_max_wait_ms 上游默认 2000，我们压到 1200：延迟方差全部来自这个数。
+[speech.s2s.turn]
+thresh = 0.6
+sample_rate = 16000
+min_silence_ms = 64
+min_speech_ms = 384
+min_speech_continuation_ms = 192
+speech_pad_ms = 500
+audio_enhancement = false
+speculative_reopen_ms = 800
+unanswered_reopen_ms = 7000
+short_segment_merge_ms = 0
+smart_turn = true
+smart_turn_threshold = 0.5
+smart_turn_max_wait_ms = 1200
+smart_turn_incomplete_delay_ms = 400
+smart_turn_cpu_count = 2
+
+[speech.dashscope]
+endpoint = ""
+model = ""
+api_key_ref = "dashscope"
+
+[speech.side]                           # 主动话题、记忆蒸馏、事实抽取都用它，挑便宜的
+base_url = ""
+model = ""
+api_key_ref = "side"
+
+[tts]                                   # 只在语音后端不自带音频时生效
+engine = "qwen3_cloud"
+voice = ""
+speed = 1.0
+api_key_ref = "tts"
+
+[audio]
+input_device = "auto"
+output_device = "auto"
+output_route = "virtual"                # virtual 走虚拟声卡给 OBS；direct 必须戴耳机
+echo_guard = "duck"                     # 主播一开口先把 AI 音量压下去
+
+[safety]
+wordlist_path = "auto"
+allowlist_path = "auto"
+on_hit = "drop_sentence"
+
+[interaction]
+chattiness = "medium"
+sc_protect_ms = 4000
+gift_gold_high = 10000
+gift_gold_medium = 1000
+burst_uniques = 5
+burst_window_s = 45
+
+# 事件一律入库（记忆、字幕、事件流照常），这里只管说不说
+[interaction.speak]
+danmaku = true
+gift = true
+super_chat = true
+guard_buy = true
+vip_enter = true
+entry = false                           # 普通观众进房，靠批量欢迎兜底
+follow = false
+like = false
+share = false
+proactive = true
+background_result = false               # MVP 默认关
+
+[memory]
+db_path = "auto"
+distill_every_n_events = 40             # 按事件计数触发，不按定时器
+retain_event_days = 7
+
+[persona]
+id = "mia"
+
+[avatar]
+renderer = "live2d"
+model_id = ""
+expression_source = "tag"               # 只在我们自己做 TTS 时安全
+
+[runtime]
+ui_port = 0
+log_level = "info"
+log_viewer_content = false              # 弹幕正文是观众的话，默认不落盘
