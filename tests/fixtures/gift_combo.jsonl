@@ -1,0 +1,5 @@
+# L2：连击礼物。验 combo 聚合成一句谢，而不是谢十次。
+{"at_s": 0.0, "kind": "gift", "gift": {"gift_id": 31036, "name": "小心心", "num": 1, "coin_type": "gold", "total_coin": 1000, "combo_id": "c1", "combo_count": 1}, "viewer": {"uid": 3001, "name": "阿强"}, "event_id": "g1", "ts_ms": 1000}
+{"at_s": 0.3, "kind": "gift", "gift": {"gift_id": 31036, "name": "小心心", "num": 1, "coin_type": "gold", "total_coin": 1000, "combo_id": "c1", "combo_count": 2}, "viewer": {"uid": 3001, "name": "阿强"}, "event_id": "g2", "ts_ms": 1300}
+{"at_s": 0.6, "kind": "gift", "gift": {"gift_id": 31036, "name": "小心心", "num": 1, "coin_type": "gold", "total_coin": 1000, "combo_id": "c1", "combo_count": 3}, "viewer": {"uid": 3001, "name": "阿强"}, "event_id": "g3", "ts_ms": 1600}
+{"at_s": 1.9, "kind": "gift", "gift": {"gift_id": 31036, "name": "小心心", "num": 1, "coin_type": "gold", "total_coin": 1000, "combo_id": "c1", "combo_count": 4, "combo_end": true}, "viewer": {"uid": 3001, "name": "阿强"}, "event_id": "g4", "ts_ms": 2900}

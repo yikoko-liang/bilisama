@@ -64,6 +64,7 @@ target-version = ["py312"]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
+plugins = ["pydantic.mypy"]
 # 第三方库没有类型标注的，单独放行
 [[tool.mypy.overrides]]
 module = ["pysbd.*", "brotli.*", "mlx_audio.*"]

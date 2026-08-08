@@ -1021,15 +1021,6 @@ def check(s: Settings) -> list[ConfigProblem]:
                 )
             )
 
-    if not owns_tts and not s.tts.engine:
-        problems.append(
-            ConfigProblem(
-                field="tts.engine",
-                message="当前配置下 BiliSama 要自己合成语音，但没选引擎。",
-                fix="选一个语音引擎。",
-            )
-        )
-
     if s.room.room_id and not s.room.credential_ref:
         problems.append(
             ConfigProblem(

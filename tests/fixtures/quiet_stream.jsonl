@@ -1,0 +1,4 @@
+# L1：近乎无人。验主动话题会不会在冷场后恰好起一次。
+{"at_s": 0.0, "kind": "danmaku", "text": "来了", "viewer": {"uid": 1001, "name": "路人甲"}, "event_id": "d1", "ts_ms": 1000}
+{"at_s": 95.0, "kind": "danmaku", "text": "还在写代码呢", "viewer": {"uid": 1001, "name": "路人甲"}, "event_id": "d2", "ts_ms": 96000}
+{"at_s": 240.0, "kind": "like", "viewer": {"uid": 1002, "name": "路人乙"}, "event_id": "l1", "ts_ms": 241000}

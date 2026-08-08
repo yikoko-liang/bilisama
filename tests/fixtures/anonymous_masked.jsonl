@@ -1,0 +1,13 @@
+# 全部 uid=0（平台隐私掩码）。N.E.K.O 那句 if not uid: return 会把这一整条流静音掉。
+{"at_s": 0.0, "kind": "danmaku", "text": "匿名弹幕0", "viewer": {"uid": 0, "uid_hash": "h0000", "name": "***"}, "event_id": "a0", "ts_ms": 1000}
+{"at_s": 0.4, "kind": "danmaku", "text": "匿名弹幕1", "viewer": {"uid": 0, "uid_hash": "h0001", "name": "***"}, "event_id": "a1", "ts_ms": 1400}
+{"at_s": 0.8, "kind": "danmaku", "text": "匿名弹幕2", "viewer": {"uid": 0, "uid_hash": "h0002", "name": "***"}, "event_id": "a2", "ts_ms": 1800}
+{"at_s": 1.2, "kind": "danmaku", "text": "匿名弹幕3", "viewer": {"uid": 0, "uid_hash": "h0003", "name": "***"}, "event_id": "a3", "ts_ms": 2200}
+{"at_s": 1.6, "kind": "danmaku", "text": "匿名弹幕4", "viewer": {"uid": 0, "uid_hash": "h0000", "name": "***"}, "event_id": "a4", "ts_ms": 2600}
+{"at_s": 2.0, "kind": "danmaku", "text": "匿名弹幕5", "viewer": {"uid": 0, "uid_hash": "h0001", "name": "***"}, "event_id": "a5", "ts_ms": 3000}
+{"at_s": 2.4, "kind": "danmaku", "text": "匿名弹幕6", "viewer": {"uid": 0, "uid_hash": "h0002", "name": "***"}, "event_id": "a6", "ts_ms": 3400}
+{"at_s": 2.8, "kind": "danmaku", "text": "匿名弹幕7", "viewer": {"uid": 0, "uid_hash": "h0003", "name": "***"}, "event_id": "a7", "ts_ms": 3800}
+{"at_s": 3.2, "kind": "danmaku", "text": "匿名弹幕8", "viewer": {"uid": 0, "uid_hash": "h0000", "name": "***"}, "event_id": "a8", "ts_ms": 4200}
+{"at_s": 3.6, "kind": "danmaku", "text": "匿名弹幕9", "viewer": {"uid": 0, "uid_hash": "h0001", "name": "***"}, "event_id": "a9", "ts_ms": 4600}
+{"at_s": 4.0, "kind": "danmaku", "text": "匿名弹幕10", "viewer": {"uid": 0, "uid_hash": "h0002", "name": "***"}, "event_id": "a10", "ts_ms": 5000}
+{"at_s": 4.4, "kind": "danmaku", "text": "匿名弹幕11", "viewer": {"uid": 0, "uid_hash": "h0003", "name": "***"}, "event_id": "a11", "ts_ms": 5400}
