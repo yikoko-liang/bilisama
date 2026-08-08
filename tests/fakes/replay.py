@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +113,7 @@ class ReplaySource:
     name: str = "replay"
     speed: float = 1000.0
     room_id: int = 0
-    clock: Clock = SystemClock()
+    clock: Clock = field(default_factory=SystemClock)
     loop_count: int = 1
 
     _stopped: asyncio.Event | None = None
