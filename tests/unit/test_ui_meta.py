@@ -105,8 +105,21 @@ def test_derived_fields_are_not_configurable() -> None:
 
     The chattiness thresholds have exactly one source. Let the TOML pin one too and
     nothing defines whether the file or the slider wins.
+
+    Nothing sets `derived_from` yet, so this checks an empty set and says so rather
+    than passing in silence — a vacuous gate reads exactly like a satisfied one.
+    What actually enforces the rule today is that the five names are absent from the
+    schema and InteractionConfig forbids extras, covered by
+    test_the_toml_cannot_pin_a_derived_threshold in test_derive.py. This one starts
+    biting the moment a derived value gains a UI entry, which is when the marker
+    becomes the only thing standing between it and a second writer.
     """
     derived = [path for path, meta in UI_META.items() if meta.derived_from]
+    if not derived:
+        pytest.skip(
+            "§7.5: no field declares derived_from — enforcement is currently "
+            "schema absence plus extra='forbid', see test_derive.py"
+        )
     leaked = [p for p in derived if p in ALL_FIELDS]
     assert not leaked, f"derived values must not be configurable: {leaked}"
 

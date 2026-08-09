@@ -18,7 +18,14 @@ class DerivedThresholds(BaseModel):
     Absent from the TOML on purpose: if the file pinned one and the slider also
     moved it, nothing would define which wins. `bilisama config show` marks these
     as derived.
+
+    Frozen because `derive()` hands out the table row itself rather than a copy.
+    Without this, one stray assignment anywhere rewrites the mapping for the whole
+    process, and `config show` then reports the corrupted number as derived truth —
+    a second writer, which is the exact thing this module exists to prevent.
     """
+
+    model_config = {"frozen": True}
 
     idle_threshold_s: int
     danmaku_window_s: int

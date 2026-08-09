@@ -221,3 +221,16 @@ def test_the_toml_cannot_pin_a_derived_threshold(key: str) -> None:
     payload: dict[str, Any] = {"interaction": {"chattiness": "low", key: 1}}
     with pytest.raises(ValidationError):
         Settings.model_validate(payload)
+
+
+def test_a_derived_row_cannot_be_rewritten_in_place() -> None:
+    """The third way a second writer could appear, after the TOML and the slider.
+
+    `derive()` hands out the table row itself, not a copy, so an unfrozen model
+    would let one stray assignment rewrite the mapping for the whole process — and
+    `config show` would then print the corrupted number as derived truth.
+    """
+    row = derive(Chattiness.HIGH)
+    with pytest.raises(ValidationError):
+        row.max_output_tokens = 4  # type: ignore[misc]
+    assert derive(Chattiness.HIGH).max_output_tokens == row.max_output_tokens
