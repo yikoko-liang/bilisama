@@ -66,6 +66,19 @@ line-length = 100
 target-version = ["py312"]
 
 [tool.mypy]
+# Without this, bilisama only resolves when "src" is on the command line. Any
+# narrower run — an editor checking one file, `mypy tests` — falls back to the
+# editable install in .venv, which carries no py.typed and is therefore skipped
+# as untyped — mypy/modulefinder.py:101, "module is installed, but missing
+# library stubs or py.typed marker". That run writes its wrong view into
+# .mypy_cache, and the next full run inherits it and reports attr-defined errors
+# on imports that are fine. Same tree, opposite verdicts, decided by who ran
+# mypy last. Reproduced: `mypy tests && mypy src && mypy src tests tools` on one
+# cache dir used to exit 1 on four imports across three files.
+mypy_path = "src"
+# So a bare `mypy` checks exactly what scripts/gate.sh checks. One definition of
+# "the whole tree", not two.
+files = ["src", "tests", "tools"]
 python_version = "3.12"
 strict = true
 warn_unreachable = true

@@ -9,6 +9,12 @@ set -euo pipefail
 PY="${PY:-.venv/bin/python}"
 cd "$(dirname "$0")/.."
 
+# Scratch lives in one directory per run, removed on the way out. Fixed /tmp
+# names collide when two people (or two agents) run the gate at the same time,
+# and the loser sees a failure that has nothing to do with their change.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/bilisama-gate.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
 step() { printf '\033[36m▸ %s\033[0m\n' "$*"; }
 
 step "black"
@@ -18,7 +24,12 @@ step "ruff"
 $PY -m ruff check src tests tools
 
 step "mypy（全量，不只 src）"
-$PY -m mypy src tests tools
+# No file arguments on purpose: the set comes from [tool.mypy] files in
+# pyproject.toml, so `mypy` on a developer machine checks exactly what the gate
+# checks. Spelling it twice is how the two drift. Paired with mypy_path there,
+# which is what stops a narrower run from poisoning .mypy_cache — see the
+# comment on pyproject.toml:69-78.
+$PY -m mypy
 
 step "单元测试"
 $PY -m pytest -q --no-header
@@ -29,16 +40,19 @@ $PY -m bilisama.cli config show --config config/bilisama.toml >/dev/null
 $PY -m bilisama.cli config chattiness >/dev/null
 $PY -m bilisama.cli config render-s2s \
     --config config/bilisama.toml \
-    --out /tmp/bilisama-gate-s2s.json \
+    --out "$WORK/s2s.json" \
     --s2s-root "${BILISAMA_S2S_ROOT:-../speech-to-speech}" >/dev/null
 
 step "profile 覆盖层"
-$PY - <<'EOF'
-import shutil, sys
+BILISAMA_GATE_WORK="$WORK" $PY - <<'EOF'
+import os
+import shutil
+import sys
 from pathlib import Path
+
 from bilisama.config import load
 
-tmp = Path("/tmp/bilisama-gate-profiles")
+tmp = Path(os.environ["BILISAMA_GATE_WORK"]) / "profiles-check"
 (tmp / "profiles").mkdir(parents=True, exist_ok=True)
 for f in Path("config/profiles").glob("*.toml"):
     shutil.copy(f, tmp / "profiles" / f.name)
