@@ -8,6 +8,7 @@
 - `_ui`      UI 元数据的定义（Audience / Reload / ui）
 - `enums`    纯枚举,schema 和 validate 都要用
 - `schema`   配置的类型与默认值
+- `ui_meta`  UI 元数据，按字段路径索引
 - `derive`   话痨度派生出的那五个阈值
 - `validate` 跨字段校验
 - `loader`   TOML 加载与覆盖层合并
@@ -39,15 +40,18 @@ from bilisama.config.schema import (
     TTSConfig,
     TurnConfig,
 )
+from bilisama.config.ui_meta import UI_META, FieldMeta
 from bilisama.config.validate import ConfigProblem, check
 
 __all__ = [
+    "UI_META",
     "Audience",
     "AudioConfig",
     "AvatarConfig",
     "Chattiness",
     "ConfigProblem",
     "DerivedThresholds",
+    "FieldMeta",
     "HostedConfig",
     "InteractionConfig",
     "MemoryConfig",
