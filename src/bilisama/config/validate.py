@@ -30,6 +30,18 @@ class ConfigProblem(BaseModel):
     fatal: bool = True
 
 
+class ConfigError(Exception):
+    """The config is fatally wrong, so we refuse to start.
+
+    Carries the problems instead of a formatted string: every caller has to show
+    `field` and `fix` too, not just the message.
+    """
+
+    def __init__(self, problems: list[ConfigProblem]) -> None:
+        self.problems = problems
+        super().__init__("\n".join(p.message for p in problems))
+
+
 def check(s: Settings) -> list[ConfigProblem]:
     """Validate combinations that individual field types cannot express.
 

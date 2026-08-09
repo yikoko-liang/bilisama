@@ -1,16 +1,19 @@
 """Configuration types and defaults.
 
-UI metadata is not here — see `ui_meta.UI_META`, keyed by field path.
+Types and defaults only. Cross-field rules are `validate.check`, and refusing to
+start on a fatal one is `loader.load` — a model that cannot construct its own
+defaults is unusable for fixtures, schema export and the settings UI.
+
+UI metadata is not here either — see `ui_meta.UI_META`, keyed by field path.
 """
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from bilisama.config.enums import Chattiness, ProviderName
-from bilisama.config.validate import check
 
 
 class TurnConfig(BaseModel):
@@ -65,9 +68,10 @@ class HostedConfig(BaseModel):
 
 
 class SideModelConfig(BaseModel):
-    """The side-channel model, used for proactive topics, memory distillation and
-    '
-     '    fact extraction. Usually a cheaper one than the conversation model."""
+    """Runs the background jobs: proactive topics, memory distillation, fact extraction.
+
+    Separate from the conversation model so it can be a cheaper one (plan §7.2).
+    """
 
     model_config = {"extra": "forbid"}
 
@@ -93,7 +97,12 @@ class SpeechConfig(BaseModel):
 
 
 class TTSConfig(BaseModel):
-    """只在 provider 不自带音频时生效。"""
+    """Our own TTS, used only when the speech provider does not produce audio itself.
+
+    When the provider speaks for us, nothing here is read. Plan §7.6 wants that
+    combination reported rather than left looking configured; `validate.check` does
+    not catch it yet.
+    """
 
     model_config = {"extra": "forbid"}
 
@@ -106,10 +115,8 @@ class TTSConfig(BaseModel):
 class AudioConfig(BaseModel):
     """Mitigations for the biggest operational risk.
 
-    '
-     '    Nothing in the pipeline cancels acoustic echo. If the assistant's own voice
-    '
-     '    reaches the mic, turn detection false-triggers continuously.
+    Nothing in the pipeline cancels acoustic echo. If the assistant's own voice
+    reaches the mic, turn detection false-triggers continuously.
     """
 
     model_config = {"extra": "forbid"}
@@ -214,10 +221,3 @@ class Settings(BaseModel):
     persona: PersonaConfig = Field(default_factory=PersonaConfig)
     avatar: AvatarConfig = Field(default_factory=AvatarConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
-
-    @model_validator(mode="after")
-    def _cross_field_checks(self) -> Self:
-        problems = [p for p in check(self) if p.fatal]
-        if problems:
-            raise ValueError("\n".join(p.message for p in problems))
-        return self

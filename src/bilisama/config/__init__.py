@@ -12,7 +12,7 @@ Split by responsibility:
 - `ui_meta`  UI metadata, keyed by field path
 - `derive`   the five thresholds chattiness derives
 - `validate` cross-field checks
-- `loader`   TOML loading and overlay merging
+- `loader`   TOML loading, overlay merging, and refusing a config that cannot start
 
 Import from this module only. The split is internal structure and callers should
 not have to track it.
@@ -20,7 +20,7 @@ not have to track it.
 
 from __future__ import annotations
 
-from bilisama.config._ui import Audience, Reload, ui
+from bilisama.config._ui import Audience, Reload
 from bilisama.config.derive import DerivedThresholds, derive
 from bilisama.config.enums import Chattiness, ProviderName
 from bilisama.config.loader import load
@@ -43,7 +43,7 @@ from bilisama.config.schema import (
     TurnConfig,
 )
 from bilisama.config.ui_meta import UI_META, FieldMeta
-from bilisama.config.validate import ConfigProblem, check
+from bilisama.config.validate import ConfigError, ConfigProblem, check
 
 __all__ = [
     "UI_META",
@@ -51,6 +51,7 @@ __all__ = [
     "AudioConfig",
     "AvatarConfig",
     "Chattiness",
+    "ConfigError",
     "ConfigProblem",
     "DerivedThresholds",
     "FieldMeta",
@@ -73,5 +74,4 @@ __all__ = [
     "check",
     "derive",
     "load",
-    "ui",
 ]
