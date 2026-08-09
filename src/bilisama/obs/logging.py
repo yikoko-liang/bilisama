@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -47,6 +48,37 @@ _REDACTED: Final[frozenset[str]] = frozenset(
 # Audience-authored content. Logged as a length unless explicitly enabled.
 _VIEWER_CONTENT: Final[frozenset[str]] = frozenset({"text", "danmaku", "message", "content"})
 
+# Trailing words that describe a sensitive field instead of carrying it:
+# `token_count` and `text_len` are metrics, `content_type` is a label.
+_DESCRIPTOR_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {"count", "len", "length", "size", "bytes", "chars", "ms", "type"}
+)
+
+# Word boundaries in a field name: any separator, plus the camelCase seam so
+# `apiKey` splits like `api_key` does.
+_WORD_BOUNDARY: Final[re.Pattern[str]] = re.compile(r"[^0-9A-Za-z]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _matches(key: str, markers: frozenset[str]) -> bool:
+    """Whether a field name names one of `markers`, matching whole words.
+
+    Substring matching redacts `keyframe`; exact matching lets `danmaku_text`
+    through. Both are wrong, so compare word by word.
+
+    Args:
+        key: Field name as the caller wrote it.
+        markers: Words that make a field sensitive.
+
+    Returns:
+        True if the field should be treated as sensitive.
+    """
+    if key.lower() in markers:
+        return True
+    words = [word.lower() for word in _WORD_BOUNDARY.split(key) if word]
+    if not words or words[-1] in _DESCRIPTOR_SUFFIXES:
+        return False
+    return any(word in markers for word in words)
+
 
 @contextmanager
 def bind(
@@ -70,17 +102,22 @@ def bind(
 def _scrub(key: str, value: Any, *, log_viewer_content: bool) -> Any:
     """Redact secrets and fold audience content down to a length.
 
-    KNOWN BROKEN, both directions — see the refactor backlog, item 2. Secrets use
-    substring matching, so `token_count` is redacted as if it were a credential.
-    Audience content uses exact equality, so `user_text` and `danmaku_text` pass
-    through verbatim. Both should match on whole words. Left as-is here because
-    this pass is not allowed to change behaviour.
+    Args:
+        key: Field name as the caller wrote it.
+        value: Field value.
+        log_viewer_content: Whether audience-authored text may be logged verbatim.
+
+    Returns:
+        The value, `"***"`, or a placeholder standing in for it.
     """
-    lowered = key.lower()
-    if any(marker in lowered for marker in _REDACTED):
+    if _matches(key, _REDACTED):
         return "***"
-    if not log_viewer_content and lowered in _VIEWER_CONTENT and isinstance(value, str):
-        return f"<{len(value)} chars>"
+    if not log_viewer_content and _matches(key, _VIEWER_CONTENT):
+        if value is None:
+            return None
+        # Non-str values carry the body too — a LiveEvent repr, a list of
+        # danmaku. Name the type rather than let json.dumps stringify it.
+        return f"<{len(value)} chars>" if isinstance(value, str) else f"<{type(value).__name__}>"
     return value
 
 

@@ -13,6 +13,7 @@ knows this is Aqiang's fifth visit, it just says nothing about it this time.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
@@ -62,7 +63,14 @@ class QueueSource:
 
     async def stop(self) -> None:
         self._stopped.set()
-        await self._queue.put(None)
+        # Never wait for a slot here: a full queue is when shutdown matters most,
+        # and setting _stopped has already removed the consumer that would free one.
+        # The pill only has to travel when start() is parked in get(), which only
+        # happens on an empty queue. If the queue is full, start() is awake and sees
+        # _stopped on its next turn, so dropping the pill costs nothing. push() keeps
+        # using put(), so backpressure is unchanged.
+        with contextlib.suppress(asyncio.QueueFull):
+            self._queue.put_nowait(None)
 
 
 async def merge(sources: list[Source], emit: EventSink) -> None:

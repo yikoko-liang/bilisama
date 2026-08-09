@@ -11,6 +11,7 @@ system clock changes, `wall()` is what humans and stored records see.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -67,11 +68,26 @@ class FakeClock:
 
     async def sleep(self, seconds: float) -> None:
         if seconds <= 0:
+            # asyncio.sleep does exactly this for <= 0: one turn of the loop and no
+            # more (CPython 3.12.13 asyncio/tasks.py:655-657, `await __sleep0()`).
+            # Callers that write `await clock.sleep(0)` to hand control over must
+            # behave the same under both clocks.
+            await asyncio.sleep(0)
             return
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[None] = loop.create_future()
-        self._waiters.append((self._now + seconds, fut))
-        await fut
+        waiter = (self._now + seconds, fut)
+        self._waiters.append(waiter)
+        try:
+            await fut
+        finally:
+            # A cancelled sleep would otherwise leave its deadline behind forever:
+            # advance() skips done futures but never drops them. asyncio.sleep drops
+            # its own pending wakeup the same way (CPython 3.12.13
+            # asyncio/tasks.py:664-667). On the normal wake path advance() has
+            # already removed the tuple, hence the suppress.
+            with contextlib.suppress(ValueError):
+                self._waiters.remove(waiter)
 
     async def advance(self, seconds: float) -> None:
         """Move time forward, waking sleepers as their deadlines pass.
@@ -79,7 +95,26 @@ class FakeClock:
         Wakes them one at a time and yields in between, so each woken coroutine
         gets to run up to its next await before the clock moves again. Waking them
         all at once would let a later sleeper observe a time it should not see yet.
+
+        A woken sleeper that sleeps again straight away is picked up by this same
+        call. One that awaits anything else in between is not — see the KNOWN
+        BROKEN note below.
+
+        Raises:
+            ValueError: if `seconds` is negative.
         """
+        if seconds < 0:
+            # Rewinding a monotonic clock hides the caller's arithmetic bug behind a
+            # cooldown that never expires. Making it visible is the point of the fake.
+            raise ValueError("advance() only moves time forward")
+        # KNOWN BROKEN, no backlog entry yet: the `await asyncio.sleep(0)` below buys
+        # the woken coroutine exactly one turn. If it awaits anything before its next
+        # clock.sleep(), this loop finds nothing due, breaks, and jumps straight to
+        # target — the very time jump the docstring above promises not to make. A
+        # `await clock.sleep(w); await queue.get()` loop hits it immediately. Pinned by
+        # test_a_resleep_behind_another_await_is_missed in tests/unit/test_clock.py.
+        # asyncio has no public "loop is quiescent" hook (trio's MockClock autojump
+        # does), so the fix is a design decision, not a one-liner.
         target = self._now + seconds
         while True:
             due = [(t, f) for t, f in self._waiters if t <= target and not f.done()]

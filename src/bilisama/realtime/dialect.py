@@ -86,6 +86,11 @@ _BETA_INBOUND: Mapping[str, ServerEvent] = {
     "input_audio_buffer.speech_started": ServerEvent.SPEECH_STARTED,
     "input_audio_buffer.speech_stopped": ServerEvent.SPEECH_STOPPED,
     "conversation.item.created": ServerEvent.ITEM_CREATED,
+    # Beta defines truncation too, this table just never listed it
+    # (openai/types/beta/realtime/conversation_item_truncated_event.py:23). Without
+    # the entry, wire_name() raises on the first barge-in against a beta endpoint
+    # that supports truncate.
+    "conversation.item.truncated": ServerEvent.ITEM_TRUNCATED,
     "response.created": ServerEvent.RESPONSE_CREATED,
     "response.text.delta": ServerEvent.TEXT_DELTA,
     "response.text.done": ServerEvent.TEXT_DONE,
