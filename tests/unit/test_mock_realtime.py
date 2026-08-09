@@ -21,7 +21,7 @@ async def _recv_until(ws: Any, wire_type: str, *, timeout: float = 1.0) -> dict[
     async def _loop() -> dict[str, Any]:
         while True:
             raw = await ws.recv()
-            event = json.loads(raw)
+            event: dict[str, Any] = json.loads(raw)
             if event.get("type") == wire_type:
                 return event
 

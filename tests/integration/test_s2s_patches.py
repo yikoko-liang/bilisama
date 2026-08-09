@@ -21,8 +21,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
-
 VENV = Path(
     os.environ.get("BILISAMA_S2S_VENV", str(Path.home() / ".local/share/bilisama/engines/s2s"))
 )
@@ -46,7 +44,8 @@ def _run(snippet: str) -> dict[str, object]:
     if proc.returncode != 0:
         pytest.fail(f"子进程失败（{proc.returncode}）：\n{proc.stdout}\n{proc.stderr}")
     last = [ln for ln in proc.stdout.splitlines() if ln.startswith("{")][-1]
-    return json.loads(last)
+    parsed: dict[str, object] = json.loads(last)
+    return parsed
 
 
 def test_patches_apply_cleanly() -> None:

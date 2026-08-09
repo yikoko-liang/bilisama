@@ -20,7 +20,7 @@ S2S_ROOT = Path(
 
 
 def _cfg(**kw: object) -> S2SConfig:
-    return S2SConfig(llm_model="our-s2t-v1", **kw)  # type: ignore[arg-type]
+    return S2SConfig(llm_model="our-s2t-v1", **kw)
 
 
 def test_render_skips_stt_and_pins_chat_completions() -> None:
@@ -68,12 +68,12 @@ def test_write_rejects_unknown_keys(tmp_path: Path) -> None:
         payload["totally_made_up_flag"] = True
         return payload
 
-    s2s_launch.render = patched  # type: ignore[assignment]
+    s2s_launch.render = patched
     try:
         with pytest.raises(s2s_launch.S2SConfigError, match="上游不认识"):
             s2s_launch.write(_cfg(), tmp_path / "c.json", s2s_root=S2S_ROOT)
     finally:
-        s2s_launch.render = original  # type: ignore[assignment]
+        s2s_launch.render = original
 
 
 @pytest.mark.skipif(not S2S_ROOT.exists(), reason="本地没有 speech-to-speech 检出")

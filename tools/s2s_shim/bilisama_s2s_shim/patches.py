@@ -81,7 +81,7 @@ def patch_text_modality() -> PatchResult:
             kwargs["response"] = text_only_params()
         return original_cls(*args, **kwargs)
 
-    svc.GenerateResponseRequest = patched_request  # type: ignore[misc]
+    svc.GenerateResponseRequest = patched_request
 
     original_handler: Callable[..., Any] = svc.RealtimeService._on_audio_input_completed
 
@@ -91,7 +91,7 @@ def patch_text_modality() -> PatchResult:
         state.current_response_params = text_only_params()
         return original_handler(self, conn_id, event)
 
-    svc.RealtimeService._on_audio_input_completed = patched_handler  # type: ignore[method-assign]
+    svc.RealtimeService._on_audio_input_completed = patched_handler
     return PatchResult("text_modality", True, "隐式轮次改走纯文本，两处都打了")
 
 
@@ -114,8 +114,8 @@ def patch_raw_instructions() -> PatchResult:
     def identity(prompt: str, tool_section: str | None = None) -> str:
         return prompt
 
-    mod.build_voice_system_prompt = identity  # type: ignore[assignment]
-    mod.build_text_system_prompt = identity  # type: ignore[assignment]
+    mod.build_voice_system_prompt = identity
+    mod.build_text_system_prompt = identity
     return PatchResult("raw_instructions", True, "人设按原样下发，不再被追加尾巴")
 
 

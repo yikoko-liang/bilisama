@@ -70,6 +70,12 @@ plugins = ["pydantic.mypy"]
 module = ["pysbd.*", "brotli.*", "mlx_audio.*"]
 ignore_missing_imports = true
 
+# speech-to-speech 装在它自己的 venv 里，这边解析不到是预期的。
+# shim 的正确性由 tests/integration/test_s2s_patches.py 在那个 venv 里验证。
+[[tool.mypy.overrides]]
+module = ["speech_to_speech.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

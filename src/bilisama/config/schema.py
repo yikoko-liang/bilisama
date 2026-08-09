@@ -1,88 +1,17 @@
-"""统一配置入口（计划 §7）。
+"""配置的类型与默认值。
 
-`bilisama.toml` 是唯一真相源，密钥除外（密钥在系统钥匙串）。s2s 的启动 JSON
-是从这里渲染出来的产物，不手改。
-
-每个字段挂一组 UI 元数据，Electron 的设置界面从这份 schema 生成，不手写表单。
-加一个配置项只改这一处。
+每个字段挂一组 UI 元数据，见 _ui.ui()。
 """
 
 from __future__ import annotations
 
-import tomllib
-from enum import StrEnum
-from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-# ---------------------------------------------------------------- UI 元数据
-
-
-class Audience(StrEnum):
-    """谁该看见这个字段。主播只该看到十几项，开发能看到全部。"""
-
-    STREAMER = "streamer"
-    OPERATOR = "operator"
-    DEVELOPER = "developer"
-
-
-class Reload(StrEnum):
-    """改了之后什么时候生效。UI 据此决定直播中要不要置灰这个控件。"""
-
-    LIVE = "live"  # 立刻生效
-    RECONNECT = "reconnect"  # 需要重连语音链路
-    ENGINE = "engine"  # 需要重启 P3'
-    RESTART = "restart"  # 需要重启整个应用
-
-
-def ui(
-    *,
-    label: str,
-    help: str = "",
-    audience: Audience = Audience.DEVELOPER,
-    reload: Reload = Reload.RESTART,
-    group: str = "",
-    order: int = 0,
-    unit: str = "",
-    widget: str = "",
-    provider_scoped: str = "",
-    derived_from: str = "",
-    secret: bool = False,
-    wizard_step: int = 0,
-    aliases: tuple[str, ...] = (),
-) -> dict[str, Any]:
-    """给字段挂 UI 元数据。
-
-    控件类型默认从 schema 结构推导（布尔→开关、有界数值→滑块、枚举→下拉），
-    只有推导不出来时才显式给 widget。
-    """
-    return {
-        "ui": {
-            "label": label,
-            "help": help,
-            "audience": audience.value,
-            "reload": reload.value,
-            "group": group,
-            "order": order,
-            "unit": unit,
-            "widget": widget,
-            "provider_scoped": provider_scoped,
-            "derived_from": derived_from,
-            "secret": secret,
-            "wizard_step": wizard_step,
-            "aliases": list(aliases),
-        }
-    }
-
-
-# ---------------------------------------------------------------- 语音链路
-
-
-class ProviderName(StrEnum):
-    S2S = "s2s"
-    DASHSCOPE = "dashscope"
-    OPENAI_GA = "openai_ga"
+from bilisama.config._ui import Audience, Reload, ui
+from bilisama.config.enums import Chattiness, ProviderName
+from bilisama.config.validate import check
 
 
 class TurnConfig(BaseModel):
@@ -604,12 +533,6 @@ class SafetyConfig(BaseModel):
     )
 
 
-class Chattiness(StrEnum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
 class SpeakSwitches(BaseModel):
     """每个来源一个开关。事件一律入库，这里只管说不说。"""
 
@@ -915,150 +838,3 @@ class Settings(BaseModel):
         if problems:
             raise ValueError("\n".join(p.message for p in problems))
         return self
-
-
-# ---------------------------------------------------------------- 话痨度派生
-
-
-class DerivedThresholds(BaseModel):
-    """chattiness 派生出来的五个数。
-
-    它们**不出现在 TOML 里**,否则配置写死一个值、滑块又要改它，谁赢没有定义。
-    `bilisama config show` 对这些标 derived:chattiness。
-    """
-
-    idle_threshold_s: int
-    danmaku_window_s: int
-    score_threshold: float
-    cooldown_s: int
-    max_output_tokens: int
-
-
-_CHATTINESS_TABLE: dict[Chattiness, DerivedThresholds] = {
-    Chattiness.LOW: DerivedThresholds(
-        idle_threshold_s=180,
-        danmaku_window_s=30,
-        score_threshold=0.55,
-        cooldown_s=20,
-        max_output_tokens=70,
-    ),
-    Chattiness.MEDIUM: DerivedThresholds(
-        idle_threshold_s=90,
-        danmaku_window_s=20,
-        score_threshold=0.35,
-        cooldown_s=12,
-        max_output_tokens=120,
-    ),
-    Chattiness.HIGH: DerivedThresholds(
-        idle_threshold_s=45,
-        danmaku_window_s=12,
-        score_threshold=0.2,
-        cooldown_s=5,
-        max_output_tokens=120,
-    ),
-}
-
-
-def derive(chattiness: Chattiness) -> DerivedThresholds:
-    return _CHATTINESS_TABLE[chattiness]
-
-
-# ---------------------------------------------------------------- 校验
-
-
-class ConfigProblem(BaseModel):
-    """校验结果。给人话和可点的修复动作，不给 traceback。"""
-
-    field: str
-    message: str
-    fix: str = ""
-    fatal: bool = True
-
-
-def check(s: Settings) -> list[ConfigProblem]:
-    """跨字段校验。schema 的类型检查管不到这些。"""
-    problems: list[ConfigProblem] = []
-    owns_tts = (
-        s.speech.provider is not ProviderName.S2S or "text_modality" not in s.speech.s2s.patches
-    )
-
-    if owns_tts and s.avatar.expression_source == "tag":
-        problems.append(
-            ConfigProblem(
-                field="avatar.expression_source",
-                message="当前语音后端自己出音频，内联表情标签会被念出来。",
-                fix="把表情驱动方式改成 lexicon 或 tool_call。",
-            )
-        )
-
-    if s.audio.output_route == "direct" and s.audio.echo_guard == "off":
-        problems.append(
-            ConfigProblem(
-                field="audio.output_route",
-                message="AI 的声音会进你的麦克风，判停会一直误触发。",
-                fix="改用虚拟声卡输出，或者戴耳机并打开抢跑静音。",
-                fatal=False,
-            )
-        )
-
-    if s.speech.provider is ProviderName.S2S and not s.speech.s2s.llm_model:
-        problems.append(
-            ConfigProblem(
-                field="speech.s2s.llm_model",
-                message="自建语音服务需要指定对话模型 id。",
-                fix="在设置里填上模型 id，或改用托管服务。",
-            )
-        )
-
-    if s.speech.provider is not ProviderName.S2S:
-        hosted = getattr(s.speech, s.speech.provider.value)
-        if not hosted.endpoint:
-            problems.append(
-                ConfigProblem(
-                    field=f"speech.{s.speech.provider.value}.endpoint",
-                    message="托管语音服务缺少地址。",
-                    fix="在设置里填服务地址。",
-                )
-            )
-
-    if s.room.room_id and not s.room.credential_ref:
-        problems.append(
-            ConfigProblem(
-                field="room.credential_ref",
-                message="没有登录凭据，观众 id 会被平台掩码成 0，认不出常客。",
-                fix="在设置里扫码登录。",
-                fatal=False,
-            )
-        )
-
-    return problems
-
-
-# ---------------------------------------------------------------- 加载
-
-
-def load(path: Path | None = None, *, overrides: dict[str, Any] | None = None) -> Settings:
-    """从 TOML 加载。profile 是覆盖层，只写自己关心的字段。"""
-    raw: dict[str, Any] = {}
-    if path is not None and path.exists():
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-
-    profile_name = raw.get("active_profile", "normal")
-    if path is not None:
-        profile_path = path.parent / "profiles" / f"{profile_name}.toml"
-        if profile_path.exists():
-            raw = _deep_merge(raw, tomllib.loads(profile_path.read_text(encoding="utf-8")))
-
-    if overrides:
-        raw = _deep_merge(raw, overrides)
-    return Settings.model_validate(raw)
-
-
-def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    out = dict(base)
-    for key, value in patch.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
