@@ -11,7 +11,7 @@ IntentSource 并存，同一条链路上要转换一次,合成一个就够了。
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
 from bilisama.ingest.events import LiveEvent
@@ -84,25 +84,3 @@ async def collect(source: Source, *, limit: int) -> list[LiveEvent]:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     return out
-
-
-async def drain(source: Source) -> AsyncIterator[LiveEvent]:
-    """把 push 风格的源转成 async iterator。写测试断言时顺手。"""
-    queue: asyncio.Queue[LiveEvent] = asyncio.Queue()
-
-    async def sink(event: LiveEvent) -> None:
-        await queue.put(event)
-
-    task = asyncio.create_task(source.start(sink))
-    try:
-        while True:
-            if task.done() and queue.empty():
-                return
-            try:
-                yield await asyncio.wait_for(queue.get(), timeout=0.5)
-            except TimeoutError:
-                if task.done():
-                    return
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)

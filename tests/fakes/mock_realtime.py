@@ -16,7 +16,6 @@ import base64
 import json
 import math
 import struct
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -32,22 +31,20 @@ from bilisama.realtime.capabilities import Capabilities
 class Fault(StrEnum):
     """可脚本化的失败模式。每一条对应 §3.3 的一条规则。"""
 
-    NONE = "none"
     # 规则 1/2：注入撞上投机轮次 → 回复被吞，且永不发 response.done，in_response 卡死
     WEDGE_ON_INJECTION = "wedge_on_injection"
     # 规则 3：response.cancel 在 response_pending 时是空操作
     CANCEL_IS_NOOP = "cancel_is_noop"
     # 规则 4：隐式回复不发 response.created
     NO_RESPONSE_CREATED = "no_response_created"
-    # 规则 5：单名额，第二个 response.create 直接拒
-    STRICT_SINGLE_SLOT = "strict_single_slot"
     # item.create 被静默延后，回复结束后才补发 ack
     DEFER_ITEM_CREATE = "defer_item_create"
-    # 打断时 response.done(cancelled) 先于 speech_started
-    BARGE_IN_ORDER = "barge_in_order"
-    # speech_stopped 前面没有 speech_started
+    # 下面两个是计划 §10.1 要求覆盖、但还没实现的场景。
+    # 留着是为了不把缺口从记录里抹掉；实现见待办第 9 项。
+    #
+    # NOT IMPLEMENTED：speech_stopped 前面没有 speech_started
     ORPHAN_SPEECH_STOPPED = "orphan_speech_stopped"
-    # 被取消的文本回复不发 output_text.done
+    # NOT IMPLEMENTED：被取消的文本回复不发 output_text.done
     NO_TEXT_DONE_ON_CANCEL = "no_text_done_on_cancel"
     # 回复卡住，用来验客户端看门狗
     STALL_RESPONSE = "stall_response"
@@ -164,9 +161,7 @@ class MockRealtimeServer:
         await self.send(dia.ServerEvent.SPEECH_STARTED)
 
     async def speech_stopped(self) -> None:
-        """主播停口。之后 speculative window 还开着一小会儿。"""
-        if not self.script.has(Fault.ORPHAN_SPEECH_STOPPED):
-            pass  # 正常情况前面应该有 speech_started
+        """主播停口。之后投机重开窗口还开着一小会儿。"""
         await self.send(dia.ServerEvent.SPEECH_STOPPED)
 
     async def close_speculative_window(self) -> None:
@@ -325,10 +320,6 @@ class MockRealtimeServer:
         self._in_response = False
         self._response_pending = False
 
-        # 规则 8：被取消的文本回复不发 output_text.done
-        if status == "cancelled" and self.script.has(Fault.NO_TEXT_DONE_ON_CANCEL):
-            pass
-
         payload: dict[str, Any] = {
             "response": {"id": f"resp_{self._response_id}", "status": status}
         }
@@ -343,9 +334,3 @@ class MockRealtimeServer:
 
     async def _error(self, code: str, message: str) -> None:
         await self.send(dia.ServerEvent.ERROR, error={"type": code, "message": message})
-
-
-async def connect(url: str) -> AsyncIterator[Any]:
-    """测试里连过去用的极简客户端。"""
-    async with websockets.connect(url) as ws:
-        yield ws
