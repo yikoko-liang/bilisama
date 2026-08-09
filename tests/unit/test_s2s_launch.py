@@ -14,9 +14,9 @@ import pytest
 from bilisama.bootstrap import s2s_launch
 from bilisama.config import S2SConfig, TurnConfig
 
-S2S_ROOT = Path(
-    os.environ.get("BILISAMA_S2S_ROOT", "/Users/bilibili/project/bilisama/speech-to-speech")
-)
+# 上游检出通常是 BiliSama 的兄弟目录。环境变量优先，便于 CI 指到别处。
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+S2S_ROOT = Path(os.environ.get("BILISAMA_S2S_ROOT", _REPO_ROOT.parent / "speech-to-speech"))
 
 
 def _cfg(**kw: object) -> S2SConfig:

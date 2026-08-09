@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -151,22 +152,15 @@ class LiveEvent:
         return self.value_cny > 0
 
     def redacted(self) -> LiveEvent:
-        """去掉 raw 的副本。进任何会流向模型的地方之前都过一次。"""
+        """去掉 raw 的副本。进任何会流向模型的地方之前都过一次。
+
+        用 replace 而不是手抄字段：以后给 LiveEvent 加字段时不会漏，
+        漏了的话新字段会被静默清成默认值，而这个方法的调用场景恰恰
+        是「进 prompt 之前」，丢字段没有任何报错。
+        """
         if self.raw is None:
             return self
-        return LiveEvent(
-            kind=self.kind,
-            room_id=self.room_id,
-            viewer=self.viewer,
-            text=self.text,
-            gift=self.gift,
-            value_cny=self.value_cny,
-            event_id=self.event_id,
-            ts_ms=self.ts_ms,
-            recv_at=self.recv_at,
-            session_generation=self.session_generation,
-            raw=None,
-        )
+        return dataclasses.replace(self, raw=None)
 
 
 def cny_from_gold(total_coin: int) -> float:
@@ -177,7 +171,14 @@ def cny_from_gold(total_coin: int) -> float:
 def is_vip_entry(viewer: Viewer, *, lifetime_gift_cny: float = 0.0) -> bool:
     """进房该不该点名欢迎。
 
-    舰长以上、或者历史送过钱的，算 VIP,这两类进 L2 的付费车道，
+    舰长以上、或者历史送过钱的算 VIP,这两类进 L2 的付费车道；
     普通观众进房归 L4，默认只上字幕不发声。
+
+    Args:
+        viewer: 进房的观众。
+        lifetime_gift_cny: 这个人历史累计送了多少钱，由记忆层查出来。
+
+    Returns:
+        True 表示值得点名欢迎。
     """
     return viewer.guard_level.is_patron or lifetime_gift_cny > 0

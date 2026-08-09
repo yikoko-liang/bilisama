@@ -13,11 +13,14 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from bilisama.config import S2SConfig
 
 # 上游的 dataclass 文件，用来对账字段名
 _UPSTREAM_ARG_DIR = "arguments_classes"
+
+_DEFAULT_PORT = 8765
 
 _FIELD_RE = re.compile(r"^\s{4}([a-z_][a-z0-9_]*)\s*:\s*\S", re.MULTILINE)
 
@@ -36,7 +39,12 @@ class RenderResult:
 def upstream_field_names(s2s_root: Path) -> frozenset[str]:
     """扫上游的 arguments dataclass，拿到所有合法字段名。
 
-    找不到源码时返回空集合,调用方据此跳过对账，而不是假装通过。
+    Args:
+        s2s_root: speech-to-speech 的检出目录。
+
+    Returns:
+        所有合法的配置字段名。找不到源码时返回空集合,调用方据此跳过对账，
+        而不是假装通过。
     """
     arg_dir = s2s_root / "src" / "speech_to_speech" / _UPSTREAM_ARG_DIR
     if not arg_dir.is_dir():
@@ -48,10 +56,16 @@ def upstream_field_names(s2s_root: Path) -> frozenset[str]:
 
 
 def render(cfg: S2SConfig) -> dict[str, object]:
-    """渲染启动配置。
+    """渲染 speech-to-speech 的启动配置。
 
     刻意不放 mac_optimal_settings：它只是一组默认值，显式写的 stt 一定赢，
     但它会顺带改一堆别的默认，排查时多一层。
+
+    Args:
+        cfg: 我们这边的 provider (b) 配置。
+
+    Returns:
+        可以直接写成 JSON 的启动参数。key 是上游 dataclass 的字段名。
     """
     payload: dict[str, object] = {
         # 跳过 STT，让音频直接进模型。这条就是需求文档里的 VAD → S2T → TTS
@@ -116,5 +130,5 @@ def write(cfg: S2SConfig, dest: Path, *, s2s_root: Path | None = None) -> Render
 
 
 def _port_of(endpoint: str) -> int:
-    match = re.search(r":(\d+)", endpoint)
-    return int(match.group(1)) if match else 8765
+    """从 ws:// 地址里取端口。没写端口时用上游的默认值。"""
+    return urlsplit(endpoint).port or _DEFAULT_PORT

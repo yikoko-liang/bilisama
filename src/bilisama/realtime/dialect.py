@@ -99,6 +99,18 @@ _BETA_INBOUND: Mapping[str, ServerEvent] = {
 }
 
 
+def _reverse(table: Mapping[str, ServerEvent]) -> dict[ServerEvent, str]:
+    """内部名 → wire 名。
+
+    一个内部名可能对应多个 wire 名（GA 的 conversation.item.created 和
+    .added 都归一化成 ITEM_CREATED），取先出现的那个。
+    """
+    out: dict[ServerEvent, str] = {}
+    for wire, internal in table.items():
+        out.setdefault(internal, wire)
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class Codec:
     """方言编解码。两个实例，选一个。"""
@@ -109,9 +121,26 @@ class Codec:
     nested_audio_format: bool
     nested_tools: bool
     _inbound: Mapping[str, ServerEvent]
+    _outbound: Mapping[ServerEvent, str]
+
+    def wire_name(self, event: ServerEvent) -> str:
+        """内部名 → 这套方言的 wire 名。
+
+        反向表是模块级预计算的：Mock 服务端每发一个 delta 就调一次，
+        线性反查在热路径上没道理。
+        """
+        return self._outbound[event]
 
     def normalize(self, raw: Mapping[str, Any]) -> tuple[ServerEvent | None, Mapping[str, Any]]:
-        """wire JSON → (内部事件名, 原始负载)。不认识的返回 None，由调用方决定怎么办。"""
+        """把 wire 上的原始 JSON 归一化成内部事件名。
+
+        Args:
+            raw: 从 WebSocket 收到的一帧，已经 json.loads 过。
+
+        Returns:
+            (内部事件名, 原始负载)。不认识的事件返回 None,由调用方决定是忽略
+            还是告警，这里不替它做主。
+        """
         wire = raw.get("type")
         if not isinstance(wire, str):
             return None, raw
@@ -147,6 +176,7 @@ GA = Codec(
     nested_audio_format=True,
     nested_tools=False,
     _inbound=_GA_INBOUND,
+    _outbound=_reverse(_GA_INBOUND),
 )
 
 BETA = Codec(
@@ -156,12 +186,5 @@ BETA = Codec(
     nested_audio_format=False,
     nested_tools=True,
     _inbound=_BETA_INBOUND,
+    _outbound=_reverse(_BETA_INBOUND),
 )
-
-
-def outbound_name(codec: Codec, event: ServerEvent) -> str:
-    """内部名 → wire 名。只有 Mock 服务端需要它。"""
-    for wire, internal in codec._inbound.items():
-        if internal is event:
-            return wire
-    raise KeyError(event)

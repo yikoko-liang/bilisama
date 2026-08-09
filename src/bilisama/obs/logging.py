@@ -141,7 +141,11 @@ def setup(
 ) -> None:
     """装配根 logger。进程启动时调一次。
 
-    log_viewer_content 默认关：弹幕正文是观众的话，不该默认落盘。
+    Args:
+        level: 根 logger 的级别。
+        log_viewer_content: 要不要把弹幕正文原样写进日志。默认关,那是观众的话，
+            排查问题时再开。
+        stream: 日志写到哪，默认 stderr。
     """
     handler = logging.StreamHandler(stream or sys.stderr)
     handler.setFormatter(_JsonFormatter(log_viewer_content=log_viewer_content))

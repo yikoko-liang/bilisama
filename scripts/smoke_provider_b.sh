@@ -12,7 +12,9 @@
 #   scripts/smoke_provider_b.sh all
 set -euo pipefail
 
-S2S_ROOT="${BILISAMA_S2S_ROOT:-/Users/bilibili/project/bilisama/speech-to-speech}"
+# 上游检出通常是本仓库的兄弟目录
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+S2S_ROOT="${BILISAMA_S2S_ROOT:-$REPO_ROOT/../speech-to-speech}"
 VENV="${BILISAMA_S2S_VENV:-$HOME/.local/share/bilisama/engines/s2s}"
 CONFIG="${BILISAMA_S2S_CONFIG:-config/s2s/bilisama-s2s.json}"
 PYVER="${BILISAMA_S2S_PYTHON:-3.12}"

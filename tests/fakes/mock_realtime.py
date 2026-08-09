@@ -153,7 +153,7 @@ class MockRealtimeServer:
         """按当前方言把内部事件名翻成 wire 名发出去。"""
         if self._conn is None:
             raise RuntimeError("还没有客户端连上来")
-        body = {"type": dia.outbound_name(self.codec, event), **payload}
+        body = {"type": self.codec.wire_name(event), **payload}
         await self._conn.send(json.dumps(body))
 
     async def speech_started(self) -> None:

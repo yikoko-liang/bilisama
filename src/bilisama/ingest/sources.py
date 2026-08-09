@@ -60,7 +60,14 @@ class QueueSource:
 
 
 async def merge(sources: list[Source], emit: EventSink) -> None:
-    """并发跑多个源，任何一个抛异常都不该拖垮其余的。"""
+    """并发跑多个源。
+
+    注意 TaskGroup 的语义：任何一个源抛出非取消异常时，其余源会被一起取消，
+    最后抛 ExceptionGroup。调用方负责重启。
+
+    直播场景其实想要「一个源挂了不拖垮其余」,那需要给每个源包一层监督协程。
+    等真接上多个源时再改（待办第 10 项会连测试一起补）。
+    """
     async with asyncio.TaskGroup() as tg:
         for source in sources:
             tg.create_task(source.start(emit), name=f"source:{source.name}")

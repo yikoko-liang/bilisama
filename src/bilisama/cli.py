@@ -9,22 +9,41 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from bilisama import __version__
 from bilisama.bootstrap import s2s_launch
 from bilisama.config import Chattiness, ProviderName, Settings, check, derive, load
 
-DEFAULT_CONFIG = Path("config/bilisama.toml")
+# 相对仓库根，不是相对当前工作目录 —— 在别处调用 CLI 时也能找到
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = _REPO_ROOT / "config" / "bilisama.toml"
 
 
 def _load(path: Path) -> Settings:
+    """读配置。出错要说人话，不甩 traceback。
+
+    Args:
+        path: TOML 配置文件路径。
+
+    Returns:
+        校验通过的配置对象。
+
+    Raises:
+        SystemExit: 文件读不了、TOML 语法错、或者校验没过。
+    """
+    if not path.exists():
+        print(f"找不到配置文件：{path}", file=sys.stderr)
+        raise SystemExit(2)
     try:
         return load(path)
-    except Exception as exc:  # 配置错误要说人话，不甩 traceback
+    except (ValidationError, tomllib.TOMLDecodeError, OSError) as exc:
         print(f"配置有问题：\n{exc}", file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit(2) from exc
 
 
 def cmd_show(args: argparse.Namespace) -> int:
