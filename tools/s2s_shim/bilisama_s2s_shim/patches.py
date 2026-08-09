@@ -1,7 +1,7 @@
-"""Runtime patches for speech-to-speech. Its source is never edited.
+"""Runtime patches for speech-to-speech.
 
-The patches live in this repo and go in over PYTHONPATH, so the upstream checkout
-stays pristine.
+They live in this repo and go in over PYTHONPATH, so the upstream checkout is
+never edited.
 
 Neither patch has anything to do with wiring up our own model — that part is pure
 configuration. They are the price of two things we chose on top:
@@ -79,7 +79,7 @@ def _replacement_fits(original: Callable[..., Any], replacement: Callable[..., A
     return True
 
 
-# ------------------------------------------------------------ 补丁 A
+# ------------------------------------------------------------ Patch A
 
 
 def patch_text_modality() -> PatchResult:
@@ -179,19 +179,21 @@ def patch_text_modality() -> PatchResult:
     return PatchResult("text_modality", True, "隐式轮次改走纯文本，两处都打了")
 
 
-# ------------------------------------------------------------ 补丁 B
+# ------------------------------------------------------------ Patch B
 
 
 def patch_raw_instructions() -> PatchResult:
     """Stop upstream from appending its Voice Rules to our persona prompt.
 
-    That block lands last, which is the strongest position in the prompt. The
-    "usually one sentence" part is a soft default with an explicit escape hatch,
-    but the ban on action text like `*laughs*` is hard, and a VTuber persona uses
-    that constantly.
+    The block goes in after our persona, deliberately: upstream calls that the
+    strongest position (LLM/voice_prompt.py:1,33). Its "usually one sentence" rule
+    is a soft default with an explicit escape hatch, but the ban on action text
+    like `*laughs*` is unconditional (LLM/voice_prompt.py:11), and a VTuber persona
+    uses that constantly.
 
-    The same block also carries the expression- and motion-tool conventions, so
-    turning it off means writing those into our own persona.
+    The same block also carries the expression- and motion-tool conventions
+    (LLM/voice_prompt.py:15-17), so turning it off means writing those into our own
+    persona.
     """
     from speech_to_speech.LLM import base_openai_compatible_language_model as mod
 
@@ -213,7 +215,7 @@ def patch_raw_instructions() -> PatchResult:
     return PatchResult("raw_instructions", True, "人设按原样下发，不再被追加尾巴")
 
 
-# ------------------------------------------------------------ 装配
+# ------------------------------------------------------------ Registry
 
 _PATCHES: dict[str, Callable[[], PatchResult]] = {
     "text_modality": patch_text_modality,
@@ -222,8 +224,11 @@ _PATCHES: dict[str, Callable[[], PatchResult]] = {
 
 
 def apply_patches(names: list[str] | None = None) -> list[PatchResult]:
-    """Apply patches by name. Reads the env var when given None; an empty list
-    means zero-patch mode."""
+    """Apply patches by name.
+
+    None reads the env var, so the launcher does not have to know the default set.
+    An empty list is zero-patch mode rather than "apply the defaults".
+    """
     if names is None:
         raw = os.environ.get("BILISAMA_S2S_PATCHES", "text_modality,raw_instructions")
         names = [n.strip() for n in raw.split(",") if n.strip()]

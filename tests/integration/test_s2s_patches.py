@@ -6,8 +6,8 @@ and skipped by default::
     scripts/smoke_provider_b.sh install
     .venv/bin/python -m pytest tests/integration -m integration
 
-Think of this file as a drift detector. If upstream changes shape, it goes red here
-rather than failing silently halfway through a live stream.
+This file is a drift detector. If upstream changes shape, it goes red here rather
+than failing silently halfway through a live stream.
 """
 
 from __future__ import annotations
@@ -52,10 +52,9 @@ def _run(snippet: str) -> dict[str, object]:
 def _self_check_under_drift(patch: str, drift: str) -> dict[str, object]:
     """Mutate the freshly imported upstream module, then apply one patch.
 
-    Simulates the upstream release that renames or reshapes something. Reports
-    whether the self-check caught it, which is the whole point of the self-check:
-    the alternative is a patch that reports success and fails on the first turn of
-    a live stream.
+    Stands in for the upstream release that renames or reshapes something, which
+    is otherwise only reproducible by pinning an old version. Reports whether the
+    self-check caught the drift.
     """
     return _run(
         "import json\n"
@@ -170,8 +169,11 @@ def test_unknown_patch_name_fails_loudly() -> None:
 
 
 def test_shim_reports_import_failure_clearly() -> None:
-    """Running under the wrong interpreter explains itself instead of dumping a
-    traceback."""
+    """Running under the wrong interpreter explains itself.
+
+    The main venv cannot import speech_to_speech, and the operator needs to be told
+    that rather than handed an ImportError traceback.
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "bilisama_s2s_shim", "serve", "x.json"],
         env={**os.environ, "PYTHONPATH": str(SHIM)},
@@ -183,12 +185,12 @@ def test_shim_reports_import_failure_clearly() -> None:
     assert "是不是没在它自己的 venv 里跑" in proc.stderr
 
 
-# ------------------------------------------------------------ 自检覆盖面
+# ------------------------------------------------------------ Self-check coverage
 #
 # Every symbol, field name and signature the patches touch gets its own drift
-# injection here. A gap in the self-check is worse than an ordinary test gap: the
-# patch reports success at startup and the failure lands on the first turn of a
-# live stream, which is exactly what the self-check exists to prevent.
+# injection here. A gap here is worse than an ordinary test gap: an unchecked
+# dependency lets the patch report success at startup and fail on the first turn
+# of a live stream.
 
 
 @pytest.mark.parametrize("symbol", ["RealtimeService", "ConnState"])
