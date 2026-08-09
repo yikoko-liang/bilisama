@@ -15,3 +15,6 @@ logs/
 config/s2s/*.json
 desktop/resources/vendor/
 desktop/node_modules/
+
+# 本地凭据，绝不入库
+path.sh

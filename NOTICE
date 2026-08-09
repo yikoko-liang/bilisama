@@ -1,0 +1,42 @@
+BiliSama
+Copyright 2026 the BiliSama authors
+
+Licensed under the Apache License, Version 2.0.
+
+This project ports designs and, in later stages, code from the following
+open-source projects. Attribution is recorded here per the implementation
+plan (section 12); entries marked "planned" are not yet in the tree.
+
+huggingface/speech-to-speech (Apache-2.0)
+  Realtime protocol conventions used as a reference spec; the generation
+  invalidation semantics (design of pipeline/cancel_scope.py); the event
+  injection pattern; normalize_realtime_url and its reconnect timeouts
+  (planned). The upstream checkout is never vendored or modified: runtime
+  patches live in tools/s2s_shim/ and are injected via PYTHONPATH.
+
+QwenAudio/qwen-audio-agent (Apache-2.0)
+  AnnouncementWindow (speaking-floor gate), batch-and-receipt delivery,
+  the Provider/Protocol/Capabilities split, the serial command queue
+  (planned for stage 1-2).
+
+liliMozi/openhanako (Apache-2.0)
+  Persona layering with fallback chain, SQLite fact store, the MoodParser
+  incremental tag state machine (planned for stage 4-5).
+
+Project-N-E-K-O/N.E.K.O (Apache-2.0)
+  Danmaku scoring and selection, the paid-event lane, SafetyGuard
+  (planned for stage 3).
+
+Open-LLM-VTuber (MIT)
+  sentence_divider (CJK chunking), tts_manager ordered delivery,
+  interruption memory rewrite (planned for stage 5).
+
+xfgryujk/blivedm (MIT)
+  Bilibili live protocol client, to be vendored under
+  src/bilisama/ingest/bilibili/_vendor/ with its LICENSE preserved
+  (planned for stage 3).
+
+Live2D Cubism Core (proprietary, "Redistributable Code")
+  To be redistributed unmodified with its copyright header intact and a
+  separate LICENSE-Live2D.md (planned for stage 6; commercial gate
+  documented in docs/live2d-licensing.md).
