@@ -49,6 +49,33 @@ def _run(snippet: str) -> dict[str, object]:
     return parsed
 
 
+def _self_check_under_drift(patch: str, drift: str) -> dict[str, object]:
+    """Mutate the freshly imported upstream module, then apply one patch.
+
+    Simulates the upstream release that renames or reshapes something. Reports
+    whether the self-check caught it, which is the whole point of the self-check:
+    the alternative is a patch that reports success and fails on the first turn of
+    a live stream.
+    """
+    return _run(
+        "import json\n"
+        "from bilisama_s2s_shim.patches import PatchError, apply_patches\n"
+        f"{drift}\n"
+        "try:\n"
+        f"    apply_patches(['{patch}'])\n"
+        "except PatchError as exc:\n"
+        "    print(json.dumps({'raised': True, 'message': str(exc)}))\n"
+        "else:\n"
+        "    print(json.dumps({'raised': False, 'message': ''}))\n"
+    )
+
+
+def _assert_caught(out: dict[str, object], symbol: str) -> None:
+    assert out["raised"] is True, f"drift in {symbol} slipped past the self-check"
+    message = out["message"]
+    assert isinstance(message, str) and symbol in message, f"the error does not name {symbol}"
+
+
 def test_patches_apply_cleanly() -> None:
     """Both patches apply and pass their self-checks."""
     out = _run(
@@ -154,3 +181,145 @@ def test_shim_reports_import_failure_clearly() -> None:
     )
     assert proc.returncode == 4
     assert "是不是没在它自己的 venv 里跑" in proc.stderr
+
+
+# ------------------------------------------------------------ 自检覆盖面
+#
+# Every symbol, field name and signature the patches touch gets its own drift
+# injection here. A gap in the self-check is worse than an ordinary test gap: the
+# patch reports success at startup and the failure lands on the first turn of a
+# live stream, which is exactly what the self-check exists to prevent.
+
+
+@pytest.mark.parametrize("symbol", ["RealtimeService", "ConnState"])
+def test_self_check_catches_missing_module_global(symbol: str) -> None:
+    """A class disappearing from the service module is caught, not dereferenced.
+
+    Without the check, `hasattr(svc.RealtimeService, ...)` raises AttributeError,
+    and __main__.py catches only PatchError and ImportError — the streamer gets a
+    traceback instead of the exit code 3 and the zero-patch-mode hint.
+    """
+    out = _self_check_under_drift(
+        "text_modality",
+        "from speech_to_speech.api.openai_realtime import service as svc\n" f"del svc.{symbol}\n",
+    )
+    _assert_caught(out, symbol)
+
+
+def test_self_check_catches_missing_state_accessor() -> None:
+    """patched_handler calls self._state(conn_id); losing it must fail at startup."""
+    out = _self_check_under_drift(
+        "text_modality",
+        "from speech_to_speech.api.openai_realtime import service as svc\n"
+        "del svc.RealtimeService._state\n",
+    )
+    _assert_caught(out, "_state")
+
+
+def test_self_check_catches_renamed_conn_state_field() -> None:
+    """patched_handler assigns state.current_response_params.
+
+    ConnState is a pydantic model, so an unknown attribute raises — but only on the
+    first VAD turn, long after the patch reported success.
+    """
+    out = _self_check_under_drift(
+        "text_modality",
+        "from pydantic import BaseModel\n"
+        "from speech_to_speech.api.openai_realtime import service as svc\n"
+        "class Renamed(BaseModel):\n"
+        "    response_params: str | None = None\n"
+        "svc.ConnState = Renamed\n",
+    )
+    _assert_caught(out, "current_response_params")
+
+
+def test_self_check_catches_renamed_output_modalities() -> None:
+    """A renamed output_modalities produces no error anywhere.
+
+    RealtimeResponseCreateParams is extra='allow', so our kwarg lands in an extra
+    key and response_wants_audio() reads the missing field as audio. The stream
+    silently goes back to upstream's TTS with the shim reporting success.
+    """
+    out = _self_check_under_drift(
+        "text_modality",
+        "from pydantic import BaseModel, ConfigDict\n"
+        "from speech_to_speech.api.openai_realtime import service as svc\n"
+        "class RenamedParams(BaseModel):\n"
+        "    model_config = ConfigDict(extra='allow')\n"
+        "    modalities: list[str] | None = None\n"
+        "svc.RealtimeResponseCreateParams = RenamedParams\n",
+    )
+    _assert_caught(out, "output_modalities")
+
+
+def test_self_check_catches_renamed_response_field() -> None:
+    """A renamed response field is the other silent one.
+
+    pydantic drops the unknown kwarg, the field upstream reads stays None, and
+    every implicit turn produces audio without a single exception.
+    """
+    out = _self_check_under_drift(
+        "text_modality",
+        "from pydantic import BaseModel\n"
+        "from speech_to_speech.api.openai_realtime import service as svc\n"
+        "class RenamedRequest(BaseModel):\n"
+        "    response_params: str | None = None\n"
+        "svc.GenerateResponseRequest = RenamedRequest\n",
+    )
+    _assert_caught(out, "response")
+
+
+def test_self_check_catches_handler_signature_change() -> None:
+    """The name surviving is not enough: patched_handler takes (self, conn_id, event).
+
+    Upstream dispatches it positionally, so an extra required parameter is a
+    TypeError on the first VAD turn.
+    """
+    out = _self_check_under_drift(
+        "text_modality",
+        "from speech_to_speech.api.openai_realtime import service as svc\n"
+        "def wider(self, conn_id, event, turn_id):\n"
+        "    return []\n"
+        "svc.RealtimeService._on_audio_input_completed = wider\n",
+    )
+    _assert_caught(out, "_on_audio_input_completed")
+
+
+def test_self_check_catches_new_builder_keyword() -> None:
+    """Patch B replaces the prompt builders with identity(prompt, tool_section).
+
+    A builder that grows a third parameter would make the replacement raise
+    TypeError on the first generated reply.
+    """
+    out = _self_check_under_drift(
+        "raw_instructions",
+        "from speech_to_speech.LLM import base_openai_compatible_language_model as mod\n"
+        "def wider(session_prompt, *, tool_section='', style_section=''):\n"
+        "    return session_prompt\n"
+        "mod.build_voice_system_prompt = wider\n",
+    )
+    _assert_caught(out, "build_voice_system_prompt")
+
+
+def test_self_check_leaves_upstream_untouched_when_it_fails() -> None:
+    """A failed self-check must not have patched half of anything.
+
+    Patch A mutates two module attributes. If it bailed between them, zero-patch
+    mode would no longer be a real fallback.
+    """
+    out = _run(
+        "import json\n"
+        "from bilisama_s2s_shim.patches import PatchError, apply_patches\n"
+        "from speech_to_speech.api.openai_realtime import service as svc\n"
+        "before_cls = svc.GenerateResponseRequest\n"
+        "before_handler = svc.RealtimeService._on_audio_input_completed\n"
+        "del svc.RealtimeService._state\n"
+        "try:\n"
+        "    apply_patches(['text_modality'])\n"
+        "except PatchError:\n"
+        "    pass\n"
+        "print(json.dumps({'cls': svc.GenerateResponseRequest is before_cls,"
+        " 'handler': svc.RealtimeService._on_audio_input_completed is before_handler}))\n"
+    )
+    assert out["cls"] is True, "GenerateResponseRequest was replaced before the check failed"
+    assert out["handler"] is True, "_on_audio_input_completed was replaced before the check failed"

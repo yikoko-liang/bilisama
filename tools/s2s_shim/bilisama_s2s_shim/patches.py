@@ -12,12 +12,14 @@ configuration. They are the price of two things we chose on top:
 Turn both off and you get zero-patch mode: upstream's TTS, upstream's prompt tail,
 nothing touched. That is also the fallback if a patch ever stops applying.
 
-Each patch checks that its target symbols exist before doing anything. Upstream
+Before touching anything, each patch checks every symbol, field name and call
+signature it depends on — not just the ones whose absence would raise. Upstream
 drift should blow up at startup, not turn into a silent failure mid-stream.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +40,43 @@ class PatchResult:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise PatchError(message)
+
+
+def _replacement_fits(original: Callable[..., Any], replacement: Callable[..., Any]) -> bool:
+    """Whether replacement can absorb every call the original signature permits.
+
+    Both patches swap a callable out for one of ours, and both are called by
+    upstream code we do not control. Binding the widest call the original accepts
+    also covers every narrower one, so this rules out a new upstream parameter
+    turning into a TypeError on the first turn of a live stream.
+
+    A `*args`/`**kwargs` original accepts unbounded calls, so there is nothing to
+    prove a replacement against: treat it as a mismatch and fail loudly.
+    """
+    try:
+        original_sig = inspect.signature(original)
+        replacement_sig = inspect.signature(replacement)
+    except (TypeError, ValueError):
+        return False
+
+    args: list[Any] = []
+    kwargs: dict[str, Any] = {}
+    for name, param in original_sig.parameters.items():
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            args.append(None)
+        elif param.kind is inspect.Parameter.KEYWORD_ONLY:
+            kwargs[name] = None
+        else:
+            return False
+
+    try:
+        replacement_sig.bind(*args, **kwargs)
+    except TypeError:
+        return False
+    return True
 
 
 # ------------------------------------------------------------ 补丁 A
@@ -69,9 +108,39 @@ def patch_text_modality() -> PatchResult:
         hasattr(svc, "RealtimeResponseCreateParams"),
         "service 模块里没有 RealtimeResponseCreateParams,上游结构变了",
     )
+    # Checked before it is dereferenced below: an AttributeError here would escape
+    # __main__.py, which only catches PatchError and ImportError.
+    _require(
+        hasattr(svc, "RealtimeService"),
+        "service 模块里没有 RealtimeService,上游结构变了",
+    )
+    _require(
+        hasattr(svc, "ConnState"),
+        "service 模块里没有 ConnState,上游结构变了",
+    )
     _require(
         hasattr(svc.RealtimeService, "_on_audio_input_completed"),
         "RealtimeService 上没有 _on_audio_input_completed,上游结构变了",
+    )
+    _require(
+        hasattr(svc.RealtimeService, "_state"),
+        "RealtimeService 上没有 _state,上游结构变了",
+    )
+    _require(
+        "current_response_params" in svc.ConnState.model_fields,
+        "ConnState 上没有 current_response_params 字段,上游结构变了",
+    )
+    # These two field names must be checked, not just their classes. Both models
+    # take an unknown key without complaining, so a rename would swallow our kwarg
+    # and leave the turn on the audio path with no error at all — an absent
+    # output_modalities reads as audio (upstream utils/utils.py:20-23).
+    _require(
+        "output_modalities" in svc.RealtimeResponseCreateParams.model_fields,
+        "RealtimeResponseCreateParams 上没有 output_modalities 字段,上游结构变了",
+    )
+    _require(
+        "response" in svc.GenerateResponseRequest.model_fields,
+        "GenerateResponseRequest 上没有 response 字段,上游结构变了",
     )
 
     original_cls = svc.GenerateResponseRequest
@@ -86,8 +155,6 @@ def patch_text_modality() -> PatchResult:
             kwargs["response"] = text_only_params()
         return original_cls(*args, **kwargs)
 
-    svc.GenerateResponseRequest = patched_request
-
     original_handler: Callable[..., Any] = svc.RealtimeService._on_audio_input_completed
 
     def patched_handler(self: Any, conn_id: str, event: Any) -> Any:
@@ -97,6 +164,17 @@ def patch_text_modality() -> PatchResult:
         state.current_response_params = text_only_params()
         return original_handler(self, conn_id, event)
 
+    # Upstream dispatches this positionally as handler(conn_id, event)
+    # (service.py:398, bound method). A new parameter would only show up on the
+    # first VAD turn.
+    _require(
+        _replacement_fits(original_handler, patched_handler),
+        "_on_audio_input_completed 的签名变了,补丁替身接不住上游的调用",
+    )
+
+    # Nothing above this line mutates upstream: a failed check must leave the
+    # process in the state it started in, so zero-patch mode is still reachable.
+    svc.GenerateResponseRequest = patched_request
     svc.RealtimeService._on_audio_input_completed = patched_handler
     return PatchResult("text_modality", True, "隐式轮次改走纯文本，两处都打了")
 
@@ -117,11 +195,18 @@ def patch_raw_instructions() -> PatchResult:
     """
     from speech_to_speech.LLM import base_openai_compatible_language_model as mod
 
-    for name in ("build_voice_system_prompt", "build_text_system_prompt"):
-        _require(hasattr(mod, name), f"目标模块里没有 {name},上游结构变了")
-
     def identity(prompt: str, tool_section: str | None = None) -> str:
         return prompt
+
+    # The name existing is not enough. Upstream is (session_prompt, *,
+    # tool_section="") today (LLM/voice_prompt.py:32, LLM/text_prompt.py:28), and a
+    # new required keyword would only surface on the first generated reply.
+    for name in ("build_voice_system_prompt", "build_text_system_prompt"):
+        _require(hasattr(mod, name), f"目标模块里没有 {name},上游结构变了")
+        _require(
+            _replacement_fits(getattr(mod, name), identity),
+            f"{name} 的签名变了,补丁替身接不住上游的调用",
+        )
 
     mod.build_voice_system_prompt = identity
     mod.build_text_system_prompt = identity

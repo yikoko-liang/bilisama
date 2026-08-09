@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,11 +31,26 @@ class S2SConfigError(RuntimeError):
     """Rendered config does not match what upstream accepts."""
 
 
+class Reconciliation(Enum):
+    """Whether the field names actually got compared against upstream.
+
+    Empty `unknown_keys` means nothing on its own. It only means "clean" when this
+    is CHECKED. UNAVAILABLE is the dangerous one: the caller asked for the check
+    and it did not happen.
+    """
+
+    NOT_REQUESTED = "not_requested"
+    UNAVAILABLE = "unavailable"
+    CHECKED = "checked"
+
+
 @dataclass(frozen=True, slots=True)
 class RenderResult:
     payload: dict[str, object]
     unknown_keys: tuple[str, ...]
     missing_turn_fields: tuple[str, ...]
+    # No default, so every construction site has to say which state it is in.
+    reconciliation: Reconciliation
 
 
 def upstream_field_names(s2s_root: Path) -> frozenset[str]:
@@ -95,19 +111,31 @@ def render(cfg: S2SConfig) -> dict[str, object]:
 
 
 def render_checked(cfg: S2SConfig, s2s_root: Path | None) -> RenderResult:
-    """Render, then reconcile field names against upstream when we can."""
+    """Render, then reconcile field names against upstream when we can.
+
+    Args:
+        cfg: Our provider (b) settings.
+        s2s_root: The speech-to-speech checkout, or None to skip reconciliation.
+
+    Returns:
+        The payload plus what the reconciliation found. Read `reconciliation`
+        before believing `unknown_keys`: empty means "clean" only when the check
+        actually ran.
+    """
     payload = render(cfg)
     if s2s_root is None:
-        return RenderResult(payload, (), ())
+        return RenderResult(payload, (), (), Reconciliation.NOT_REQUESTED)
 
     known = upstream_field_names(s2s_root)
     if not known:
-        return RenderResult(payload, (), ())
+        # Asked to check, could not. Reporting this as clean is the failure mode
+        # this whole module exists to prevent.
+        return RenderResult(payload, (), (), Reconciliation.UNAVAILABLE)
 
     unknown = tuple(sorted(k for k in payload if k not in known))
     turn_fields = set(type(cfg.turn).model_fields) - _intentionally_omitted(cfg)
     missing = tuple(sorted(f for f in turn_fields if f in known and f not in payload))
-    return RenderResult(payload, unknown, missing)
+    return RenderResult(payload, unknown, missing, Reconciliation.CHECKED)
 
 
 def _intentionally_omitted(cfg: S2SConfig) -> set[str]:
@@ -120,7 +148,31 @@ def _intentionally_omitted(cfg: S2SConfig) -> set[str]:
 
 
 def write(cfg: S2SConfig, dest: Path, *, s2s_root: Path | None = None) -> RenderResult:
+    """Render, reconcile, then write the launch JSON.
+
+    Nothing reaches disk unless the config is either verified or was never asked
+    to be. A live stream launches from this file, and scripts/smoke_provider_b.sh
+    only checks that it exists.
+
+    Args:
+        cfg: Our provider (b) settings.
+        dest: Where to write the launch JSON. Parent directories are created.
+        s2s_root: The speech-to-speech checkout, or None to skip reconciliation.
+
+    Returns:
+        What render_checked found, once the file is on disk.
+
+    Raises:
+        S2SConfigError: Upstream would swallow one of our keys, or s2s_root was
+            given but holds no upstream sources to reconcile against.
+    """
     result = render_checked(cfg, s2s_root)
+    if result.reconciliation is Reconciliation.UNAVAILABLE:
+        raise S2SConfigError(
+            f"没能在这个目录里找到上游的参数定义，字段名对账没做成：{s2s_root}\n"
+            f"怎么办：确认 --s2s-root 指向 speech-to-speech 的检出"
+            f"（它应该有 src/speech_to_speech/{_UPSTREAM_ARG_DIR}/）。"
+        )
     if result.unknown_keys:
         raise S2SConfigError(
             "这些配置项上游不认识，会被静默忽略：" + "、".join(result.unknown_keys)
