@@ -146,6 +146,111 @@ def test_render_checked_marks_real_checkout_checked(tmp_path: Path) -> None:
     assert result.unknown_keys == ()
 
 
+# ------------------------------------------------- missing_turn_fields
+#
+# The four tests below pin both halves of the one expression at s2s_launch.py:137.
+# The CLI turns its result into "提醒：这些判停参数没有透传", so a wrong one either
+# cries wolf on every ordinary config or stays quiet when a knob really did not
+# reach the engine. `result.missing_turn_fields == ()` on a clean config cannot
+# tell those apart: it is also what a function that always returns () produces.
+
+
+def _render_without(field: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `render` drop one key, standing in for a pass-through that got lost.
+
+    Faked rather than configured, because every turn field is passed through today
+    and the point is to describe what happens the day one stops being.
+
+    Args:
+        field: Payload key to remove.
+        monkeypatch: Undoes the patch at the end of the test.
+    """
+    original = s2s_launch.render
+
+    def render_minus_one(cfg: S2SConfig) -> dict[str, object]:
+        payload = original(cfg)
+        del payload[field]
+        return payload
+
+    monkeypatch.setattr(s2s_launch, "render", render_minus_one)
+
+
+def test_missing_turn_fields_names_a_parameter_that_never_reached_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal path: upstream accepts the knob, we stopped sending it, so say so.
+
+    Upstream then falls back to its own default while the streamer keeps tuning a
+    number that never arrives. Not an error — the pipeline still runs — which is
+    exactly why it has to be said out loud.
+    """
+    _render_without("speech_pad_ms", monkeypatch)
+    root = _fake_upstream(tmp_path / "upstream", [*s2s_launch.render(_cfg()), "speech_pad_ms"])
+
+    result = s2s_launch.render_checked(_cfg(), root)
+
+    assert result.reconciliation is s2s_launch.Reconciliation.CHECKED
+    assert result.missing_turn_fields == ("speech_pad_ms",)
+
+
+def test_a_parameter_upstream_does_not_accept_is_not_called_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Boundary: same dropped field, but upstream has never heard of it.
+
+    Then there is nothing to pass through and naming it is a false alarm that sends
+    someone hunting for a knob the engine does not have. The warning only carries
+    information once it has been reconciled against upstream's own names, which is
+    why the test is `f in known` and not just `f not in payload`.
+    """
+    _render_without("speech_pad_ms", monkeypatch)
+    root = _fake_upstream(tmp_path / "upstream", s2s_launch.render(_cfg()))
+
+    result = s2s_launch.render_checked(_cfg(), root)
+
+    # Without this line the silence below is ambiguous: a failed check is quiet too.
+    assert result.reconciliation is s2s_launch.Reconciliation.CHECKED
+    assert result.unknown_keys == ()
+    assert result.missing_turn_fields == ()
+
+
+def test_an_omission_we_chose_is_not_reported_as_missing(tmp_path: Path) -> None:
+    """Boundary: max_speech_ms is left out on purpose, and upstream still accepts it.
+
+    inf is not valid JSON and a missing value already means "no limit" upstream, so
+    the key is dropped deliberately (s2s_launch.py:104-106). Reporting it would put a
+    提醒 on every default config, and a warning that fires always is one nobody reads
+    — which is the whole reason _intentionally_omitted is subtracted here.
+    """
+    root = _fake_upstream(tmp_path / "upstream", [*s2s_launch.render(_cfg()), "max_speech_ms"])
+
+    result = s2s_launch.render_checked(_cfg(), root)
+
+    assert "max_speech_ms" not in result.payload  # the omission really happened
+    assert result.reconciliation is s2s_launch.Reconciliation.CHECKED
+    assert result.missing_turn_fields == ()
+
+
+def test_a_finite_max_speech_that_goes_missing_is_still_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Error path: the exemption is conditional on inf, not a blanket one.
+
+    With a real limit configured the key stops being an intentional omission, and
+    losing it means the engine cuts the streamer off at its own default instead of
+    at the configured one. Staying quiet about that is the silence the 提醒 exists
+    to break.
+    """
+    cfg = _cfg(turn=TurnConfig(max_speech_ms=30_000))
+    _render_without("max_speech_ms", monkeypatch)
+    root = _fake_upstream(tmp_path / "upstream", [*s2s_launch.render(cfg), "max_speech_ms"])
+
+    result = s2s_launch.render_checked(cfg, root)
+
+    assert result.reconciliation is s2s_launch.Reconciliation.CHECKED
+    assert result.missing_turn_fields == ("max_speech_ms",)
+
+
 def test_write_refuses_when_reconciliation_was_asked_for_but_impossible(tmp_path: Path) -> None:
     """An unverified launch config must not reach disk.
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from bilisama import __version__, cli
 from bilisama.bootstrap import s2s_launch
@@ -162,6 +163,73 @@ def test_show_output_survives_a_round_trip_through_a_strict_parser(
 
     assert payload["speech"]["s2s"]["patches"] == ["text_modality", "raw_instructions"]
     assert isinstance(payload["interaction"]["speak"]["danmaku"], bool)
+
+
+# ------------------------------------------- the two defences against Infinity
+#
+# JSON has no infinity and JSON.parse rejects the literal, so `Infinity` reaching
+# the settings page (plan §7.5) is a blank panel with no clue why. There are two
+# defences and the suite only exercised the first arm of the first one.
+
+
+def test_json_safe_replaces_non_finite_floats_anywhere_in_the_payload() -> None:
+    """The contract is "anywhere", so the walk has to enter lists, not only dicts.
+
+    No settings field is a list of floats today, which is why every other test
+    reaches the dict branch and none reach the list one. The branch is not
+    decoration: `patches` shows sequence fields already exist in this schema
+    (config/schema.py:55), and the day one of them carries a number, an unwalked
+    list reopens the hole with the whole suite still green.
+    """
+    payload: dict[str, Any] = {
+        "flat": float("inf"),
+        "in_a_list": [1.0, float("-inf"), float("nan")],
+        "nested": {"deeper": [[float("inf")], {"k": float("nan")}]},
+        "left_alone": ["text", 3, True, None, 2.5],
+    }
+
+    assert cli._json_safe(payload) == {
+        "flat": None,
+        "in_a_list": [1.0, None, None],
+        "nested": {"deeper": [[None], {"k": None}]},
+        "left_alone": ["text", 3, True, None, 2.5],
+    }
+
+
+class _DerivedWithASequence(BaseModel):
+    """A derived block whose field is a sequence — the shape `_json_safe` walks past.
+
+    `cmd_show` builds `_derived` from `model_dump()` in python mode, where a tuple
+    field stays a tuple (`patches` at config/schema.py:55 is exactly such a field).
+    `_json_safe` handles dicts, lists and floats; a tuple is none of the three, and
+    `json.dumps` serialises it as an array regardless.
+    """
+
+    cooldown_s: tuple[float, ...] = (float("inf"),)
+
+
+def test_show_refuses_to_print_infinity_when_the_first_defence_misses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Error path, and the reason `allow_nan=False` is on the dumps call.
+
+    Stacking `allow_nan=False` behind `_json_safe` only means something if it fires
+    when `_json_safe` misses, and nothing reached that state before. This is a
+    developer-facing guard rather than a config error — no TOML a streamer can write
+    gets here — so failing loudly at the point of the mistake beats emitting a
+    document the settings page cannot parse.
+    """
+    monkeypatch.setattr(cli, "derive", _fake_derive)
+
+    with pytest.raises(ValueError):
+        cli.main(["config", "show", "--config", str(_write(tmp_path, _CLEAN))])
+
+    assert "Infinity" not in capsys.readouterr().out
+
+
+def _fake_derive(chattiness: Chattiness) -> _DerivedWithASequence:
+    """Stands in for `derive`, returning a block `_json_safe` cannot clean."""
+    return _DerivedWithASequence()
 
 
 # -------------------------------------------------------------- config validate

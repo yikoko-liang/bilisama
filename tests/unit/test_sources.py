@@ -3,6 +3,11 @@
 The queue is bounded on purpose, so every test here has to hold two things at
 once: a slow consumer must still stall its producer, and shutdown must never
 depend on the consumer being alive.
+
+Which makes the poison pill best-effort and `_stopped` the authority. The pill
+only has to travel on an empty queue; on a full one it is dropped, and start()
+gets out on the flag alone. Both halves are pinned below, because the bug this
+module has now had twice is a shutdown that hangs on whichever half went untested.
 """
 
 from __future__ import annotations
@@ -13,6 +18,10 @@ import pytest
 
 from bilisama.ingest.events import EventKind, LiveEvent
 from bilisama.ingest.sources import EventSink, QueueSource, collect, merge
+
+# Spelled out rather than imported from the source: a test that reads the default
+# back out of QueueSource would be self-consistent with any default at all.
+_DEFAULT_MAXSIZE = 256
 
 
 def _queue_event(n: int) -> LiveEvent:
@@ -136,6 +145,128 @@ async def test_stop_is_idempotent_on_a_single_slot_queue() -> None:
     assert seen == []
 
 
+async def test_start_returns_when_stop_had_to_drop_the_pill() -> None:
+    """The other half of the stop() fix, and the load-bearing one.
+
+    The comment at sources.py:66-73 argues that dropping the pill on a full queue
+    costs nothing *because* start() re-reads _stopped on its next turn. Delete that
+    read (`while True:`) and stop() still returns, so every other test here stays
+    green — while start() drains the backlog and then parks in get() forever, with
+    nobody left to feed it a pill. The hang just moves from stop() to start().
+    """
+    source = QueueSource(maxsize=2)
+    emitting = asyncio.Event()
+    release = asyncio.Event()
+    seen: list[str] = []
+
+    async def slow_sink(event: LiveEvent) -> None:
+        seen.append(event.event_id)
+        emitting.set()
+        await release.wait()
+
+    task = asyncio.create_task(source.start(slow_sink))
+    await source.push(_queue_event(1))
+    await asyncio.wait_for(emitting.wait(), timeout=1.0)
+
+    # The consumer is parked inside emit, so both slots are ours. These two pushes
+    # returning is itself the proof that the queue is now full: maxsize is 2.
+    await asyncio.wait_for(source.push(_queue_event(2)), timeout=1.0)
+    await asyncio.wait_for(source.push(_queue_event(3)), timeout=1.0)
+
+    await asyncio.wait_for(source.stop(), timeout=1.0)
+    release.set()
+
+    await asyncio.wait_for(task, timeout=1.0)
+    # Abandoned, not drained: stop() means stop, and the two queued events are the
+    # ones the flag check has to skip for the dropped pill to be harmless.
+    assert seen == ["q1"]
+
+
+async def test_start_after_stop_abandons_a_queued_backlog() -> None:
+    """Same flag check, seen from the ordering a supervisor actually produces.
+
+    An in-process producer can fill the queue before the source task ever gets its
+    first turn, so the pill lands *behind* real events. A start() that trusted the
+    pill alone would emit the whole backlog on the way out — the events the
+    supervisor already decided nobody wants.
+    """
+    source = QueueSource(maxsize=8)
+    for n in (1, 2, 3):
+        await source.push(_queue_event(n))
+    await asyncio.wait_for(source.stop(), timeout=1.0)
+
+    seen: list[str] = []
+
+    async def sink(event: LiveEvent) -> None:
+        seen.append(event.event_id)
+
+    await asyncio.wait_for(source.start(sink), timeout=1.0)
+    assert seen == []
+
+
+async def test_push_after_stop_is_accepted_and_never_delivered() -> None:
+    """A danmaku reader keeps arriving for a while after the supervisor says stop.
+
+    push() stays a plain put(), so the producer sees no new exception on the way
+    down — it is cancelled with the rest of the task group instead. What it pushes
+    is dropped, because nothing consumes after stop().
+    """
+    source = QueueSource(maxsize=4)
+    await asyncio.wait_for(source.stop(), timeout=1.0)
+
+    await asyncio.wait_for(source.push(_queue_event(1)), timeout=1.0)
+
+    seen: list[str] = []
+
+    async def sink(event: LiveEvent) -> None:
+        seen.append(event.event_id)
+
+    await asyncio.wait_for(source.start(sink), timeout=1.0)
+    assert seen == []
+
+
+async def test_push_on_a_full_queue_after_stop_waits_to_be_cancelled() -> None:
+    """The one part of shutdown that is not self-contained, pinned so it stays a
+    deliberate choice.
+
+    After stop() nothing drains the queue, so a producer already parked in push()
+    can only be freed by cancellation — which is exactly what both callers do
+    (merge() runs sources in a TaskGroup, collect() cancels at sources.py:106).
+    Cannot flake: a full queue with no consumer can never free a slot. If push()
+    ever has to fail fast instead, this is the test to rewrite on purpose.
+    """
+    source = QueueSource(maxsize=1)
+    await source.push(_queue_event(1))
+    await asyncio.wait_for(source.stop(), timeout=1.0)
+
+    producer = asyncio.create_task(source.push(_queue_event(2)))
+    _done, pending = await asyncio.wait({producer}, timeout=0.05)
+    assert producer in pending, "push() cannot complete while the queue stays full"
+
+    producer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await producer
+
+
+async def test_cancelling_a_parked_start_propagates_the_cancellation() -> None:
+    """collect() (sources.py:106) and merge()'s TaskGroup both shut a source down by
+    cancelling start(); a QueueSource that swallowed CancelledError would hang both.
+    """
+    source = QueueSource(maxsize=2)
+
+    async def sink(event: LiveEvent) -> None:
+        raise AssertionError("nothing is ever pushed")
+
+    task = asyncio.create_task(source.start(sink))
+    # One yield is enough to run the task up to its first get(), where it parks.
+    await asyncio.sleep(0)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 # ------------------------------------------------------------ backpressure
 
 
@@ -149,6 +280,26 @@ async def test_push_still_applies_backpressure() -> None:
 
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(source.push(_queue_event(2)), timeout=0.05)
+
+
+async def test_the_default_bound_is_the_documented_one() -> None:
+    """The test above passes its own maxsize, so the default was pinned nowhere.
+
+    Both directions matter and the default is what every real caller gets: 1 would
+    serialise the ingest path behind one in-flight danmaku, and a huge value would
+    quietly remove the "instead of letting the queue grow until the process dies"
+    protection the comment at sources.py:49-50 promises.
+    """
+    source = QueueSource()
+
+    async def fill_to_the_brim() -> None:
+        for n in range(_DEFAULT_MAXSIZE):
+            await source.push(_queue_event(n))
+
+    await asyncio.wait_for(fill_to_the_brim(), timeout=2.0)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(source.push(_queue_event(_DEFAULT_MAXSIZE)), timeout=0.05)
 
 
 # ------------------------------------------------------------ collect
@@ -167,7 +318,7 @@ async def test_collect_returns_the_first_events() -> None:
 async def test_collect_returns_while_a_producer_keeps_the_queue_full() -> None:
     """The real caller, in the shape that hung: flood, then shut down.
 
-    collect() awaits stop() before it cancels the start task (sources.py:97-98),
+    collect() awaits stop() before it cancels the start task (sources.py:105-106),
     so a blocking stop() took collect() down with it. `>= 2` because collect()
     has always been allowed to overshoot its limit.
     """

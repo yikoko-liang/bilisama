@@ -61,6 +61,31 @@ def test_silver_gift_is_not_paid() -> None:
     assert Gift(coin_type="gold", total_coin=1000).is_paid
 
 
+def test_a_gift_that_cost_nothing_is_not_paid() -> None:
+    """Boundary: gold with total_coin 0 belongs to the free lane, not the paid one.
+
+    total_coin is what was actually spent (1000 gold == CNY 1), so zero means no
+    money changed hands whatever coin_type says. The shape is reachable from the
+    wire rather than hypothetical: both our own reader and N.E.K.O's default the
+    amount to 0 when a frame omits it while still reading coin_type out of the same
+    payload — tests/fakes/replay.py:66 and
+    N.E.K.O/plugin/plugins/neko_live/modules/bili_live_ingest/danmaku_core.py:844-861
+    (COMBO_SEND, `coin_type` read at :844, `total_coin=int(d.get("total_coin", 0))`
+    at :860). The stronger claim that Bilibili's free daily gifts arrive as gold
+    with total_coin 0 could not be verified against anything in this tree, so this
+    test does not rest on it.
+
+    Why the boundary is worth a test: is_paid is what puts an event in the paid
+    lane, which plan §2.7 lets pre-empt L1/L3 and §5.3 exempts from the 1.5 s gift
+    output cooldown. A free gift in there jumps the queue for CNY 0 and pushes a
+    real danmaku out of the window.
+    """
+    assert not Gift(coin_type="gold", total_coin=0).is_paid
+    assert Gift(coin_type="gold", total_coin=1).is_paid  # a single coin is still money
+    assert not Gift(coin_type="silver", total_coin=0).is_paid
+    assert not Gift().is_paid  # a frame with no gift block at all
+
+
 # ------------------------------------------------------------ dedup and redaction
 
 
@@ -77,6 +102,45 @@ def test_dedup_key_falls_back_without_event_id() -> None:
     assert a.dedup_key == b.dedup_key  # same person, same words, same second
     c = LiveEvent(kind=EventKind.DANMAKU, viewer=v, text="666", ts_ms=2500)
     assert a.dedup_key != c.dedup_key
+
+
+def _danmaku_key(*, text: str = "666", ts_ms: int = 1000) -> str:
+    """dedup_key for one viewer's danmaku, so only the varied part can move it."""
+    return LiveEvent(kind=EventKind.DANMAKU, viewer=Viewer(uid=7), text=text, ts_ms=ts_ms).dedup_key
+
+
+def test_dedup_key_buckets_time_by_exactly_one_second() -> None:
+    """Boundary: the bucket edge, which the width has to be read off.
+
+    The docstring promises a one-second bucket and 2999/3000 straddle exactly that
+    edge. Both directions are bugs, and both are silent. Wider merges two distinct
+    danmaku sent a second apart — a dropped reaction nobody sees drop. Narrower stops
+    the replay suppression this key exists for: a reconnect re-delivers the same
+    danmaku with the same platform timestamp, and the surviving jitter is what the
+    bucket absorbs.
+    """
+    assert _danmaku_key(ts_ms=3000) == _danmaku_key(ts_ms=3999)  # one bucket, both ends
+    assert _danmaku_key(ts_ms=2999) != _danmaku_key(ts_ms=3000)  # the edge itself
+    assert _danmaku_key(ts_ms=2000) != _danmaku_key(ts_ms=3000)  # adjacent whole seconds
+
+
+def test_dedup_key_keeps_thirty_two_characters_of_the_body() -> None:
+    """Boundary: the body prefix is 32 characters wide, and both edges matter.
+
+    Short prefix and two different things the same viewer said in the same second
+    collapse into one key, so the second one is dropped as a duplicate — Bilibili
+    caps ordinary danmaku at 20-30 characters, which is why a 16-character prefix
+    collides on real traffic rather than in theory.
+
+    The cap is deliberate, so the last case is the price of it and not an oversight:
+    anything two bodies share past character 32 does collapse. That only reaches
+    bodies longer than any danmaku, and those (super chats) carry a platform id, so
+    they never take this fallback.
+    """
+    shared = "0123456789abcdef"  # the first 16 characters, identical either way
+    assert _danmaku_key(text=shared + "0" * 16) != _danmaku_key(text=shared + "1" * 16)
+    assert _danmaku_key(text="x" * 31 + "a") != _danmaku_key(text="x" * 31 + "b")
+    assert _danmaku_key(text="y" * 32 + "a") == _danmaku_key(text="y" * 32 + "b")
 
 
 def test_redacted_drops_raw() -> None:

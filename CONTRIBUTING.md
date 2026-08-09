@@ -10,18 +10,41 @@ scripts/gate.sh
 ```
 
 它跑 `black --check`、`ruff`、`mypy`（全量，含 `tests` 和 `tools`）、单元测试、
-CLI 冒烟和 profile 覆盖层断言。
+CLI 冒烟、profile 覆盖层断言，最后是需要 speech-to-speech 的集成层。
 
-最后两项不是凑数：拆 `config` 包那次，`validate.py` 少了一个运行时 import，52 个
-单元测试全绿,因为当时**没有一个测试构造过 `Settings`**。是 CLI 冒烟抓到的。
-在覆盖缺口补上之前，这一层不能省。
+CLI 冒烟和 profile 覆盖层不是凑数：拆 `config` 包那次，`validate.py` 少了一个运行时
+import，52 个单元测试全绿,因为当时**没有一个测试构造过 `Settings`**。是 CLI 冒烟
+抓到的。在覆盖缺口补上之前，这一层不能省。
 
-需要 speech-to-speech 的那批单独跑：
+### 集成层：装了就自动跑
+
+集成层管的是 s2s 补丁的自检，要一个单独的 venv（约 385 MiB），所以门禁没法无条件跑
+它。规矩不是「一定要跑」，而是「不跑就得说出来」：venv 在，门禁自己就把这一层跑了；
+不在，它会打一条显眼的跳过提示，并且**不会**在最后声称全部通过。
+
+装一次就够，之后 `scripts/gate.sh` 就覆盖了这一层：
 
 ```bash
-scripts/smoke_provider_b.sh install     # 一次就够，约 385 MiB
+scripts/smoke_provider_b.sh install
+```
+
+默认装到 `~/.local/share/bilisama/engines/s2s`；换地方用 `BILISAMA_S2S_VENV`，
+门禁按同一个变量找。想在门禁之外单独跑这批，原来的命令照旧：
+
+```bash
 .venv/bin/python -m pytest -m integration
 ```
+
+门禁最后一行说的是这次到底跑了哪几层，别扫一眼绿色就走：
+
+| 最后一行 | 意思 |
+|---|---|
+| `全部通过（含集成层）` | 两层都跑了 |
+| `单元层全部通过，集成层没跑（见上）` | 没装 s2s，那一层这次没验过 |
+
+CI 上「没装所以跳过」不是个能接受的答案，所以那边要设
+`BILISAMA_GATE_REQUIRE_INTEGRATION=1`：venv 找不到就直接判门禁失败，而不是跳过。
+它比的是 `0`,所以设成 `0` 就是明确关掉，本机不想被拦的时候用。
 
 ## 语言：代码用英文，给人看的用中文
 

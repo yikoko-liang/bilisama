@@ -32,6 +32,8 @@ step "mypy（全量，不只 src）"
 $PY -m mypy
 
 step "单元测试"
+# pyproject 的 addopts 把 integration / provider_a / manual 三个标记摘掉了，
+# 所以这一步只跑单元层。integration 那层在下面单独跑。
 $PY -m pytest -q --no-header
 
 step "CLI 冒烟"
@@ -67,4 +69,40 @@ for name, level in expected.items():
         sys.exit(f"profile {name}: log_level 应该是 {level}，实际 {got}")
 EOF
 
-printf '\033[32m全部通过\033[0m\n'
+# The integration tier: the s2s shim's self-checks against a real speech-to-speech
+# install. It needs a separate ~385 MiB venv, so it cannot run unconditionally —
+# but it must not be able to go missing quietly either. `pytest` above deselects
+# the marker, so for a long time this whole tier simply never ran on the way to a
+# commit, and five of the shim's drift checks were pinned only by tests nobody
+# executed. A skipped tier is now something the gate says out loud, and the last
+# line below never claims a pass it did not earn. Same principle as
+# tests/unit/test_dependency_direction.py reporting "checked 0 modules" instead of
+# passing silently over an empty package.
+#
+# Keep this default in step with scripts/smoke_provider_b.sh (which installs it)
+# and tests/integration/test_s2s_patches.py (which skips on it) — if they drift,
+# the gate reports "没装" forever while the tests happily run.
+S2S_VENV="${BILISAMA_S2S_VENV:-$HOME/.local/share/bilisama/engines/s2s}"
+integration_ran=no
+if [ -x "$S2S_VENV/bin/python" ]; then
+  step "集成测试（s2s 补丁）"
+  $PY -m pytest -m integration -q --no-header
+  integration_ran=yes
+# Compared against 0 rather than tested for emptiness, so that setting it to 0 to
+# turn it off does what it looks like it does.
+elif [ "${BILISAMA_GATE_REQUIRE_INTEGRATION:-0}" != 0 ]; then
+  # CI sets this. There, 「没装所以跳过」 is not an acceptable answer.
+  printf '\033[31m✗ 集成测试跑不了：%s 里没有 speech-to-speech\033[0m\n' "$S2S_VENV" >&2
+  printf '  这台机器要求必须跑。先装：scripts/smoke_provider_b.sh install\n' >&2
+  exit 1
+else
+  printf '\033[33m▸ 集成测试：跳过 —— %s 里没装 speech-to-speech（约 385 MiB）\033[0m\n' "$S2S_VENV"
+  printf '  这一层管的是 s2s 补丁的自检，本机这次没验过。\n'
+  printf '  要跑：scripts/smoke_provider_b.sh install\n'
+fi
+
+if [ "$integration_ran" = yes ]; then
+  printf '\033[32m全部通过（含集成层）\033[0m\n'
+else
+  printf '\033[32m单元层全部通过\033[0m\033[33m，集成层没跑（见上）\033[0m\n'
+fi

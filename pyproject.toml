@@ -102,4 +102,10 @@ markers = [
     "provider_a: 需要真实的托管 Realtime 端点，默认不跑",
     "manual: 一次性探针，手动跑",
 ]
+# Keeps the inner loop down to the tier that needs nothing installed. The cost is
+# that a bare `pytest` cannot see the integration tier at all, which is how five of
+# the s2s shim's drift checks ended up pinned only by tests that nothing ran on the
+# way to a commit. scripts/gate.sh runs `-m integration` as a step of its own and
+# reports the skip when the venv is missing; tests/unit/test_gate.py fails if a
+# marker is deselected here without either a gate step or a written reason.
 addopts = "-m 'not integration and not provider_a and not manual'"

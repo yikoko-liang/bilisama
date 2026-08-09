@@ -15,6 +15,10 @@ nothing touched. That is also the fallback if a patch ever stops applying.
 Before touching anything, each patch checks every symbol, field name and call
 signature it depends on — not just the ones whose absence would raise. Upstream
 drift should blow up at startup, not turn into a silent failure mid-stream.
+
+Checks all run before any write, and the writes go through `_commit` so that
+"before" is a property of the code rather than of the order someone happened to
+write the lines in. See `_commit` for what enforces it.
 """
 
 from __future__ import annotations
@@ -40,6 +44,30 @@ class PatchResult:
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise PatchError(message)
+
+
+def _commit(mutations: tuple[tuple[Any, str, Any], ...]) -> None:
+    """Write every replacement at once. The only place this module touches upstream.
+
+    A patch that fails half way through leaves the process in a state that is
+    neither patched nor pristine, and zero-patch mode — the documented fallback
+    for exactly this situation — stops being real. So every check runs first and
+    every write happens here, after the last of them.
+
+    That used to be an ordering the comments asserted and nothing enforced: a
+    stray `svc.X = ...` a few lines higher passed the whole suite, because the
+    one atomicity test tripped a check that came early either way. Funnelling the
+    writes through a single call is what makes the invariant checkable, and two
+    tests check it: tests/unit/test_s2s_shim_structure.py reads this module and
+    fails if any patch function writes outside this call or runs a check after
+    it, and tests/integration/test_s2s_patches.py replays every drift injection
+    it knows about and fails if a rejected patch left a fingerprint on upstream.
+
+    Args:
+        mutations: (target, attribute, replacement) triples, applied in order.
+    """
+    for target, attribute, replacement in mutations:
+        setattr(target, attribute, replacement)
 
 
 def _replacement_fits(original: Callable[..., Any], replacement: Callable[..., Any]) -> bool:
@@ -174,8 +202,15 @@ def patch_text_modality() -> PatchResult:
 
     # Nothing above this line mutates upstream: a failed check must leave the
     # process in the state it started in, so zero-patch mode is still reachable.
-    svc.GenerateResponseRequest = patched_request
-    svc.RealtimeService._on_audio_input_completed = patched_handler
+    # Both writes go together — patching the request without the response params
+    # gets you text from the model under audio event names, which is worse than
+    # not patching at all.
+    _commit(
+        (
+            (svc, "GenerateResponseRequest", patched_request),
+            (svc.RealtimeService, "_on_audio_input_completed", patched_handler),
+        )
+    )
     return PatchResult("text_modality", True, "隐式轮次改走纯文本，两处都打了")
 
 
@@ -210,8 +245,15 @@ def patch_raw_instructions() -> PatchResult:
             f"{name} 的签名变了,补丁替身接不住上游的调用",
         )
 
-    mod.build_voice_system_prompt = identity
-    mod.build_text_system_prompt = identity
+    # Both builders or neither: the loop above has already vetted both names, and
+    # a half-applied patch would strip the tail from voice replies while text
+    # replies still carry it.
+    _commit(
+        (
+            (mod, "build_voice_system_prompt", identity),
+            (mod, "build_text_system_prompt", identity),
+        )
+    )
     return PatchResult("raw_instructions", True, "人设按原样下发，不再被追加尾巴")
 
 

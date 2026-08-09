@@ -17,7 +17,9 @@ tests/unit/test_mock_realtime.py:
 
 - The headline rule — an in-band injection against an open speculative turn is
   swallowed and wedges the connection — has a fault, Fault.WEDGE_ON_INJECTION,
-  and a control [test_out_of_band_injection_is_immune_to_the_wedge].
+  and a control [test_out_of_band_injection_is_immune_to_the_wedge]. Both routes
+  to an open turn are covered: the streamer starting to talk, and the streamer
+  talking over the assistant [test_barge_in_reopens_the_speculative_window].
 - Rule 3, cancel cannot pre-empt a reply before its first token: failure case
   and control [test_cancel_before_the_first_token_is_ignored_and_the_reply_still_speaks,
   test_cancel_after_the_first_token_is_honoured].
@@ -27,12 +29,17 @@ tests/unit/test_mock_realtime.py:
   test_the_slot_refuses_a_create_once_the_implicit_reply_has_spoken].
 - Rule 7, never stop appending: failure case and control
   [test_speculative_window_stays_open_while_the_append_stream_is_starved,
-  test_speculative_window_closes_once_the_reopen_audio_has_flowed].
+  test_speculative_window_closes_once_the_reopen_audio_has_flowed]. The budget
+  the window closes on is per turn, not per connection
+  [test_a_new_turn_starts_the_reopen_budget_over].
 - Rule 8, commit and the two clears: one case per event, each with the error
-  upstream really sends, plus the commit that answers nothing at all, plus
-  append as the control
+  upstream really sends, plus the three commits that decide between silence and
+  a complaint — audio buffered, buffer already committed, nothing appended that
+  carried audio — plus append as the control
   [test_forbidden_audio_buffer_events_draw_their_own_upstream_errors,
   test_commit_with_audio_buffered_draws_nothing_at_all,
+  test_a_second_commit_with_nothing_appended_in_between_is_refused,
+  test_an_append_carrying_no_audio_does_not_arm_the_commit_buffer,
   test_audio_buffer_append_is_accepted].
 - Rule 2, the watchdog: Fault.STALL_RESPONSE is the failure case
   [test_stalled_response_never_completes]. It has no dedicated control; every
@@ -47,9 +54,17 @@ upstream reads it (handlers/audio.py:113-114) and this fake does not, so barge_i
 always interrupts.
 
 Three more quirks are modelled although they are not among the eight, because
-each costs a debugging session every time it is met cold: conversation.item.create
-is deferred while a reply generates, barge-in sends response.done before
-speech_started, and a cancelled text reply never sends output_text.done.
+each costs a debugging session every time it is met cold. conversation.item.create
+is deferred while a reply generates, and the acks come back in arrival order
+[test_item_create_during_a_reply_is_deferred_until_it_ends,
+test_item_create_is_acked_at_once_when_nothing_is_generating,
+test_deferred_items_are_acked_in_arrival_order]. Barge-in sends response.done
+before speech_started [test_barge_in_sends_response_done_before_speech_started].
+A cancelled text reply never sends output_text.done, whether the cancel lands
+mid-stream or after the last delta
+[test_cancelled_text_reply_sends_no_output_text_done,
+test_a_reply_cancelled_after_its_last_delta_still_sends_no_text_done,
+test_completed_text_reply_does_send_output_text_done].
 
 The static half of rule 8 — that L3 never sends those events in the first place —
 needs an L3 to check. This server rejects them on arrival, which is the half a
@@ -114,7 +129,9 @@ class Script:
     # measures elapsed as `audio_start_ms - _last_final_audio_ms`
     # (vad_handler.py:255-259) and keeps the turn reopenable while that stays
     # within unanswered_reopen_ms (vad_handler.py:268; default 7000 at :75,
-    # floored at speculative_reopen_ms at :117-122). Stop sending frames and the
+    # raised at :117-121 to the largest of speculative_reopen_ms, the requested
+    # value and smart_turn_max_wait_ms — 800, 7000 and 2000 by default, so the
+    # effective default is the 7000 mirrored here). Stop sending frames and the
     # window freezes open.
     #
     # Not upstream's speculative_reopen_ms (800). That one is a wall-clock grace
@@ -307,6 +324,24 @@ class MockRealtimeServer:
         await self._conn.send(json.dumps(body))
 
     async def speech_started(self) -> None:
+        """Streamer starts talking, which opens a fresh speculative turn.
+
+        The reopen budget starts over rather than carrying on from the last
+        turn. Upstream measures it from _last_final_audio_ms, which only a
+        finalised stretch of speech sets (vad_handler.py:766) and a new turn
+        clears (:212, inside _start_new_turn at :204-214, reached from :350 when
+        speech starts and the old turn is not reopened). With no reference point
+        there is no elapsed time to compare against the cap (:268), so a fresh
+        turn cannot inherit what the last one spent. A count that carried over
+        would shut the window while the streamer is still talking, and shut it
+        for good — the next speech_stopped finds _speculative_open already false
+        and never re-arms it.
+
+        Modelled as a new turn every time. Upstream can instead reopen the
+        previous one and keep counting (:313-330), which shuts the trap sooner
+        than this does, so the omission leaves the trap open longer than
+        upstream would rather than shorter.
+        """
         self._speculative_open = True
         self._appended_since_stop_ms = None
         await self.send(dia.ServerEvent.SPEECH_STARTED)
@@ -349,6 +384,11 @@ class MockRealtimeServer:
         if pending is not None:
             self._close_reply(pending)
             pending.first_token.set()  # let its task observe the kill and exit
+        # The streamer is talking again, so the trap is armed again: the same
+        # event that cancels the reply starts a fresh input item and turn id
+        # (handlers/audio.py:108-138), and an in-band injection sent now — the
+        # obvious moment, since our scheduler just saw a reply end — lands on a
+        # turn that is still speculative. Same bookkeeping as speech_started.
         self._speculative_open = True
         self._appended_since_stop_ms = None
         await self.send(dia.ServerEvent.SPEECH_STARTED)
@@ -479,6 +519,9 @@ class MockRealtimeServer:
                 "input_audio_buffer_commit_empty", "Input audio buffer is empty, nothing to commit."
             )
             return
+        # A successful commit empties the buffer (handlers/audio.py:102), which
+        # is what makes the *next* commit the one that answers. Leaving it set
+        # would make every commit after the first equally silent.
         self._audio_buffer_has_data = False
 
     async def _on_item_create(self, event: dict[str, Any]) -> None:
@@ -596,6 +639,12 @@ class MockRealtimeServer:
             if self.script.delta_interval_s:
                 await asyncio.sleep(self.script.delta_interval_s)
 
+        # The loop guard again, for a cancel that lands after the last delta.
+        # Upstream builds output_text.done only under `elif status ==
+        # "completed"` (handlers/response.py:291), so a cancelled reply has none
+        # to send — and one sent from here would arrive *behind* its own
+        # response.done, stamped with a freshly minted id, telling a client that
+        # treats it as the terminator that the reply ended cleanly.
         if not reply.is_open:
             return
         if not self.caps.owns_tts:
@@ -633,6 +682,11 @@ class MockRealtimeServer:
         (handlers/response.py:311-314), so the ack rides out directly behind the
         response.done in the same batch. The client has to cope with an ack
         arriving long after the request that earned it.
+
+        The order is upstream's too, not a convenience: items are appended as
+        they arrive (handlers/conversation.py:48-52) and replayed front to back
+        (:74-89), so a client may reconcile a batch of acks to its requests
+        positionally. Draining from the other end would certify one that cannot.
         """
         while self._deferred:
             pending = self._deferred.pop(0)

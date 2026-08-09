@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ import websockets
 from bilisama.config.schema import TurnConfig
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
+from tests.fakes import mock_realtime as mock_module
 from tests.fakes.mock_realtime import _INPUT_BYTES_PER_MS, Fault, MockRealtimeServer, Script
 
 
@@ -108,6 +110,64 @@ async def _await_response_started(ws: Any) -> None:
         AssertionError: The reply was never accepted.
     """
     await _recv_until(ws, "response.created")
+
+
+async def _await_recorded(
+    server: MockRealtimeServer, wire_type: str, count: int, *, timeout: float = 2.0
+) -> None:
+    """Block until the server has received `count` frames of the given type.
+
+    A client frame crosses a socket while `server.speech_started()` and friends
+    run in-process, so interleaving the two orders nothing by itself. Tests that
+    need a frame applied before the next server-side call wait here rather than
+    assume.
+
+    Args:
+        server: The running mock.
+        wire_type: Wire name to count on the server side.
+        count: How many the server must have recorded.
+        timeout: Deadlock guard, not a pacing knob.
+
+    Raises:
+        AssertionError: They never arrived.
+    """
+
+    async def _loop() -> None:
+        while server.recorded.count(wire_type) < count:
+            await asyncio.sleep(0.005)
+
+    try:
+        await asyncio.wait_for(_loop(), timeout)
+    except TimeoutError:
+        got = server.recorded.count(wire_type)
+        raise AssertionError(f"expected {count}x {wire_type} on the server, saw {got}") from None
+
+
+async def _await_reply_tasks(server: MockRealtimeServer, *, timeout: float = 2.0) -> None:
+    """Block until every reply the server started has run to the end of its task.
+
+    "This frame never arrives" can only be asserted once the code that would
+    have sent it has finished. Waiting on the wire cannot do that — the frame
+    under test is the one that must not be there — and a fixed sleep would be a
+    guess at the script's delta_interval_s, so this reads the server's own task
+    set instead.
+
+    Args:
+        server: The running mock.
+        timeout: Deadlock guard, not a pacing knob.
+
+    Raises:
+        AssertionError: A reply task is still running.
+    """
+
+    async def _loop() -> None:
+        while server._tasks:
+            await asyncio.sleep(0.005)
+
+    try:
+        await asyncio.wait_for(_loop(), timeout)
+    except TimeoutError:
+        raise AssertionError(f"{len(server._tasks)} reply task(s) still busy") from None
 
 
 def _index_of(names: list[str], wire_type: str) -> int:
@@ -246,6 +306,47 @@ async def test_out_of_band_injection_is_immune_to_the_wedge() -> None:
         assert "response.done" in names
 
 
+async def test_barge_in_reopens_the_speculative_window() -> None:
+    """Talking over the assistant arms the trap again.
+
+    Both directions on one connection: the first in-band create arrives with no
+    speculative turn open and speaks, and the identical create after barge_in is
+    swallowed. That is the realistic route into the wedge — the streamer
+    interrupts, our scheduler sees the reply end and injects the line it was
+    holding — and until now the fault was only ever reached through
+    speech_started().
+
+    Upstream lands in the same state: on_speech_started cancels the live
+    response and starts a fresh input item and turn id (handlers/audio.py:108-138),
+    and that turn is registered as the latest revision without being committed
+    (VAD/vad_handler.py:213 into pipeline/speculative_turns.py:38-48, which
+    touches only _latest_revision). So an in-band injection sent now stamps
+    itself onto a turn that is still speculative.
+    """
+    script = Script(
+        faults={Fault.WEDGE_ON_INJECTION},
+        reply_text="一二三四五六",
+        delta_chunks=6,
+        delta_interval_s=0.02,
+    )
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create())
+        await _await_response_started(ws)
+        spoken = await _recv_until(ws, "response.output_text.delta")
+        assert spoken["delta"], "the control: with the window shut this fault swallows nothing"
+
+        await server.barge_in()
+        await _recv_until(ws, "input_audio_buffer.speech_started")
+
+        await ws.send(_create())
+        await _recv_until(ws, "response.created")  # acked, exactly as upstream acks it
+        assert await _drain(ws) == [], "the streamer talks again, so the injection is swallowed"
+
+
 async def test_speculative_window_stays_open_while_the_append_stream_is_starved() -> None:
     """The window closes on the audio clock, not the wall clock.
 
@@ -312,6 +413,57 @@ async def test_speculative_window_closes_once_the_reopen_audio_has_flowed() -> N
         assert "response.done" in names
 
 
+async def test_a_new_turn_starts_the_reopen_budget_over() -> None:
+    """The append counter is per turn, not per connection.
+
+    Two turns carrying 150 ms each against a 200 ms budget: more than enough in
+    total, never enough inside one turn, and the second turn's audio arrives
+    while the streamer is still talking. The window is therefore still open when
+    the injection lands.
+
+    Upstream measures the budget from _last_final_audio_ms, which a finalised
+    stretch of speech sets (VAD/vad_handler.py:766) and a new turn clears
+    (:212, inside _start_new_turn at :204-214, reached from :350 when speech
+    starts and the old turn is not reopened). With no reference point there is
+    no elapsed time to compare against the cap at :268, so a fresh turn cannot
+    inherit what the previous one spent. A counter that carried over would slam
+    the window shut mid-speech and stay shut — the later speech_stopped finds it
+    already closed — so the mock would stop reproducing the wedge exactly where
+    a real one is most likely.
+
+    Modelling every speech_started as a new turn is the harsher reading:
+    upstream may instead reopen the previous turn (:313-330) and keep counting,
+    which shuts the trap sooner than this does.
+
+    The counterpart is test_speculative_window_closes_once_the_reopen_audio_has_flowed:
+    one turn, the whole budget in one frame, window shut.
+    """
+    script = Script(faults={Fault.WEDGE_ON_INJECTION}, unanswered_reopen_ms=200)
+    per_turn_ms = 150
+    assert per_turn_ms < script.unanswered_reopen_ms < 2 * per_turn_ms, "cumulative, never per turn"
+
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await server.speech_started()
+        await _recv_until(ws, "input_audio_buffer.speech_started")
+        await server.speech_stopped()
+        await _recv_until(ws, "input_audio_buffer.speech_stopped")
+        await ws.send(_append_audio(per_turn_ms))
+        await _await_recorded(server, "input_audio_buffer.append", 1)
+
+        await server.speech_started()  # the streamer talks again: a new turn
+        await _recv_until(ws, "input_audio_buffer.speech_started")
+        await ws.send(_append_audio(per_turn_ms))
+        await _await_recorded(server, "input_audio_buffer.append", 2)
+
+        await ws.send(_create())
+        await _recv_until(ws, "response.created")
+        assert await _drain(ws) == [], "this turn has spent 150 ms of its 200, so it is still open"
+
+
 def test_the_append_clock_matches_the_audio_we_actually_send() -> None:
     """The mock's uplink clock and the engine config we ship have to agree.
 
@@ -323,6 +475,32 @@ def test_the_append_clock_matches_the_audio_we_actually_send() -> None:
     turn = TurnConfig()
     assert turn.sample_rate * 2 // 1000 == _INPUT_BYTES_PER_MS, "mono s16 at the configured rate"
     assert turn.unanswered_reopen_ms == Script().unanswered_reopen_ms
+
+
+async def test_the_downlink_runs_at_one_and_a_half_times_the_uplink_rate() -> None:
+    """The other half of the same asymmetry, measured off the wire.
+
+    Server output is 24 kHz mono s16 — 48 bytes per millisecond — against a
+    16 kHz uplink. That gap is the entire argument for _INPUT_BYTES_PER_MS being
+    32: measure the uplink at the downlink rate and every speculative-window
+    test demands 1.5x too much audio. The test above pins the uplink against the
+    config we ship; this one pins the downlink against what a client actually
+    receives, so the two rates cannot quietly converge from either side.
+    """
+    script = Script(delta_chunks=1, audio_ms_per_delta=40)
+    async with (
+        MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create())
+        delta = await _recv_until(ws, "response.audio.delta")
+
+        pcm = base64.b64decode(delta["delta"])
+        assert len(pcm) == script.audio_ms_per_delta * 48, f"24 kHz mono s16, got {len(pcm)} bytes"
+        assert (
+            len(pcm) * 2 == script.audio_ms_per_delta * _INPUT_BYTES_PER_MS * 3
+        ), "the downlink has to stay 1.5x the uplink, or the 32 B/ms constant loses its reason"
 
 
 async def test_cancel_with_no_reply_in_flight_is_silent() -> None:
@@ -574,6 +752,35 @@ async def test_item_create_during_a_reply_is_deferred_until_it_ends() -> None:
         assert ack_at > done_at, "the ack should arrive only after the reply finishes"
 
 
+async def test_deferred_items_are_acked_in_arrival_order() -> None:
+    """Three items held by one reply come back in the order they were sent.
+
+    Upstream appends them to a list (handlers/conversation.py:48-52) and replays
+    that list front to back (:74-89), called from finish_response
+    (handlers/response.py:314) — its docstring says "in arrival order" and the
+    loop at :87 delivers it. So a client may reconcile a batch of acks to its
+    requests positionally, and a LIFO flush here would certify one that cannot.
+    A single deferred item, which is all the test above sends, says nothing
+    either way.
+    """
+    script = Script(reply_text="一二三四", delta_chunks=4, delta_interval_s=0.02)
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create())
+        await _await_response_started(ws)
+
+        sent = ["i1", "i2", "i3"]
+        for item_id in sent:
+            await ws.send(json.dumps({"type": "conversation.item.create", "item": {"id": item_id}}))
+
+        frames = await _collect_through(ws, "conversation.item.created", count=len(sent))
+        acks = [e["item"]["id"] for e in frames if e["type"] == "conversation.item.created"]
+        assert acks == sent, f"the acks have to keep arrival order, got {acks}"
+
+
 async def test_item_create_is_acked_at_once_when_nothing_is_generating() -> None:
     """The control, and the distinction the deferral turns on.
 
@@ -721,6 +928,63 @@ async def test_commit_with_audio_buffered_draws_nothing_at_all() -> None:
         assert await _drain(ws) == [], "silence, not an error, is what upstream sends here"
 
 
+async def test_a_second_commit_with_nothing_appended_in_between_is_refused() -> None:
+    """A successful commit empties the buffer, so the next one has nothing to commit.
+
+    Upstream clears audio_buffer_has_data on the way out of a successful commit
+    (handlers/audio.py:102), which is what makes the second one draw
+    input_audio_buffer_commit_empty. A mock that left the flag set would answer
+    the second commit with the same silence as the first, hiding the one commit
+    case that talks back at all — and rule 8 is a rule about which commits are
+    silent.
+    """
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_append_audio(40))
+        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+        frames = await _collect_through(ws, "error")
+        assert _types(frames) == ["error"], f"only the second commit answers, got {_types(frames)}"
+        assert frames[-1]["error"]["type"] == "input_audio_buffer_commit_empty"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pytest.param({"type": "input_audio_buffer.append", "audio": ""}, id="empty"),
+        pytest.param({"type": "input_audio_buffer.append"}, id="absent"),
+        pytest.param({"type": "input_audio_buffer.append", "audio": "!!!!"}, id="undecodable"),
+    ],
+)
+async def test_an_append_carrying_no_audio_does_not_arm_the_commit_buffer(
+    frame: dict[str, Any],
+) -> None:
+    """An append with nothing in it leaves the following commit an empty one.
+
+    Upstream only sets audio_buffer_has_data once a full 1024-byte chunk
+    assembles out of the appended bytes (handlers/audio.py:80-91), so a frame
+    carrying no samples cannot arm it — nor can one whose payload will not
+    decode. Arming on an empty frame would silence the following commit, and
+    silence is the answer a client must never be certified against: it is the
+    one rule 8 mistake that ships.
+    """
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(json.dumps(frame))
+        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+        frames = await _collect_through(ws, "error")
+        assert _types(frames) == ["error"], f"the append itself answers nothing, got {frames}"
+        assert frames[-1]["error"]["type"] == "input_audio_buffer_commit_empty"
+
+
 async def test_audio_buffer_append_is_accepted() -> None:
     """The control: the one buffer event we may send draws no error.
 
@@ -764,6 +1028,44 @@ async def test_cancelled_text_reply_sends_no_output_text_done() -> None:
         spoken = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
         assert spoken, "the deltas are the only record of what it said"
         assert len(spoken) < len(script.reply_text), f"it was cut off, yet said all of {spoken!r}"
+
+
+async def test_a_reply_cancelled_after_its_last_delta_still_sends_no_text_done() -> None:
+    """The same quirk one step later, where the mid-reply guard cannot reach.
+
+    The test above interrupts between deltas, so the loop's own check ends the
+    reply. Cancel after the *last* delta instead and the only thing standing
+    between a closed reply and a stray output_text.done is the check that
+    follows the loop. Upstream builds that frame only under
+    `elif status == "completed"` (handlers/response.py:291), so a cancelled
+    reply has none to send.
+
+    A late one is the worst shape available: it arrives behind response.done,
+    carrying a response id the reply had to mint fresh because the done already
+    cleared the old one, and it tells a client that treats output_text.done as
+    the terminator that a cancelled reply finished cleanly.
+
+    delta_interval_s is the window the cancel has to land in, generous by two
+    orders of magnitude against an in-process socket. Missing it fails the test
+    rather than passing it quietly.
+    """
+    script = Script(reply_text="嗨", delta_chunks=1, delta_interval_s=0.1)
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create())
+        delta = await _recv_until(ws, "response.output_text.delta")
+        assert delta["delta"] == script.reply_text, "the whole reply is out: the loop is done"
+
+        await ws.send(json.dumps({"type": "response.cancel"}))
+        done = await _recv_until(ws, "response.done")
+        assert done["response"]["status"] == "cancelled"
+
+        await _await_reply_tasks(server)
+        tail = await _drain(ws)
+        assert _types(tail) == [], f"a cancelled reply says nothing after its done, got {tail}"
 
 
 async def test_completed_text_reply_does_send_output_text_done() -> None:
@@ -842,6 +1144,13 @@ async def test_item_truncate_rejected_when_capability_absent() -> None:
 
 
 async def test_tool_call_round_trip() -> None:
+    """A tool call carries the id of the response that produced it.
+
+    The correlation matters as much as the arguments: it is the same
+    connection-scoped id machinery rule 5 turns on, so a client that reconciles
+    function_call_arguments.done back to its own response.created has to be
+    tested against a real id rather than a constant.
+    """
     async with (
         MockRealtimeServer(
             caps=caps_mod.S2S, script=Script(faults={Fault.EMIT_TOOL_CALL})
@@ -850,9 +1159,11 @@ async def test_tool_call_round_trip() -> None:
     ):
         await _recv_until(ws, "session.created")
         await ws.send(_create())
+        created = await _recv_until(ws, "response.created")
         events = await _collect_through(ws, "response.function_call_arguments.done")
         call = events[-1]
         assert call["name"] == "get_stream_status"
+        assert call["response_id"] == created["response"]["id"], "the frame belongs to this reply"
 
 
 async def test_session_update_ack_follows_capability() -> None:
@@ -886,6 +1197,22 @@ def test_s2s_does_not_claim_semantic_vad() -> None:
 
 
 # ------------------------------------------------------------ test-harness guards
+
+
+def test_the_mock_docstring_indexes_tests_that_exist() -> None:
+    """The mock's opening paragraphs are an index, and an index that rots misleads.
+
+    It promises the bracketed names are greppable here, and it has been wrong
+    about its own coverage twice. This catches the cheap half automatically: a
+    test renamed or deleted out from under a claim. The other half — a modelled
+    behaviour the docstring forgets to claim — still needs a reader.
+    """
+    doc = mock_module.__doc__ or ""
+    named = {n for span in re.findall(r"\[([^\]]+)\]", doc) for n in re.findall(r"test_\w+", span)}
+    assert named, "the docstring indexes its coverage by test name"
+
+    missing = sorted(n for n in named if n not in globals())
+    assert missing == [], f"the docstring names tests that are not in this file: {missing}"
 
 
 async def test_the_slot_is_taken_when_the_create_is_accepted_not_at_the_first_token(
