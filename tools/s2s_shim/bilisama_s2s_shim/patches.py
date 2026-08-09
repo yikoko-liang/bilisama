@@ -1,17 +1,19 @@
-"""运行时补丁。**不改 speech-to-speech 一个字节。**
+"""Runtime patches for speech-to-speech. Its source is never edited.
 
-补丁住在 BiliSama 仓库里，通过 PYTHONPATH 注入，上游检出目录保持干净。
+The patches live in this repo and go in over PYTHONPATH, so the upstream checkout
+stays pristine.
 
-两个补丁都不是为了「接自研模型」,那件事是纯配置。它们是我们额外挑的两件事的代价：
+Neither patch has anything to do with wiring up our own model — that part is pure
+configuration. They are the price of two things we chose on top:
 
-- A：拿纯文本输出，好用我们自己的中文 VTuber 音色
-- B：人设完全由我们控制
+- A: text-only output, so we can use our own Chinese VTuber voice.
+- B: full control of the persona prompt.
 
-两个都关掉就是「零补丁模式」：用它自带的 TTS 和提示词尾巴，一个字节都不碰。
-那也是补丁出问题时的退路。
+Turn both off and you get zero-patch mode: upstream's TTS, upstream's prompt tail,
+nothing touched. That is also the fallback if a patch ever stops applying.
 
-每个补丁都先自检目标符号存在且形状对得上，对不上就 fail fast,上游漂移要在启动时
-炸出来，不能变成直播中途的静默失效。
+Each patch checks that its target symbols exist before doing anything. Upstream
+drift should blow up at startup, not turn into a silent failure mid-stream.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from typing import Any
 
 
 class PatchError(RuntimeError):
-    """目标符号不在了，或者形状变了。"""
+    """A target symbol is gone or has changed shape."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,16 +44,19 @@ def _require(condition: bool, message: str) -> None:
 
 
 def patch_text_modality() -> PatchResult:
-    """让服务端 VAD 发起的隐式轮次也吐纯文本。
+    """Make the implicit VAD-driven turn produce text instead of audio.
 
-    上游 `service.py` 里 `_on_audio_input_completed` 构造 GenerateResponseRequest
-    时不带 `response=`，下游就当成要音频,于是会话级设了 output_modalities 也没用。
+    Upstream's `_on_audio_input_completed` builds a GenerateResponseRequest without
+    a `response=`, and everything downstream reads that as "wants audio". Setting
+    output_modalities at session level therefore has no effect on that path.
 
-    要改两处，只改一处不够：
+    Two places need patching, and one is not enough:
 
-    1. `GenerateResponseRequest` 的默认 `response`,决定模型走文本还是音频路径
-    2. `ConnState.current_response_params`,决定服务端按哪套事件名往外发。
-       只改前者的话模型确实走文本，但客户端收到的还是 output_audio_transcript.done
+    1. The default `response` on GenerateResponseRequest decides whether the model
+       takes the text path or the audio path.
+    2. `ConnState.current_response_params` decides which event names the server
+       emits. Patch only the first and the model does produce text, but the client
+       still receives output_audio_transcript.done.
     """
     from openai.types.realtime import response_create_event as _rce  # noqa: F401
     from speech_to_speech.api.openai_realtime import service as svc
@@ -76,7 +81,7 @@ def patch_text_modality() -> PatchResult:
         return params_cls(output_modalities=["text"])
 
     def patched_request(*args: Any, **kwargs: Any) -> Any:
-        # setdefault：显式 response.create 自己带了参数，不覆盖
+        # setdefault semantics: an explicit response.create brings its own params.
         if kwargs.get("response") is None:
             kwargs["response"] = text_only_params()
         return original_cls(*args, **kwargs)
@@ -87,7 +92,8 @@ def patch_text_modality() -> PatchResult:
 
     def patched_handler(self: Any, conn_id: str, event: Any) -> Any:
         state = self._state(conn_id)
-        # 这一处决定服务端按哪套事件名发。漏了它客户端收不到 output_text.delta
+        # This is what picks the outbound event names. Without it the client
+        # never sees output_text.delta.
         state.current_response_params = text_only_params()
         return original_handler(self, conn_id, event)
 
@@ -99,12 +105,15 @@ def patch_text_modality() -> PatchResult:
 
 
 def patch_raw_instructions() -> PatchResult:
-    """关掉它注入的 system prompt 尾巴。
+    """Stop upstream from appending its Voice Rules to our persona prompt.
 
-    那段 Voice Rules 被追加在**最后**，也就是最强位置。其中"回复通常一句"是软
-    默认还给了豁免，但**禁止 `*laughs*` 这类动作文本是硬的**,VTuber 人设经常要用。
+    That block lands last, which is the strongest position in the prompt. The
+    "usually one sentence" part is a soft default with an explicit escape hatch,
+    but the ban on action text like `*laughs*` is hard, and a VTuber persona uses
+    that constantly.
 
-    注意它同时也带了表情/动作工具的使用规范，关掉之后那部分要我们自己在人设里补。
+    The same block also carries the expression- and motion-tool conventions, so
+    turning it off means writing those into our own persona.
     """
     from speech_to_speech.LLM import base_openai_compatible_language_model as mod
 
@@ -128,7 +137,8 @@ _PATCHES: dict[str, Callable[[], PatchResult]] = {
 
 
 def apply_patches(names: list[str] | None = None) -> list[PatchResult]:
-    """按名字打补丁。默认从环境变量读，空列表就是零补丁模式。"""
+    """Apply patches by name. Reads the env var when given None; an empty list
+    means zero-patch mode."""
     if names is None:
         raw = os.environ.get("BILISAMA_S2S_PATCHES", "text_modality,raw_instructions")
         names = [n.strip() for n in raw.split(",") if n.strip()]

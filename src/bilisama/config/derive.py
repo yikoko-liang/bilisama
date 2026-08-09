@@ -1,6 +1,8 @@
-"""话痨度派生出的阈值。
+"""Thresholds derived from the chattiness setting.
 
-这五个数不出现在 TOML 里，否则配置写死一个值、滑块又要改它，谁赢没有定义。
+These five numbers are deliberately absent from the TOML file. If the config
+pinned `window_s` and the slider also moved it, nothing would define which wins.
+The slider is the single writer; this table is the only mapping.
 """
 
 from __future__ import annotations
@@ -11,10 +13,11 @@ from bilisama.config.enums import Chattiness
 
 
 class DerivedThresholds(BaseModel):
-    """chattiness 派生出来的五个数。
+    """The five numbers chattiness derives.
 
-    它们**不出现在 TOML 里**,否则配置写死一个值、滑块又要改它，谁赢没有定义。
-    `bilisama config show` 对这些标 derived:chattiness。
+    Absent from the TOML on purpose: if the file pinned one and the slider also
+    moved it, nothing would define which wins. `bilisama config show` marks these
+    as derived.
     """
 
     idle_threshold_s: int

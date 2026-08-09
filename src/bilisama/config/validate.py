@@ -1,6 +1,8 @@
-"""跨字段校验。
+"""Cross-field validation.
 
-schema 的类型检查管不到这些。报错要给人话和可点的修复动作，不给 traceback。
+Type checking cannot catch these. Problems come back as plain sentences with a
+concrete next step, never as a traceback — a streamer who sees
+`pydantic.ValidationError` will just file a ticket.
 """
 
 from __future__ import annotations
@@ -16,7 +18,11 @@ if TYPE_CHECKING:
 
 
 class ConfigProblem(BaseModel):
-    """校验结果。给人话和可点的修复动作，不给 traceback。"""
+    """One thing wrong with the configuration.
+
+    `message` and `fix` are shown to the streamer, so they stay in Chinese and
+    stay free of jargon. `fix` should name an action, not restate the problem.
+    """
 
     field: str
     message: str
@@ -25,12 +31,23 @@ class ConfigProblem(BaseModel):
 
 
 def check(s: Settings) -> list[ConfigProblem]:
-    """跨字段校验。schema 的类型检查管不到这些。"""
+    """Validate combinations that individual field types cannot express.
+
+    Args:
+        s: A settings object that already passed schema validation.
+
+    Returns:
+        Everything wrong with it. Empty means good to go.
+    """
     problems: list[ConfigProblem] = []
     owns_tts = (
         s.speech.provider is not ProviderName.S2S or "text_modality" not in s.speech.s2s.patches
     )
 
+    # Inline <expr/> tags only survive if we hold the text before it reaches a
+    # synthesizer. When the provider speaks for us, the tag gets read aloud —
+    # speech-to-speech's own SPEECHABLE_PATTERN (LLM/utils.py:18-20) whitelists
+    # square brackets, so its filter does not save us either.
     if owns_tts and s.avatar.expression_source == "tag":
         problems.append(
             ConfigProblem(
@@ -40,6 +57,11 @@ def check(s: Settings) -> list[ConfigProblem]:
             )
         )
 
+    # Nothing in the pipeline does acoustic echo cancellation. Without either a
+    # virtual output device or the local energy gate, the assistant's own voice
+    # re-enters the mic and false-triggers turn detection continuously — which
+    # looks like a broken endpointer and sends people tuning VAD thresholds that
+    # were never the problem.
     if s.audio.output_route == "direct" and s.audio.echo_guard == "off":
         problems.append(
             ConfigProblem(
@@ -70,6 +92,9 @@ def check(s: Settings) -> list[ConfigProblem]:
                 )
             )
 
+    # Anonymous connections still work, but Bilibili masks every uid to 0, so
+    # per-viewer memory, name-checking and per-uid cooldowns all stop working —
+    # which is most of what makes a co-host feel present.
     if s.room.room_id and not s.room.credential_ref:
         problems.append(
             ConfigProblem(

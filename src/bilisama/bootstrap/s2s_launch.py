@@ -1,10 +1,11 @@
-"""把 [speech.s2s] 渲染成 speech-to-speech 的启动 JSON。
+"""Render [speech.s2s] into speech-to-speech's launch JSON.
 
-两件事：
+Our turn-detection field names match `vad_arguments.py` word for word, so this is
+a direct mapping with no translation table to keep in sync.
 
-1. 渲染。字段名跟上游 `vad_arguments.py` 逐字对齐，所以是直接映射，不用维护翻译表。
-2. **渲染前按上游的字段名做白名单校验。** 上游用 `allow_extra_keys=True`
-   解析这个 JSON，拼错的 key 会被静默吞掉,等你发现时已经在直播间里了。
+The names get checked against upstream before anything is written, because
+`s2s_pipeline.py:241` parses this file with `allow_extra_keys=True`: a misspelled
+key is swallowed without a word, and you find out mid-stream.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from urllib.parse import urlsplit
 
 from bilisama.config import S2SConfig
 
-# 上游的 dataclass 文件，用来对账字段名
+# Upstream dataclasses, scanned to reconcile field names.
 _UPSTREAM_ARG_DIR = "arguments_classes"
 
 _DEFAULT_PORT = 8765
@@ -26,7 +27,7 @@ _FIELD_RE = re.compile(r"^\s{4}([a-z_][a-z0-9_]*)\s*:\s*\S", re.MULTILINE)
 
 
 class S2SConfigError(RuntimeError):
-    """渲染出来的配置跟上游对不上。"""
+    """Rendered config does not match what upstream accepts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,14 +38,14 @@ class RenderResult:
 
 
 def upstream_field_names(s2s_root: Path) -> frozenset[str]:
-    """扫上游的 arguments dataclass，拿到所有合法字段名。
+    """Scan upstream's argument dataclasses for every field name it accepts.
 
     Args:
-        s2s_root: speech-to-speech 的检出目录。
+        s2s_root: The speech-to-speech checkout.
 
     Returns:
-        所有合法的配置字段名。找不到源码时返回空集合,调用方据此跳过对账，
-        而不是假装通过。
+        Every valid field name, or an empty set when the sources are not there.
+        Callers must treat empty as "could not check" rather than "checked and fine".
     """
     arg_dir = s2s_root / "src" / "speech_to_speech" / _UPSTREAM_ARG_DIR
     if not arg_dir.is_dir():
@@ -56,19 +57,21 @@ def upstream_field_names(s2s_root: Path) -> frozenset[str]:
 
 
 def render(cfg: S2SConfig) -> dict[str, object]:
-    """渲染 speech-to-speech 的启动配置。
+    """Render the launch config.
 
-    刻意不放 mac_optimal_settings：它只是一组默认值，显式写的 stt 一定赢，
-    但它会顺带改一堆别的默认，排查时多一层。
+    Deliberately omits mac_optimal_settings. It only supplies defaults, so an
+    explicit `stt` still wins, but it quietly moves a dozen other knobs and that is
+    one more layer to peel back when something misbehaves.
 
     Args:
-        cfg: 我们这边的 provider (b) 配置。
+        cfg: Our provider (b) settings.
 
     Returns:
-        可以直接写成 JSON 的启动参数。key 是上游 dataclass 的字段名。
+        Launch parameters ready to serialise. Keys are upstream field names.
     """
     payload: dict[str, object] = {
-        # 跳过 STT，让音频直接进模型。这条就是需求文档里的 VAD → S2T → TTS
+        # Skip STT so VAD audio reaches the model directly. This is the
+        # VAD -> S2T -> TTS path the requirements ask for.
         "stt": "none",
         "llm_backend": "chat-completions",
         "model_name": cfg.llm_model,
@@ -80,11 +83,11 @@ def render(cfg: S2SConfig) -> dict[str, object]:
         "host": "127.0.0.1",
         "port": _port_of(cfg.endpoint),
         "num_pipelines": 1,
-        # --stt none 下它只烧 CPU 不干活
+        # Burns CPU for nothing once STT is skipped.
         "enable_live_transcription": False,
     }
     turn = cfg.turn.model_dump()
-    # inf 不是合法 JSON，上游那个字段的语义是「不限制」
+    # inf is not valid JSON, and upstream reads a missing value as "no limit".
     if turn.get("max_speech_ms") == float("inf"):
         turn.pop("max_speech_ms")
     payload.update(turn)
@@ -92,7 +95,7 @@ def render(cfg: S2SConfig) -> dict[str, object]:
 
 
 def render_checked(cfg: S2SConfig, s2s_root: Path | None) -> RenderResult:
-    """渲染并对账。s2s_root 为 None 或源码不在时跳过对账并如实标注。"""
+    """Render, then reconcile field names against upstream when we can."""
     payload = render(cfg)
     if s2s_root is None:
         return RenderResult(payload, (), ())
@@ -108,10 +111,10 @@ def render_checked(cfg: S2SConfig, s2s_root: Path | None) -> RenderResult:
 
 
 def _intentionally_omitted(cfg: S2SConfig) -> set[str]:
-    """故意不写进 JSON 的字段。漏掉和故意不写要分得开。"""
+    """Fields left out on purpose. Distinguishing these from oversights is the point."""
     omitted: set[str] = set()
     if cfg.turn.max_speech_ms == float("inf"):
-        # inf 不是合法 JSON，上游的默认就是不限制
+        # inf is not valid JSON; upstream defaults to unlimited anyway.
         omitted.add("max_speech_ms")
     return omitted
 
@@ -130,5 +133,5 @@ def write(cfg: S2SConfig, dest: Path, *, s2s_root: Path | None = None) -> Render
 
 
 def _port_of(endpoint: str) -> int:
-    """从 ws:// 地址里取端口。没写端口时用上游的默认值。"""
+    """Port from a ws:// endpoint, falling back to upstream's default."""
     return urlsplit(endpoint).port or _DEFAULT_PORT

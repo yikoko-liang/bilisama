@@ -50,8 +50,13 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 注释和 docstring 一律英文。用户可见的文案（CLI 输出、设置界面标签、
+# 人设文本）保持中文 —— 主播是中文用户。
 ignore = [
-    "RUF001",  # 全角标点在中文注释里是正常的
+    # Comments and docstrings are English. These three fire on the Chinese text we
+    # show to the streamer — CLI output, settings labels, persona copy — where
+    # full-width punctuation is correct.
+    "RUF001",
     "RUF002",
     "RUF003",
 ]

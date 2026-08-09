@@ -1,6 +1,6 @@
-"""配置的类型与默认值。
+"""Configuration types and defaults.
 
-UI 元数据不在这里,在 ui_meta.UI_META，按字段路径索引。
+UI metadata is not here — see `ui_meta.UI_META`, keyed by field path.
 """
 
 from __future__ import annotations
@@ -14,9 +14,11 @@ from bilisama.config.validate import check
 
 
 class TurnConfig(BaseModel):
-    """判停三件套。**字段名跟上游 vad_arguments.py 逐字对齐**，渲染就是直接映射。
+    """Turn-detection knobs, passed through to speech-to-speech verbatim.
 
-    全部是启动期参数，改了要重启 P3'。CI 有一条门禁拿这里的字段名跟上游对账。
+    Field names match upstream's `vad_arguments.py` exactly, so rendering is a
+    direct mapping. All of them are startup-time: changing one means restarting the
+    engine. A CI check reconciles these names against upstream in both directions.
     """
 
     model_config = {"extra": "forbid"}
@@ -63,14 +65,16 @@ class HostedConfig(BaseModel):
 
 
 class SideModelConfig(BaseModel):
-    """后台侧路模型：主动话题、记忆蒸馏、事实抽取都用它。通常挑更便宜的。"""
+    """The side-channel model, used for proactive topics, memory distillation and
+    '
+     '    fact extraction. Usually a cheaper one than the conversation model."""
 
     model_config = {"extra": "forbid"}
 
     base_url: str = Field("")
     model: str = Field("")
     api_key_ref: str = Field("")
-    # 固定关，见 §4.7。放在 schema 里是为了让人看见这个决定，不是为了让人改。
+    # Pinned off. Present in the schema so the decision is visible, not adjustable.
     thinking: Literal["off"] = Field("off")
     tool_choice: Literal["none"] = Field("none")
 
@@ -85,7 +89,7 @@ class SpeechConfig(BaseModel):
     side: SideModelConfig = Field(default_factory=SideModelConfig)
 
 
-# ---------------------------------------------------------------- 其余各段
+# ---------------------------------------------------------------- everything else
 
 
 class TTSConfig(BaseModel):
@@ -100,7 +104,13 @@ class TTSConfig(BaseModel):
 
 
 class AudioConfig(BaseModel):
-    """头号风险的对策。回声进麦克风会让判停一直误触发。"""
+    """Mitigations for the biggest operational risk.
+
+    '
+     '    Nothing in the pipeline cancels acoustic echo. If the assistant's own voice
+    '
+     '    reaches the mic, turn detection false-triggers continuously.
+    """
 
     model_config = {"extra": "forbid"}
 
@@ -119,7 +129,7 @@ class SafetyConfig(BaseModel):
 
 
 class SpeakSwitches(BaseModel):
-    """每个来源一个开关。事件一律入库，这里只管说不说。"""
+    """One switch per source. Events are always recorded; this only gates speech."""
 
     model_config = {"extra": "forbid"}
 
@@ -187,7 +197,7 @@ class RuntimeConfig(BaseModel):
 
 
 class Settings(BaseModel):
-    """根配置。程序里所有模块只从这个对象读。"""
+    """Root config. Every module reads from this object and nowhere else."""
 
     model_config = {"extra": "forbid"}
 

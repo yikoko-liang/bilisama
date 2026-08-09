@@ -1,11 +1,13 @@
-"""事件源。
+"""Event sources.
 
-一个 ABC，不是两个。参考实现里 pull 风格的 EventSource 和 push 风格的
-IntentSource 并存，同一条链路上要转换一次,合成一个就够了。
+One ABC, not two. The reference implementations keep a pull-style EventSource and
+a push-style IntentSource side by side, which forces a conversion partway down the
+same pipeline. One shape does the job.
 
-`speak` 开关只影响最后一步：**事件一律入库**（记忆、字幕、事件流照常），
-只有产不产生 Intent 是开关。所以"不发声"不等于"不知道",
-小助手照样知道阿强来了第五次，只是这次不吭声。
+The `speak` switch only gates the last step. Events always land in memory,
+subtitles and the event feed; all the switch decides is whether an Intent gets
+produced. "Not speaking" is not the same as "not knowing" — the assistant still
+knows this is Aqiang's fifth visit, it just says nothing about it this time.
 """
 
 from __future__ import annotations
@@ -21,26 +23,30 @@ EventSink = Callable[[LiveEvent], Awaitable[None]]
 
 @runtime_checkable
 class Source(Protocol):
-    """事件源。直播接入、回放、以及以后的后台 agent 都实现它。
+    """Implemented by the live feed, the replay fixture, and later the background
+    runner.
 
-    装配处按配置决定注册哪些,这是「打开一级」的全部动作，不产生任何新分支。
+    Which ones get registered is decided once at assembly time. That is the entire
+    mechanism behind "turn on another interaction level" — it adds data, never a
+    branch.
     """
 
     name: str
 
     async def start(self, emit: EventSink) -> None:
-        """开始产出事件。这个协程一直跑到 stop() 被调用。"""
+        """Produce events until `stop()` is called."""
         ...
 
     async def stop(self) -> None: ...
 
 
 class QueueSource:
-    """把一个 asyncio.Queue 包成 Source。测试和进程内注入用。"""
+    """Wraps an asyncio.Queue as a Source, for tests and in-process injection."""
 
     def __init__(self, name: str = "queue", *, maxsize: int = 256) -> None:
         self.name = name
-        # 有上限：消费不过来时上游被挡住，而不是无限堆积到 OOM
+        # Bounded on purpose: a slow consumer applies backpressure instead of
+        # letting the queue grow until the process dies.
         self._queue: asyncio.Queue[LiveEvent | None] = asyncio.Queue(maxsize=maxsize)
         self._stopped = asyncio.Event()
 
@@ -60,13 +66,14 @@ class QueueSource:
 
 
 async def merge(sources: list[Source], emit: EventSink) -> None:
-    """并发跑多个源。
+    """Run several sources concurrently.
 
-    注意 TaskGroup 的语义：任何一个源抛出非取消异常时，其余源会被一起取消，
-    最后抛 ExceptionGroup。调用方负责重启。
+    Mind the TaskGroup semantics: if one source raises, the others are cancelled
+    and the caller gets an ExceptionGroup. Restarting is the caller's problem.
 
-    直播场景其实想要「一个源挂了不拖垮其余」,那需要给每个源包一层监督协程。
-    等真接上多个源时再改（待办第 10 项会连测试一起补）。
+    A live stream really wants the opposite — one dead source should not take the
+    rest down — which needs a supervising wrapper per source. Deferred until there
+    is more than one source to supervise (backlog item 10, with tests).
     """
     async with asyncio.TaskGroup() as tg:
         for source in sources:
@@ -74,7 +81,7 @@ async def merge(sources: list[Source], emit: EventSink) -> None:
 
 
 async def collect(source: Source, *, limit: int) -> list[LiveEvent]:
-    """把源的前 N 条事件收进 list。测试用。"""
+    """Collect the first N events from a source. Test helper."""
     out: list[LiveEvent] = []
     done = asyncio.Event()
 

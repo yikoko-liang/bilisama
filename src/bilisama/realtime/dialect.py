@@ -1,17 +1,17 @@
-"""协议方言。
+"""Protocol dialects.
 
-OpenAI Realtime 前后有两版，事件名和字段名都变过：
+The OpenAI Realtime protocol shipped twice with different names:
 
-- 早期版（DashScope 实现的）：`modalities`、`response.text.delta`、扁平的
-  `input_audio_format`、嵌套的工具声明
-- 正式版 GA（speech-to-speech 和 OpenAI 实现的）：`output_modalities`、
-  `response.output_text.delta`、嵌套的 `audio.input.format`、扁平的工具声明
+- The early one, which DashScope implements: `modalities`, `response.text.delta`,
+  a flat `input_audio_format`, nested tool declarations.
+- The GA one, which speech-to-speech and OpenAI implement: `output_modalities`,
+  `response.output_text.delta`, a nested `audio.input.format`, flat tools.
 
-有意思的是 DashScope 用的那套早期方言，正是 OpenAI 自己已经退役的 beta 方言,
-`openai` SDK 里 `types/beta/realtime/` 至今还留着，字段形状一模一样。
+DashScope's dialect is in fact OpenAI's own retired beta — the shapes still sit in
+`openai`'s `types/beta/realtime/`, field for field.
 
-codec 的职责只有一件：wire 上的原始 JSON ↔ 我们内部的归一化名字。
-**只归一化一次**,不要先把 GA 名翻成 beta 名再翻成内部名。
+A codec does exactly one thing: raw wire JSON to our internal names and back.
+Normalise once. Do not translate GA names into beta names and then into ours.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class Dialect(StrEnum):
 
 
 class ClientEvent(StrEnum):
-    """我们会发出去的事件。内部名，跟 wire 名解耦。"""
+    """Events we send. Internal names, decoupled from the wire."""
 
     SESSION_UPDATE = "session.update"
     AUDIO_APPEND = "input_audio_buffer.append"
@@ -39,7 +39,7 @@ class ClientEvent(StrEnum):
 
 
 class ServerEvent(StrEnum):
-    """我们会收到的事件。归一化之后 L2 只认这些名字。"""
+    """Events we receive. After normalisation, L2 knows only these."""
 
     SESSION_CREATED = "session.created"
     SESSION_UPDATED = "session.updated"
@@ -59,7 +59,7 @@ class ServerEvent(StrEnum):
     ERROR = "error"
 
 
-# wire 名 → 内部名。两套方言各一张表。
+# Wire name to internal name, one table per dialect.
 _GA_INBOUND: Mapping[str, ServerEvent] = {
     "session.created": ServerEvent.SESSION_CREATED,
     "session.updated": ServerEvent.SESSION_UPDATED,
@@ -100,10 +100,11 @@ _BETA_INBOUND: Mapping[str, ServerEvent] = {
 
 
 def _reverse(table: Mapping[str, ServerEvent]) -> dict[ServerEvent, str]:
-    """内部名 → wire 名。
+    """Internal name to wire name.
 
-    一个内部名可能对应多个 wire 名（GA 的 conversation.item.created 和
-    .added 都归一化成 ITEM_CREATED），取先出现的那个。
+    Several wire names can normalise to one internal name — GA's
+    conversation.item.created and .added both become ITEM_CREATED — so the first
+    one listed wins on the way back out.
     """
     out: dict[ServerEvent, str] = {}
     for wire, internal in table.items():
@@ -113,7 +114,7 @@ def _reverse(table: Mapping[str, ServerEvent]) -> dict[ServerEvent, str]:
 
 @dataclass(frozen=True, slots=True)
 class Codec:
-    """方言编解码。两个实例，选一个。"""
+    """A dialect codec. Two instances exist; pick one."""
 
     dialect: Dialect
     modalities_key: str
@@ -124,22 +125,22 @@ class Codec:
     _outbound: Mapping[ServerEvent, str]
 
     def wire_name(self, event: ServerEvent) -> str:
-        """内部名 → 这套方言的 wire 名。
+        """Internal name to this dialect's wire name.
 
-        反向表是模块级预计算的：Mock 服务端每发一个 delta 就调一次，
-        线性反查在热路径上没道理。
+        The reverse table is precomputed at import: the mock server calls this once
+        per delta, and a linear scan has no business on that path.
         """
         return self._outbound[event]
 
     def normalize(self, raw: Mapping[str, Any]) -> tuple[ServerEvent | None, Mapping[str, Any]]:
-        """把 wire 上的原始 JSON 归一化成内部事件名。
+        """Normalise a raw wire frame to an internal event name.
 
         Args:
-            raw: 从 WebSocket 收到的一帧，已经 json.loads 过。
+            raw: One frame off the WebSocket, already parsed from JSON.
 
         Returns:
-            (内部事件名, 原始负载)。不认识的事件返回 None,由调用方决定是忽略
-            还是告警，这里不替它做主。
+            (internal name, original payload). Unknown events come back as None —
+            whether that is worth a warning is the caller's call, not ours.
         """
         wire = raw.get("type")
         if not isinstance(wire, str):

@@ -1,6 +1,7 @@
-"""事件模型与回放源。
+"""Event model and replay source.
 
-重点是那条会静默毁掉整个产品的规则：**匿名观众不能被丢弃**。
+The rule that matters most: a masked viewer is still a viewer. Dropping those
+events looks like nothing is wrong until half the room goes silent.
 """
 
 from __future__ import annotations
@@ -19,18 +20,19 @@ from bilisama.ingest.events import (
 from bilisama.ingest.sources import QueueSource, collect
 from tests.fakes.replay import ReplaySource, fixture, read_fixture
 
-# ------------------------------------------------------------ 身份
+# ------------------------------------------------------------ identity
 
 
 def test_masked_uid_still_has_a_usable_identity() -> None:
-    """B 站隐私掩码下 uid 就是 0。这时 uid_hash 才是稳定标识。
+    """Bilibili masks uid to 0, and uid_hash becomes the only stable handle.
 
-    N.E.K.O 那句 `if not uid or uid == "0": return` 会把整条弹幕流静音掉。
+    N.E.K.O's guard at neko_live/modules/live_events/module.py:238 returns early on
+    exactly this, silencing the whole danmaku stream once masking is in play.
     """
     masked = Viewer(uid=0, uid_hash="ab12", name="***")
     assert masked.is_anonymous
     assert masked.identity == "hash:ab12"
-    assert masked.identity, "身份 key 永远不能为空，否则去重和记忆全废"
+    assert masked.identity, "an empty identity key would break dedup and memory"
 
 
 def test_identity_prefers_uid_when_present() -> None:
@@ -46,7 +48,7 @@ def test_display_name_never_empty() -> None:
     assert Viewer(uid=1, name="阿强").display_name == "阿强"
 
 
-# ------------------------------------------------------------ 货币口径
+# ------------------------------------------------------------ money
 
 
 @pytest.mark.parametrize(("coin", "cny"), [(1000, 1.0), (20000, 20.0), (198000, 198.0), (0, 0.0)])
@@ -59,7 +61,7 @@ def test_silver_gift_is_not_paid() -> None:
     assert Gift(coin_type="gold", total_coin=1000).is_paid
 
 
-# ------------------------------------------------------------ 去重与脱敏
+# ------------------------------------------------------------ dedup and redaction
 
 
 def test_dedup_key_uses_event_id_when_available() -> None:
@@ -68,21 +70,21 @@ def test_dedup_key_uses_event_id_when_available() -> None:
 
 
 def test_dedup_key_falls_back_without_event_id() -> None:
-    """没有 event_id 时也要能去重，否则重连后会重复回应。"""
+    """Dedup has to work without a platform id, or a reconnect replays reactions."""
     v = Viewer(uid=7)
     a = LiveEvent(kind=EventKind.DANMAKU, viewer=v, text="666", ts_ms=1500)
     b = LiveEvent(kind=EventKind.DANMAKU, viewer=v, text="666", ts_ms=1900)
-    assert a.dedup_key == b.dedup_key  # 同一秒内同一个人说同样的话
+    assert a.dedup_key == b.dedup_key  # same person, same words, same second
     c = LiveEvent(kind=EventKind.DANMAKU, viewer=v, text="666", ts_ms=2500)
     assert a.dedup_key != c.dedup_key
 
 
 def test_redacted_drops_raw() -> None:
-    """raw 是未经清洗的平台负载，绝对不能进 prompt。"""
+    """raw is the unsanitised platform payload and must never reach a prompt."""
     e = LiveEvent(kind=EventKind.DANMAKU, text="嗨", raw={"cmd": "DANMU_MSG", "info": [1, 2]})
     assert e.raw is not None
     assert e.redacted().raw is None
-    assert e.redacted().text == "嗨"  # 别的字段不能丢
+    assert e.redacted().text == "嗨"  # other fields survive
 
 
 def test_redacted_is_cheap_when_already_clean() -> None:
@@ -90,7 +92,7 @@ def test_redacted_is_cheap_when_already_clean() -> None:
     assert e.redacted() is e
 
 
-# ------------------------------------------------------------ VIP 判定
+# ------------------------------------------------------------ VIP arrivals
 
 
 def test_guard_makes_a_vip_entry() -> None:
@@ -99,7 +101,7 @@ def test_guard_makes_a_vip_entry() -> None:
 
 
 def test_past_spending_makes_a_vip_entry() -> None:
-    """送过钱的观众进房也该点名。需求第 5 条要的是这个，不只是舰长。"""
+    """Past spenders deserve a greeting too, not just current members."""
     assert is_vip_entry(Viewer(uid=1), lifetime_gift_cny=30.0)
 
 
@@ -107,14 +109,15 @@ def test_guard_level_from_wire() -> None:
     assert GuardLevel.from_wire(3) is GuardLevel.CAPTAIN
     assert GuardLevel.from_wire(1) is GuardLevel.GOVERNOR
     assert GuardLevel.from_wire(0) is GuardLevel.NONE
-    assert GuardLevel.from_wire(99) is GuardLevel.NONE  # 未知等级不该炸
+    assert GuardLevel.from_wire(99) is GuardLevel.NONE  # an unknown tier must not raise
 
 
-# ------------------------------------------------------------ 回放
+# ------------------------------------------------------------ replay
 
 
 def test_every_fixture_parses() -> None:
-    """七个 fixture 全部能解析。fixture 坏了会让一整批测试假绿。"""
+    """Every fixture parses. A broken fixture turns a whole batch of tests green
+    for the wrong reason."""
     names = [
         "quiet_stream.jsonl",
         "superchat_during_speech.jsonl",
@@ -127,16 +130,18 @@ def test_every_fixture_parses() -> None:
     ]
     for name in names:
         events = list(read_fixture(fixture(name)))
-        assert events, f"{name} 是空的"
+        assert events, f"{name} is empty"
         assert all(isinstance(e, LiveEvent) for _, e in events)
 
 
 def test_anonymous_fixture_yields_usable_identities() -> None:
-    """全 uid=0 的那份 fixture，每条都要有可用身份，而且能区分出不同的人。"""
+    """Every event in the masked fixture still has a usable, distinguishing identity."""
     events = [e for _, e in read_fixture(fixture("anonymous_masked.jsonl"))]
     assert all(e.is_anonymous for e in events)
     assert all(e.viewer.identity != "anon" for e in events)
-    assert len({e.viewer.identity for e in events}) > 1, "掩码后也要能区分出不同的人"
+    assert (
+        len({e.viewer.identity for e in events}) > 1
+    ), "masking must not collapse everyone into one person"
 
 
 def test_gift_value_derived_from_gold() -> None:
@@ -146,7 +151,7 @@ def test_gift_value_derived_from_gold() -> None:
 
 
 def test_flood_fixture_has_paid_events_mixed_in() -> None:
-    """洪水里要混着付费事件,验的就是付费不会输给窗口竞争。"""
+    """The flood carries paid events, so we can check they do not lose the window race."""
     events = [e for _, e in read_fixture(fixture("event_flood.jsonl"))]
     assert len(events) > 150
     assert any(e.is_paid for e in events)
@@ -159,7 +164,7 @@ async def test_replay_source_emits_in_order() -> None:
 
 
 async def test_replay_source_keeps_relative_order_under_real_clock() -> None:
-    """speed 是倍速不是"忽略时间"。验窗口逻辑的测试要保留相对间隔。"""
+    """speed is a multiplier, not "ignore timing" — window logic needs the gaps kept."""
     source = ReplaySource(path=fixture("superchat_during_speech.jsonl"), speed=2000.0)
     events = await collect(source, limit=3)
     assert [e.kind for e in events] == [
@@ -177,13 +182,14 @@ async def test_queue_source_round_trip() -> None:
 
 
 def test_event_kind_covers_the_speak_switches() -> None:
-    """事件枚举和 speak 开关必须一一对上。两边各写各的就是 bug 的温床。"""
+    """The event taxonomy and the speak switches must line up exactly."""
     from bilisama.config import SpeakSwitches
 
     switches = set(SpeakSwitches.model_fields)
-    # proactive 和 background_result 不是直播事件，是内部源
+    # proactive and background_result are internal sources, not live events.
     switches -= {"proactive", "background_result"}
     kinds = {k.value for k in EventKind} - {"room_state"}
-    assert (
-        switches == kinds
-    ), f"开关和事件枚举对不上：只在开关里 {switches - kinds}，只在枚举里 {kinds - switches}"
+    assert switches == kinds, (
+        f"switches and event kinds disagree: switch-only {switches - kinds}, "
+        f"kind-only {kinds - switches}"
+    )

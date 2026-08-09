@@ -1,11 +1,13 @@
-"""发言尝试的终局协议。
+"""Terminal verdict for every attempt to speak.
 
-「为什么小助手刚才没说话」是直播产品的头号支持问题。答案不能靠翻日志猜，
-所以每条 Intent 从产生到消失，最终必然落到一个 (outcome, phase) 上，
-控制面板的事件流直接显示。
+"Why didn't the assistant say anything just now?" is the number one support
+question for a live product. Guessing from logs does not scale, so every Intent
+ends in exactly one (outcome, phase) pair that the control panel can display
+directly.
 
-读法：``skipped@gated`` 是闸门没放行，``cancelled@speaking`` 是说到一半被主播打断，
-``expired@queued`` 是排太久过期了。
+Read them as a pair: `skipped@gated` means the speaking floor held it back,
+`cancelled@speaking` means the streamer talked over it mid-sentence,
+`expired@queued` means it waited too long and stopped being worth saying.
 """
 
 from __future__ import annotations
@@ -15,30 +17,31 @@ from enum import StrEnum
 
 
 class Outcome(StrEnum):
-    SPOKEN = "spoken"  # 说出来了，观众听到了
-    SKIPPED = "skipped"  # 没派发就被丢弃
-    CANCELLED = "cancelled"  # 派发了但被取消（打断、抢占、panic）
-    FAILED = "failed"  # provider 或工具报错
-    EXPIRED = "expired"  # 过了 expires_at 还没轮到
-    TIMED_OUT = "timed_out"  # 看门狗超时
+    SPOKEN = "spoken"
+    SKIPPED = "skipped"  # dropped before dispatch
+    CANCELLED = "cancelled"  # dispatched, then interrupted or preempted
+    FAILED = "failed"  # provider or tool error
+    EXPIRED = "expired"  # its turn never came
+    TIMED_OUT = "timed_out"  # watchdog fired
 
 
 class Phase(StrEnum):
-    """终局发生在哪一步。跟 Outcome 组合起来才有意义。"""
+    """Where the verdict happened. Only meaningful paired with an Outcome."""
 
-    SELECTED = "selected"  # 刚被 L4 选中，还没进调度器
-    QUEUED = "queued"  # 在优先级堆里
-    GATED = "gated"  # 被说话权闸门挡住
-    DISPATCHED = "dispatched"  # 已发给 provider，等首个 delta
-    GENERATING = "generating"  # 模型在吐字
-    SPEAKING = "speaking"  # 音频在播
-    PLAYED = "played"  # 播完了
+    SELECTED = "selected"  # picked by ingest, not yet scheduled
+    QUEUED = "queued"  # in the priority heap
+    GATED = "gated"  # held by the speaking floor
+    DISPATCHED = "dispatched"  # sent to the provider, awaiting first delta
+    GENERATING = "generating"  # model is producing tokens
+    SPEAKING = "speaking"  # audio is playing
+    PLAYED = "played"  # audience heard all of it
 
 
 class SkipReason(StrEnum):
-    """skipped / expired 时的稳定原因串。
+    """Stable reason strings for skipped and expired intents.
 
-    这些字符串会出现在控制面板上，也会被聚合成统计，所以只能加不能改。
+    These surface in the control panel and get aggregated into stats, so treat
+    them as an append-only vocabulary: add new ones, never rename old ones.
     """
 
     LOW_VALUE = "selection.low_value"
@@ -59,7 +62,7 @@ class SkipReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Verdict:
-    """一条 Intent 的终局。调度器在丢弃或完成时产出，永远恰好产出一次。"""
+    """How one Intent ended. The scheduler emits exactly one per Intent."""
 
     intent_id: str
     source: str

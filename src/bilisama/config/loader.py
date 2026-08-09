@@ -1,6 +1,7 @@
-"""从 TOML 加载配置。
+"""Load configuration from TOML.
 
-profile 是覆盖层，只写自己关心的字段。
+A profile is an overlay: it only names the fields it cares about, everything else
+falls through to the base file.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from bilisama.config.schema import Settings
 
 
 def load(path: Path | None = None, *, overrides: dict[str, Any] | None = None) -> Settings:
-    """从 TOML 加载。profile 是覆盖层，只写自己关心的字段。"""
+    """Load from TOML, layering the active profile on top."""
     raw: dict[str, Any] = {}
     if path is not None and path.exists():
         raw = tomllib.loads(path.read_text(encoding="utf-8"))

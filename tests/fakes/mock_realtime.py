@@ -1,12 +1,18 @@
-"""进程内的假 Realtime 服务端。
+"""In-process fake Realtime server.
 
-它的价值不在于"能连上"，而在于**§3.3 那八条客户端规则每一条都是一个可复现的
-失败模式**。否则那八条只是文档里的好意。
+The point is not that it accepts a connection. The point is that each provider
+quirk we have to code around becomes a reproducible failure mode here, so the
+rules that avoid them are covered by tests rather than by good intentions in a
+document.
 
-用 Capabilities + Codec 构造，所以同一个测试类可以跑三遍：speech-to-speech 形状、
-DashScope 形状、OpenAI GA 形状。
+Constructed from a Capabilities plus a Codec, so one test class can run against
+all three provider shapes.
 
-不加载任何模型，不联网，发罐装 PCM。
+Loads no models, opens no sockets to the outside, and emits canned PCM.
+
+Only three of the eight client-side rules are genuinely modelled today. The two
+marked NOT IMPLEMENTED below are tracked in the backlog; the rest are not
+represented at all yet.
 """
 
 from __future__ import annotations
@@ -29,39 +35,40 @@ from bilisama.realtime.capabilities import Capabilities
 
 
 class Fault(StrEnum):
-    """可脚本化的失败模式。每一条对应 §3.3 的一条规则。"""
+    """Scriptable failure modes, one per provider quirk we code around."""
 
-    # 规则 1/2：注入撞上投机轮次 → 回复被吞，且永不发 response.done，in_response 卡死
+    # An in-band injection lands while a speculative turn is still open: the reply
+    # is swallowed, no response.done is ever sent, and in_response stays stuck.
     WEDGE_ON_INJECTION = "wedge_on_injection"
-    # 规则 3：response.cancel 在 response_pending 时是空操作
+    # response.cancel does nothing while a reply is merely pending.
     CANCEL_IS_NOOP = "cancel_is_noop"
-    # 规则 4：隐式回复不发 response.created
+    # Implicit replies never announce themselves with response.created.
     NO_RESPONSE_CREATED = "no_response_created"
-    # item.create 被静默延后，回复结束后才补发 ack
+    # item.create is silently deferred and acknowledged only once the reply ends.
     DEFER_ITEM_CREATE = "defer_item_create"
-    # 下面两个是计划 §10.1 要求覆盖、但还没实现的场景。
-    # 留着是为了不把缺口从记录里抹掉；实现见待办第 9 项。
+    # The next two are scenarios we are supposed to cover and do not yet. They stay
+    # here so the gap is recorded rather than forgotten; see backlog item 9.
     #
-    # NOT IMPLEMENTED：speech_stopped 前面没有 speech_started
+    # NOT IMPLEMENTED: speech_stopped arriving with no preceding speech_started.
     ORPHAN_SPEECH_STOPPED = "orphan_speech_stopped"
-    # NOT IMPLEMENTED：被取消的文本回复不发 output_text.done
+    # NOT IMPLEMENTED: a cancelled text reply never sends output_text.done.
     NO_TEXT_DONE_ON_CANCEL = "no_text_done_on_cancel"
-    # 回复卡住，用来验客户端看门狗
+    # Reply hangs forever, to exercise the client-side watchdog.
     STALL_RESPONSE = "stall_response"
-    # 会话容量满
+    # Server is at capacity.
     SESSION_LIMIT = "session_limit"
-    # 发一个工具调用
+    # Emit a tool call.
     EMIT_TOOL_CALL = "emit_tool_call"
 
 
 @dataclass(slots=True)
 class Script:
-    """一次测试要复现什么。"""
+    """What one test wants to reproduce."""
 
     faults: set[Fault] = field(default_factory=set)
     reply_text: str = "好的，我看到了。"
     delta_chunks: int = 3
-    # 每个 delta 之间等多久，让测试能插入打断
+    # Gap between deltas, so a test can slip an interruption in mid-reply.
     delta_interval_s: float = 0.0
     audio_ms_per_delta: int = 40
 
@@ -71,7 +78,7 @@ class Script:
 
 @dataclass(slots=True)
 class Recorded:
-    """服务端收到了什么。断言客户端行为用。"""
+    """What the server received. Used to assert on client behaviour."""
 
     events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -96,12 +103,12 @@ def _pcm(ms: int, *, rate: int = 24000, freq: float = 220.0) -> bytes:
 
 
 class MockRealtimeServer:
-    """在 127.0.0.1 的临时端口上起一个假 Realtime 服务端。
+    """A fake Realtime server on an ephemeral loopback port.
 
-    用法::
+    Usage::
 
         async with MockRealtimeServer(caps=capabilities.S2S) as server:
-            ...  # server.url 连过去
+            ...  # connect to server.url
             assert server.recorded.count("response.create") == 1
     """
 
@@ -119,7 +126,7 @@ class MockRealtimeServer:
         self._server: Any = None
         self._conn: ServerConnection | None = None
         self._port = 0
-        # 服务端状态。刻意跟上游同名，好对照着读。
+        # Server state, deliberately named after upstream so the two read together.
         self._in_response = False
         self._response_pending = False
         self._response_id = 0
@@ -127,7 +134,7 @@ class MockRealtimeServer:
         self._speculative_open = False
         self._tasks: set[asyncio.Task[None]] = set()
 
-    # ------------------------------------------------------------ 生命周期
+    # ------------------------------------------------------------ lifecycle
 
     async def __aenter__(self) -> MockRealtimeServer:
         self._server = await serve(self._handle, "127.0.0.1", 0)
@@ -147,12 +154,12 @@ class MockRealtimeServer:
     def url(self) -> str:
         return f"ws://127.0.0.1:{self._port}/v1/realtime"
 
-    # ------------------------------------------------------------ 服务端推事件
+    # ------------------------------------------------------------ server-side pushes
 
     async def send(self, event: dia.ServerEvent, **payload: Any) -> None:
-        """按当前方言把内部事件名翻成 wire 名发出去。"""
+        """Send an event, translated into the current dialect's wire name."""
         if self._conn is None:
-            raise RuntimeError("还没有客户端连上来")
+            raise RuntimeError("no client has connected yet")
         body = {"type": self.codec.wire_name(event), **payload}
         await self._conn.send(json.dumps(body))
 
@@ -161,17 +168,19 @@ class MockRealtimeServer:
         await self.send(dia.ServerEvent.SPEECH_STARTED)
 
     async def speech_stopped(self) -> None:
-        """主播停口。之后投机重开窗口还开着一小会儿。"""
+        """Streamer stops talking. The speculative window stays open a moment longer."""
         await self.send(dia.ServerEvent.SPEECH_STOPPED)
 
     async def close_speculative_window(self) -> None:
         self._speculative_open = False
 
     async def barge_in(self) -> None:
-        """模拟主播打断。注意顺序：先 response.done(cancelled)，后 speech_started。
+        """Simulate the streamer talking over the assistant.
 
-        这个顺序是反直觉的，但上游就是这么发的（`websocket_router.py:745-785`
-        先取 in_response 快照并 finish_response，再 dispatch 出 speech_started）。
+        Note the order: response.done(cancelled) arrives *before* speech_started.
+        That reads backwards, but it is what upstream does — websocket_router.py:745-785
+        snapshots in_response and calls finish_response before dispatching the
+        speech_started event.
         """
         if self._in_response:
             await self._finish_response(status="cancelled", reason="turn_detected")
@@ -179,13 +188,13 @@ class MockRealtimeServer:
         await self.send(dia.ServerEvent.SPEECH_STARTED)
 
     async def emit_implicit_reply(self) -> None:
-        """服务端 VAD 自己发起的那一轮。默认**不发** response.created。"""
+        """The turn the server's own VAD starts. Sends no response.created."""
         self._response_pending = True
         task = asyncio.create_task(self._run_response(implicit=True))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    # ------------------------------------------------------------ 内部
+    # ------------------------------------------------------------ internals
 
     async def _handle(self, conn: ServerConnection) -> None:
         self._conn = conn
@@ -209,7 +218,7 @@ class MockRealtimeServer:
             if self.caps.acknowledges_session_update:
                 await self.send(dia.ServerEvent.SESSION_UPDATED, session=event.get("session", {}))
         elif kind == dia.ClientEvent.AUDIO_APPEND.value:
-            pass  # 音频只记不回
+            pass  # audio is recorded, never answered
         elif kind == dia.ClientEvent.ITEM_CREATE.value:
             await self._on_item_create(event)
         elif kind == dia.ClientEvent.RESPONSE_CREATE.value:
@@ -228,7 +237,8 @@ class MockRealtimeServer:
                 await self._error("unknown_or_invalid_event", "不支持 conversation.item.truncate")
 
     async def _on_item_create(self, event: dict[str, Any]) -> None:
-        # 有回复在生成时，item.create 被静默延后：返回空，回复结束后补发 ack
+        # While a reply is generating, item.create is deferred: nothing comes back
+        # now, and the ack arrives once the reply finishes.
         if self._in_response and self.script.has(Fault.DEFER_ITEM_CREATE):
             self._deferred.append(event)
             return
@@ -246,9 +256,10 @@ class MockRealtimeServer:
             await self._error("conversation_already_has_active_response", "已经有一个回复在生成了")
             return
 
-        # 规则 1：in-band 注入撞上还开着的投机轮次 → 整条回复被吞，连 done 都不发
+        # In-band injection against an open speculative turn: the whole reply is
+        # swallowed, not even a done event comes back.
         if self.script.has(Fault.WEDGE_ON_INJECTION) and not out_of_band and self._speculative_open:
-            self._in_response = True  # 卡死：之后所有 response.create 都会被拒
+            self._in_response = True  # wedged: every later response.create is refused
             return
 
         task = asyncio.create_task(self._run_response(implicit=False, event=event))
@@ -256,7 +267,7 @@ class MockRealtimeServer:
         task.add_done_callback(self._tasks.discard)
 
     async def _on_cancel(self) -> None:
-        # 规则 3：只有 in_response 为真时才真的取消。pending 时是空操作
+        # Only a reply that has started can be cancelled; a pending one is a no-op.
         if self.script.has(Fault.CANCEL_IS_NOOP) and not self._in_response:
             return
         if not self._in_response:
@@ -269,13 +280,13 @@ class MockRealtimeServer:
         self._in_response = True
         self._response_pending = False
 
-        # 规则 4：隐式回复不发 response.created
+        # Implicit replies never announce themselves with response.created.
         skip_created = implicit or self.script.has(Fault.NO_RESPONSE_CREATED)
         if not skip_created:
             await self.send(dia.ServerEvent.RESPONSE_CREATED, response={"id": rid})
 
         if self.script.has(Fault.STALL_RESPONSE):
-            await asyncio.sleep(3600)  # 让客户端的看门狗去处理
+            await asyncio.sleep(3600)  # let the client watchdog deal with it
             return
 
         if self.script.has(Fault.EMIT_TOOL_CALL):
@@ -295,7 +306,7 @@ class MockRealtimeServer:
 
         for piece in pieces:
             if not self._in_response:
-                return  # 中途被取消了
+                return  # cancelled mid-reply
             if self.caps.owns_tts:
                 await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
                 await self.send(
@@ -327,7 +338,8 @@ class MockRealtimeServer:
             payload["response"]["status_details"] = {"reason": reason}
         await self.send(dia.ServerEvent.RESPONSE_DONE, **payload)
 
-        # 延后的 item.create 在回复结束时补发 ack,客户端要能接住这个迟到的 ack
+        # Deferred item.create calls are acknowledged now. The client has to cope
+        # with an ack arriving long after the request.
         while self._deferred:
             pending = self._deferred.pop(0)
             await self.send(dia.ServerEvent.ITEM_CREATED, item=pending.get("item", {}))

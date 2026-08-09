@@ -1,14 +1,13 @@
-"""补丁的运行时验证。
+"""Runtime verification of the speech-to-speech patches.
 
-需要 speech-to-speech 装在它自己的 venv 里，所以标了 integration，默认不跑。
-跑法：
+Needs speech-to-speech installed in its own venv, so these are marked integration
+and skipped by default::
 
     scripts/smoke_provider_b.sh install
-    BILISAMA_S2S_VENV=~/.local/share/bilisama/engines/s2s \\
-      .venv/bin/python -m pytest tests/integration -m integration
+    .venv/bin/python -m pytest tests/integration -m integration
 
-这批测试是「上游漂移探测器」：上游改了结构，这里先红，而不是等到直播中途
-静默失效。
+Think of this file as a drift detector. If upstream changes shape, it goes red here
+rather than failing silently halfway through a live stream.
 """
 
 from __future__ import annotations
@@ -28,12 +27,14 @@ SHIM = Path(__file__).resolve().parents[2] / "tools" / "s2s_shim"
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not (VENV / "bin" / "python").exists(), reason="s2s 还没装"),
+    pytest.mark.skipif(
+        not (VENV / "bin" / "python").exists(), reason="speech-to-speech is not installed"
+    ),
 ]
 
 
 def _run(snippet: str) -> dict[str, object]:
-    """在 s2s 的 venv 里跑一段代码，拿回它打印的最后一行 JSON。"""
+    """Run a snippet inside the s2s venv and parse the last JSON line it prints."""
     proc = subprocess.run(
         [str(VENV / "bin" / "python"), "-c", snippet],
         env={**os.environ, "PYTHONPATH": str(SHIM)},
@@ -42,14 +43,14 @@ def _run(snippet: str) -> dict[str, object]:
         timeout=120,
     )
     if proc.returncode != 0:
-        pytest.fail(f"子进程失败（{proc.returncode}）：\n{proc.stdout}\n{proc.stderr}")
+        pytest.fail(f"subprocess failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
     last = [ln for ln in proc.stdout.splitlines() if ln.startswith("{")][-1]
     parsed: dict[str, object] = json.loads(last)
     return parsed
 
 
 def test_patches_apply_cleanly() -> None:
-    """两个补丁都能打上，且自检通过。"""
+    """Both patches apply and pass their self-checks."""
     out = _run(
         "import json\n"
         "from bilisama_s2s_shim.patches import apply_patches\n"
@@ -61,10 +62,11 @@ def test_patches_apply_cleanly() -> None:
 
 
 def test_patch_a_makes_implicit_turn_text_only() -> None:
-    """服务端 VAD 发起的隐式轮次会走纯文本。
+    """The implicit VAD-driven turn produces text.
 
-    不打这个补丁的话，会话级设了 output_modalities 也没用,上游构造
-    GenerateResponseRequest 时不带 response，下游就当成要音频。
+    Without this patch, setting output_modalities at session level has no effect:
+    upstream builds the request without a response field and everything downstream
+    reads that as "wants audio".
     """
     out = _run(
         "import json\n"
@@ -79,13 +81,13 @@ def test_patch_a_makes_implicit_turn_text_only() -> None:
         "print(json.dumps({'implicit': implicit.response.output_modalities,"
         " 'explicit': explicit.response.output_modalities}))\n"
     )
-    assert out["implicit"] == ["text"], "隐式轮次没有改成纯文本"
-    # setdefault 语义：显式带了参数的不能被覆盖
-    assert out["explicit"] == ["audio"], "补丁覆盖了调用方显式指定的参数"
+    assert out["implicit"] == ["text"], "the implicit turn is still producing audio"
+    # setdefault semantics: an explicit request keeps its own parameters.
+    assert out["explicit"] == ["audio"], "the patch overrode an explicit caller parameter"
 
 
 def test_patch_b_stops_the_injected_tail() -> None:
-    """人设按原样下发，不再被追加 Voice Rules。"""
+    """The persona prompt goes out verbatim, with no Voice Rules appended."""
     out = _run(
         "import json\n"
         "from speech_to_speech.LLM import voice_prompt\n"
@@ -97,16 +99,18 @@ def test_patch_b_stops_the_injected_tail() -> None:
         "print(json.dumps({'out': m.build_voice_system_prompt(persona),"
         " 'tail_len': len(tail), 'bans_action_text': '*laughs*' in tail}))\n"
     )
-    assert out["out"] == "我是米娅。", "人设被改写了"
-    # 这就是打这个补丁的理由：那条硬约束跟 VTuber 人设正面冲突
+    assert out["out"] == "我是米娅。", "the persona prompt was rewritten"
+    # This is why the patch exists: that constraint is hard, and a VTuber persona
+    # uses action text constantly.
     assert out["bans_action_text"] is True
     assert isinstance(out["tail_len"], int) and out["tail_len"] > 500
 
 
 def test_zero_patch_mode_touches_nothing() -> None:
-    """零补丁模式：用它自带的 TTS 和提示词尾巴，一个字节都不碰。
+    """Zero-patch mode leaves upstream completely alone.
 
-    这是补丁出问题时的退路，要保证它真的什么都没改。
+    This is the fallback if a patch ever stops applying, so it had better really
+    change nothing.
     """
     out = _run(
         "import json\n"
@@ -121,7 +125,7 @@ def test_zero_patch_mode_touches_nothing() -> None:
 
 
 def test_unknown_patch_name_fails_loudly() -> None:
-    """拼错补丁名要报错，不能静默跳过。"""
+    """A misspelled patch name is an error, not a silent skip."""
     proc = subprocess.run(
         [
             str(VENV / "bin" / "python"),
@@ -139,7 +143,8 @@ def test_unknown_patch_name_fails_loudly() -> None:
 
 
 def test_shim_reports_import_failure_clearly() -> None:
-    """在错误的解释器里跑要给人话，不甩 traceback。"""
+    """Running under the wrong interpreter explains itself instead of dumping a
+    traceback."""
     proc = subprocess.run(
         [sys.executable, "-m", "bilisama_s2s_shim", "serve", "x.json"],
         env={**os.environ, "PYTHONPATH": str(SHIM)},

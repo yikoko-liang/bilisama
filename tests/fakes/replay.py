@@ -1,9 +1,11 @@
-"""JSONL 回放源。
+"""Replay live events from a JSONL fixture.
 
-放在 tests/ 而不是生产树里,它是测试设施，不是产品的一部分。
+Lives under tests/ rather than in the package: it is test infrastructure, not part
+of the product.
 
-fixture 的格式刻意贴近平台原始负载的形状，这样解析逻辑本身也被测到，
-而不是喂已经解析好的 dataclass 进去自欺欺人。
+Fixtures deliberately mirror the shape of the platform's raw payloads, so the
+parsing code gets exercised too. Feeding in pre-built dataclasses would test
+nothing but the fixture.
 """
 
 from __future__ import annotations
@@ -31,10 +33,10 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 
 
 def parse_line(raw: dict[str, Any], *, room_id: int = 0) -> LiveEvent:
-    """把 fixture 的一行变成 LiveEvent。
+    """Turn one fixture line into a LiveEvent.
 
-    这里就是「绝不因 uid==0 丢弃」落地的地方：uid 缺失或为 0 时照样构造
-    Viewer，靠 uid_hash 给出稳定身份。
+    This is where "never drop an event because uid is 0" actually happens: a
+    missing or zero uid still produces a Viewer, with uid_hash carrying identity.
     """
     kind = EventKind(raw["kind"])
     v = raw.get("viewer", {})
@@ -89,7 +91,7 @@ def parse_line(raw: dict[str, Any], *, room_id: int = 0) -> LiveEvent:
 
 
 def read_fixture(path: Path, *, room_id: int = 0) -> Iterator[tuple[float, LiveEvent]]:
-    """读 JSONL，产出 (相对开播的秒数, 事件)。"""
+    """Read a JSONL fixture as (seconds since stream start, event) pairs."""
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -100,13 +102,15 @@ def read_fixture(path: Path, *, room_id: int = 0) -> Iterator[tuple[float, LiveE
 
 @dataclass(slots=True)
 class ReplaySource:
-    """按 fixture 里的时间戳回放。
+    """Replay a fixture at its recorded timing.
 
-    speed 是倍速：1.0 是实时（看真实节奏用），大值把 20 秒窗口压到毫秒。
-    speed <= 0 表示完全不等待,断言事件顺序和解析时用这个，最确定性。
+    `speed` is a multiplier: 1.0 is real time, useful for watching the actual
+    rhythm; a large value squeezes a 20-second window into milliseconds. Zero or
+    less skips waiting entirely, which is what you want when asserting on ordering
+    or parsing.
 
-    注意 FakeClock 需要有人调 advance() 才会走，所以配 FakeClock 时要么由测试
-    驱动时间，要么用 speed=0。
+    A FakeClock only moves when someone calls advance(), so pair it either with a
+    test that drives time or with speed=0.
     """
 
     path: Path
@@ -130,7 +134,7 @@ class ReplaySource:
                     if delay:
                         await self.clock.sleep(delay)
                 else:
-                    await asyncio.sleep(0)  # 让出控制权，但不消耗时间
+                    await asyncio.sleep(0)  # yield without consuming time
                 cursor = at_s
                 await emit(event)
 
@@ -142,5 +146,5 @@ class ReplaySource:
 def fixture(name: str) -> Path:
     path = FIXTURE_DIR / name
     if not path.exists():
-        raise FileNotFoundError(f"没有这个 fixture：{path}")
+        raise FileNotFoundError(f"no such fixture: {path}")
     return path

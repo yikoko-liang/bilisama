@@ -1,11 +1,16 @@
-"""结构化日志。
+"""Structured logging.
 
-三条纪律，都是为了让「为什么小助手刚才没说话」可回答（计划 §4.12）：
+Three rules, all in service of making "why didn't the assistant say anything?"
+answerable:
 
-1. event 名是固定的字符串常量，不是格式化出来的句子。探针点的名字跟
-   bench_latency 的打点名共用一套（§2.8），一次投入两处收益。
-2. turn_id / intent_id / job_id 用 contextvars 携带，不用每个调用点手传。
-3. **默认不记弹幕正文**。那是观众的话，出问题时再开。
+1. Event names are fixed constants, not formatted sentences. `log.info(
+   "vad.speech_stopped", audio_end_ms=...)` can be grouped and counted; an
+   f-string reads fine once and then cannot. These names double as the probe
+   points for the latency benchmark, so one investment covers both.
+2. Correlation ids ride in contextvars rather than being threaded through every
+   call site.
+3. Danmaku bodies are not logged by default. That text belongs to the audience;
+   turn it on only while chasing a specific bug.
 """
 
 from __future__ import annotations
@@ -16,14 +21,14 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TextIO
 
-# 跨调用栈携带的关联 id。三个都可能为空。
+# Correlation ids, carried across the call stack. All three may be unset.
 _turn_id: ContextVar[str | None] = ContextVar("turn_id", default=None)
 _intent_id: ContextVar[str | None] = ContextVar("intent_id", default=None)
 _job_id: ContextVar[str | None] = ContextVar("job_id", default=None)
 
-# 这些 key 的值永远不进日志，不管调用方传了什么
+# Field names whose values never reach the log, whatever the caller passes.
 _REDACTED: Final[frozenset[str]] = frozenset(
     {
         "api_key",
@@ -39,7 +44,7 @@ _REDACTED: Final[frozenset[str]] = frozenset(
     }
 )
 
-# 弹幕正文这类观众内容，默认打成长度而不是原文
+# Audience-authored content. Logged as a length unless explicitly enabled.
 _VIEWER_CONTENT: Final[frozenset[str]] = frozenset({"text", "danmaku", "message", "content"})
 
 
@@ -47,7 +52,7 @@ _VIEWER_CONTENT: Final[frozenset[str]] = frozenset({"text", "danmaku", "message"
 def bind(
     *, turn_id: str | None = None, intent_id: str | None = None, job_id: str | None = None
 ) -> Iterator[None]:
-    """在这个上下文里发出的所有日志都自动带上这些 id。"""
+    """Attach correlation ids to every log line emitted inside this block."""
     tokens = []
     if turn_id is not None:
         tokens.append((_turn_id, _turn_id.set(turn_id)))
@@ -63,11 +68,19 @@ def bind(
 
 
 def _scrub(key: str, value: Any, *, log_viewer_content: bool) -> Any:
+    """Redact secrets and fold audience content down to a length.
+
+    KNOWN BROKEN, both directions — see the refactor backlog, item 2. Secrets use
+    substring matching, so `token_count` is redacted as if it were a credential.
+    Audience content uses exact equality, so `user_text` and `danmaku_text` pass
+    through verbatim. Both should match on whole words. Left as-is here because
+    this pass is not allowed to change behaviour.
+    """
     lowered = key.lower()
     if any(marker in lowered for marker in _REDACTED):
         return "***"
     if not log_viewer_content and lowered in _VIEWER_CONTENT and isinstance(value, str):
-        return f"<{len(value)}字>"
+        return f"<{len(value)} chars>"
     return value
 
 
@@ -99,10 +112,11 @@ class _JsonFormatter(logging.Formatter):
 
 
 class EventLogger:
-    """薄封装，强制 event 名 + 结构化字段的写法。
+    """Thin wrapper that forces the event-name-plus-fields style.
 
-    用法：``log.info("vad.speech_stopped", audio_end_ms=12345)``
-    不要写 ``log.info(f"speech stopped at {ms}")``,那种日志没法聚合。
+    Write ``log.info("vad.speech_stopped", audio_end_ms=12345)``, not
+    ``log.info(f"speech stopped at {ms}")`` — the second one cannot be grouped,
+    filtered or counted.
     """
 
     __slots__ = ("_logger",)
@@ -137,15 +151,15 @@ def setup(
     *,
     level: Literal["debug", "info", "warning", "error"] = "info",
     log_viewer_content: bool = False,
-    stream: Any = None,
+    stream: TextIO | None = None,
 ) -> None:
-    """装配根 logger。进程启动时调一次。
+    """Configure the root logger. Call once at process start.
 
     Args:
-        level: 根 logger 的级别。
-        log_viewer_content: 要不要把弹幕正文原样写进日志。默认关,那是观众的话，
-            排查问题时再开。
-        stream: 日志写到哪，默认 stderr。
+        level: Root log level.
+        log_viewer_content: Whether to log danmaku bodies verbatim. Off by
+            default — that text belongs to the audience.
+        stream: Where lines go. Defaults to stderr.
     """
     handler = logging.StreamHandler(stream or sys.stderr)
     handler.setFormatter(_JsonFormatter(log_viewer_content=log_viewer_content))
@@ -153,6 +167,6 @@ def setup(
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level.upper()))
-    # 第三方库的噪音压下去
+    # Quiet the third-party chatter.
     for noisy in ("websockets", "asyncio", "aiohttp", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

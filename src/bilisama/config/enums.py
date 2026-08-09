@@ -1,6 +1,6 @@
-"""配置里的纯枚举。
+"""Plain enums shared by schema and validate.
 
-schema 和 validate 都要用，放在这里避免两边互相 import。
+They live here so those two modules do not have to import each other.
 """
 
 from __future__ import annotations

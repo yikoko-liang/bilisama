@@ -1,15 +1,18 @@
-"""直播事件模型。
+"""Live event model.
 
-**这是事件枚举的唯一定义处。** 配置的 key、UI 协议的 speak 开关、fixture 文件名
-全部引用这一份，不许各写各的。
+This module owns the event taxonomy. Config keys, the speak switches in the UI
+protocol and the fixture filenames all reference `EventKind` — nobody gets to
+keep a private copy.
 
-三个相对参考实现必须修正的点，每一条不改上线即坏：
+One rule matters more than the rest: **never drop an event because uid is 0.**
+Bilibili masks uid for privacy, and a masked viewer still has a stable per-room
+identity in uid_hash. N.E.K.O drops those events outright
+(neko_live/modules/live_events/module.py:238, `if not uid or uid == "0": return`),
+which silences the entire danmaku stream the moment masking kicks in.
 
-1. **绝不因 uid == 0 丢弃**。B 站隐私掩码下 uid 就是 0，回退到 uid_hash 做身份
-   和去重，并置 is_anonymous。N.E.K.O 那句 `if not uid: return` 会把整条弹幕流静音。
-2. 现役事件是 V2（base64 protobuf），v1 只当遗留回退。
-3. 第一天就要有登录态路径,匿名能连，但每个观众都是 uid 0 加 `***`，
-   per-viewer 记忆、点名、per-uid 冷却全废，那等于废掉伴播的核心。
+That is also why a logged-in path matters from day one. Anonymous connections
+work, but every viewer arrives as uid 0 named `***`, and per-viewer memory,
+name-checking and per-uid cooldowns are most of what makes a co-host feel present.
 """
 
 from __future__ import annotations
@@ -21,14 +24,15 @@ from typing import Any
 
 
 class EventKind(StrEnum):
-    """canonical 事件枚举。加一个类型要同步改 UI 协议和配置 schema。"""
+    """The event taxonomy. Adding one means updating the UI protocol and the
+    config schema too — there is a test that fails if they drift apart."""
 
     DANMAKU = "danmaku"
     GIFT = "gift"
     SUPER_CHAT = "super_chat"
     GUARD_BUY = "guard_buy"
-    VIP_ENTER = "vip_enter"  # 舰长 / 高能榜 / 送过大额礼物的观众进房
-    ENTRY = "entry"  # 普通观众进房
+    VIP_ENTER = "vip_enter"  # member, top-spender or past gifter walking in
+    ENTRY = "entry"  # ordinary arrival, high volume
     FOLLOW = "follow"
     LIKE = "like"
     SHARE = "share"
@@ -36,12 +40,16 @@ class EventKind(StrEnum):
 
 
 class GuardLevel(StrEnum):
-    """大航海等级。数值越小越贵，所以不用 IntEnum 免得被误当成分数。"""
+    """Membership tier.
+
+    Deliberately not an IntEnum: on the wire, smaller means more expensive, and
+    an integer sitting next to a bunch of scores invites someone to compare them.
+    """
 
     NONE = "none"
-    GOVERNOR = "governor"  # 总督
+    GOVERNOR = "governor"  # 总督, the most expensive tier
     ADMIRAL = "admiral"  # 提督
-    CAPTAIN = "captain"  # 舰长
+    CAPTAIN = "captain"  # 舰长, the entry tier and by far the most common
 
     @classmethod
     def from_wire(cls, value: int) -> GuardLevel:
@@ -66,15 +74,16 @@ class Medal:
 
 @dataclass(frozen=True, slots=True)
 class Viewer:
-    """观众身份。
+    """Who sent an event.
 
-    uid 为 0 不代表"没有身份"，而是"平台掩码了"。这时 uid_hash 才是稳定标识。
-    identity 永远返回一个可用的 key，调用方不用自己判空。
+    uid == 0 does not mean "no identity", it means "the platform masked it". Use
+    `identity`, which falls back to uid_hash and never returns an empty key, so
+    callers never have to special-case masking.
     """
 
     uid: int = 0
-    uid_hash: str = ""  # info[0][7]，掩码时的稳定 per-room 标识
-    name: str = ""  # 可能是 "***"
+    uid_hash: str = ""  # stable per-room id, the only handle we get when uid is masked
+    name: str = ""  # may literally be "***" when masked
     face_url: str = ""
     user_level: int = 0
     wealth_level: int = 0
@@ -88,7 +97,7 @@ class Viewer:
 
     @property
     def identity(self) -> str:
-        """去重和记忆用的 key。掩码时回退到 hash，永远不返回空。"""
+        """Key used for dedup and memory. Never empty."""
         if self.uid:
             return f"uid:{self.uid}"
         if self.uid_hash:
@@ -105,12 +114,12 @@ class Gift:
     gift_id: int = 0
     name: str = ""
     num: int = 1
-    coin_type: str = ""  # gold | silver | ""
-    total_coin: int = 0  # 1000 金瓜子 = 1 元
+    coin_type: str = ""  # gold | silver | ""; only gold is real money
+    total_coin: int = 0  # 1000 gold == CNY 1
     combo_id: str = ""
     combo_count: int = 0
     combo_end: bool | None = None
-    aggregated_count: int = 1  # >1 表示多条轻礼物被合并了
+    aggregated_count: int = 1  # >1 once several small gifts were merged into one
 
     @property
     def is_paid(self) -> bool:
@@ -119,21 +128,23 @@ class Gift:
 
 @dataclass(frozen=True, slots=True)
 class LiveEvent:
-    """一种结构装下所有事件类型。
+    """One shape for every kind of live event.
 
-    raw 只供调试，**绝对不能进 LLM prompt**,那是未经清洗的平台原始负载。
+    `raw` is for debugging only and must never reach an LLM prompt — it is the
+    unsanitised platform payload. Call `redacted()` before anything that flows
+    toward the model.
     """
 
     kind: EventKind
-    room_id: int = 0  # 真实房间号，不是短号
+    room_id: int = 0  # the real room id, not the short vanity one
     viewer: Viewer = field(default_factory=Viewer)
-    text: str = ""  # 弹幕或 SC 正文；礼物为空
+    text: str = ""  # danmaku or super chat body; empty for gifts
     gift: Gift | None = None
-    value_cny: float = 0.0  # 统一货币口径
-    event_id: str = ""  # 去重主键
-    ts_ms: int = 0  # 平台时间戳
-    recv_at: float = 0.0  # 本地单调时钟
-    session_generation: int = 0  # 重连后作废迟到事件
+    value_cny: float = 0.0  # one currency for every paid event, so ranking is easy
+    event_id: str = ""  # primary dedup key when the platform gives us one
+    ts_ms: int = 0  # platform timestamp
+    recv_at: float = 0.0  # our monotonic clock
+    session_generation: int = 0  # bumped on reconnect so late events can be dropped
     raw: dict[str, Any] | None = None
 
     @property
@@ -142,7 +153,12 @@ class LiveEvent:
 
     @property
     def dedup_key(self) -> str:
-        """去重键。event_id 优先，没有就用身份加内容凑一个。"""
+        """Dedup key.
+
+        Falls back to identity plus content plus a one-second bucket when the
+        platform gives us no id, which is what stops a reconnect from replaying
+        the same reaction.
+        """
         if self.event_id:
             return f"{self.kind}:{self.event_id}"
         return f"{self.kind}:{self.viewer.identity}:{self.text[:32]}:{self.ts_ms // 1000}"
@@ -152,11 +168,11 @@ class LiveEvent:
         return self.value_cny > 0
 
     def redacted(self) -> LiveEvent:
-        """去掉 raw 的副本。进任何会流向模型的地方之前都过一次。
+        """A copy with `raw` stripped. Run it before anything model-facing.
 
-        用 replace 而不是手抄字段：以后给 LiveEvent 加字段时不会漏，
-        漏了的话新字段会被静默清成默认值，而这个方法的调用场景恰恰
-        是「进 prompt 之前」，丢字段没有任何报错。
+        Uses `replace` rather than listing fields by hand: forget one after adding
+        a field and it silently reverts to its default, with no error, on the exact
+        path that feeds the prompt.
         """
         if self.raw is None:
             return self
@@ -164,21 +180,23 @@ class LiveEvent:
 
 
 def cny_from_gold(total_coin: int) -> float:
-    """金瓜子换算成元。1000 金瓜子 = 1 元。"""
+    """Convert gold coins to CNY. 1000 gold == CNY 1."""
     return total_coin / 1000.0
 
 
 def is_vip_entry(viewer: Viewer, *, lifetime_gift_cny: float = 0.0) -> bool:
-    """进房该不该点名欢迎。
+    """Whether this arrival deserves a greeting by name.
 
-    舰长以上、或者历史送过钱的算 VIP,这两类进 L2 的付费车道；
-    普通观众进房归 L4，默认只上字幕不发声。
+    Members and anyone who has spent money before go into the paid lane; ordinary
+    arrivals are high-volume and stay silent by default, surfacing only in the
+    batched welcome.
 
     Args:
-        viewer: 进房的观众。
-        lifetime_gift_cny: 这个人历史累计送了多少钱，由记忆层查出来。
+        viewer: The person who just walked in.
+        lifetime_gift_cny: What they have spent across all past streams, looked up
+            from memory.
 
     Returns:
-        True 表示值得点名欢迎。
+        True when they are worth greeting individually.
     """
     return viewer.guard_level.is_patron or lifetime_gift_cny > 0

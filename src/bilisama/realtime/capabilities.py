@@ -1,13 +1,16 @@
-"""provider 能力位。
+"""Per-provider capability flags.
 
-判据很硬：**一个字段如果只有 adapter 自己读，它就不是 capability，是 adapter 的常量。**
-采样率、超时、会话上限、错误分类全部按这条降级到 adapter 里了。
+The test for belonging here is strict: **a field only the adapter reads is not a
+capability, it is an adapter constant.** Sample rates, timeouts, session limits
+and error patterns all failed that test and live in the adapters.
 
-上游 qwen-audio-agent 的 DEFAULT_CAPABILITIES 只有 3 个布尔，方言在独立的 codec
-对象里、连接细节是 provider 上的普通函数。我们照这个分,把三样东西揉回一个
-dataclass 是自造复杂度。
+qwen-audio-agent's DEFAULT_CAPABILITIES is three booleans; dialect lives in a
+separate codec object and connection details are plain functions on the provider.
+Folding all three back into one dataclass would be inventing complexity rather
+than inheriting their experience, so we keep the same split.
 
-这里的六个字段都会让**客户端或调度器长出分支**，所以它们才配叫 capability。
+Every field below makes either the client or the scheduler grow a branch. That is
+what earns it a place here.
 """
 
 from __future__ import annotations
@@ -17,53 +20,60 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True, slots=True)
 class Capabilities:
-    # 它自己出音频，还是给我们文本让我们自己合成
+    # Does it produce audio, or hand us text to synthesize ourselves?
     owns_tts: bool = True
-    # 同时只能有一个回复在生成
+    # Only one response may be generating at a time.
     single_response_slot: bool = False
-    # 旁路回复（conversation="none"）占不占那唯一的名额
+    # Whether out-of-band responses (conversation="none") consume that one slot.
     out_of_band_exempt_from_slot: bool = False
-    # 支不支持 conversation.item.truncate。不支持就只能在我们自己的记忆层截断
+    # conversation.item.truncate support. Without it, truncation after a barge-in
+    # can only happen in our own memory, never in the model's history.
     item_truncate: bool = False
-    # 会不会回 session.updated。不会的话客户端不能等这个 ack
+    # Whether session.update is acknowledged. If not, the client must not wait.
     acknowledges_session_update: bool = True
-    # 声明支持哪些判停类型。配了不支持的直接报错，不静默降级
+    # Declared turn-detection types. Configuring an undeclared one is an error,
+    # never a silent downgrade.
     turn_detection_types: frozenset[str] = field(default_factory=lambda: frozenset({"server_vad"}))
 
     @property
     def expr_tags_safe(self) -> bool:
-        """内联 <expr/> 标签安不安全,恒等于「不是它做 TTS」。
+        """Whether inline <expr/> tags survive the trip to the speaker.
 
-        存成字段就会有两处真相，所以做成派生属性。
+        Derived rather than stored: it is exactly "we own the TTS", and storing a
+        value you can compute gives you two places to keep in sync.
         """
         return not self.owns_tts
 
 
-# 三份 profile。方言不在这里，在 codec 里。
-
 S2S = Capabilities(
-    owns_tts=False,  # 我们请求纯文本，自己合成
+    owns_tts=False,  # we ask for text and synthesize it ourselves
     single_response_slot=True,
-    out_of_band_exempt_from_slot=False,  # 已核实：in_response 检查在 is_out_of_band 之前
-    item_truncate=False,  # 上游没实现
+    # Verified: handlers/response.py:202-206 checks in_response before
+    # is_out_of_band on line 208, so out-of-band still consumes the slot.
+    out_of_band_exempt_from_slot=False,
+    item_truncate=False,  # not implemented upstream
     acknowledges_session_update=True,
-    turn_detection_types=frozenset({"server_vad"}),  # semantic_vad 会被收下然后忽略
+    # Claiming semantic_vad would be lying: vad_handler.py accepts the field and
+    # then ignores it, reading only threshold and silence_duration_ms.
+    turn_detection_types=frozenset({"server_vad"}),
 )
 
 DASHSCOPE = Capabilities(
     owns_tts=True,
-    single_response_slot=False,  # 待实测，见计划 §13
-    out_of_band_exempt_from_slot=False,  # 待实测
-    item_truncate=False,  # 待实测
+    # These three are guesses until we test against the real endpoint (plan §13).
+    # They sit in a constant, which makes them look like facts — treat with care.
+    single_response_slot=False,
+    out_of_band_exempt_from_slot=False,
+    item_truncate=False,
     acknowledges_session_update=True,
     turn_detection_types=frozenset({"smart_turn", "server_vad", "semantic_vad"}),
 )
 
 OPENAI_GA = Capabilities(
     owns_tts=True,
-    single_response_slot=True,  # 只能有一个写主对话
-    out_of_band_exempt_from_slot=True,  # 旁路回复可以并发
-    item_truncate=True,  # WebSocket 下这是必需的，它支持
+    single_response_slot=True,  # only one response may write the default conversation
+    out_of_band_exempt_from_slot=True,  # out-of-band responses do run in parallel
+    item_truncate=True,  # required over WebSocket, and supported here
     acknowledges_session_update=True,
     turn_detection_types=frozenset({"server_vad", "semantic_vad"}),
 )

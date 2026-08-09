@@ -1,7 +1,7 @@
-"""命令行入口。
+"""Command line entry point.
 
-`bilisama config show` 会展开所有覆盖层并标注每个值来自哪一层,配置出问题时
-第一件事就是跑它。
+`bilisama config show` expands every overlay and marks where each value came from.
+It is the first thing to run when a config behaves unexpectedly.
 """
 
 from __future__ import annotations
@@ -19,22 +19,23 @@ from bilisama import __version__
 from bilisama.bootstrap import s2s_launch
 from bilisama.config import Chattiness, ProviderName, Settings, check, derive, load
 
-# 相对仓库根，不是相对当前工作目录 —— 在别处调用 CLI 时也能找到
+# Relative to the repo, not the working directory, so the CLI works from anywhere.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = _REPO_ROOT / "config" / "bilisama.toml"
 
 
 def _load(path: Path) -> Settings:
-    """读配置。出错要说人话，不甩 traceback。
+    """Read the config, reporting problems in plain language.
 
     Args:
-        path: TOML 配置文件路径。
+        path: Path to the TOML file.
 
     Returns:
-        校验通过的配置对象。
+        A validated settings object.
 
     Raises:
-        SystemExit: 文件读不了、TOML 语法错、或者校验没过。
+        SystemExit: File missing or unreadable, malformed TOML, or failed validation.
+            A streamer who sees a traceback just files a ticket, so we never show one.
     """
     if not path.exists():
         print(f"找不到配置文件：{path}", file=sys.stderr)
@@ -49,7 +50,7 @@ def _load(path: Path) -> Settings:
 def cmd_show(args: argparse.Namespace) -> int:
     settings = _load(args.config)
     payload: dict[str, Any] = settings.model_dump(mode="json")
-    # 派生值单独标出来，免得有人以为它们能在 TOML 里写
+    # Called out separately so nobody assumes these can be set in the TOML.
     payload["_derived"] = {
         "source": "chattiness",
         **derive(settings.interaction.chattiness).model_dump(),
@@ -94,7 +95,10 @@ def cmd_render_s2s(args: argparse.Namespace) -> int:
 
 
 def cmd_chattiness(args: argparse.Namespace) -> int:
-    """把三档话痨度派生出的阈值打出来。解释「为什么它这么话多」时用。"""
+    """Print the thresholds each chattiness level derives.
+
+    Useful when answering "why is it talking this much?".
+    """
     for level in Chattiness:
         d = derive(level)
         marker = " ←" if level.value == args.level else ""

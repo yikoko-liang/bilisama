@@ -1,36 +1,37 @@
-"""时钟抽象。
+"""Injectable clock.
 
-窗口、冷却、宽限期全是时间驱动的，测试里必须能把时间捏在手里。
-用一个 15 行的协议换掉 freezegun 在 asyncio 上要处理的事件循环时间源。
+Windows, cooldowns and grace periods are all time-driven, so tests need to hold
+time still. A 15-line protocol does that without freezegun having to patch the
+event loop's time source.
 
-单调时钟用于测量间隔，墙钟只用于写进记忆和日志的时间戳。两者不要混用：
-`monotonic()` 不受系统对时影响，`wall()` 才是人看的时间。
+Keep the two clocks apart: `monotonic()` measures intervals and is immune to
+system clock changes, `wall()` is what humans and stored records see.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 
 class Clock(Protocol):
-    """注入式时钟。生产代码只依赖这个协议。"""
+    """What production code depends on. Never `time.monotonic()` directly."""
 
     def monotonic(self) -> float:
-        """单调秒。只用来算间隔，不要格式化给人看。"""
+        """Seconds from an arbitrary origin. For intervals only — never format it."""
         ...
 
     def wall(self) -> datetime:
-        """带时区的墙钟时间。用于记忆、日志、字幕时间戳。"""
+        """Timezone-aware wall time, for memory rows, logs and subtitles."""
         ...
 
     async def sleep(self, seconds: float) -> None: ...
 
 
 class SystemClock:
-    """生产用的实现。"""
+    """The real one."""
 
     __slots__ = ()
 
@@ -45,10 +46,10 @@ class SystemClock:
 
 
 class FakeClock:
-    """测试用。时间只在 advance() 时前进。
+    """Time only moves when a test calls `advance()`.
 
-    sleep() 不会真的等待：它注册一个唤醒点，等 advance() 走到那个时刻才放行。
-    这样一个跑 20 秒窗口的测试可以在毫秒内跑完，而且是确定性的。
+    `sleep()` registers a wake-up point instead of waiting, so a test covering a
+    20-second danmaku window finishes in milliseconds and does so deterministically.
     """
 
     __slots__ = ("_now", "_waiters", "_wall")
@@ -62,8 +63,6 @@ class FakeClock:
         return self._now
 
     def wall(self) -> datetime:
-        from datetime import timedelta
-
         return self._wall + timedelta(seconds=self._now)
 
     async def sleep(self, seconds: float) -> None:
@@ -75,14 +74,18 @@ class FakeClock:
         await fut
 
     async def advance(self, seconds: float) -> None:
-        """把时间往前推，唤醒到期的 sleep，并把控制权让给事件循环。"""
+        """Move time forward, waking sleepers as their deadlines pass.
+
+        Wakes them one at a time and yields in between, so each woken coroutine
+        gets to run up to its next await before the clock moves again. Waking them
+        all at once would let a later sleeper observe a time it should not see yet.
+        """
         target = self._now + seconds
         while True:
             due = [(t, f) for t, f in self._waiters if t <= target and not f.done()]
             if not due:
                 break
-            # 按到期顺序逐个唤醒，中间让出控制权，保证被唤醒的协程能跑到下一个 await
-            due.sort(key=lambda p: p[0])
+            due.sort(key=lambda pair: pair[0])
             when, fut = due[0]
             self._now = when
             self._waiters.remove((when, fut))

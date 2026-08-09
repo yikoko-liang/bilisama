@@ -1,11 +1,13 @@
 """UI metadata, keyed by field path.
 
-搬出 schema 的理由：69 处 `json_schema_extra=ui(...)` 占了 schema 大半体积，
-而目前零消费者,Electron 设置页还没开工。搬成纯数据之后 schema 只剩类型和默认值，
-一眼能看完；以后 Electron 直接消费这一份，不用从 JSON Schema 里挖。
+This used to hang off every field as `json_schema_extra`, which accounted for most
+of the schema's bulk while having no consumer at all — the settings page is not
+built yet. As plain data the schema is back to types and defaults, and the Electron
+side can read this directly instead of digging it out of a JSON Schema.
 
-代价是多一处真相要同步，所以 tests/unit/test_ui_meta.py 有一条对账门禁：
-字段路径两边必须完全相等，数值字段必须有边界。
+The cost is a second place to keep in sync, so `tests/unit/test_ui_meta.py`
+reconciles the two: field paths must match exactly, numeric fields must be bounded.
+Labels and hints stay in Chinese — they are shown to the streamer.
 """
 
 from __future__ import annotations
@@ -17,10 +19,10 @@ from bilisama.config._ui import Audience, Reload
 
 @dataclass(frozen=True, slots=True)
 class FieldMeta:
-    """一个配置字段在设置界面上长什么样。
+    """How one config field appears in the settings UI.
 
-    控件类型默认从 schema 结构推导（布尔→开关、有界数值→滑块、枚举→下拉），
-    只有推导不出来时才显式给 widget。
+    Widget type is inferred from the schema — bool to toggle, bounded number to
+    slider, enum to select — so `widget` is only set when inference cannot do it.
     """
 
     label: str
@@ -39,7 +41,8 @@ class FieldMeta:
 
 
 UI_META: dict[str, FieldMeta] = {
-    # 回应哪些事件。渲染成一个开关矩阵，所以每项只要标签。
+    # Which events to react to. Rendered as one switch matrix, so each entry
+    # only needs a label.
     "interaction.speak.danmaku": FieldMeta(
         label="普通弹幕",
         audience=Audience.STREAMER,

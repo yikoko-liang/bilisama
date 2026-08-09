@@ -1,7 +1,8 @@
-"""带补丁启动 speech-to-speech。
+"""Start speech-to-speech with our patches applied.
 
-先打补丁再交给它自己的 CLI。补丁自检不过就直接退出,上游漂移要在启动时炸出来，
-不能变成直播中途的静默失效。
+Patches go on first, then control passes to its own CLI. A failed self-check exits
+immediately: upstream drift should surface at startup, not as a silent failure
+halfway through a stream.
 """
 
 from __future__ import annotations

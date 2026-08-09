@@ -1,19 +1,21 @@
-"""统一配置入口（计划 §7）。
+"""The one place configuration comes from.
 
-`bilisama.toml` 是唯一真相源，密钥除外（密钥在系统钥匙串）。s2s 的启动 JSON
-是从这里渲染出来的产物，不手改。
+`bilisama.toml` is the single source of truth; secrets are the exception and live
+in the OS keychain. speech-to-speech's launch JSON is rendered from here and should
+never be hand-edited.
 
-这个包按职责分成五块：
+Split by responsibility:
 
-- `_ui`      UI 元数据的定义（Audience / Reload / ui）
-- `enums`    纯枚举,schema 和 validate 都要用
-- `schema`   配置的类型与默认值
-- `ui_meta`  UI 元数据，按字段路径索引
-- `derive`   话痨度派生出的那五个阈值
-- `validate` 跨字段校验
-- `loader`   TOML 加载与覆盖层合并
+- `_ui`      vocabulary for UI metadata (Audience, Reload)
+- `enums`    plain enums shared by schema and validate
+- `schema`   types and defaults
+- `ui_meta`  UI metadata, keyed by field path
+- `derive`   the five thresholds chattiness derives
+- `validate` cross-field checks
+- `loader`   TOML loading and overlay merging
 
-对外只从这里导入,拆包是内部结构，调用方不该关心。
+Import from this module only. The split is internal structure and callers should
+not have to track it.
 """
 
 from __future__ import annotations

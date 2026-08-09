@@ -1,6 +1,8 @@
-"""UI 元数据。
+"""Vocabulary for UI metadata.
 
-Electron 的设置界面从这份 schema 生成，不手写表单。加一个配置项只改一处。
+The Electron settings page is generated from this metadata rather than hand-written,
+so adding a config option touches one place. The metadata itself lives in
+`ui_meta.UI_META`, keyed by field path.
 """
 
 from __future__ import annotations
@@ -10,7 +12,8 @@ from typing import Any
 
 
 class Audience(StrEnum):
-    """谁该看见这个字段。主播只该看到十几项，开发能看到全部。"""
+    """Who sees a field. The streamer view is a dozen or so items; developers
+    see everything."""
 
     STREAMER = "streamer"
     OPERATOR = "operator"
@@ -18,12 +21,13 @@ class Audience(StrEnum):
 
 
 class Reload(StrEnum):
-    """改了之后什么时候生效。UI 据此决定直播中要不要置灰这个控件。"""
+    """When a change takes effect. The UI greys out controls that cannot be
+    changed mid-stream."""
 
-    LIVE = "live"  # 立刻生效
-    RECONNECT = "reconnect"  # 需要重连语音链路
-    ENGINE = "engine"  # 需要重启 P3'
-    RESTART = "restart"  # 需要重启整个应用
+    LIVE = "live"  # takes effect immediately
+    RECONNECT = "reconnect"  # needs the speech link reconnected
+    ENGINE = "engine"  # needs the speech engine restarted
+    RESTART = "restart"  # needs a full app restart
 
 
 def ui(
@@ -42,10 +46,11 @@ def ui(
     wizard_step: int = 0,
     aliases: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """给字段挂 UI 元数据。
+    """Attach UI metadata to a field.
 
-    控件类型默认从 schema 结构推导（布尔→开关、有界数值→滑块、枚举→下拉），
-    只有推导不出来时才显式给 widget。
+    Widget type is inferred from the schema — bool to toggle, bounded number to
+    slider, enum to select — so `widget` is only worth setting when inference
+    cannot work it out.
     """
     return {
         "ui": {
