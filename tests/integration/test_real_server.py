@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
-import math
+import platform
 import socket
-import struct
 import subprocess
+import tempfile
+import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -63,13 +65,37 @@ requires_server = pytest.mark.skipif(
 )
 
 
-def _pcm_tone(ms: int, *, freq: float = 220.0) -> bytes:
-    """Synthetic speech-band audio. Loud enough for Silero to call it speech."""
-    n = int(_INPUT_RATE * ms / 1000)
-    return struct.pack(
-        f"<{n}h",
-        *(int(12000 * math.sin(2 * math.pi * freq * i / _INPUT_RATE)) for i in range(n)),
-    )
+@functools.cache
+def _speech(text: str) -> bytes:
+    """Real Chinese speech via the macOS synthesizer, as 16 kHz mono s16 PCM.
+
+    A pure sine tone does not work here: Silero is a speech detector and
+    (correctly) refuses to call a 220 Hz beep speech, so the whole pipeline
+    stays silent. Verified the hard way — 90 seconds of tone produced zero
+    events and the server logged cumulative audio=0.00s.
+    """
+    if platform.system() != "Darwin":
+        pytest.skip("测试语料靠 macOS 的 say 合成，这台机器不是 macOS")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        path = Path(f.name)
+    try:
+        subprocess.run(
+            [
+                "say",
+                "--file-format=WAVE",
+                "--data-format=LEI16@16000",
+                "-o",
+                str(path),
+                text,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        with wave.open(str(path), "rb") as w:
+            assert w.getframerate() == _INPUT_RATE and w.getnchannels() == 1
+            return w.readframes(w.getnframes())
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _silence(ms: int) -> bytes:
@@ -120,20 +146,49 @@ def _types(events: list[dict[str, Any]]) -> list[str]:
     return [e.get("type", "") for e in events]
 
 
-async def _speak_one_turn(ws: Any, *, ms: int = 1200) -> list[dict[str, Any]]:
-    """Speak, stop, and collect until the reply finishes."""
-    await _append(ws, _pcm_tone(ms))
+async def _speak_one_turn(ws: Any, text: str = "你好你好今天天气怎么样") -> list[dict[str, Any]]:
+    """Speak, stop, and collect until a reply COMPLETES.
+
+    Punctuation makes the synthesizer pause mid-utterance, the pause splits the
+    audio into two turns, and the second turn barge-ins the first reply — so a
+    cancelled response.done can arrive before the real one. Collect through
+    cancellations until a completed done (or the deadline).
+    """
+    await _append(ws, _speech(text))
     await _append(ws, _silence(1600))
-    return await _events_until(ws, {"response.done"}, timeout=90.0)
+    collected: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 120.0
+    while loop.time() < deadline:
+        chunk = await _events_until(ws, {"response.done"}, timeout=deadline - loop.time())
+        collected.extend(chunk)
+        dones = [e for e in chunk if e.get("type") == "response.done"]
+        if not dones:
+            break
+        if any((d.get("response") or {}).get("status") == "completed" for d in dones):
+            break
+    return collected
 
 
 @pytest.fixture
 async def ws() -> AsyncIterator[Any]:
-    async with websockets.connect(SERVER_URL, max_size=16 * 1024 * 1024) as conn:
-        # session.created is the server's hello; nothing works before it.
+    # The server runs one pipeline (num_pipelines=1), and releasing a slot lags
+    # the previous test's disconnect by a moment. Retry instead of failing on
+    # session_limit_reached so back-to-back tests do not race the release.
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while True:
+        conn = await websockets.connect(SERVER_URL, max_size=16 * 1024 * 1024)
         first = json.loads(await asyncio.wait_for(conn.recv(), timeout=10.0))
-        assert first.get("type") == "session.created", first
+        if first.get("type") == "session.created":
+            break
+        await conn.close()
+        limit = (first.get("error") or {}).get("type") == "session_limit_reached"
+        assert limit and asyncio.get_running_loop().time() < deadline, first
+        await asyncio.sleep(1.0)
+    try:
         yield conn
+    finally:
+        await conn.close()
 
 
 # ------------------------------------------------------------ 1. duplex round trip
@@ -162,50 +217,85 @@ async def test_full_duplex_round_trip(ws: Any) -> None:
 
 
 @requires_server
-async def test_in_band_injection_during_speculative_window_wedges(ws: Any) -> None:
-    """Plan section 3.3's worst finding, reproduced on the real service.
+async def test_in_band_injection_loses_the_reply_but_the_slot_recovers(ws: Any) -> None:
+    """The wedge, checked against the real service — with a finding.
 
-    An in-band response.create while the streamer's speculative turn is still
-    open gets its reply swallowed — no deltas, no response.done — and the slot
-    never frees, so later creates are refused. Until now this was only ever
-    shown on our own fake (mock_realtime.py), which proves the client handles a
-    wedge, not that the wedge exists.
+    Plan section 3.3 predicted an in-band response.create against an open
+    speculative turn would swallow the reply AND jam the slot for good ("连接
+    实际上死了"). Verified on v0.2.12-40-g68f0604: the first half is real, the
+    second is not. Every link in the chain exists, but the composition
+    self-heals — the injected create sets in_response at once, so the moment
+    the streamer resumes, the barge-in path cancels the injected reply and
+    frees the slot, and the resumed turn completes normally.
+
+    So the reason for out-of-band stands (an in-band injection loses its reply,
+    which for a paid Super Chat thank-you is a revenue bug), while the
+    doomsday half gets downgraded. The mock keeps modelling a permanent trap
+    on purpose: harsher than the real server is the safe direction — a client
+    that survives the permanent wedge also survives the transient one.
     """
-    # Open a speculative turn: speak, then stop just long enough for the soft
-    # end, keeping the reopen window open (64ms silence trips it; the window
-    # stays open for unanswered_reopen_ms of appended audio).
-    await _append(ws, _pcm_tone(900))
+    # Open a speculative turn: speak, then only a short silence so the soft end
+    # fires while the reopen window stays open.
+    await _append(ws, _speech("在吗在吗，问你个事"))
     await _append(ws, _silence(200))
     opened = await _events_until(ws, {"input_audio_buffer.speech_stopped"}, timeout=15.0)
     assert "input_audio_buffer.speech_started" in _types(opened), _types(opened)
 
     # In-band create against the open turn. Upstream stamps it with the
-    # streamer's uncommitted turn id (handlers/response.py:236-238); resuming
-    # speech bumps the revision and the reply is discarded wholesale.
+    # streamer's uncommitted turn id and answers with response.created.
     await ws.send(json.dumps({"type": "response.create", "response": {}}))
-    # Resume speech so the speculative revision moves and the injected reply
-    # goes stale.
-    await _append(ws, _pcm_tone(700))
-    await _append(ws, _silence(300))
+    created = await _events_until(ws, {"response.created"}, timeout=10.0)
+    created_events = [e for e in created if e.get("type") == "response.created"]
+    assert created_events, _types(created)
+    injected_id = (created_events[-1].get("response") or {}).get("id")
 
-    aftermath = await _events_until(ws, {"response.done"}, timeout=20.0)
-    in_band_done = [
+    # Resume speech: the revision moves, the injected reply goes stale.
+    await _append(ws, _speech("我还没说完，接着聊啊"))
+    await _append(ws, _silence(1600))
+
+    # Collect until the resumed turn's own reply completes.
+    aftermath: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 120.0
+    while loop.time() < deadline:
+        chunk = await _events_until(ws, {"response.done"}, timeout=deadline - loop.time())
+        aftermath.extend(chunk)
+        dones = [e for e in chunk if e.get("type") == "response.done"]
+        if not dones:
+            break
+        if any((d.get("response") or {}).get("status") == "completed" for d in dones):
+            break
+
+    completed = [
         e
         for e in aftermath
         if e.get("type") == "response.done"
         and (e.get("response") or {}).get("status") == "completed"
     ]
-    # The injected reply must not complete; the implicit turn may or may not
-    # answer, but the injected one is swallowed.
-    assert not in_band_done, _types(aftermath)
+    # Half one, still true: the injected reply never completes.
+    assert not any(
+        (e.get("response") or {}).get("id") == injected_id for e in completed
+    ), f"注入的回复居然完成了：{injected_id}"
+    # Half two, the finding: the slot recovers — the resumed turn answers.
+    assert completed, "主播接着说话后连回复都没有——那才是真卡死"
 
-    # The slot is wedged: a later create is refused outright.
-    await ws.send(json.dumps({"type": "response.create", "response": {}}))
-    refusal = await _events_until(ws, {"error"}, timeout=10.0)
-    errors = [e for e in refusal if e.get("type") == "error"]
-    assert errors, "第二个 response.create 没有被拒——卡死没有发生？"
-    codes = [(e.get("error") or {}).get("type") for e in errors]
-    assert "conversation_already_has_active_response" in codes, codes
+    # And a later create is admitted rather than refused.
+    await ws.send(
+        json.dumps(
+            {
+                "type": "response.create",
+                "response": {"conversation": "none", "instructions": "说一个字。"},
+            }
+        )
+    )
+    probe = await _events_until(ws, {"response.done", "error"}, timeout=60.0)
+    errors = [e for e in probe if e.get("type") == "error"]
+    slot_errors = [
+        e
+        for e in errors
+        if (e.get("error") or {}).get("type") == "conversation_already_has_active_response"
+    ]
+    assert not slot_errors, "槽位仍然占着——永久卡死在这个版本上复现了，改回原断言并更新计划"
 
 
 @requires_server
@@ -216,7 +306,7 @@ async def test_out_of_band_injection_is_immune(ws: Any) -> None:
     every speculative staleness gate treats the reply as always-latest. Same
     scenario as the wedge test, opposite outcome.
     """
-    await _append(ws, _pcm_tone(900))
+    await _append(ws, _speech("在吗在吗，问你个事"))
     await _append(ws, _silence(200))
     await _events_until(ws, {"input_audio_buffer.speech_stopped"}, timeout=15.0)
 

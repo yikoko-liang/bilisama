@@ -23,12 +23,18 @@ Turn-detection values are read from config/bilisama.toml so the test server
 runs the same tuned endpointing as the product path (1200/400/2 rather than
 upstream defaults).
 
-Usage:
+Usage (the split-tunnel case: a system proxy owns DNS, the LLM endpoint
+lives on a corp VPN — verified working 2026-08-10 with Shadowrocket untouched):
+
     source path.sh && export OPENAI_API_KEY="$api_key"
     .venv/bin/python scripts/make_official_pipe_config.py
-    HF_ENDPOINT=https://hf-mirror.com \
-      BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json \
+    export BILISAMA_RESOLVE="llmapi.bilibili.co=<真实内网IP>"   # 进程内钉死域名
+    export NO_PROXY="llmapi.bilibili.co,localhost,127.0.0.1,::1,.local"
+    export no_proxy="$NO_PROXY"    # 单独一行：httpx 优先读小写，同行双赋值拿到旧值
+    BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json \
       scripts/smoke_provider_b.sh serve
+
+Models are all cached after the first run; only the LLM call needs a network.
 """
 
 from __future__ import annotations
@@ -77,6 +83,11 @@ def main() -> int:
         "model_name": model_name,
         "responses_api_base_url": base_url,
         "responses_api_stream": True,
+        # This gateway ignores chat_template_kwargs (upstream's default lever)
+        # and honours reasoning_effort instead; verified live on 2026-08-10.
+        # Without it deepseek replies arrive as reasoning_content and the
+        # pipeline reads an empty content stream.
+        "responses_api_reasoning_effort": "none",
         "tts": "qwen3",
         "host": "127.0.0.1",
         "port": 8765,

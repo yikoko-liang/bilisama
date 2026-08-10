@@ -105,6 +105,14 @@ class Fault(StrEnum):
     # An in-band injection lands while a speculative turn is still open. The
     # create is acked and then every frame the generation produces is dropped,
     # so no response.done ever arrives and the slot stays occupied forever.
+    #
+    # Verified live on v0.2.12-40-g68f0604 (tests/integration/test_real_server.py):
+    # the real server loses the reply but SELF-HEALS — the injected create sets
+    # in_response, so the streamer's resumed speech takes the barge-in path,
+    # cancels the injected reply and frees the slot. The fake keeps the trap
+    # permanent on purpose: harsher than the real server is the one safe
+    # direction, since a client that survives the permanent wedge also survives
+    # the transient one.
     WEDGE_ON_INJECTION = "wedge_on_injection"
     # Reply hangs forever, to exercise the client-side watchdog.
     STALL_RESPONSE = "stall_response"
