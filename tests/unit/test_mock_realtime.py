@@ -210,6 +210,16 @@ def _create(**response: Any) -> str:
     return json.dumps({"type": "response.create", "response": response})
 
 
+def _create_text(**response: Any) -> str:
+    """A create that asks for text out loud, the way a correct client must.
+
+    Absent output_modalities means audio (utils/utils.py:20-23), whatever the
+    session default is — patch A never touches explicit creates.
+    """
+    response.setdefault("output_modalities", ["text"])
+    return json.dumps({"type": "response.create", "response": response})
+
+
 async def test_session_created_on_connect() -> None:
     async with MockRealtimeServer() as server, websockets.connect(server.url) as ws:
         assert (await _recv_until(ws, "session.created"))["type"] == "session.created"
@@ -231,27 +241,33 @@ async def test_ga_and_beta_use_different_event_names() -> None:
             websockets.connect(server.url) as ws,
         ):
             await _recv_until(ws, "session.created")
-            await ws.send(_create())
+            await ws.send(_create_text())
             names = _types(await _collect_through(ws, "response.done"))
             assert expected in names, f"{codec.dialect} should emit {expected}, got {names}"
 
 
-async def test_owns_tts_decides_text_vs_audio() -> None:
-    """owns_tts decides audio-plus-transcript versus plain text.
+async def test_owns_tts_decides_the_implicit_reply_modality() -> None:
+    """owns_tts is the session default, and only the implicit VAD turn obeys it.
 
-    This is the fork the hybrid TTS design hangs on.
+    This is the fork the hybrid TTS design hangs on — and it is deliberately
+    NOT what explicit creates follow: those carry their own output_modalities,
+    absent meaning audio, whatever the session default (utils/utils.py:20-23).
     """
-    async with (
-        MockRealtimeServer(
-            caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=Script(delta_chunks=1)
-        ) as server,
-        websockets.connect(server.url) as ws,
+    for caps, codec, audio_name, text_name in (
+        (caps_mod.DASHSCOPE, dia.BETA, "response.audio.delta", "response.text.delta"),
+        (caps_mod.S2S, dia.GA, "response.output_audio.delta", "response.output_text.delta"),
     ):
-        await _recv_until(ws, "session.created")
-        await ws.send(_create())
-        names = _types(await _collect_through(ws, "response.done"))
-        assert "response.audio.delta" in names
-        assert "response.text.delta" not in names
+        async with (
+            MockRealtimeServer(caps=caps, codec=codec, script=Script(delta_chunks=1)) as server,
+            websockets.connect(server.url) as ws,
+        ):
+            await _recv_until(ws, "session.created")
+            await server.emit_implicit_reply()
+            names = _types(await _collect_through(ws, "response.done"))
+            if caps.owns_tts:
+                assert audio_name in names and text_name not in names, names
+            else:
+                assert text_name in names and audio_name not in names, names
 
 
 # ------------------------------------------------------------ provider quirks
@@ -275,12 +291,12 @@ async def test_in_band_injection_during_a_speculative_turn_wedges_the_connection
         await server.speech_started()  # speculative window now open
         await _recv_until(ws, "input_audio_buffer.speech_started")
 
-        await ws.send(_create())
+        await ws.send(_create_text())
         await _recv_until(ws, "response.created")  # accepted, as upstream accepts it
         assert await _drain(ws) == [], "and then nothing: not a delta, not a done"
 
         # From here on every response.create is refused: the connection is dead.
-        await ws.send(_create())
+        await ws.send(_create_text())
         events = await _drain(ws)
         assert any(
             e.get("error", {}).get("type") == "conversation_already_has_active_response"
@@ -300,7 +316,7 @@ async def test_out_of_band_injection_is_immune_to_the_wedge() -> None:
         await server.speech_started()
         await _recv_until(ws, "input_audio_buffer.speech_started")
 
-        await ws.send(_create(conversation="none"))
+        await ws.send(_create_text(conversation="none"))
         names = _types(await _collect_through(ws, "response.done"))
         assert "response.output_text.delta" in names
         assert "response.done" in names
@@ -334,7 +350,7 @@ async def test_barge_in_reopens_the_speculative_window() -> None:
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         await _await_response_started(ws)
         spoken = await _recv_until(ws, "response.output_text.delta")
         assert spoken["delta"], "the control: with the window shut this fault swallows nothing"
@@ -342,7 +358,7 @@ async def test_barge_in_reopens_the_speculative_window() -> None:
         await server.barge_in()
         await _recv_until(ws, "input_audio_buffer.speech_started")
 
-        await ws.send(_create())
+        await ws.send(_create_text())
         await _recv_until(ws, "response.created")  # acked, exactly as upstream acks it
         assert await _drain(ws) == [], "the streamer talks again, so the injection is swallowed"
 
@@ -376,7 +392,7 @@ async def test_speculative_window_stays_open_while_the_append_stream_is_starved(
         await asyncio.sleep(script.unanswered_reopen_ms / 1000 * 1.5)
         await ws.send(_append_audio(10))  # still streaming, still starved: 90 ms
 
-        await ws.send(_create())
+        await ws.send(_create_text())
         await _recv_until(ws, "response.created")
         assert await _drain(ws) == [], "the window is still open, so the injection is swallowed"
 
@@ -407,7 +423,7 @@ async def test_speculative_window_closes_once_the_reopen_audio_has_flowed() -> N
         await _recv_until(ws, "input_audio_buffer.speech_stopped")
 
         await ws.send(_append_audio(script.unanswered_reopen_ms))  # one frame, budget met
-        await ws.send(_create())
+        await ws.send(_create_text())
         names = _types(await _collect_through(ws, "response.done"))
         assert "response.output_text.delta" in names
         assert "response.done" in names
@@ -617,7 +633,7 @@ async def test_response_create_during_the_pending_window_is_admitted() -> None:
         await _recv_until(ws, "session.created")
         await server.emit_implicit_reply(hold=True)  # response_pending, not generating
 
-        await ws.send(_create())
+        await ws.send(_create_text())
         created = await _recv_until(ws, "response.created")  # admitted, not refused
         rid = created["response"]["id"]
         await server.release_pending_reply()
@@ -653,7 +669,7 @@ async def test_the_slot_refuses_a_create_once_the_implicit_reply_has_spoken() ->
         await server.emit_implicit_reply()
         await _recv_until(ws, "response.output_text.delta")  # in_response is true now
 
-        await ws.send(_create())
+        await ws.send(_create_text())
         refusal = await _recv_until(ws, "error")
         assert refusal["error"]["type"] == "conversation_already_has_active_response"
 
@@ -672,9 +688,9 @@ async def test_ga_concurrent_replies_each_get_their_own_done() -> None:
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         first = await _recv_until(ws, "response.created")
-        await ws.send(_create(conversation="none"))
+        await ws.send(_create_text(conversation="none"))
         events = [first, *await _collect_through(ws, "response.done", count=2)]
 
         created = [e["response"]["id"] for e in events if e["type"] == "response.created"]
@@ -836,7 +852,7 @@ async def test_barge_in_sends_response_done_before_speech_started() -> None:
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         await _await_response_started(ws)
         await _recv_until(ws, "response.output_text.delta")  # interrupt it mid-reply
         await server.barge_in()
@@ -1014,7 +1030,7 @@ async def test_cancelled_text_reply_sends_no_output_text_done() -> None:
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         first = await _recv_until(ws, "response.output_text.delta")
         await server.barge_in()
         events = [first, *await _collect_through(ws, "response.done")]
@@ -1055,7 +1071,7 @@ async def test_a_reply_cancelled_after_its_last_delta_still_sends_no_text_done()
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         delta = await _recv_until(ws, "response.output_text.delta")
         assert delta["delta"] == script.reply_text, "the whole reply is out: the loop is done"
 
@@ -1076,7 +1092,7 @@ async def test_completed_text_reply_does_send_output_text_done() -> None:
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         events = await _collect_through(ws, "response.done")
 
         finals = [e for e in events if e["type"] == "response.output_text.done"]
@@ -1093,7 +1109,7 @@ async def test_stalled_response_never_completes() -> None:
         websockets.connect(server.url) as ws,
     ):
         await _recv_until(ws, "session.created")
-        await ws.send(_create())
+        await ws.send(_create_text())
         names = _types(await _drain(ws, seconds=0.2))
         assert "response.done" not in names, "a stalled reply must not finish by itself"
         assert "response.output_text.delta" not in names
@@ -1256,3 +1272,87 @@ def test_index_of_names_the_event_that_never_arrived() -> None:
     assert _index_of(["a", "b"], "b") == 1
     with pytest.raises(AssertionError, match=r"expected response\.done in the stream"):
         _index_of(["response.output_text.delta"], "response.done")
+
+
+# ------------------------------------------------------------ modality fidelity (§15.8)
+
+
+async def test_bare_explicit_create_speaks_audio_even_on_a_text_session() -> None:
+    """The restored trap: absent output_modalities means audio, session be damned.
+
+    Patch A pins the SESSION to text; an explicit create carries its own
+    parameters verbatim (handlers/response.py:223) and the default is audio
+    (utils/utils.py:20-23). A client that forgets to ask for text passes on a
+    kind fake and fails on the real server — which is exactly what happened in
+    §15.8, and why stage 1's acceptance criterion depends on this test.
+    """
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=Script(delta_chunks=1)) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create())
+        names = _types(await _collect_through(ws, "response.done"))
+        assert "response.output_audio.delta" in names, names
+        assert "response.output_text.delta" not in names, names
+
+
+async def test_text_modalities_win_on_an_audio_provider() -> None:
+    """The reverse direction: asking for text gets text, whatever the session."""
+    async with (
+        MockRealtimeServer(
+            caps=caps_mod.OPENAI_GA, codec=dia.GA, script=Script(delta_chunks=1)
+        ) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create_text())
+        names = _types(await _collect_through(ws, "response.done"))
+        assert "response.output_text.delta" in names, names
+        assert "response.output_audio.delta" not in names, names
+
+
+async def test_audio_replies_end_with_their_terminators() -> None:
+    """transcript.done then audio.done, before response.done — and only when completed."""
+    async with (
+        MockRealtimeServer(caps=caps_mod.OPENAI_GA, script=Script(delta_chunks=1)) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_create())
+        names = _types(await _collect_through(ws, "response.done"))
+        transcript_done = _index_of(names, "response.output_audio_transcript.done")
+        audio_done = _index_of(names, "response.output_audio.done")
+        done = _index_of(names, "response.done")
+        assert transcript_done < audio_done < done, names
+
+
+async def test_speech_events_carry_the_audio_clock_and_item_id() -> None:
+    """audio_start_ms / audio_end_ms ride the append clock; the pair shares an item.
+
+    §2.8 nominates audio_end_ms as the ground-truth timebase for the latency
+    bench, so the fake must supply it the way the real server does — computed
+    from appended samples, not from the wall clock.
+    """
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await server.speech_started()
+        started = await _recv_until(ws, "input_audio_buffer.speech_started")
+        await ws.send(_append_audio(800))
+        # The append rides the socket while speech_stopped is a direct call, so
+        # wait until the server has banked the frame before stopping the turn.
+        await _await_recorded(server, "input_audio_buffer.append", 1)
+        await server.speech_stopped()
+        stopped = await _recv_until(ws, "input_audio_buffer.speech_stopped")
+
+        assert started["item_id"] == stopped["item_id"]
+        assert started["audio_start_ms"] == 0
+        assert stopped["audio_end_ms"] == 800
+        # A second turn keeps counting on the same clock and mints a new item.
+        await server.barge_in()
+        second = await _recv_until(ws, "input_audio_buffer.speech_started")
+        assert second["item_id"] != started["item_id"]
+        assert second["audio_start_ms"] == 800

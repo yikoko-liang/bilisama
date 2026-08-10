@@ -165,6 +165,13 @@ class _Reply:
     """
 
     holds_slot: bool
+    # Decided at creation and never re-read from caps: session defaults drive
+    # only the implicit VAD turn, while an explicit create is exactly what the
+    # client sent — absent output_modalities means AUDIO (utils/utils.py:20-23,
+    # the default-is-audio rule), no matter what the session was put into.
+    # Getting this wrong the kind way is how the fake certified clients that
+    # forget to ask for text (the §15.8 finding).
+    text_reply: bool = False
     # Upstream's st.in_response. Only the server's own VAD turn is ever accepted
     # without it: that one is merely response_pending from the moment its request
     # is queued (service.py:474, :506) until its first token flips in_response
@@ -239,6 +246,10 @@ class MockRealtimeServer:
         self._speculative_open = False
         self._appended_since_stop_ms: int | None = None
         self._audio_buffer_has_data = False
+        # Total appended milliseconds: the audio clock §2.8 nominates as the
+        # ground-truth timebase (s2s computes audio_end_ms from sample counts).
+        self._audio_ms_total = 0
+        self._user_item_seq = 0
         self._tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------ lifecycle
@@ -263,8 +274,10 @@ class MockRealtimeServer:
 
     # ------------------------------------------------------------ response bookkeeping
 
-    def _start_reply(self, *, holds_slot: bool, started: bool = True) -> _Reply:
-        reply = _Reply(holds_slot=holds_slot, started=started)
+    def _start_reply(
+        self, *, holds_slot: bool, started: bool = True, text_reply: bool = False
+    ) -> _Reply:
+        reply = _Reply(holds_slot=holds_slot, started=started, text_reply=text_reply)
         self._replies.append(reply)
         return reply
 
@@ -352,7 +365,12 @@ class MockRealtimeServer:
         """
         self._speculative_open = True
         self._appended_since_stop_ms = None
-        await self.send(dia.ServerEvent.SPEECH_STARTED)
+        self._user_item_seq += 1
+        await self.send(
+            dia.ServerEvent.SPEECH_STARTED,
+            audio_start_ms=self._audio_ms_total,
+            item_id=f"item_user_{self._user_item_seq}",
+        )
 
     async def speech_stopped(self) -> None:
         """Streamer stops talking. The speculative window stays open a moment longer.
@@ -366,7 +384,11 @@ class MockRealtimeServer:
         # because _speculative_open is already false.
         if self._speculative_open:
             self._appended_since_stop_ms = 0
-        await self.send(dia.ServerEvent.SPEECH_STOPPED)
+        await self.send(
+            dia.ServerEvent.SPEECH_STOPPED,
+            audio_end_ms=self._audio_ms_total,
+            item_id=f"item_user_{self._user_item_seq}",
+        )
 
     async def barge_in(self) -> None:
         """Simulate the streamer talking over the assistant.
@@ -399,7 +421,12 @@ class MockRealtimeServer:
         # turn that is still speculative. Same bookkeeping as speech_started.
         self._speculative_open = True
         self._appended_since_stop_ms = None
-        await self.send(dia.ServerEvent.SPEECH_STARTED)
+        self._user_item_seq += 1
+        await self.send(
+            dia.ServerEvent.SPEECH_STARTED,
+            audio_start_ms=self._audio_ms_total,
+            item_id=f"item_user_{self._user_item_seq}",
+        )
 
     async def emit_implicit_reply(self, *, hold: bool = False) -> None:
         """The turn the server's own VAD starts. Sends no response.created.
@@ -410,7 +437,9 @@ class MockRealtimeServer:
                 observe the pending state, where response.cancel does nothing and
                 the single-response guard is missing.
         """
-        reply = self._start_reply(holds_slot=True, started=False)
+        # The implicit turn follows the session default: the S2S profile's
+        # owns_tts=False stands in for patch A pinning the session to text.
+        reply = self._start_reply(holds_slot=True, started=False, text_reply=not self.caps.owns_tts)
         if not hold:
             reply.first_token.set()
         task = asyncio.create_task(self._run_response(reply, implicit=True))
@@ -505,6 +534,7 @@ class MockRealtimeServer:
             # Flipping on any audio errs toward commit being silently accepted,
             # which is the harder case for a client, never the easier one.
             self._audio_buffer_has_data = True
+        self._audio_ms_total += len(pcm) // _INPUT_BYTES_PER_MS
         if self._appended_since_stop_ms is None:
             return
         self._appended_since_stop_ms += len(pcm) // _INPUT_BYTES_PER_MS
@@ -568,7 +598,12 @@ class MockRealtimeServer:
         # handle_response_create returns a ResponseCreatedEvent (handlers/response.py:243-247)
         # and the router sends it before anything downstream can go wrong
         # (websocket_router.py:395-401).
-        reply = self._start_reply(holds_slot=holds_slot)
+        # Explicit creates carry their own parameters verbatim
+        # (handlers/response.py:223): output_modalities==["text"] means text,
+        # anything else — including absent — means audio. Patch A only fills
+        # the default for the implicit turn; it does not touch this path.
+        modalities = (event.get("response") or {}).get("output_modalities")
+        reply = self._start_reply(holds_slot=holds_slot, text_reply=modalities == ["text"])
         rid = self._ensure_response_id(reply)
         await self.send(dia.ServerEvent.RESPONSE_CREATED, response={"id": rid})
 
@@ -635,7 +670,7 @@ class MockRealtimeServer:
             # on every assistant event, so a reply that outlives the id it was
             # sharing starts stamping a new one mid-stream.
             rid = self._ensure_response_id(reply)
-            if self.caps.owns_tts:
+            if not reply.text_reply:
                 await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
                 await self.send(
                     dia.ServerEvent.AUDIO_DELTA,
@@ -655,10 +690,16 @@ class MockRealtimeServer:
         # treats it as the terminator that the reply ended cleanly.
         if not reply.is_open:
             return
-        if not self.caps.owns_tts:
+        if reply.text_reply:
             await self.send(
                 dia.ServerEvent.TEXT_DONE, response_id=self._ensure_response_id(reply), text=text
             )
+        else:
+            # Audio streams have terminators too; without them a client cannot
+            # tell "the reply finished" from "the network went quiet".
+            rid = self._ensure_response_id(reply)
+            await self.send(dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=text)
+            await self.send(dia.ServerEvent.AUDIO_DONE, response_id=rid)
         await self._finish_response(reply, status="completed")
 
     def _close_reply(self, reply: _Reply) -> None:
