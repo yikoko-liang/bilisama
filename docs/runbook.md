@@ -46,6 +46,10 @@ export no_proxy="$NO_PROXY"
 真实内网 IP 在能访问该域名的机器上 `nslookup` 一次即得。端口开了不等于模型加载完，
 等日志里出现 `Uvicorn running` 才算就绪（全冷启动约 40 秒）。
 
+serve 默认**零补丁**（官方管线自带 TTS，语音回复出声）。要测产品路径（隐式回复出纯文本、
+音频归我们阶段 4 的 TTS）时显式开补丁：`BILISAMA_S2S_PATCHES=text_modality,raw_instructions`。
+2026-08-11 之前脚本吃 shim 的补丁全开默认值，隐式回复被钉成纯文本，表现为「说话没人声回」。
+
 **免 VPN 变体**（2026-08-11 验证）：LLM 段不走内网 deepseek，改走阿里 compatible-mode
 的 qwen3.7-flash——渲染配置前把三个环境变量换掉即可，其余照旧，不需要 EasyConnect
 和 no_proxy 那三行：
@@ -91,9 +95,9 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 
 director 档里的动作：
 
-- **说话**照常聊（判停、打断都是真栈）。s2s 上的回复音频来自官方管线自带的 TTS
-  （adapter 以 `text_replies=False` 请求音频——正式产品是纯文本＋我们自己的 TTS，
-  那是阶段 4；在那之前 text 模式会整场无声）。
+- **说话**照常聊（判停、打断都是真栈）。s2s 上的回复音频来自官方管线自带的 TTS：
+  serve 现在默认零补丁（见上一节），adapter 也以 `text_replies=False` 请求音频。
+  正式产品是纯文本＋我们自己的 TTS，那是阶段 4 的事。
 - **终端打字＝模拟观众**：直接打字是弹幕；`阿强:内容` 指定观众名（同名同记忆行）；
   `/sc 阿强 30 主播玩什么` 是 SC；`/gift 老板 52` 是礼物。
 - 屏幕上会打出调度终局（`[调度] …` 为什么没说话）、上下文推送（`[上下文] N 字`）、

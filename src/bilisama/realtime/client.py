@@ -58,6 +58,9 @@ class ReplyRecord:
     rid: str | None = None  # learned from response.created, or first frame
     ours: bool = False
     text: list[str] = field(default_factory=list)
+    # True once streamed text deltas arrived: transcript.done fragments are
+    # then redundant (the beta dialect sends both) and must not double the text.
+    saw_stream_text: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -222,6 +225,7 @@ class RealtimeClient:
         elif kind in (dia.ServerEvent.TEXT_DELTA, dia.ServerEvent.TRANSCRIPT_DELTA):
             record = self._record_for(payload)
             if record is not None and not record.handle.stale:
+                record.saw_stream_text = True
                 delta = str(payload.get("delta") or "")
                 record.text.append(delta)
                 if len(record.text) == 1:
@@ -247,20 +251,21 @@ class RealtimeClient:
                     )
                 )
         elif kind is dia.ServerEvent.TRANSCRIPT_DONE:
-            # Audio replies on s2s carry their text as ONE done event with the
-            # full transcript and no deltas (upstream handlers/response.py:362,
-            # the response_wants_audio branch). Fold it into the record so
-            # ReplyDone.text is never empty for a spoken reply. The emptiness
-            # check keeps dialects that DO stream transcript deltas (DashScope)
-            # from getting the text twice.
+            # Audio replies on s2s carry their text as transcript.done events —
+            # one PER LLM CHUNK, never as deltas (upstream handlers/response.py
+            # :362, the response_wants_audio branch; probed live: seven
+            # fragments for one reply). Fold every fragment in, so
+            # ReplyDone.text carries the whole utterance. saw_stream_text keeps
+            # dialects that DO stream deltas (DashScope sends deltas plus one
+            # final done) from getting the text twice.
             record = self._record_for(payload)
-            if record is not None and not record.handle.stale:
-                transcript = str(payload.get("transcript") or "")
-                if transcript and not "".join(record.text):
+            if record is not None and not record.handle.stale and not record.saw_stream_text:
+                fragment = str(payload.get("transcript") or "")
+                if fragment:
                     if not record.text:
                         emit(link.ReplyStarted(record.handle))
-                    record.text.append(transcript)
-                    emit(link.ReplyTextDelta(record.handle, transcript))
+                    record.text.append(fragment)
+                    emit(link.ReplyTextDelta(record.handle, fragment))
         elif kind is dia.ServerEvent.RESPONSE_DONE:
             self._on_done(payload)
         elif kind is dia.ServerEvent.USER_TRANSCRIPT_DELTA:

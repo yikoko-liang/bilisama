@@ -62,6 +62,12 @@ cmd_serve() {
   [ -f "$CONFIG" ] || die "没有启动配置。先跑：bilisama config render-s2s"
   [ -x "$VENV/bin/python" ] || die "还没装。先跑：$0 install"
   log "起服务，配置：$CONFIG"
+  # 官方三段管线按计划 §3.4 就是零补丁模式：它自带 TTS，隐式回复要出声。
+  # 之前这里吃了 shim 的默认值（补丁全开），补丁 A 把隐式回复钉成纯文本，
+  # 整场语音对话就哑了。要测产品路径（我们自己的 TTS）时显式设：
+  #   BILISAMA_S2S_PATCHES=text_modality,raw_instructions
+  export BILISAMA_S2S_PATCHES="${BILISAMA_S2S_PATCHES-}"
+  log "补丁：${BILISAMA_S2S_PATCHES:-零补丁（官方管线默认）}"
   # 补丁走 PYTHONPATH 注入，不改上游一个字节
   PYTHONPATH="$PWD/tools/s2s_shim" \
     "$VENV/bin/python" -m bilisama_s2s_shim serve "$CONFIG" &

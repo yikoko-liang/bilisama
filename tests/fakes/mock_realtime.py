@@ -671,15 +671,19 @@ class MockRealtimeServer:
             # sharing starts stamping a new one mid-stream.
             rid = self._ensure_response_id(reply)
             if not reply.text_reply:
-                # Transcript DELTAS only exist on the beta dialect (DashScope
-                # streams response.audio_transcript.delta — probed live). The
-                # GA-speaking s2s server sends NO deltas for an audio reply:
-                # its text arrives as ONE output_audio_transcript.done below
-                # (handlers/response.py:362). Streaming deltas here on GA made
-                # the fake kinder than the real server, which hid a client that
-                # dropped the done event — the muted-voice-box bug.
+                # Dialects carry an audio reply's text differently, and the fake
+                # must not be kinder than either real server (that hid the
+                # muted-voice-box bug once). Beta (DashScope, probed live)
+                # streams response.audio_transcript.delta per piece plus a final
+                # all-text done. GA (s2s) streams NOTHING per piece — its text
+                # arrives as one output_audio_transcript.done PER LLM CHUNK
+                # (handlers/response.py:362), sent right here.
                 if self.codec.dialect is dia.Dialect.BETA:
                     await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
+                else:
+                    await self.send(
+                        dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=piece
+                    )
                 await self.send(
                     dia.ServerEvent.AUDIO_DELTA,
                     response_id=rid,
@@ -704,9 +708,12 @@ class MockRealtimeServer:
             )
         else:
             # Audio streams have terminators too; without them a client cannot
-            # tell "the reply finished" from "the network went quiet".
+            # tell "the reply finished" from "the network went quiet". Only the
+            # beta dialect closes with an all-text transcript done (after its
+            # deltas); GA already delivered the text chunk by chunk above.
             rid = self._ensure_response_id(reply)
-            await self.send(dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=text)
+            if self.codec.dialect is dia.Dialect.BETA:
+                await self.send(dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=text)
             await self.send(dia.ServerEvent.AUDIO_DONE, response_id=rid)
         await self._finish_response(reply, status="completed")
 
