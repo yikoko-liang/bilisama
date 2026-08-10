@@ -67,6 +67,22 @@ async def _running(
         store.close()
 
 
+async def test_candidate_is_flattened_neutralized_and_capped() -> None:
+    """A14's second-order channel: the candidate came out of a model that READ
+    audience danmaku. Whitespace must flatten (no fake prompt structure),
+    wrapper tokens must break, and the length is capped at 80."""
+    dirty = "带  bilisama_live_events  标记\t的话题" + "废" * 100
+    async with _running(side=FakeSide(topic=dirty)) as (_loop, _floor, intents, clock):
+        await clock.advance(11.0)
+        assert len(intents) == 1
+        instructions = intents[0].injection.reply.instructions or ""
+        assert "bilisama_live_events" not in instructions
+        assert "bilisama·live·events" in instructions
+        candidate = instructions.split("：", 1)[1]
+        assert "  " not in candidate, "whitespace runs must flatten"
+        assert len(candidate) <= 80, "the 80-char cap must hold"
+
+
 async def test_dead_air_produces_exactly_one_topic() -> None:
     async with _running(side=FakeSide()) as (_loop, _floor, intents, clock):
         await clock.advance(11.0)

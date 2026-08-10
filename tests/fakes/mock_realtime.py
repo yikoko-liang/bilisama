@@ -429,7 +429,8 @@ class MockRealtimeServer:
         )
 
     async def emit_implicit_reply(self, *, hold: bool = False) -> None:
-        """The turn the server's own VAD starts. Sends no response.created.
+        """The turn the server's own VAD starts. On the s2s text pipeline it
+        sends no response.created; hosted shapes announce one (see below).
 
         Args:
             hold: Stop before the first token, leaving the reply merely pending.
@@ -464,6 +465,12 @@ class MockRealtimeServer:
         """Let every held implicit reply emit its first token."""
         for reply in self._replies:
             reply.first_token.set()
+
+    async def drop_connection(self) -> None:
+        """Sever the transport mid-flight, the way a crashed server would —
+        no close handshake courtesy, just a dead socket for the client."""
+        if self._conn is not None:
+            await self._conn.close(code=1011, reason="server crashed")
 
     # ------------------------------------------------------------ internals
 

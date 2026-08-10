@@ -187,6 +187,53 @@ async def test_supervised_source_restarts_with_backoff(tmp_path: Path) -> None:
     assert supervised.gave_up is False
 
 
+class _HiccupsAfterAnHour:
+    """Burns the whole restart budget, then runs healthily past HEALTHY_RUN_S,
+    crashes once more, and finally serves. Only a replenished budget survives."""
+
+    name = "hiccup"
+
+    def __init__(self, clock: FakeClock) -> None:
+        self._clock = clock
+        self.attempts = 0
+
+    async def start(self, emit: object) -> None:
+        self.attempts += 1
+        if self.attempts <= 3:
+            raise RuntimeError(f"启动即炸第 {self.attempts} 次")
+        if self.attempts == 4:
+            await self._clock.sleep(SupervisedSource.HEALTHY_RUN_S + 1.0)
+            raise RuntimeError("跑了一个多小时后打了个嗝")
+        await emit(_event("活过来了"))  # type: ignore[operator]
+
+    async def stop(self) -> None:
+        return None
+
+
+async def test_a_healthy_run_refills_the_restart_budget(tmp_path: Path) -> None:
+    """D2: the cap is for crash LOOPS. A source that hiccups once a day must
+    not die permanently on day four just because its lifetime total hit the
+    cap — a run past HEALTHY_RUN_S resets the count."""
+    clock = FakeClock()
+    source = _HiccupsAfterAnHour(clock)
+    supervised = SupervisedSource(source, clock, max_restarts=3, backoff_s=1.0)
+    got: list[LiveEvent] = []
+
+    async def sink(event: LiveEvent) -> None:
+        got.append(event)
+
+    task = asyncio.create_task(supervised.start(sink))
+    for step in (1.0, 2.0, 4.0):  # the three crash-loop backoffs
+        await clock.advance(step)
+    await clock.advance(SupervisedSource.HEALTHY_RUN_S + 1.0)  # the healthy run
+    await clock.advance(1.0)  # backoff after the post-healthy hiccup
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert source.attempts == 5
+    assert [e.text for e in got] == ["活过来了"]
+    assert supervised.gave_up is False, "the healthy run must have refilled the budget"
+
+
 async def test_a_gave_up_source_does_not_kill_its_siblings(tmp_path: Path) -> None:
     """The whole point of backlog item 9: merge survives a dead source."""
     clock = FakeClock()

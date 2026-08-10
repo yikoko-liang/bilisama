@@ -291,6 +291,100 @@ async def test_implicit_reply_is_booked_from_its_first_frame() -> None:
             await linkobj.aclose()
 
 
+async def test_hosted_implicit_created_books_the_slot() -> None:
+    """Hosted endpoints ANNOUNCE their VAD replies with response.created —
+    the client must book the slot on that frame, so an intent arriving during
+    the implicit turn queues instead of drawing the server's slot error (C8).
+    Modelling every provider as silent hid this for a whole stage.
+
+    DashScope only: on the OpenAI GA shape out-of-band replies are exempt from
+    the slot, so there is nothing to queue behind — the exemption is its own
+    test elsewhere."""
+    script = Script(delta_chunks=2, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=script) as server:
+        linkobj: AnyLink = HostedLink(server.url, ProviderName.DASHSCOPE)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            # Held implicit: created goes out, no token yet — the exact window
+            # where an unbooked slot would let a request through to its death.
+            await server.emit_implicit_reply(hold=True)
+            # Let the created frame land before requesting; a request racing
+            # the frame itself is the documented FIFO-pairing residual (C1),
+            # not what this test pins.
+            await asyncio.sleep(0.05)
+            request = asyncio.create_task(
+                linkobj.request_reply(link.ReplySpec(instructions="接一句"))
+            )
+            await asyncio.sleep(0.1)
+            assert not request.done(), "the request must queue behind the announced implicit turn"
+            await server.release_pending_reply()
+            first = await _next_event(events, link.ReplyDone)
+            assert isinstance(first, link.ReplyDone)
+            await request
+            second = await _next_event(events, link.ReplyDone)
+            assert isinstance(second, link.ReplyDone)
+            assert second.status is link.ReplyStatus.COMPLETED
+            assert server.recorded.count("error") == 0, "the slot guard fired — client sent early"
+        finally:
+            await linkobj.aclose()
+
+
+async def test_late_frames_for_a_settled_reply_stay_buried() -> None:
+    """The tombstone: a delta straggling in AFTER its reply settled must not
+    re-book the slot as a phantom implicit turn (C6). Without the graveyard,
+    rule 4's first-frame booking resurrects every settled rid."""
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script(delta_chunks=1)) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            await linkobj.request_reply(link.ReplySpec(instructions="说一句"))
+            done = await _next_event(events, link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+            # The same rid, one frame too late. The fake clears its books on
+            # done, so replay the first minted id — deterministic "resp_1"
+            # (_mint_response_id counts from 1).
+            await server.send(dia.ServerEvent.TEXT_DELTA, response_id="resp_1", delta="迟到的字")
+            # A fresh request must find the slot free and complete; along the
+            # way, no event from the ghost may surface.
+            await linkobj.request_reply(link.ReplySpec(instructions="再说一句"))
+            while True:
+                event = await _next_event(events, (link.ReplyTextDelta, link.ReplyDone))
+                if isinstance(event, link.ReplyTextDelta):
+                    assert "迟到的字" not in event.text, "a buried reply's frame surfaced"
+                    continue
+                assert isinstance(event, link.ReplyDone)
+                assert event.status is link.ReplyStatus.COMPLETED
+                break
+        finally:
+            await linkobj.aclose()
+
+
+async def test_connection_loss_settles_records_and_says_so() -> None:
+    """A dead transport mid-reply: every open record fails, the slot frees,
+    and the consumer hears connection_lost — not a silent hang."""
+    script = Script(delta_chunks=8, delta_interval_s=0.1)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            handle = await linkobj.request_reply(link.ReplySpec(instructions="讲个长故事"))
+            events = linkobj.events()
+            await _next_event(events, link.ReplyTextDelta)
+            await server.drop_connection()
+            done = await _next_event(events, link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.FAILED
+            assert done.handle is handle
+            assert handle.stale
+            error = await _next_event(events, link.LinkError)
+            assert isinstance(error, link.LinkError)
+            assert error.code == "connection_lost"
+        finally:
+            await linkobj.aclose()
+
+
 async def test_deferred_item_ack_is_not_retried() -> None:
     """During a reply the server defers item acks and flushes them later; the
     adapter sends each item exactly once — retrying is how duplicates happen."""

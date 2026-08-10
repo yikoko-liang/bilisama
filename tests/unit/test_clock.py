@@ -150,6 +150,20 @@ async def test_advance_refuses_to_move_time_backwards() -> None:
     assert clock.monotonic() == 10.0
 
 
+async def test_concurrent_advance_is_refused() -> None:
+    """Two drivers would each write their own target at the end — the later
+    finisher rewinds time past the first one's (D9). The second call must be
+    refused loudly, not interleaved quietly."""
+    clock = FakeClock()
+    sleeper = asyncio.create_task(clock.sleep(5.0))
+    driver = asyncio.create_task(clock.advance(10.0))
+    await asyncio.sleep(0)  # driver is now inside advance(), mid-settle
+    with pytest.raises(RuntimeError, match="并发"):
+        await clock.advance(1.0)
+    await driver
+    await sleeper
+
+
 async def test_advance_of_zero_is_allowed_and_moves_nothing() -> None:
     """Boundary either side of the guard: zero is not negative."""
     clock = FakeClock(start=10.0)

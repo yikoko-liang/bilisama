@@ -78,6 +78,23 @@ def _make(
     return distiller, store, persona, side
 
 
+class BlockingSide:
+    """Parks inside complete() until released — the window every race lives in."""
+
+    def __init__(self, reply: str = "迟到的摘要") -> None:
+        self.gate = asyncio.Event()
+        self.reply = reply
+        self.calls = 0
+
+    async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+        self.calls += 1
+        await self.gate.wait()
+        return self.reply
+
+    async def aclose(self) -> None:
+        return None
+
+
 # ------------------------------------------------------------ rolling summary
 
 
@@ -97,6 +114,49 @@ async def test_fingerprint_skips_an_unchanged_input(tmp_path: Path) -> None:
     assert not second.ran
     assert second.reason == "fingerprint_unchanged"
     assert len(side.calls) == 1
+
+
+async def test_rolling_summary_crossing_streams_writes_nothing(tmp_path: Path) -> None:
+    """The inflight race (B-series): the side call comes back after the stream
+    has already rolled over — its summary belongs to a world that no longer
+    exists and must not be written into the new stream's facts."""
+    distiller, store, _persona, _side = _make(tmp_path)
+    side = BlockingSide()
+    distiller._side = side
+    task = asyncio.create_task(distiller.rolling_summary())
+    for _ in range(50):
+        if side.calls:
+            break
+        await asyncio.sleep(0)
+    assert side.calls == 1, "the distill must be parked inside the side call"
+    old_sid = store.stream_id
+    store.end_stream()
+    store.begin_stream()
+    side.gate.set()
+    report = await task
+    assert not report.ran
+    assert report.reason == "stream_moved_on"
+    assert not store.facts("stream", str(old_sid)), "the dead stream must stay unwritten"
+    assert not store.facts("stream", str(store.stream_id)), "the new stream too"
+
+
+async def test_end_of_stream_runs_once_per_stream(tmp_path: Path) -> None:
+    """The once-latch: a Ctrl-C plus a finally block means end_of_stream can be
+    called twice for the same stream — the second must be a no-op, or growth
+    entries land twice and budgets lie."""
+    distiller, _store, persona, side = _make(
+        tmp_path,
+        replies=[_batch_reply(), _batch_reply()],
+        growth=GrowthSwitches(relationship="collect", voice="collect"),
+    )
+    first = await distiller.end_of_stream()
+    assert first.ran
+    grown = persona.growth_entries("relationship")
+    second = await distiller.end_of_stream()
+    assert not second.ran
+    assert second.reason == "already_ran"
+    assert len(side.calls) == 1, "the second call must not spend a token"
+    assert persona.growth_entries("relationship") == grown, "no double-applied growth"
 
 
 async def test_note_event_fires_at_the_threshold_not_before(tmp_path: Path) -> None:
