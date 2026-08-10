@@ -46,7 +46,9 @@ export no_proxy="$NO_PROXY"
 真实内网 IP 在能访问该域名的机器上 `nslookup` 一次即得。端口开了不等于模型加载完，
 等日志里出现 `Uvicorn running` 才算就绪（全冷启动约 40 秒）。
 
-serve 默认**零补丁**（官方管线自带 TTS，语音回复出声）。要测产品路径（隐式回复出纯文本、
+serve 默认**零补丁**（官方管线自带 TTS，语音回复出声）。TTS 音色默认 `vivian`，
+换音色用环境变量 `tts_speaker` 后重渲染配置；这套 CustomVoice 模型支持：
+serena、vivian、uncle_fu、ryan、aiden、ono_anna、sohee、eric（四川话）、dylan（北京话）。要测产品路径（隐式回复出纯文本、
 音频归我们阶段 4 的 TTS）时显式开补丁：`BILISAMA_S2S_PATCHES=text_modality,raw_instructions`。
 2026-08-11 之前脚本吃 shim 的补丁全开默认值，隐式回复被钉成纯文本，表现为「说话没人声回」。
 
@@ -221,4 +223,5 @@ scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测
 | 对话没反应、服务端 audio=0.00s | 喂的不是真人声（正弦波 Silero 不认）；或麦克风权限没给终端 |
 | NLTK LookupError | 它的下载器把假 IP 网段当 SSRF 拦了；用 curl 手动下数据包解压到 venv 的 `nltk_data/` |
 | director 刷 `proactive.refresh_failed` | 侧路模型连不上。回退顺序：`[speech.side]` 配置 → path.sh 的阿里 compatible-mode（免 VPN，默认 qwen3.7-flash）→ 内网 LLM（要 EasyConnect + no_proxy 那套）。启动时看 `[侧路]` 那行用的是哪个 |
+| TTS 音色不正常 / 每次回复换嗓子 | CustomVoice 模型没拿到 speaker 就无条件生成（同句实测基频漂 36 Hz）。配置生成脚本已默认钉 `vivian`；重渲染配置并重启服务器即可，换音色设 `tts_speaker` |
 | director 打字「没反应」 | 按顺序看：有没有 `[已注入 弹幕]` 回显（没有＝输入没进来）→ 有没有 `[调度] danmaku → …` 终局（`expired@queued`＝排队超 20 秒 TTL，多半是外放回声让闸门常闭——戴耳机或 `--mute-while-speaking`；每答完一句还有 12 秒话痨度冷却，medium 档） |
