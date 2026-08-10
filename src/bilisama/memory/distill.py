@@ -64,11 +64,20 @@ _BATCH_TEMPLATE = (
     "最近事件：\n{events}\n\n伴播自己说过的话（完整播出、没被打断的）：\n{assistant_lines}"
 )
 
-_GROWTH_RULES = (
+_RELATIONSHIP_RULE = (
     "relationship：从材料里挑 0~3 条值得长期记住的共同经历（外号、约定、名场面），一句一条。\n"
-    "voice：从「伴播自己说过的话」里挑 0~2 句最有个人味道的当口癖样本，必须原句照抄。\n"
 )
-_NO_GROWTH_RULES = "relationship 和 voice 固定给空数组。\n"
+_VOICE_RULE = "voice：从「伴播自己说过的话」里挑 0~2 句最有个人味道的当口癖样本，必须原句照抄。\n"
+
+
+def _log_task_failure(task: asyncio.Task[Any]) -> None:
+    """Fire-and-forget must not mean fail-and-vanish (B1): a crashed rolling
+    task logs instead of waiting for the garbage collector to mumble."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("distill.rolling_crashed", error=str(exc)[:200])
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +95,8 @@ class _State:
     fingerprint: str = ""
     assistant_lines: list[str] = field(default_factory=list)
     inflight: asyncio.Task[DistillReport] | None = None
+    # Stream ids whose end-of-stream batch already ran: the once-latch (B13).
+    batch_done: set[int] = field(default_factory=set)
 
 
 class Distiller:
@@ -128,6 +139,7 @@ class Distiller:
             return  # one call at a time; the counter keeps accruing
         self._state.events_since = 0
         task = asyncio.create_task(self.rolling_summary(), name="distill:rolling")
+        task.add_done_callback(_log_task_failure)
         self._state.inflight = task
 
     def note_assistant_line(self, text: str) -> None:
@@ -145,6 +157,7 @@ class Distiller:
         """Rewrite the ≤200-char session progress from recent events."""
         if self._side is None:
             return DistillReport(ran=False, reason="no_side_model")
+        sid = self._store.stream_id
         events = self._store.recent_events(limit=30)
         summary = self._session_summary()
         # Fingerprint the EVENTS only: the summary is this call's own output,
@@ -163,45 +176,86 @@ class Distiller:
         except SideModelError as exc:
             log.warning("distill.rolling_failed", error=str(exc))
             return DistillReport(ran=False, reason="side_error")
+        if self._store.stream_id != sid or sid in self._state.batch_done:
+            # The stream ended (or its batch already ran) while we were on the
+            # wire: a late rolling write would overwrite the final summary or
+            # land under a dead stream id (B1).
+            return DistillReport(ran=False, reason="stream_moved_on")
         self._state.fingerprint = fingerprint
-        new_summary, clipped = _clip(raw.strip(), _SUMMARY_MAX_CHARS)
+        new_summary = self._flatten(raw)
+        if self._blocked(new_summary):
+            log.warning("distill.summary_blocked")
+            return DistillReport(ran=False, reason="summary_blocked")
+        new_summary, clipped = _clip(new_summary, _SUMMARY_MAX_CHARS)
         if clipped:
             log.warning("distill.summary_clipped", chars=len(raw.strip()))
-        self._store.replace_facts("stream", str(self._store.stream_id), [(new_summary, "")])
+        self._store.replace_facts("stream", str(sid), [(new_summary, "")])
         return DistillReport(ran=True, reason="ok")
 
     async def end_of_stream(self) -> DistillReport:
         """The batch call. Run BEFORE MemoryStore.end_stream() — it reads this
-        stream's viewers and events by the still-open stream id."""
+        stream's viewers and events by the still-open stream id. Runs at most
+        once per stream (B13) and retries a transient failure once (B18)."""
         if self._side is None:
             return DistillReport(ran=False, reason="no_side_model")
+        sid = self._store.stream_id
+        if sid in self._state.batch_done:
+            return DistillReport(ran=False, reason="already_ran")
+        # A rolling rewrite still on the wire would race this call's final
+        # summary (B1): cancel it and wait it out before writing anything.
+        inflight = self._state.inflight
+        if inflight is not None and not inflight.done():
+            inflight.cancel()
+            await asyncio.gather(inflight, return_exceptions=True)
         viewers = self._store.top_viewers(limit=20)
-        grow = self._growth_enabled()
-        try:
-            raw = await self._side.complete(
-                system=_SYSTEM,
-                user=_BATCH_TEMPLATE.format(
-                    growth_rules=_GROWTH_RULES if grow else _NO_GROWTH_RULES,
-                    viewers="\n".join(
-                        f"{v.identity} {v.uname}（来过 {v.streams_seen} 次，"
-                        f"发言 {v.msg_count}，礼物 ¥{v.gift_value_cny:.0f}）"
-                        for v in viewers
-                    )
-                    or "（没有跨过门槛的观众）",
-                    summary=self._session_summary() or "（无）",
-                    events="\n".join(self._store.recent_events(limit=30)) or "（无）",
-                    assistant_lines="\n".join(self._state.assistant_lines) or "（无）",
+        rules = "".join(
+            (
+                (
+                    _RELATIONSHIP_RULE
+                    if self._growth.relationship is not GrowthMode.OFF
+                    else "relationship 固定给空数组。\n"
                 ),
-                max_tokens=900,
+                (
+                    _VOICE_RULE
+                    if self._growth.voice is not GrowthMode.OFF
+                    else "voice 固定给空数组。\n"
+                ),
             )
-        except SideModelError as exc:
-            log.warning("distill.batch_failed", error=str(exc))
-            return DistillReport(ran=False, reason="side_error")
+        )
+        user = _BATCH_TEMPLATE.format(
+            growth_rules=rules,
+            viewers="\n".join(
+                f"{v.identity} {v.uname}（来过 {v.streams_seen} 次，"
+                f"发言 {v.msg_count}，礼物 ¥{v.gift_value_cny:.0f}）"
+                for v in viewers
+            )
+            or "（没有跨过门槛的观众）",
+            summary=self._session_summary() or "（无）",
+            events="\n".join(self._store.recent_events(limit=30)) or "（无）",
+            assistant_lines="\n".join(self._state.assistant_lines) or "（无）",
+        )
+        raw = ""
+        for attempt in (1, 2):
+            try:
+                raw = await self._side.complete(system=_SYSTEM, user=user, max_tokens=900)
+                break
+            except SideModelError as exc:
+                log.warning("distill.batch_failed", attempt=attempt, error=str(exc))
+                if attempt == 2:
+                    return DistillReport(ran=False, reason="side_error")
+                # One short-backoff retry: this is the highest-value call of
+                # the whole stream and it has no natural second chance (B18).
+                await self._clock.sleep(2.0)
         payload = _parse_json(raw)
         if payload is None:
-            log.warning("distill.batch_unparseable", head=raw[:120])
+            log.warning("distill.batch_unparseable", head_text=raw[:120])
             return DistillReport(ran=False, reason="bad_json")
         dropped = self._apply(payload, {v.identity for v in viewers})
+        self._state.batch_done.add(sid)
+        # Fresh state for the next stream (B14): last stream's spoken lines
+        # must not become next stream's voice candidates. The latch survives.
+        latch = self._state.batch_done
+        self._state = _State(batch_done=latch)
         return DistillReport(ran=True, reason="ok", dropped=tuple(dropped))
 
     # ------------------------------------------------------------ applying
@@ -234,7 +288,7 @@ class Distiller:
         self._apply_growth("voice", _as_list(payload.get("voice")), dropped)
 
         for item in dropped:
-            log.warning("distill.entry_dropped", entry=item)
+            log.warning("distill.entry_dropped", entry_text=item)
         return dropped
 
     def _apply_growth(self, layer: str, raw_entries: list[Any], dropped: list[str]) -> None:
@@ -243,7 +297,9 @@ class Distiller:
             return  # off means off: nothing distilled, nothing written
         entries: list[str] = []
         for raw in raw_entries:
-            entry = str(raw).strip()
+            # Flatten first: an embedded newline survives the length check but
+            # gets silently eaten by the bullet parser on the way back (B6).
+            entry = self._flatten(str(raw))
             if not entry or len(entry) > _ENTRY_MAX_CHARS or self._blocked(entry):
                 if entry:
                     dropped.append(f"{layer}:{entry[:20]}")
@@ -254,11 +310,26 @@ class Distiller:
         if layer == "relationship":
             date = logical_date(self._clock.wall()).date().isoformat()
             fresh = [f"{date} {entry}" for entry in entries]
-            merged = merge_relationship(self._persona.growth_entries("relationship"), fresh)
+            existing = self._persona.growth_entries("relationship")
+            merged = merge_relationship(existing, fresh)
+            self._warn_trimmed(layer, existing, fresh, merged)
             self._persona.write_growth("relationship", merged)
         else:
-            merged = merge_voice(self._persona.growth_entries("voice"), entries)
+            existing = self._persona.growth_entries("voice")
+            merged = merge_voice(existing, entries)
             self._persona.write_growth("voice", merged)
+
+    @staticmethod
+    def _flatten(text: str) -> str:
+        return " ".join(text.split())
+
+    @staticmethod
+    def _warn_trimmed(layer: str, existing: list[str], fresh: list[str], merged: list[str]) -> None:
+        # Budget trims must not be silent (plan section 4.7).
+        added = sum(1 for entry in fresh if entry in merged and entry not in existing)
+        trimmed = len(existing) + added - len(merged)
+        if trimmed > 0:
+            log.warning("distill.growth_trimmed", layer=layer, count=trimmed)
 
     # ------------------------------------------------------------ helpers
 

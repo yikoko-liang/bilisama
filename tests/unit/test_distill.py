@@ -183,7 +183,9 @@ async def test_collect_and_on_both_land_growth_on_disk(tmp_path: Path, mode: str
     assert persona.growth_entries("voice") == ["这把稳了，稳得一批"]
     relationship = persona.growth_entries("relationship")
     assert len(relationship) == 1
-    assert relationship[0].startswith("2026-08-12 "), "entries carry the logical date"
+    # Wall 2026-08-12 20:00 UTC is 04:00 on the 13th in China — exactly the
+    # logical-day boundary, which belongs to the NEW day.
+    assert relationship[0].startswith("2026-08-13 "), "entries carry the CST logical date"
     assert "卷王" in relationship[0]
 
 

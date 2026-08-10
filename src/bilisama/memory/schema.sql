@@ -48,3 +48,7 @@ CREATE TABLE IF NOT EXISTS fact (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS fact_scope ON fact(scope, subject);
+
+-- present_regulars/top_viewers scan by the current stream every context tick;
+-- viewer rows never get deleted, so this is the one hot index the table needs.
+CREATE INDEX IF NOT EXISTS viewer_last_stream ON viewer(last_stream_id);

@@ -8,6 +8,8 @@ swap cap gives the voice its inertia (style should creep, not lurch).
 
 from __future__ import annotations
 
+import re
+
 __all__ = [
     "RELATIONSHIP_MAX_CHARS",
     "RELATIONSHIP_MAX_ENTRIES",
@@ -38,10 +40,27 @@ def _trim_oldest(entries: list[str], *, max_entries: int, max_chars: int) -> lis
     return trimmed
 
 
+_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} ")
+
+
+def _content(entry: str) -> str:
+    """The entry minus its logical-date prefix — the dedup key.
+
+    The same fact re-extracted on a later stream carries a different date, so
+    comparing full strings let duplicates churn the whole budget (B3).
+    """
+    return _DATE_PREFIX.sub("", entry)
+
+
 def merge_relationship(existing: list[str], fresh: list[str]) -> list[str]:
-    """Append new shared-history entries, oldest out over budget."""
+    """Append new shared-history entries, oldest out over budget. Dedup is by
+    content, ignoring the date prefix."""
     merged = list(existing)
-    merged.extend(entry for entry in fresh if entry and entry not in merged)
+    seen = {_content(entry) for entry in merged}
+    for entry in fresh:
+        if entry and _content(entry) not in seen:
+            merged.append(entry)
+            seen.add(_content(entry))
     return _trim_oldest(
         merged, max_entries=RELATIONSHIP_MAX_ENTRIES, max_chars=RELATIONSHIP_MAX_CHARS
     )

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from bilisama.memory.store import MemoryStore
+from bilisama.memory.store import STREAM_TZ, MemoryStore
 
 if TYPE_CHECKING:
     from bilisama.clock import Clock
@@ -42,8 +42,9 @@ def clock_line(store: MemoryStore, clock: Clock) -> str:
         return ""
     now = clock.wall()
     minutes = int((now - started).total_seconds() // 60)
-    # Local time for the streamer's world; wall() itself stays UTC in rows.
-    hhmm = now.astimezone().strftime("%H:%M")
+    # China time, same zone the 04:00 day boundary uses — one clock line must
+    # not mix two zones (B4). wall() itself stays UTC in rows.
+    hhmm = now.astimezone(STREAM_TZ).strftime("%H:%M")
     return f"{_uptime_phrase(minutes)}，现在 {hhmm}，本周第 {store.streams_this_week()} 场"
 
 

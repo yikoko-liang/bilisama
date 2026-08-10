@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +22,7 @@ from bilisama.ingest.events import LiveEvent
 if TYPE_CHECKING:
     from bilisama.clock import Clock
 
-__all__ = ["FactRow", "MemoryStore", "ViewerRow", "logical_date"]
+__all__ = ["STREAM_TZ", "FactRow", "MemoryStore", "ViewerRow", "logical_date"]
 
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
@@ -30,10 +30,19 @@ _SCHEMA = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 # logical day (plan section 4.7).
 _DAY_BOUNDARY_H = 4
 
+# The product speaks to Bilibili streamers: stream-world arithmetic runs on
+# China time, pinned rather than host-local so the same DB reads the same on
+# any machine. Rows still store UTC (schema.sql).
+STREAM_TZ = timezone(timedelta(hours=8))
+
 
 def logical_date(wall: datetime) -> datetime:
-    """The stream-world date: the calendar day flips at 04:00, not midnight."""
-    return wall - timedelta(hours=_DAY_BOUNDARY_H)
+    """The stream-world date: the calendar day flips at 04:00 CHINA time.
+
+    Computing the boundary on raw UTC put it at noon Beijing (B4): every
+    morning stream landed on yesterday and "本周第 N 场" flipped at lunch.
+    """
+    return wall.astimezone(STREAM_TZ) - timedelta(hours=_DAY_BOUNDARY_H)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +155,7 @@ class MemoryStore:
                                 msg_count, gift_value_cny)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(identity) DO UPDATE SET
-                uname = excluded.uname,
+                uname = COALESCE(NULLIF(excluded.uname, ''), uname),
                 guard_level = excluded.guard_level,
                 last_seen = excluded.last_seen,
                 streams_seen = streams_seen
@@ -174,17 +183,7 @@ class MemoryStore:
         row = self._db.execute("SELECT * FROM viewer WHERE identity = ?", (identity,)).fetchone()
         if row is None:
             return None
-        return ViewerRow(
-            identity=row["identity"],
-            uid=row["uid"],
-            uname=row["uname"],
-            guard_level=row["guard_level"],
-            first_seen=row["first_seen"],
-            last_seen=row["last_seen"],
-            streams_seen=row["streams_seen"],
-            msg_count=row["msg_count"],
-            gift_value_cny=row["gift_value_cny"],
-        )
+        return self._viewer_row(row)
 
     def present_regulars(self, *, limit: int = 5) -> list[ViewerRow]:
         """Viewers active this stream who have been here before, most loyal
@@ -198,7 +197,7 @@ class MemoryStore:
             """,
             (self._stream_id, limit),
         ).fetchall()
-        return [self.viewer(row["identity"]) for row in rows if row is not None]  # type: ignore[misc]
+        return [self._viewer_row(row) for row in rows]
 
     def top_viewers(self, *, limit: int = 20) -> list[ViewerRow]:
         """This stream's most engaged viewers — the distiller's shortlist."""
@@ -211,7 +210,21 @@ class MemoryStore:
             """,
             (self._stream_id, limit),
         ).fetchall()
-        return [self.viewer(row["identity"]) for row in rows if row is not None]  # type: ignore[misc]
+        return [self._viewer_row(row) for row in rows]
+
+    @staticmethod
+    def _viewer_row(row: sqlite3.Row) -> ViewerRow:
+        return ViewerRow(
+            identity=row["identity"],
+            uid=row["uid"],
+            uname=row["uname"],
+            guard_level=row["guard_level"],
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            streams_seen=row["streams_seen"],
+            msg_count=row["msg_count"],
+            gift_value_cny=row["gift_value_cny"],
+        )
 
     def recent_events(self, *, limit: int = 30) -> list[str]:
         """The newest event lines of this stream, oldest first — distiller and

@@ -15,7 +15,11 @@ ship without them on purpose.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -104,19 +108,37 @@ class PersonaStore:
 
     def anchor_path(self, name: AnchorName) -> Path:
         """The file a read would actually use: live copy first, then template."""
-        live = self._data_dir / f"{name}.md"
-        if live.is_file() and live.read_text(encoding="utf-8").strip():
-            return live
+        if self._live_anchor_text(name) is not None:
+            return self._data_dir / f"{name}.md"
         return self._template_dir / f"{name}.md"
 
+    def _live_anchor_text(self, name: AnchorName) -> str | None:
+        """The live copy's text, or None when absent, blank or unreadable.
+
+        Unreadable is treated like blank on purpose (B12): a permission-broken
+        live file must degrade to the template, not crash the whole assembly —
+        an EMPTY file already fell back gracefully, and worse states should
+        not behave worse.
+        """
+        live = self._data_dir / f"{name}.md"
+        try:
+            text = live.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return text if text.strip() else None
+
     def anchor(self, name: AnchorName, variables: Mapping[str, str] | None = None) -> str:
-        path = self.anchor_path(name)
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"人设文件缺失：{path}。"
-                "随包模板应该在 config/personas/ 下，检查 persona id 是否拼对。"
-            )
-        return _substitute(path.read_text(encoding="utf-8"), variables or {})
+        text = self._live_anchor_text(name)
+        if text is None:
+            template = self._template_dir / f"{name}.md"
+            try:
+                text = template.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise FileNotFoundError(
+                    f"人设文件缺失：{template}。"
+                    "随包模板应该在 config/personas/ 下，检查 persona id 是否拼对。"
+                ) from exc
+        return _substitute(text, variables or {})
 
     def anchors(self, variables: Mapping[str, str] | None = None) -> PersonaAnchors:
         return PersonaAnchors(
@@ -139,9 +161,34 @@ class PersonaStore:
         """Replace a growth file wholesale. Budgets are the caller's job
         (persona.growth merges); this only owns the file format."""
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        with self._growth_lock():
+            self._write_growth_unlocked(layer, entries)
+
+    def _write_growth_unlocked(self, layer: GrowthLayer, entries: Sequence[str]) -> None:
         body = "\n".join(f"- {entry}" for entry in entries)
         text = f"{_GROWTH_HEADERS[layer]}\n{body}\n" if body else f"{_GROWTH_HEADERS[layer]}\n"
         self.growth_path(layer).write_text(text, encoding="utf-8")
+
+    def _growth_entries_unlocked(self, layer: GrowthLayer) -> list[str]:
+        return self.growth_entries(layer)
+
+    @contextlib.contextmanager
+    def _growth_lock(self) -> Iterator[None]:
+        """Advisory lock shared by every growth writer.
+
+        `persona review` runs in its own process, typically right after a
+        stream — exactly when the end-of-stream distillation writes (B7).
+        Unlocked, one side's read-modify-write silently resurrects what the
+        other just changed.
+        """
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._data_dir / ".growth.lock"
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     # ------------------------------------------------------------ proactive
 
@@ -169,13 +216,20 @@ class PersonaStore:
     # ------------------------------------------------------------ pinned
 
     def pinned_text(self) -> str:
-        """The streamer's pinned memory, verbatim. Not a growth layer — it is
-        the one deterministic write channel (plan section 4.7), file-edited by
-        hand until the pin/unpin tools arrive."""
+        """The streamer's pinned memory. Not a growth layer — it is the one
+        deterministic write channel (plan section 4.7), file-edited by hand
+        until the pin/unpin tools arrive.
+
+        Newlines collapse to 「；」 on the way out (B15): pinned is injected
+        into the dynamic tail, and a multi-line file could otherwise fake a
+        section header there. The redaction pass promised by the plan ships
+        with the pin/unpin tools.
+        """
         path = self._data_dir / "pinned.md"
         if not path.is_file():
             return ""
-        return path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8").strip()
+        return re.sub(r"\s*\n+\s*", "；", text)
 
     # ------------------------------------------------------------ promotion
 
@@ -186,7 +240,11 @@ class PersonaStore:
         live personality copy is created from the template on first promotion
         so the shipped template itself stays pristine.
         """
-        entries = self.growth_entries(layer)
+        with self._growth_lock():
+            self._promote_locked(layer, entry)
+
+    def _promote_locked(self, layer: GrowthLayer, entry: str) -> None:
+        entries = self._growth_entries_unlocked(layer)
         if entry not in entries:
             raise ValueError(f"生长层 {layer} 里没有这条：{entry}")
 
@@ -203,4 +261,4 @@ class PersonaStore:
         live.write_text(text, encoding="utf-8")
 
         entries.remove(entry)
-        self.write_growth(layer, entries)
+        self._write_growth_unlocked(layer, entries)
