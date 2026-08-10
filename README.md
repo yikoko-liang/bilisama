@@ -17,7 +17,8 @@ scripts/gate.sh                                 # 全套检查：格式、类型
 
 | 文档 | 干什么 |
 |---|---|
-| 实施计划（`~/.claude/plans/` 下，路径见 CLAUDE.md 会话上下文） | 架构与全部决策、进度台账（§15）、欠账清单（§16.8） |
+| 实施计划（`~/.claude/plans/` 下，路径见 CLAUDE.md 会话上下文） | 架构与全部决策（§1-14）、进度台账（§15）、欠账清单（§16.8） |
+| 计划归档（同目录 `*.archive.md`） | 每一轮的完整过程记录，回溯用 |
 | [CLAUDE.md](CLAUDE.md) | 会话准则：指导原则、代码规范、文风、流程纪律 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 提交门禁、代码语言分界、commit 写法 |
 | [docs/runbook.md](docs/runbook.md) | 操作手册：起服务器、dev-talk、测试、常见坑 |
