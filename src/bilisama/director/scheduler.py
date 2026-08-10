@@ -75,6 +75,7 @@ class Scheduler:
         quiet_after_speech_s: float = 1.1,
         cooldown_s: float = 0.0,
         guard: Callable[[str], bool] | None = None,
+        spoken_sink: Callable[[str], None] | None = None,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -85,6 +86,10 @@ class Scheduler:
         self._cooldown_s = cooldown_s
         # Returns True when the text must not go out (output guard, section 4.5).
         self._guard = guard
+        # Receives every cleanly completed reply text — the distiller collects
+        # them as voice-exemplar raw material (section 4.6). Interrupted or
+        # guard-killed replies never reach it, which IS the quality filter.
+        self._spoken_sink = spoken_sink
         self._heap: list[_Entry] = []
         self._entries: dict[int, _Entry] = {}  # id(intent) -> entry, for pre-emption
         self._seq = itertools.count()
@@ -246,6 +251,8 @@ class Scheduler:
         if active is None or event.handle is not active.handle:
             return
         if event.status is link.ReplyStatus.COMPLETED:
+            if self._spoken_sink is not None and event.text:
+                self._spoken_sink(event.text)
             self._settle_active(Outcome.SPOKEN, Phase.GENERATING)
             if self._cooldown_s > 0:
                 self._floor.start_cooldown(self._cooldown_s)
