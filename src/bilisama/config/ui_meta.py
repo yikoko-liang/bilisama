@@ -571,6 +571,14 @@ UI_META: dict[str, FieldMeta] = {
         group="自建语音服务",
         order=6,
     ),
+    "speech.s2s.tts_speaker": FieldMeta(
+        label="服务端 TTS 音色",
+        hint="只在零补丁模式（服务器自己出声）有效。不钉音色会每句换嗓子",
+        audience=Audience.OPERATOR,
+        reload=Reload.ENGINE,
+        group="自建语音服务",
+        order=7,
+    ),
     "speech.s2s.turn": FieldMeta(label="判停参数", provider_scoped="s2s", group="判停"),
     "speech.s2s.turn.audio_enhancement": FieldMeta(
         label="离线降噪",

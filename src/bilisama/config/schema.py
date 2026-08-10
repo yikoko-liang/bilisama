@@ -56,6 +56,10 @@ class S2SConfig(BaseModel):
         ("text_modality", "raw_instructions")
     )
     tts_placeholder: str = Field("kokoro")
+    # Only audible when the server's own TTS speaks (zero-patch mode). The
+    # CustomVoice model generates a random voice per reply when unset upstream
+    # (measured live 2026-08-11), so the render always pins one.
+    tts_speaker: str = Field("vivian")
     turn: TurnConfig = Field(default_factory=TurnConfig)
 
 

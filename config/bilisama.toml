@@ -25,6 +25,7 @@ llm_base_url = "http://127.0.0.1:9010/v1"
 llm_model = "our-s2t-v1"
 patches = ["text_modality", "raw_instructions"]
 tts_placeholder = "kokoro"              # 纯文本模式下它不合成音频，但结构上必须在
+tts_speaker = "vivian"                  # 零补丁模式（服务器自己出声）用的音色；不钉会每句换嗓子
 
 # 判停三件套。字段名跟上游 vad_arguments.py 逐字对齐，CI 有一条门禁对账。
 # smart_turn_max_wait_ms 上游默认 2000，我们压到 1200：延迟方差全部来自这个数。

@@ -93,10 +93,13 @@ def main() -> int:
         # it — a different random voice per reply (measured live 2026-08-11:
         # same sentence twice, median F0 240 Hz vs 276 Hz). The arguments-class
         # default is None despite its help text naming "Aiden", so the speaker
-        # must be pinned here. Supported names sit in the model config's
-        # talker_config.spk_id: serena, vivian, uncle_fu, ryan, aiden,
-        # ono_anna, sohee, eric (四川话), dylan (北京话).
-        "qwen3_tts_speaker": os.environ.get("tts_speaker", "vivian"),  # noqa: SIM112
+        # must be pinned here. Truth lives in bilisama.toml ([speech.s2s]
+        # tts_speaker); the env var is a per-run override. Supported names sit
+        # in the model config's talker_config.spk_id: serena, vivian, uncle_fu,
+        # ryan, aiden, ono_anna, sohee, eric (四川话), dylan (北京话).
+        "qwen3_tts_speaker": os.environ.get(
+            "tts_speaker", settings.speech.s2s.tts_speaker  # noqa: SIM112
+        ),
         "host": "127.0.0.1",
         "port": 8765,
         "num_pipelines": 1,
