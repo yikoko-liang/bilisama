@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from bilisama.config.enums import ProviderName
+from bilisama.config.enums import GrowthMode, ProviderName
 
 if TYPE_CHECKING:
     from bilisama.config.schema import Settings
@@ -103,6 +103,24 @@ def check(s: Settings) -> list[ConfigProblem]:
                     fix="在设置里填服务地址。",
                 )
             )
+
+    # The growth layers run on the side model. Turning one on without that model
+    # configured would not error anywhere — distillation simply never runs and
+    # the files never grow, silent degradation. Proactive topics have the same
+    # dependency but stay out of this rule: speak.proactive is the shipped
+    # default, and nagging every fresh install trains people to ignore the list.
+    # The proactive loop reports the missing model at runtime instead (health).
+    growth = s.persona.growth
+    growth_on = growth.relationship is not GrowthMode.OFF or growth.voice is not GrowthMode.OFF
+    if growth_on and not s.speech.side.base_url:
+        problems.append(
+            ConfigProblem(
+                field="speech.side.base_url",
+                message="人设生长层开了，但侧路模型还没配地址，生长层会静默不长。",
+                fix="在设置里填侧路模型地址，或把生长层拨回 off。",
+                fatal=False,
+            )
+        )
 
     # Anonymous connections still work, but Bilibili masks every uid to 0, so
     # per-viewer memory, name-checking and per-uid cooldowns all stop working —

@@ -227,9 +227,10 @@ async def test_advance_short_of_a_deadline_leaves_the_sleeper_asleep() -> None:
 async def test_advance_wakes_a_sleeper_that_sleeps_again_straight_away() -> None:
     """The audit question: does the one-at-a-time loop cope with a re-registration?
 
-    Yes, as long as the woken coroutine reaches its next clock.sleep() within the
-    single loop turn that advance() yields it. A `while True: await clock.sleep(1.0)`
-    poll loop is that shape, and it is the shape stage 2 windows and cooldowns use.
+    The straight-away case needs no settle window at all — the re-sleep lands
+    inside the single turn the wake yields. Stage 2 windows and cooldowns are
+    this shape; the settle window exists for the shapes that are not (see the
+    two tests below).
     """
     clock = FakeClock()
     ticks: list[float] = []
@@ -250,18 +251,15 @@ async def test_advance_wakes_a_sleeper_that_sleeps_again_straight_away() -> None
     assert clock._waiters == []
 
 
-async def test_a_resleep_behind_another_await_is_missed() -> None:
-    """The other half of the audit answer, and it is a NO.
+async def test_a_resleep_behind_another_await_is_still_woken() -> None:
+    """The settle window at work: intermediate awaits no longer cost the wake.
 
-    This test pins today's broken behaviour on purpose, so the fix arrives as a
-    deliberate test update rather than a surprise. What SHOULD happen: the second
-    sleep wakes at 2.0 and the poller finishes. What DOES happen: one intervening
-    await costs the coroutine the only turn advance() gives it, so advance() sees
-    nothing due, jumps to target, and strands the second sleep at a deadline of
-    11.0. The gap between the first tick and `monotonic()` is a nine-second silent
-    time jump. See the KNOWN BROKEN note in FakeClock.advance.
-
-    When advance() is fixed, invert the assertions below.
+    This used to pin the opposite (a silent nine-second time jump, the KNOWN
+    BROKEN note that was backlog item 6): one `await asyncio.sleep(0)` between
+    tick and re-sleep cost the coroutine its only turn, advance() found nothing
+    due and jumped to target. The bounded settle window closes that: the loop
+    gets up to _SETTLE_TURNS turns to carry a woken coroutine to its next
+    clock.sleep() before advance() gives up.
     """
     clock = FakeClock()
     ticks: list[float] = []
@@ -270,17 +268,80 @@ async def test_a_resleep_behind_another_await_is_missed() -> None:
         for _ in range(3):
             await clock.sleep(1.0)
             ticks.append(clock.monotonic())
-            await asyncio.sleep(0)  # one extra turn is all it takes
+            await asyncio.sleep(0)  # the turn that used to lose the wake
+
+    task = asyncio.create_task(poller())
+    await asyncio.sleep(0)
+
+    await clock.advance(10.0)
+    await task
+
+    assert ticks == [1.0, 2.0, 3.0], "every deadline honoured despite the extra await"
+    assert clock.monotonic() == 10.0
+    assert clock._waiters == []
+
+
+async def test_a_resleep_behind_a_queue_hop_is_still_woken() -> None:
+    """The shape that motivated the fix: `await clock.sleep(w); await queue.get()`.
+
+    The item arrives from another task, so the wake has to survive a cross-task
+    hop — strictly more turns than one asyncio.sleep(0). This is the loop shape
+    the proactive topic loop and the distiller both use.
+    """
+    clock = FakeClock()
+    queue: asyncio.Queue[int] = asyncio.Queue()
+    got: list[tuple[float, int]] = []
+
+    async def feeder() -> None:
+        for i in range(2):
+            await queue.put(i)
+            await asyncio.sleep(0)
+
+    async def poller() -> None:
+        for _ in range(2):
+            await clock.sleep(1.0)
+            item = await queue.get()
+            got.append((clock.monotonic(), item))
+
+    poll = asyncio.create_task(poller())
+    feed = asyncio.create_task(feeder())
+    await asyncio.sleep(0)
+
+    await clock.advance(5.0)
+    await asyncio.gather(poll, feed)
+
+    assert got == [(1.0, 0), (2.0, 1)]
+    assert clock.monotonic() == 5.0
+
+
+async def test_a_chain_longer_than_the_settle_window_is_jumped_past() -> None:
+    """The documented boundary of the fix, pinned so it stays a contract.
+
+    _SETTLE_TURNS is a bounded heuristic, not quiescence detection: a coroutine
+    that crosses more awaits than that before its next clock.sleep() is jumped
+    past, exactly like before the fix. No production loop is that shape; if one
+    ever is, this test is where the discussion starts.
+    """
+    from bilisama.clock import _SETTLE_TURNS
+
+    clock = FakeClock()
+    ticks: list[float] = []
+
+    async def poller() -> None:
+        for _ in range(2):
+            await clock.sleep(1.0)
+            ticks.append(clock.monotonic())
+            for _ in range(_SETTLE_TURNS + 8):
+                await asyncio.sleep(0)
 
     task = asyncio.create_task(poller())
     await asyncio.sleep(0)
 
     await clock.advance(10.0)
 
-    assert ticks == [1.0], "today only the first deadline is honoured"
-    assert not task.done(), "the poller is stranded on a sleep advance() will never wake"
-    assert clock.monotonic() == 10.0, "and time jumped past the deadline it skipped"
-    assert clock._waiters == [(11.0, clock._waiters[0][1])], "deadline set from the jumped time"
+    assert ticks == [1.0], "beyond the settle window the old jump behaviour remains"
+    assert clock.monotonic() == 10.0
+    assert not task.done()
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

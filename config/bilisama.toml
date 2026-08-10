@@ -94,6 +94,10 @@ share = false
 proactive = true
 background_result = false               # MVP 默认关
 
+[interaction.proactive]                 # 主动话题（L1）。开口时机由冷场阈值（话痨度派生）决定
+max_per_hour = 12
+wake_interval_s = 30                    # 后台思考节奏，不是开口节奏
+
 [memory]
 db_path = "auto"
 distill_every_n_events = 40             # 按事件计数触发，不按定时器
@@ -101,6 +105,13 @@ retain_event_days = 7
 
 [persona]
 id = "mia"
+data_dir = "auto"                       # auto = 用户数据目录/personas/<id>，四个人设文件的活副本在这
+
+# 生长层三态：off 不长 | collect 只攒进文件、不进提示词 | on 攒并注入（§4.6）。
+# 默认全关。先 collect 看几场、翻文件放心了再 on；voice 影响说话风格，建议最后开。
+[persona.growth]
+relationship = "off"
+voice = "off"
 
 [avatar]
 renderer = "live2d"

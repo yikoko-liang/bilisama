@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from bilisama.config.enums import Chattiness, ProviderName
+from bilisama.config.enums import Chattiness, GrowthMode, ProviderName
 
 
 class TurnConfig(BaseModel):
@@ -170,6 +170,19 @@ class SpeakSwitches(BaseModel):
     background_result: bool = False
 
 
+class ProactiveConfig(BaseModel):
+    """The proactive topic loop's own knobs.
+
+    The idle threshold that actually triggers a topic is derived from
+    chattiness (derive.py), not set here — single-writer rule.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    max_per_hour: int = Field(12, ge=0, le=60)
+    wake_interval_s: int = Field(30, ge=5, le=300)
+
+
 class InteractionConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -180,6 +193,7 @@ class InteractionConfig(BaseModel):
     gift_gold_medium: int = Field(1000, ge=0)
     burst_uniques: int = Field(5, ge=1)
     burst_window_s: int = Field(45, ge=5)
+    proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
 
 
 class MemoryConfig(BaseModel):
@@ -198,10 +212,28 @@ class RoomConfig(BaseModel):
     credential_ref: str = Field("")
 
 
+class GrowthSwitches(BaseModel):
+    """Per-layer switches for the machine-grown persona files (plan section 4.6).
+
+    Default off. The anchors cannot drift — the machine has no write path to
+    them — but voice.md is few-shot with real style influence, so trust gets
+    built by reading collect-mode output for a few streams before switching on.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    relationship: GrowthMode = Field(GrowthMode.OFF)
+    voice: GrowthMode = Field(GrowthMode.OFF)
+
+
 class PersonaConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     id: str = Field("mia")
+    # auto = <data home>/personas/<id>. Live copies of all four persona files;
+    # the shipped templates under config/personas/ carry only the two anchors.
+    data_dir: str = Field("auto")
+    growth: GrowthSwitches = Field(default_factory=GrowthSwitches)
 
 
 class AvatarConfig(BaseModel):

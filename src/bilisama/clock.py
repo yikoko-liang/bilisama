@@ -16,6 +16,10 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+# How many loop turns advance() grants a woken coroutine to reach its next
+# clock.sleep() through intermediate awaits. See FakeClock.advance.
+_SETTLE_TURNS = 32
+
 
 class Clock(Protocol):
     """What production code depends on. Never `time.monotonic()` directly."""
@@ -92,13 +96,18 @@ class FakeClock:
     async def advance(self, seconds: float) -> None:
         """Move time forward, waking sleepers as their deadlines pass.
 
-        Wakes them one at a time and yields in between, so each woken coroutine
-        gets to run up to its next await before the clock moves again. Waking them
-        all at once would let a later sleeper observe a time it should not see yet.
+        Wakes them one at a time, in deadline order, moving the clock to each
+        deadline first and yielding right after — a woken coroutine runs at its
+        own deadline and never observes a time past it.
 
-        A woken sleeper that sleeps again straight away is picked up by this same
-        call. One that awaits anything else in between is not — see the KNOWN
-        BROKEN note below.
+        When nothing is due, the loop gets a bounded settle window before this
+        call gives up: a woken coroutine may cross up to _SETTLE_TURNS
+        intermediate awaits — a queue hop, an event, a lock — on its way to the
+        next clock.sleep(), and the re-registered deadline is still honoured by
+        this same call. asyncio has no public "loop is quiescent" hook (trio's
+        MockClock autojumps on one), so a bounded window is the design decision:
+        a chain longer than _SETTLE_TURNS awaits is jumped past, and that
+        boundary is pinned in tests/unit/test_clock.py.
 
         Raises:
             ValueError: if `seconds` is negative.
@@ -107,24 +116,28 @@ class FakeClock:
             # Rewinding a monotonic clock hides the caller's arithmetic bug behind a
             # cooldown that never expires. Making it visible is the point of the fake.
             raise ValueError("advance() only moves time forward")
-        # KNOWN BROKEN, no backlog entry yet: the `await asyncio.sleep(0)` below buys
-        # the woken coroutine exactly one turn. If it awaits anything before its next
-        # clock.sleep(), this loop finds nothing due, breaks, and jumps straight to
-        # target — the very time jump the docstring above promises not to make. A
-        # `await clock.sleep(w); await queue.get()` loop hits it immediately. Pinned by
-        # test_a_resleep_behind_another_await_is_missed in tests/unit/test_clock.py.
-        # asyncio has no public "loop is quiescent" hook (trio's MockClock autojump
-        # does), so the fix is a design decision, not a one-liner.
         target = self._now + seconds
         while True:
             due = [(t, f) for t, f in self._waiters if t <= target and not f.done()]
-            if not due:
+            if due:
+                due.sort(key=lambda pair: pair[0])
+                when, fut = due[0]
+                self._now = when
+                self._waiters.remove((when, fut))
+                fut.set_result(None)
+                # The woken coroutine gets its turn now, at its own deadline,
+                # before any later sleeper can move the clock.
+                await asyncio.sleep(0)
+                continue
+            if not await self._settle(target):
                 break
-            due.sort(key=lambda pair: pair[0])
-            when, fut = due[0]
-            self._now = when
-            self._waiters.remove((when, fut))
-            fut.set_result(None)
-            await asyncio.sleep(0)
         self._now = target
         await asyncio.sleep(0)
+
+    async def _settle(self, target: float) -> bool:
+        """Yield up to _SETTLE_TURNS loop turns; True once a due waiter appears."""
+        for _ in range(_SETTLE_TURNS):
+            await asyncio.sleep(0)
+            if any(t <= target and not f.done() for t, f in self._waiters):
+                return True
+        return False

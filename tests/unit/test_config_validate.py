@@ -45,6 +45,8 @@ def _settings(
     echo_guard: EchoGuard = "duck",
     room_id: int = 0,
     credential_ref: str = "",
+    growth_voice: str = "off",
+    side_base_url: str = "",
 ) -> Settings:
     """Shipped defaults with a model id, and one axis moved off it.
 
@@ -59,12 +61,14 @@ def _settings(
     }
     if provider is not ProviderName.S2S:
         speech[provider.value] = {"endpoint": endpoint}
+    speech["side"] = {"base_url": side_base_url}
     return Settings.model_validate(
         {
             "speech": speech,
             "avatar": {"expression_source": expression_source},
             "audio": {"output_route": output_route, "echo_guard": echo_guard},
             "room": {"room_id": room_id, "credential_ref": credential_ref},
+            "persona": {"growth": {"voice": growth_voice}},
         }
     )
 
@@ -107,6 +111,7 @@ BROKEN_ONE_WAY_EACH = {
         provider=ProviderName.DASHSCOPE, endpoint="", expression_source="lexicon"
     ),
     "room.credential_ref": _settings(room_id=12345, credential_ref=""),
+    "speech.side.base_url": _settings(growth_voice="collect", side_base_url=""),
 }
 
 
@@ -198,6 +203,22 @@ def test_echo_guard_problem_is_advisory_not_fatal() -> None:
 
     assert check(_settings(output_route="direct", echo_guard="duck")) == []
     assert check(_settings(output_route="virtual", echo_guard="off")) == []
+
+
+@pytest.mark.parametrize("mode", ["collect", "on"])
+def test_growth_without_side_model_is_advisory(mode: str) -> None:
+    """Turning a growth layer on without its engine is a mistake worth flagging;
+    refusing to start over it would be wrong — everything else works fine."""
+    problem = _one(_settings(growth_voice=mode, side_base_url=""), "speech.side.base_url")
+    assert problem.fatal is False
+
+
+def test_growth_rule_stays_quiet_when_off_or_when_the_side_model_is_there() -> None:
+    """The shipped default (growth off, side model unset) must stay clean — the
+    proactive loop's same dependency is reported at runtime, not here, so a
+    fresh install does not open on a warning it cannot yet act on."""
+    assert check(_settings(growth_voice="off", side_base_url="")) == []
+    assert check(_settings(growth_voice="on", side_base_url="http://127.0.0.1:9010/v1")) == []
 
 
 def test_anonymous_room_is_advisory_and_silent_before_setup() -> None:
