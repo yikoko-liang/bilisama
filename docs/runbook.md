@@ -200,3 +200,5 @@ scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测
 | `session.update` 报 Unknown event | s2s 要求 `session.type="realtime"`（计划 §3.1 表在这点上写反了）；走 codec 的 `session_patch` 不会踩 |
 | 对话没反应、服务端 audio=0.00s | 喂的不是真人声（正弦波 Silero 不认）；或麦克风权限没给终端 |
 | NLTK LookupError | 它的下载器把假 IP 网段当 SSRF 拦了；用 curl 手动下数据包解压到 venv 的 `nltk_data/` |
+| director 刷 `proactive.refresh_failed` | 侧路模型连不上。回退顺序：`[speech.side]` 配置 → path.sh 的阿里 compatible-mode（免 VPN，默认 qwen3.7-flash）→ 内网 LLM（要 EasyConnect + no_proxy 那套）。启动时看 `[侧路]` 那行用的是哪个 |
+| director 打字「没反应」 | 按顺序看：有没有 `[已注入 弹幕]` 回显（没有＝输入没进来）→ 有没有 `[调度] danmaku → …` 终局（`expired@queued`＝排队超 20 秒 TTL，多半是外放回声让闸门常闭——戴耳机或 `--mute-while-speaking`；每答完一句还有 12 秒话痨度冷却，medium 档） |

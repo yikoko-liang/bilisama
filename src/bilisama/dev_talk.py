@@ -395,6 +395,11 @@ async def run_director(args: argparse.Namespace) -> int:
     config_path: Path = args.config or DEFAULT_CONFIG
     overrides = {"persona": {"id": args.persona}} if args.persona else None
     settings = load(config_path, overrides=overrides, strict=False)
+    # Without this, background warnings (proactive.refresh_failed and friends)
+    # reach the console as bare event names with their error fields dropped.
+    from bilisama.obs.logging import setup as logging_setup
+
+    logging_setup(level=settings.runtime.log_level)
     clock = SystemClock()
     thresholds = derive(settings.interaction.chattiness)
 
@@ -409,11 +414,25 @@ async def run_director(args: argparse.Namespace) -> int:
     persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
     variables = {"userName": "主播", "agentName": settings.persona.id}
 
+    # Side-model resolution, most reliable first: explicit config wins, then
+    # the aliyun compatible-mode endpoint from path.sh (public network, no VPN
+    # — probed live 2026-08-11 with qwen3.7-flash), then the intranet LLM
+    # (which needs the whole EasyConnect + no_proxy incantation, runbook §起服务器).
     side: SideModel | None = None
+    side_desc = ""
     side_cfg = settings.speech.side
+    compat_url = os.environ.get("openai_compatible_url", "")  # noqa: SIM112  (path.sh 里的原名)
     if side_cfg.base_url:
         side = OpenAICompatSideModel(side_cfg, api_key=os.environ.get("OPENAI_API_KEY", ""))
-    elif os.environ.get("base_url"):  # noqa: SIM112  (path.sh 里的原名)
+        side_desc = f"{side_cfg.model} @ {side_cfg.base_url}（来自 [speech.side]）"
+    elif compat_url:
+        side_model = os.environ.get("side_model_name", "qwen3.7-flash")  # noqa: SIM112
+        side = OpenAICompatSideModel(
+            SideModelConfig.model_validate({"base_url": compat_url, "model": side_model}),
+            api_key=os.environ.get("ali_api_key", ""),  # noqa: SIM112
+        )
+        side_desc = f"{side_model} @ 阿里 compatible-mode（path.sh，免 VPN）"
+    elif os.environ.get("base_url"):  # noqa: SIM112
         side = OpenAICompatSideModel(
             SideModelConfig.model_validate(
                 {
@@ -423,8 +442,11 @@ async def run_director(args: argparse.Namespace) -> int:
             ),
             api_key=os.environ.get("api_key", ""),  # noqa: SIM112
         )
+        side_desc = "path.sh 的内网端点（要 EasyConnect + no_proxy，连不上会刷 refresh_failed）"
     if side is None:
         print("提示：没配侧路模型（[speech.side] 或 source path.sh），主动话题和蒸馏这场不干活。")
+    else:
+        print(f"[侧路] {side_desc}")
 
     inner: link.SpeechLink
     if provider is ProviderName.S2S:
@@ -516,6 +538,10 @@ async def run_director(args: argparse.Namespace) -> int:
             if event is None:
                 print("弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额")
                 continue
+            label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
+            money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
+            body = f"：{event.text}" if event.text else ""
+            print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
             await console.push(event)
 
     async def drain_controls() -> None:
