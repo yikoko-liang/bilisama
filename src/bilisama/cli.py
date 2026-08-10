@@ -38,6 +38,27 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = _REPO_ROOT / "config" / "bilisama.toml"
 
 
+# The two schema errors everyone actually hits: a typo'd key and a deleted
+# required one. Anything else falls through to pydantic's English message,
+# which at least now arrives with its field path in front (D7).
+_FIELD_ERROR_TEXT = {
+    "extra_forbidden": "不认识这个字段，多半是拼错了。对照 `bilisama config show` 的字段名改过来。",
+    "missing": "缺了这个必填字段。",
+}
+
+
+def _report_validation(exc: ValidationError, *, stream: TextIO | None = None) -> None:
+    """Print schema errors as field path + plain Chinese, one per line.
+
+    Plan §7.6: a streamer who sees a raw `pydantic.ValidationError` just files
+    a ticket.
+    """
+    for err in exc.errors():
+        loc = ".".join(str(part) for part in err["loc"]) or "（顶层）"
+        detail = _FIELD_ERROR_TEXT.get(err["type"], err["msg"])
+        print(f"[错误] {loc}：{detail}", file=stream)
+
+
 def _report(problems: list[ConfigProblem], *, stream: TextIO | None = None) -> None:
     """Print problems the way plan §7.6 promises: which field, what is wrong, what to do.
 
@@ -76,7 +97,11 @@ def _load(path: Path, *, strict: bool = True) -> Settings:
         print("配置有问题，没法启动：", file=sys.stderr)
         _report(exc.problems, stream=sys.stderr)
         raise SystemExit(2) from exc
-    except (ValidationError, tomllib.TOMLDecodeError, OSError) as exc:
+    except ValidationError as exc:
+        print("配置有问题，没法启动：", file=sys.stderr)
+        _report_validation(exc, stream=sys.stderr)
+        raise SystemExit(2) from exc
+    except (tomllib.TOMLDecodeError, OSError) as exc:
         print(f"配置有问题：\n{exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
@@ -117,6 +142,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
     # This command exists to describe a broken config, so it has to be handed one.
     settings = _load(args.config, strict=False)
     problems = check(settings, config_dir=args.config.parent)
+    if settings.speech.provider is not ProviderName.S2S:
+        # Turn-type support lives in the provider registry, which config/ cannot
+        # import (dependency direction), so the wiring sits here (D14). Lazy so
+        # `config validate` does not pay for the realtime stack unless needed.
+        from bilisama.realtime.providers import turn_type_problems
+
+        hosted = getattr(settings.speech, settings.speech.provider.value)
+        problems += turn_type_problems(settings.speech.provider, hosted.turn.type)
     if not problems:
         print("配置没问题。")
         return 0
@@ -217,12 +250,26 @@ def cmd_persona_review(args: argparse.Namespace) -> int:
 
     if args.promote:
         layer, entry = _pick(args.promote)
-        store.promote(layer, entry)
+        try:
+            store.promote(layer, entry)
+        except ValueError as exc:
+            # The distiller may rewrite the file between listing and clicking;
+            # a stale pick is a retry, not a traceback (D11).
+            print(f"没成：{exc}", file=sys.stderr)
+            print("这条可能刚被蒸馏改写了，重新跑一遍看最新列表。", file=sys.stderr)
+            raise SystemExit(2) from exc
         print(f"已合并进 personality.md：{entry}")
     elif args.drop:
         layer, entry = _pick(args.drop)
         rows = store.growth_entries(layer)
-        rows.remove(entry)
+        try:
+            rows.remove(entry)
+        except ValueError as exc:
+            print(
+                "这条已经不在生长层里了（可能刚被蒸馏改写），重新跑一遍看最新列表。",
+                file=sys.stderr,
+            )
+            raise SystemExit(2) from exc
         store.write_growth(layer, rows)
         print(f"已删掉：{entry}")
     else:

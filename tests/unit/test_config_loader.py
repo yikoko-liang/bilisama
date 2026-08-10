@@ -9,12 +9,11 @@ it just selected.
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 
 import pytest
 
-from bilisama.config import Chattiness, load
+from bilisama.config import Chattiness, ConfigError, load
 
 BASE = """\
 active_profile = "normal"
@@ -131,9 +130,26 @@ def test_no_file_falls_back_to_packaged_defaults(tmp_path: Path) -> None:
 
 
 def test_malformed_toml_is_not_swallowed(tmp_path: Path) -> None:
-    """The loader does not paper over a broken file; the CLI is what turns this
-    into a sentence."""
+    """The loader does not paper over a broken file, and the refusal names WHICH
+    file — with profile overlays the broken line is as likely in
+    profiles/<name>.toml as in the base file (D7)."""
     path = tmp_path / "bilisama.toml"
     path.write_text("this is not = = toml", encoding="utf-8")
-    with pytest.raises(tomllib.TOMLDecodeError):
+    with pytest.raises(ConfigError) as exc_info:
         load(path)
+    assert exc_info.value.problems[0].field == str(path)
+
+
+def test_broken_profile_toml_names_the_profile_file(tmp_path: Path) -> None:
+    """The half that motivated D7: the base parses fine, the overlay does not,
+    and the error must point at the overlay."""
+    path = tmp_path / "bilisama.toml"
+    path.write_text(BASE, encoding="utf-8")
+    (tmp_path / "safety").mkdir()
+    (tmp_path / "safety" / "wordlist.txt").write_text("测试词\n", encoding="utf-8")
+    profile = tmp_path / "profiles" / "normal.toml"
+    profile.parent.mkdir()
+    profile.write_text("this is not = = toml", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc_info:
+        load(path)
+    assert exc_info.value.problems[0].field == str(profile)

@@ -89,6 +89,11 @@ class SupervisedSource:
     keep running and the outage is a log line plus a health entry, not a crash.
     """
 
+    # A run this long counts as healthy and refills the restart budget: the
+    # cap is for crash LOOPS, not for a source that hiccups once a day and
+    # would otherwise die permanently on day four (D2).
+    HEALTHY_RUN_S = 60.0
+
     def __init__(
         self,
         inner: Source,
@@ -107,15 +112,18 @@ class SupervisedSource:
     async def start(self, emit: EventSink) -> None:
         restarts = 0
         while True:
+            began = self._clock.monotonic()
             try:
                 await self._inner.start(emit)
                 return  # a clean exit is a clean exit
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if self._clock.monotonic() - began >= self.HEALTHY_RUN_S:
+                    restarts = 0
                 if restarts >= self._max_restarts:
                     self.gave_up = True
-                    log.error("source.gave_up", source=self.name, error=str(exc))
+                    log.error("source.gave_up", source=self.name, error_text=str(exc))
                     return
                 restarts += 1
                 delay = self._backoff_s * (2 ** (restarts - 1))
@@ -124,7 +132,7 @@ class SupervisedSource:
                     source=self.name,
                     attempt=restarts,
                     backoff_s=delay,
-                    error=str(exc),
+                    error_text=str(exc),
                 )
                 await self._clock.sleep(delay)
 

@@ -15,7 +15,28 @@ from pathlib import Path
 from typing import Any
 
 from bilisama.config.schema import Settings
-from bilisama.config.validate import ConfigError, check
+from bilisama.config.validate import ConfigError, ConfigProblem, check
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    """Parse one TOML file, naming it on failure.
+
+    A bare TOMLDecodeError says "line 3, column 7" but not in which file —
+    useless once profiles exist, because the broken line is as likely in
+    profiles/<name>.toml as in the base file (D7).
+    """
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(
+            [
+                ConfigProblem(
+                    field=str(path),
+                    message=f"TOML 语法错误：{exc}",
+                    fix="打开这个文件，检查报错位置附近的引号、括号和等号。",
+                )
+            ]
+        ) from exc
 
 
 def load(
@@ -39,13 +60,13 @@ def load(
         The merged settings.
 
     Raises:
-        ConfigError: A fatal cross-field rule is broken and `strict` is on.
-        tomllib.TOMLDecodeError: The base file or the profile is not valid TOML.
+        ConfigError: A fatal cross-field rule is broken and `strict` is on, or a
+            file is not valid TOML (the problem names which file).
         pydantic.ValidationError: A field has the wrong type or is out of range.
     """
     raw: dict[str, Any] = {}
     if path is not None and path.exists():
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        raw = _read_toml(path)
 
     overrides = overrides or {}
     # An override that sets active_profile has to pick the profile, so read the
@@ -55,7 +76,7 @@ def load(
     if path is not None:
         profile_path = path.parent / "profiles" / f"{profile_name}.toml"
         if profile_path.exists():
-            raw = _deep_merge(raw, tomllib.loads(profile_path.read_text(encoding="utf-8")))
+            raw = _deep_merge(raw, _read_toml(profile_path))
 
     if overrides:
         raw = _deep_merge(raw, overrides)

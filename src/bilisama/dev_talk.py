@@ -22,9 +22,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import itertools
+import json
+import math
 import os
 import signal
 import sys
+import threading
 import wave
 import zlib
 from collections.abc import AsyncIterator
@@ -317,6 +320,22 @@ def _console_viewer(name: str) -> Viewer:
     return Viewer(uid=10000 + zlib.crc32(name.encode()) % 90000, name=name)
 
 
+def _parse_amount(raw: str) -> float | None:
+    """A finite positive yuan amount, or None.
+
+    float() happily accepts "inf" and "nan", which then reach
+    `int(value * 1000)` in the gift path as OverflowError/ValueError and kill
+    the stdin pump task — one bad typed line, no more console input (C11).
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
 def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     """One typed line, one simulated live event.
 
@@ -332,9 +351,8 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
         if len(parts) < 3:
             return None
         name, amount, body = parts[0], parts[1], parts[2]
-        try:
-            value = float(amount)
-        except ValueError:
+        value = _parse_amount(amount)
+        if value is None:
             return None
         return LiveEvent(
             kind=EventKind.SUPER_CHAT,
@@ -347,9 +365,8 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
         parts = text[6:].split()
         if len(parts) < 2:
             return None
-        try:
-            value = float(parts[1])
-        except ValueError:
+        value = _parse_amount(parts[1])
+        if value is None:
             return None
         return LiveEvent(
             kind=EventKind.GIFT,
@@ -387,26 +404,39 @@ async def run_director(args: argparse.Namespace) -> int:
     acceptance tests compose, with a microphone on one side and the console
     standing in for the danmaku feed on the other.
     """
+    from bilisama import secrets
     from bilisama.app import Assembly
     from bilisama.cli import DEFAULT_CONFIG
     from bilisama.clock import SystemClock
-    from bilisama.config import derive, load
+    from bilisama.config import check, derive, load
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
     from bilisama.director.scheduler import Scheduler
     from bilisama.ingest.sources import QueueSource
     from bilisama.memory.distill import Distiller
     from bilisama.memory.store import MemoryStore
+    from bilisama.obs.health import HealthRegistry
     from bilisama.obs.outcome import Outcome, Verdict
     from bilisama.persona.loader import PersonaStore, default_data_dir
     from bilisama.proactive import ProactiveTopicLoop
+    from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
 
     provider = ProviderName(args.provider)
     config_path: Path = args.config or DEFAULT_CONFIG
+    if not config_path.is_file():
+        # load() treats a missing path as "all defaults", which silently ignores
+        # a typo'd --config — the one case where defaults are a lie (D6).
+        raise SystemExit(f"找不到配置文件：{config_path}")
     overrides = {"persona": {"id": args.persona}} if args.persona else None
     settings = load(config_path, overrides=overrides, strict=False)
+    # strict=False keeps a half-configured dev box usable, but the problems
+    # still get said out loud instead of silently shaping behaviour (D6).
+    for problem in check(settings, config_dir=config_path.parent):
+        tag = "错误" if problem.fatal else "提醒"
+        fix = f"（{problem.fix}）" if problem.fix else ""
+        print(f"[配置{tag}] {problem.field}：{problem.message}{fix}")
     # Without this, background warnings (proactive.refresh_failed and friends)
     # reach the console as bare event names with their error fields dropped.
     from bilisama.obs.logging import setup as logging_setup
@@ -414,6 +444,20 @@ async def run_director(args: argparse.Namespace) -> int:
     logging_setup(level=settings.runtime.log_level)
     clock = SystemClock()
     thresholds = derive(settings.interaction.chattiness)
+
+    stop = asyncio.Event()
+
+    def on_sigint() -> None:
+        if stop.is_set():
+            # Second press: the polite path is stuck somewhere before
+            # stop.wait() (a hung connect, a wedged close). BaseExceptions
+            # escape loop callbacks by design, so this aborts asyncio.run.
+            raise KeyboardInterrupt
+        stop.set()
+
+    # Installed before the first await so a Ctrl-C during connect/setup exits
+    # cleanly instead of unwinding with a traceback (C7).
+    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, on_sigint)
 
     # Memory persists across runs on purpose: streams_seen is the point.
     # Same data home the personas use, one directory up from them.
@@ -435,7 +479,10 @@ async def run_director(args: argparse.Namespace) -> int:
     side_cfg = settings.speech.side
     compat_url = os.environ.get("openai_compatible_url", "")  # noqa: SIM112  (path.sh 里的原名)
     if side_cfg.base_url:
-        side = OpenAICompatSideModel(side_cfg, api_key=os.environ.get("OPENAI_API_KEY", ""))
+        # The config's own credential reference wins; the env name is the
+        # fallback for boxes that never filled it in (D8).
+        side_key = secrets.resolve(side_cfg.api_key_ref) or os.environ.get("OPENAI_API_KEY", "")
+        side = OpenAICompatSideModel(side_cfg, api_key=side_key)
         side_desc = f"{side_cfg.model} @ {side_cfg.base_url}（来自 [speech.side]）"
     elif compat_url:
         side_model = os.environ.get("side_model_name", "qwen3.7-flash")  # noqa: SIM112
@@ -469,9 +516,16 @@ async def run_director(args: argparse.Namespace) -> int:
     elif provider is ProviderName.DASHSCOPE:
         from bilisama.realtime.providers.hosted import HostedLink
 
-        key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
+        # The registry knows which turn types this endpoint really honours;
+        # refusing here beats a session.update that gets silently ignored (D14).
+        for problem in turn_type_problems(provider, settings.speech.dashscope.turn.type):
+            raise SystemExit(f"{problem.message} {problem.fix}")
+        env_key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
+        key = secrets.resolve(settings.speech.dashscope.api_key_ref) or env_key
         if not key:
-            raise SystemExit("缺环境变量 ali_api_key。先 source path.sh 再跑。")
+            raise SystemExit(
+                "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
+            )
         inner = HostedLink(
             _dashscope_url(args.model),
             ProviderName.DASHSCOPE,
@@ -561,15 +615,40 @@ async def run_director(args: argparse.Namespace) -> int:
         variables=variables,
     )
 
+    # The same probes stage 5's UI server will mount; until then the exit
+    # snapshot is their one reader (D3).
+    registry = HealthRegistry()
+    registry.register("assembly", assembly.status)
+    registry.register("proactive", proactive.status)
+    registry.register("scheduler", scheduler.status)
+
     console = QueueSource("console")
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
-    async def stdin_pump() -> None:
-        loop = asyncio.get_running_loop()
+    # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
+    # default executor on shutdown, and a worker parked in readline() holds
+    # that join until one more Enter — Ctrl-C would hang the exit (C7). A
+    # daemon thread just dies with the process.
+    lines: asyncio.Queue[str | None] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def read_stdin() -> None:
         while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
+            line = sys.stdin.readline()
+            try:
+                loop.call_soon_threadsafe(lines.put_nowait, line or None)
+            except RuntimeError:
+                return  # loop already closed; we are exiting
             if not line:
+                return
+
+    threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
+
+    async def stdin_pump() -> None:
+        while True:
+            line = await lines.get()
+            if line is None:
                 return  # stdin closed; keep the rest running
             event = _parse_console_event(line, next(seq))
             if event is None:
@@ -587,9 +666,6 @@ async def run_director(args: argparse.Namespace) -> int:
             if speaker is not None:
                 speaker.flush()
             print(f"[打断] playback.clear（{clear.reason}）")
-
-    stop = asyncio.Event()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
 
     print(
         f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
@@ -622,20 +698,41 @@ async def run_director(args: argparse.Namespace) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        print("\n下播蒸馏中…")
-        report = await distiller.end_of_stream()
-        print(f"[蒸馏] ran={report.ran} reason={report.reason}")
-        store.end_stream()
-        rel, voc = persona.growth_entries("relationship"), persona.growth_entries("voice")
-        if rel or voc:
-            print(
-                f"[生长层] 共同经历 {len(rel)} 条、口癖 {len(voc)} 句。"
-                "翻看：bilisama persona review"
-            )
-        store.close()
+        # Every step below gets its own try: this is a chain of unrelated
+        # resources, and one refusing to close must not leak the rest — a
+        # failed distillation would otherwise leave the WS and the DB open
+        # (C12). Broad excepts are the point here; each one reports.
+        snapshot = registry.snapshot()
+        print(f"\n[状态] {json.dumps(snapshot['components'], ensure_ascii=False, default=str)}")
+        print("下播蒸馏中…")
+        try:
+            report = await distiller.end_of_stream()
+            print(f"[蒸馏] ran={report.ran} reason={report.reason}")
+        except Exception as exc:
+            print(f"[蒸馏] 失败：{exc}", file=sys.stderr)
+        try:
+            store.end_stream()
+            rel, voc = persona.growth_entries("relationship"), persona.growth_entries("voice")
+            if rel or voc:
+                print(
+                    f"[生长层] 共同经历 {len(rel)} 条、口癖 {len(voc)} 句。"
+                    "翻看：bilisama persona review"
+                )
+        except Exception as exc:
+            print(f"[收尾] 记忆收口失败：{exc}", file=sys.stderr)
+        try:
+            store.close()
+        except Exception as exc:
+            print(f"[收尾] 记忆库没关上：{exc}", file=sys.stderr)
         if side is not None:
-            await side.aclose()
-        await speech.aclose()
+            try:
+                await side.aclose()
+            except Exception as exc:
+                print(f"[收尾] 侧路连接没关上：{exc}", file=sys.stderr)
+        try:
+            await speech.aclose()
+        except Exception as exc:
+            print(f"[收尾] 语音连接没关上：{exc}", file=sys.stderr)
         print("再见。")
     return 0
 
@@ -717,7 +814,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if args.director:
-        return asyncio.run(run_director(args))
+        try:
+            return asyncio.run(run_director(args))
+        except KeyboardInterrupt:
+            # Only the second Ctrl-C lands here (see on_sigint); the first one
+            # goes through the graceful path.
+            print("\n强退。")
+            return 130
     try:
         return asyncio.run(run(args))
     except KeyboardInterrupt:

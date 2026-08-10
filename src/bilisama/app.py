@@ -76,6 +76,7 @@ class Assembly:
         # edit shift the cached prefix under the provider.
         self._prefix = static_prefix(persona.anchors(variables or {"userName": "主播"}))
         self._last_pushed = ""
+        self._supervised: list[SupervisedSource] = []
         self.events_seen = 0
         self.intents_submitted = 0
 
@@ -137,10 +138,13 @@ class Assembly:
 
     async def run(self, sources: list[Source]) -> None:
         """Supervise every source, keep the context fresh. Cancel to stop."""
-        supervised: list[Source] = [SupervisedSource(s, self._clock) for s in sources]
+        supervised = [SupervisedSource(s, self._clock) for s in sources]
+        # Kept on self so status() can answer "which source gave up" (D3) —
+        # the whole point of supervision is that an outage stays visible.
+        self._supervised = supervised
         ticker = asyncio.create_task(self._context_ticker(), name="assembly:context")
         try:
-            await merge(supervised, self._sink())
+            await merge(list(supervised), self._sink())
         finally:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
@@ -153,7 +157,7 @@ class Assembly:
             try:
                 await self.refresh_context()
             except Exception as exc:
-                log.warning("assembly.context_push_failed", error=str(exc))
+                log.warning("assembly.context_push_failed", error_text=str(exc))
             await self._clock.sleep(self._refresh_s)
 
     # ------------------------------------------------------------ health
@@ -163,4 +167,5 @@ class Assembly:
             "events_seen": self.events_seen,
             "intents_submitted": self.intents_submitted,
             "context_chars": len(self._last_pushed),
+            "sources": {s.name: ("gave_up" if s.gave_up else "ok") for s in self._supervised},
         }

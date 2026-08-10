@@ -187,6 +187,16 @@ class Scheduler:
         """Verdicts collected by the default sink (tests read these)."""
         return self._verdicts
 
+    def status(self) -> dict[str, Any]:
+        """The health probe's view (plan section 4.12)."""
+        active = self._active
+        return {
+            "panicked": self._panicked,
+            "queued": len(self._heap),
+            "active_source": active.intent.source if active else None,
+            "dispatching": self._dispatching,
+        }
+
     # ------------------------------------------------------------ the loop
 
     async def run(self) -> None:
@@ -270,7 +280,9 @@ class Scheduler:
                 await self._speech.add_context_item(intent.injection.item_text)
             handle = await self._speech.request_reply(intent.injection.reply)
         except Exception as exc:
-            log.warning("scheduler.dispatch_failed", source=intent.source, error=str(exc)[:200])
+            log.warning(
+                "scheduler.dispatch_failed", source=intent.source, error_text=str(exc)[:200]
+            )
             self._free_key(intent)
             self._verdict_sink(
                 Verdict(
@@ -409,7 +421,7 @@ class Scheduler:
             try:
                 await self._speech.end_protection()
             except Exception as exc:
-                log.warning("scheduler.end_protection_failed", error=str(exc)[:200])
+                log.warning("scheduler.end_protection_failed", error_text=str(exc)[:200])
 
         self._spawn(rearm(), name="scheduler:end-protection")
 

@@ -72,7 +72,7 @@ def _window_count(moments: list[float], start: float, window_s: float) -> int:
 
 # ------------------------------------------------------------ parse_line: medal
 
-# No shipped fixture carries a medal block, so this branch and Medal.is_this_room
+# No shipped fixture carries a medal block, so this branch and Medal.is_this_room()
 # only run here. Real danmaku carries one on most events; see the report attached to
 # backlog item 10.
 
@@ -121,7 +121,8 @@ def test_an_absent_medal_block_leaves_medal_none(block: dict[str, object] | None
 )
 def test_is_this_room_needs_a_name_and_an_anchor_room(medal: Medal, expected: bool) -> None:
     """A medal worn for someone else's room must not read as loyalty to this one."""
-    assert medal.is_this_room is expected
+    assert medal.is_this_room(medal.anchor_room_id or 1) is expected
+    assert medal.is_this_room(999999) is False or medal.anchor_room_id == 999999
 
 
 # ------------------------------------------------------------ parse_line: viewer

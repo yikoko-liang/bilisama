@@ -77,7 +77,7 @@ def _log_task_failure(task: asyncio.Task[Any]) -> None:
         return
     exc = task.exception()
     if exc is not None:
-        log.warning("distill.rolling_crashed", error=str(exc)[:200])
+        log.warning("distill.rolling_crashed", error_text=str(exc)[:200])
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +174,7 @@ class Distiller:
                 max_tokens=300,
             )
         except SideModelError as exc:
-            log.warning("distill.rolling_failed", error=str(exc))
+            log.warning("distill.rolling_failed", error_text=str(exc))
             return DistillReport(ran=False, reason="side_error")
         if self._store.stream_id != sid or sid in self._state.batch_done:
             # The stream ended (or its batch already ran) while we were on the
@@ -240,7 +240,7 @@ class Distiller:
                 raw = await self._side.complete(system=_SYSTEM, user=user, max_tokens=900)
                 break
             except SideModelError as exc:
-                log.warning("distill.batch_failed", attempt=attempt, error=str(exc))
+                log.warning("distill.batch_failed", attempt=attempt, error_text=str(exc))
                 if attempt == 2:
                     return DistillReport(ran=False, reason="side_error")
                 # One short-backoff retry: this is the highest-value call of

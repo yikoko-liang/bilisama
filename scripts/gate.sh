@@ -40,10 +40,21 @@ step "CLI 冒烟"
 $PY -m bilisama.cli config validate --config config/bilisama.toml >/dev/null
 $PY -m bilisama.cli config show --config config/bilisama.toml >/dev/null
 $PY -m bilisama.cli config chattiness >/dev/null
-$PY -m bilisama.cli config render-s2s \
-    --config config/bilisama.toml \
-    --out "$WORK/s2s.json" \
-    --s2s-root "${BILISAMA_S2S_ROOT:-../speech-to-speech}" >/dev/null
+# Reconcile field names against the upstream checkout when it exists. Without
+# one the render still has to run — a missing sibling directory must not fail
+# the whole gate on a machine that never installed s2s (D10).
+S2S_UPSTREAM="${BILISAMA_S2S_ROOT:-../speech-to-speech}"
+if [ -d "$S2S_UPSTREAM" ]; then
+  $PY -m bilisama.cli config render-s2s \
+      --config config/bilisama.toml \
+      --out "$WORK/s2s.json" \
+      --s2s-root "$S2S_UPSTREAM" >/dev/null
+else
+  printf '\033[33m▸ render-s2s：没有上游检出（%s），这次没对账字段名\033[0m\n' "$S2S_UPSTREAM"
+  $PY -m bilisama.cli config render-s2s \
+      --config config/bilisama.toml \
+      --out "$WORK/s2s.json" >/dev/null
+fi
 
 step "profile 覆盖层"
 BILISAMA_GATE_WORK="$WORK" $PY - <<'EOF'

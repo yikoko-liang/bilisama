@@ -16,7 +16,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 S2S_ROOT="${BILISAMA_S2S_ROOT:-$REPO_ROOT/../speech-to-speech}"
 VENV="${BILISAMA_S2S_VENV:-$HOME/.local/share/bilisama/engines/s2s}"
-CONFIG="${BILISAMA_S2S_CONFIG:-config/s2s/bilisama-s2s.json}"
+# Anchored to the repo, not the caller's cwd, so the script works from anywhere (D12).
+CONFIG="${BILISAMA_S2S_CONFIG:-$REPO_ROOT/config/s2s/bilisama-s2s.json}"
 PYVER="${BILISAMA_S2S_PYTHON:-3.12}"
 
 # 中国大陆网络下这两条决定成败。UV_PYTHON_INSTALL_MIRROR 最容易被漏掉：
@@ -69,7 +70,7 @@ cmd_serve() {
   export BILISAMA_S2S_PATCHES="${BILISAMA_S2S_PATCHES-}"
   log "补丁：${BILISAMA_S2S_PATCHES:-零补丁（官方管线默认）}"
   # 补丁走 PYTHONPATH 注入，不改上游一个字节
-  PYTHONPATH="$PWD/tools/s2s_shim" \
+  PYTHONPATH="$REPO_ROOT/tools/s2s_shim" \
     "$VENV/bin/python" -m bilisama_s2s_shim serve "$CONFIG" &
   local pid=$!
   trap 'kill "$pid" 2>/dev/null || true' EXIT

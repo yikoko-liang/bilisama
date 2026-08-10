@@ -67,9 +67,13 @@ class Medal:
     up_name: str = ""
     anchor_room_id: int = 0
 
-    @property
-    def is_this_room(self) -> bool:
-        return bool(self.name) and self.anchor_room_id > 0
+    def is_this_room(self, room_id: int) -> bool:
+        """Whether the medal belongs to THIS room — it must be told which.
+
+        The old property answered "has any medal at all" (D13): a viewer
+        wearing another streamer's badge counted as a local fan.
+        """
+        return bool(self.name) and room_id > 0 and self.anchor_room_id == room_id
 
 
 @dataclass(frozen=True, slots=True)

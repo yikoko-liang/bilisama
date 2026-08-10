@@ -177,7 +177,7 @@ class ProactiveTopicLoop:
                 max_tokens=_CANDIDATE_MAX_TOKENS,
             )
         except SideModelError as exc:
-            log.warning("proactive.refresh_failed", error=str(exc))
+            log.warning("proactive.refresh_failed", error_text=str(exc))
             return
         topic = raw.strip().splitlines()[0].strip() if raw.strip() else ""
         if topic:

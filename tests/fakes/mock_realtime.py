@@ -440,11 +440,25 @@ class MockRealtimeServer:
         # The implicit turn follows the session default: the S2S profile's
         # owns_tts=False stands in for patch A pinning the session to text.
         reply = self._start_reply(holds_slot=True, started=False, text_reply=not self.caps.owns_tts)
+        # The s2s text pipeline announces nothing (rule 4's "no created" is a
+        # TEXT-MODE fact); hosted endpoints DO send response.created for their
+        # VAD replies — modelling them as silent hid the unbooked-slot bug for
+        # a whole stage (C8).
+        if self._is_hosted():
+            await self.send(
+                dia.ServerEvent.RESPONSE_CREATED,
+                response={"id": self._ensure_response_id(reply)},
+            )
         if not hold:
             reply.first_token.set()
         task = asyncio.create_task(self._run_response(reply, implicit=True))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _is_hosted(self) -> bool:
+        """DashScope (beta dialect) or OpenAI (the GA profile with the
+        out-of-band exemption) — the two announced-implicit shapes."""
+        return self.codec.dialect is dia.Dialect.BETA or self.caps.out_of_band_exempt_from_slot
 
     async def release_pending_reply(self) -> None:
         """Let every held implicit reply emit its first token."""
@@ -678,7 +692,7 @@ class MockRealtimeServer:
                 # all-text done. GA (s2s) streams NOTHING per piece — its text
                 # arrives as one output_audio_transcript.done PER LLM CHUNK
                 # (handlers/response.py:362), sent right here.
-                if self.codec.dialect is dia.Dialect.BETA:
+                if self._is_hosted():
                     await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
                 else:
                     await self.send(
@@ -712,7 +726,7 @@ class MockRealtimeServer:
             # beta dialect closes with an all-text transcript done (after its
             # deltas); GA already delivered the text chunk by chunk above.
             rid = self._ensure_response_id(reply)
-            if self.codec.dialect is dia.Dialect.BETA:
+            if self._is_hosted():
                 await self.send(dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=text)
             await self.send(dia.ServerEvent.AUDIO_DONE, response_id=rid)
         await self._finish_response(reply, status="completed")
