@@ -25,6 +25,11 @@ class SpeakingFloor:
         self._clock = clock
         self.streamer_speaking = False
         self.turn_pending = False
+        # The provider's own implicit (VAD-triggered) reply is generating or
+        # speaking. Tracked separately from turn_pending, which only covers
+        # replies the scheduler dispatched itself — the audit's rule-5 window
+        # (A2) lived exactly in that difference.
+        self.implicit_active = False
         self.queued_audio = False
         self._quiet_until = 0.0
         self._cooldown_until = 0.0
@@ -47,6 +52,9 @@ class SpeakingFloor:
     def on_reply_active(self, active: bool) -> None:
         self.turn_pending = active
 
+    def on_implicit(self, active: bool) -> None:
+        self.implicit_active = active
+
     def on_playback(self, queued: bool) -> None:
         self.queued_audio = queued
 
@@ -62,6 +70,7 @@ class SpeakingFloor:
         return (
             self.streamer_speaking
             or self.turn_pending
+            or self.implicit_active
             or self.queued_audio
             or now < self._quiet_until
             or now < self._cooldown_until

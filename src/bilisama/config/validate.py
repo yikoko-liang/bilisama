@@ -7,6 +7,7 @@ concrete next step, never as a traceback — a streamer who sees
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -42,16 +43,37 @@ class ConfigError(Exception):
         super().__init__("\n".join(p.message for p in problems))
 
 
-def check(s: Settings) -> list[ConfigProblem]:
+def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]:
     """Validate combinations that individual field types cannot express.
 
     Args:
         s: A settings object that already passed schema validation.
+        config_dir: Directory holding bilisama.toml; enables the checks that
+            must touch the filesystem (the safety wordlist). None skips them.
 
     Returns:
         Everything wrong with it. Empty means good to go.
     """
     problems: list[ConfigProblem] = []
+
+    # Plan section 7.6 row 7: a missing wordlist refuses to start — a mouth
+    # with no backstop must not reach an audience. Gated on room_id like the
+    # credential rule: the backstop matters when going live, and nagging a
+    # fresh install trains people to ignore the list. "auto" resolves the
+    # same way director/output_guard.load_guard does (keep the two in step).
+    if config_dir is not None and s.room.room_id:
+        raw = s.safety.wordlist_path
+        wordlist = (
+            config_dir / "safety" / "wordlist.txt" if raw == "auto" else Path(raw).expanduser()
+        )
+        if not wordlist.is_file():
+            problems.append(
+                ConfigProblem(
+                    field="safety.wordlist_path",
+                    message=f"敏感词表文件不存在：{wordlist}。没有输出兜底不能开播。",
+                    fix="把词表放到该路径，或在设置里改成真实文件的位置。",
+                )
+            )
     owns_tts = (
         s.speech.provider is not ProviderName.S2S or "text_modality" not in s.speech.s2s.patches
     )

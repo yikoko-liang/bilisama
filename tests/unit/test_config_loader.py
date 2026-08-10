@@ -60,6 +60,10 @@ def config_path(tmp_path: Path) -> Path:
     (tmp_path / "bilisama.toml").write_text(BASE, encoding="utf-8")
     (tmp_path / "profiles" / "debug.toml").write_text(DEBUG_PROFILE, encoding="utf-8")
     (tmp_path / "profiles" / "normal.toml").write_text(NORMAL_PROFILE, encoding="utf-8")
+    # BASE sets a room_id, and a config that is going live must carry a
+    # wordlist (plan section 7.6 row 7) — strict load refuses otherwise.
+    (tmp_path / "safety").mkdir()
+    (tmp_path / "safety" / "wordlist.txt").write_text("测试敏感词\n", encoding="utf-8")
     return tmp_path / "bilisama.toml"
 
 

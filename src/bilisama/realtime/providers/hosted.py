@@ -128,5 +128,11 @@ class HostedLink:
     async def cancel(self, handle: link.ReplyHandle) -> None:
         await self._client.cancel(handle)
 
+    async def end_protection(self) -> None:
+        # Hosted protection is not implemented yet (request_reply ignores
+        # spec.protected too — backlog item 19); a paired no-op keeps the
+        # scheduler's lifecycle uniform across adapters.
+        return
+
     def events(self) -> AsyncIterator[link.LinkEvent]:
         return self._client.events()

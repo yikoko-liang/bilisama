@@ -55,6 +55,7 @@ class Assembly:
         push_context: Callable[[str], Awaitable[None]],
         clock: Clock,
         max_tokens: int = 120,
+        protect_ms: int = 4000,
         variables: Mapping[str, str] | None = None,
         context_refresh_s: float = 10.0,
     ) -> None:
@@ -68,6 +69,7 @@ class Assembly:
         self._push_context = push_context
         self._clock = clock
         self._max_tokens = max_tokens
+        self._protect_ms = protect_ms
         self._refresh_s = context_refresh_s
         # Anchors are read once: editing an anchor is a restart-level change
         # (ui_meta says so), and re-reading per push would let a mid-stream
@@ -88,7 +90,10 @@ class Assembly:
         if not self._speak_enabled(event.kind.value):
             return
         intent = intent_for(
-            event.redacted(), now=self._clock.monotonic(), max_tokens=self._max_tokens
+            event.redacted(),
+            now=self._clock.monotonic(),
+            max_tokens=self._max_tokens,
+            protect_ms=self._protect_ms,
         )
         if intent is not None:
             self.intents_submitted += 1

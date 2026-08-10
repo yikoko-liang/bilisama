@@ -308,6 +308,9 @@ class _Fanout:
     async def cancel(self, handle: link.ReplyHandle) -> None:
         await self._inner.cancel(handle)
 
+    async def end_protection(self) -> None:
+        await self._inner.end_protection()
+
 
 def _console_viewer(name: str) -> Viewer:
     # A stable uid per name, so memory sees 测试观众 as the same person every time.
@@ -481,6 +484,14 @@ async def run_director(args: argparse.Namespace) -> int:
     await speech.connect()
     speech.start()
 
+    from bilisama.director.output_guard import load_guard
+
+    try:
+        guard = load_guard(settings.safety, config_dir=config_path.parent)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"{exc}。词表是上线硬门槛（计划 §7.6），配好再跑。") from exc
+    print(f"[安全] 词表已装载，命中策略 {settings.safety.on_hit}")
+
     distiller = Distiller(
         side,
         store,
@@ -488,8 +499,18 @@ async def run_director(args: argparse.Namespace) -> int:
         settings.persona.growth,
         clock,
         every_n_events=settings.memory.distill_every_n_events,
+        guard=guard.text_blocked,
     )
     floor = SpeakingFloor(clock)
+    # The quiet window must cover the WORST turn-grace branch plus margin
+    # (plan section 3.3 rule 1); a fixed 1.1 s left a gap into the rule-5
+    # pending window (A2/A3). The floor also holds while an implicit reply
+    # is generating, so this timer only carries the no-reply case.
+    if provider is ProviderName.S2S:
+        turn = settings.speech.s2s.turn
+        quiet_s = (turn.smart_turn_max_wait_ms + turn.smart_turn_incomplete_delay_ms) / 1000 + 0.3
+    else:
+        quiet_s = settings.speech.dashscope.turn.silence_duration_ms / 1000 + 0.3
 
     def verdict_sink(verdict: Verdict) -> None:
         if verdict.outcome is not Outcome.SPOKEN:
@@ -500,7 +521,10 @@ async def run_director(args: argparse.Namespace) -> int:
         floor,
         clock,
         cooldown_s=float(thresholds.cooldown_s),
+        quiet_after_speech_s=quiet_s,
         verdict_sink=verdict_sink,
+        guard=guard,
+        on_hit=settings.safety.on_hit,
         spoken_sink=distiller.note_assistant_line,
     )
     proactive = ProactiveTopicLoop(
@@ -533,6 +557,7 @@ async def run_director(args: argparse.Namespace) -> int:
         push_context=push_context,
         clock=clock,
         max_tokens=thresholds.max_output_tokens,
+        protect_ms=settings.interaction.sc_protect_ms,
         variables=variables,
     )
 

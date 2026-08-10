@@ -20,6 +20,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from bilisama.director.intent import Injection, Intent, Priority
+from bilisama.director.intents import neutralize_tags
 from bilisama.obs.logging import get_logger
 from bilisama.realtime.link import ReplySpec
 from bilisama.side import SideModel, SideModelError
@@ -113,7 +114,11 @@ class ProactiveTopicLoop:
         self._speak(now)
 
     def _speak(self, now: float) -> None:
-        candidate = self._candidate or ""
+        # The candidate came out of a side model that READ audience danmaku —
+        # a second-order injection channel (A14). Flatten whitespace so it
+        # cannot fake prompt structure, break wrapper tokens, cap the length;
+        # the instructions text around it stays a fixed template.
+        candidate = neutralize_tags(" ".join((self._candidate or "").split()))[:80]
         self._candidate = None
         # Force a regeneration next refresh even if no new events arrive: the
         # next dead-air stretch deserves a fresh angle, not this one reheated.

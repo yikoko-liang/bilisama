@@ -116,7 +116,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     # This command exists to describe a broken config, so it has to be handed one.
     settings = _load(args.config, strict=False)
-    problems = check(settings)
+    problems = check(settings, config_dir=args.config.parent)
     if not problems:
         print("配置没问题。")
         return 0

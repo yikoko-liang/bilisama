@@ -168,4 +168,10 @@ class SpeechLink(Protocol):
 
     async def cancel(self, handle: ReplyHandle) -> None: ...
 
+    async def end_protection(self) -> None:
+        """Re-arm barge-in after a protected reply. The scheduler calls this
+        when a protected reply settles and again on the protect_ms hard cap;
+        adapters where protection is a no-op just return."""
+        ...
+
     def events(self) -> AsyncIterator[LinkEvent]: ...

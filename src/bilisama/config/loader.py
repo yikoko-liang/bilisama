@@ -62,7 +62,8 @@ def load(
 
     settings = Settings.model_validate(raw)
     if strict:
-        fatal = [p for p in check(settings) if p.fatal]
+        config_dir = path.parent if path is not None else None
+        fatal = [p for p in check(settings, config_dir=config_dir) if p.fatal]
         if fatal:
             raise ConfigError(fatal)
     return settings
