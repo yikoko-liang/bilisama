@@ -392,10 +392,6 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.side import OpenAICompatSideModel, SideModel
 
     provider = ProviderName(args.provider)
-    if provider is not ProviderName.S2S:
-        raise SystemExit(
-            "--director 目前只支持 --provider s2s：托管 adapter 的会话引导还在收尾（欠账 #19）。"
-        )
     config_path: Path = args.config or DEFAULT_CONFIG
     overrides = {"persona": {"id": args.persona}} if args.persona else None
     settings = load(config_path, overrides=overrides, strict=False)
@@ -430,7 +426,24 @@ async def run_director(args: argparse.Namespace) -> int:
     if side is None:
         print("提示：没配侧路模型（[speech.side] 或 source path.sh），主动话题和蒸馏这场不干活。")
 
-    speech = _Fanout(S2SLink(args.url))
+    inner: link.SpeechLink
+    if provider is ProviderName.S2S:
+        inner = S2SLink(args.url)
+    elif provider is ProviderName.DASHSCOPE:
+        from bilisama.realtime.providers.hosted import HostedLink
+
+        key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
+        if not key:
+            raise SystemExit("缺环境变量 ali_api_key。先 source path.sh 再跑。")
+        inner = HostedLink(
+            _dashscope_url(args.model),
+            ProviderName.DASHSCOPE,
+            headers={"Authorization": f"Bearer {key}"},
+            turn=settings.speech.dashscope.turn,
+        )
+    else:
+        raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
+    speech = _Fanout(inner)
     await speech.connect()
     speech.start()
 

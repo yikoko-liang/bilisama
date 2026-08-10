@@ -63,12 +63,14 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 ```
 
 **全装配档（`--director`，阶段 3 的体验入口）**：把人设、记忆、蒸馏、主动话题、
-调度器整套真栈立起来，麦克风在一头，终端打字在另一头顶替弹幕源。目前只支持
-`--provider s2s`（托管 adapter 的会话引导在欠账 #19）。
+调度器整套真栈立起来，麦克风在一头，终端打字在另一头顶替弹幕源。s2s 和 DashScope
+都能接（HostedLink 会在连接后自动发会话引导帧，判停参数读 `[speech.dashscope.turn]`；
+2026-08-11 对真端点验证过：注入回复 completed 且带音频）。
 
 ```bash
 source path.sh && export OPENAI_API_KEY="$api_key"
-.venv/bin/bilisama dev-talk --director                      # 用 config/bilisama.toml
+.venv/bin/bilisama dev-talk --director                      # 本地 s2s，用 config/bilisama.toml
+.venv/bin/bilisama dev-talk --director --provider dashscope --model qwen-audio-3.0-realtime-flash
 .venv/bin/bilisama dev-talk --director --persona hanako     # 临时换人设，不改配置
 .venv/bin/bilisama dev-talk --director --show-context       # 每次上下文推送打全文
 ```

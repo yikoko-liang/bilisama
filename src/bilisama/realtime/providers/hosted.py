@@ -12,7 +12,7 @@ not pin the session to text.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 from bilisama.clock import Clock
 from bilisama.config.enums import ProviderName
@@ -20,6 +20,11 @@ from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.providers import profile_for
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from bilisama.config.schema import HostedTurnConfig
 
 __all__ = ["HostedLink"]
 
@@ -34,16 +39,53 @@ class HostedLink:
         *,
         clock: Clock | None = None,
         watchdog_s: float = 25.0,
+        headers: dict[str, str] | None = None,
+        turn: HostedTurnConfig | None = None,
     ) -> None:
         profile = profile_for(provider)
         self._client = RealtimeClient(
-            url, caps=profile.caps, codec=profile.codec, clock=clock, watchdog_s=watchdog_s
+            url,
+            caps=profile.caps,
+            codec=profile.codec,
+            clock=clock,
+            watchdog_s=watchdog_s,
+            headers=headers,
         )
         self._codec = profile.codec
         self._caps = profile.caps
+        self._turn = turn
 
     async def connect(self) -> None:
         await self._client.connect()
+        frame = self._bootstrap_frame()
+        if frame is not None:
+            await self._client.send_command(frame)
+
+    def _bootstrap_frame(self) -> dict[str, Any] | None:
+        """The session bootstrap a hosted endpoint needs before audio flows.
+
+        DashScope's beta endpoint leaves server VAD off until a session.update
+        names it — dev-talk's wire mode carried this frame by hand until now
+        (probed live 2026-08-10). Formats use the flat beta keys; the GA
+        dialect nests them and runs server_vad by default, so a link built
+        without turn config sends nothing at all.
+        """
+        if self._turn is None:
+            return None
+        session: dict[str, Any] = {
+            self._codec.modalities_key: ["text", "audio"],
+            "turn_detection": {
+                "type": self._turn.type,
+                "threshold": self._turn.threshold,
+                "silence_duration_ms": self._turn.silence_duration_ms,
+            },
+        }
+        if self._codec.needs_session_type:
+            session["type"] = "realtime"
+        if not self._codec.nested_audio_format:
+            session["input_audio_format"] = "pcm16"
+            session["output_audio_format"] = "pcm16"
+        return {"type": dia.ClientEvent.SESSION_UPDATE.value, "session": session}
 
     async def aclose(self) -> None:
         await self._client.aclose()
