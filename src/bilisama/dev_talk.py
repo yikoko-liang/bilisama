@@ -260,16 +260,25 @@ class _Fanout:
 
     async def _pump(self) -> None:
         async for event in self._inner.events():
-            for sink in self._sinks:
+            for sink in list(self._sinks):
+                if sink.full():
+                    # A stalled or dead consumer must not grow memory forever
+                    # (C10): live streams stay live, oldest frames go.
+                    sink.get_nowait()
                 sink.put_nowait(event)
 
     def events(self) -> AsyncIterator[link.LinkEvent]:
-        queue: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
+        queue: asyncio.Queue[link.LinkEvent] = asyncio.Queue(maxsize=256)
         self._sinks.append(queue)
 
         async def drain() -> AsyncIterator[link.LinkEvent]:
-            while True:
-                yield await queue.get()
+            try:
+                while True:
+                    yield await queue.get()
+            finally:
+                # A consumer that stops iterating unregisters its queue.
+                if queue in self._sinks:
+                    self._sinks.remove(queue)
 
         return drain()
 

@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -94,6 +96,11 @@ class RealtimeClient:
         self._slot_free = asyncio.Event()
         self._slot_free.set()
         self._awaiting_created: list[ReplyRecord] = []
+        # Settled response ids. A watchdog-abandoned reply's late frames used
+        # to re-book as a fresh "implicit" record — a ghost reply with a new
+        # handle that the docstring's tombstone promise was supposed to stop.
+        self._tombstones: deque[str] = deque(maxlen=64)
+        self._tombstone_set: set[str] = set()
 
     # ------------------------------------------------------------ lifecycle
 
@@ -155,7 +162,13 @@ class RealtimeClient:
             await self._wait_for_slot()
             self._slot_free.clear()
             self._awaiting_created.append(record)
-            await self._send_raw(frame)
+            try:
+                await self._send_raw(frame)
+            except Exception:
+                # A create that never left must not hold the slot for 25 s.
+                self._awaiting_created.remove(record)
+                self._slot_free.set()
+                raise
         watchdog = asyncio.create_task(self._watchdog(record), name="realtime:watchdog")
         self._tasks.add(watchdog)
         watchdog.add_done_callback(self._tasks.discard)
@@ -164,9 +177,24 @@ class RealtimeClient:
     async def cancel(self, handle: link.ReplyHandle) -> None:
         """response.cancel, bypassing the queue — waiting to interrupt defeats
         the point. The handle goes stale immediately; the server's done event
-        settles the books."""
+        settles the books.
+
+        A bare cancel kills whoever holds the slot NOW, so when this handle's
+        reply has already ended (the done raced us), sending would murder an
+        innocent — typically the streamer's own implicit reply. Skip it.
+        """
         handle.stale = True
+        record = self._record_of(handle)
+        # Settled records are popped from the books, so "gone" IS "ended".
+        if record is None or record.done.is_set():
+            return
         await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
+
+    def _record_of(self, handle: link.ReplyHandle) -> ReplyRecord | None:
+        for record in (*self._replies.values(), *self._awaiting_created):
+            if record.handle is handle:
+                return record
+        return None
 
     async def _send_raw(self, frame: dict[str, Any]) -> None:
         if self._ws is None:
@@ -189,9 +217,12 @@ class RealtimeClient:
             if done_task in finished:
                 return
             # No done inside the window: the reply is presumed wedged. Cancel is
-            # the only client-side path that can free a stuck in_response.
+            # the only client-side path that can free a stuck in_response. A
+            # dead socket must not eat the TIMED_OUT settlement (A9): the local
+            # books free either way.
             record.handle.stale = True
-            await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
+            with contextlib.suppress(ConnectionError, OSError, websockets.ConnectionClosed):
+                await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
             self._settle(record, link.ReplyStatus.TIMED_OUT)
         finally:
             for task in (done_task, sleep_task):
@@ -202,6 +233,7 @@ class RealtimeClient:
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None
+        reason = "connection_closed"
         try:
             async for raw in self._ws:
                 try:
@@ -211,8 +243,22 @@ class RealtimeClient:
                 kind, payload = self.codec.normalize(frame)
                 if kind is not None:
                     await self._dispatch(kind, payload)
-        except (websockets.ConnectionClosed, asyncio.CancelledError):
-            return
+        except asyncio.CancelledError:
+            return  # aclose(): a deliberate teardown needs no failure theatre
+        except websockets.ConnectionClosed as exc:
+            reason = f"connection_closed:{exc.code}"
+        # The link died underneath us. Silence here used to freeze the whole
+        # consumer stack (C4/A9): the active reply never settles, the floor
+        # stays pending, and nobody upstairs hears a word about it.
+        self._on_disconnect(reason)
+
+    def _on_disconnect(self, reason: str) -> None:
+        """Fail every open record, free the slot, tell the consumer."""
+        for record in (*self._replies.values(), *self._awaiting_created):
+            record.handle.stale = True
+            self._settle(record, link.ReplyStatus.FAILED)
+        self._slot_free.set()
+        self._events.put_nowait(link.LinkError("connection_lost", reason))
 
     async def _dispatch(self, kind: dia.ServerEvent, payload: dict[str, Any] | Any) -> None:
         emit = self._events.put_nowait
@@ -275,10 +321,27 @@ class RealtimeClient:
         elif kind is dia.ServerEvent.ERROR:
             error = payload.get("error") or {}
             emit(link.LinkError(str(error.get("type") or ""), str(error.get("message") or "")))
+            # A rejected create gets neither created nor done — without this,
+            # the slot we cleared for it stays shut for the full 25 s watchdog
+            # (C5). Rule 4's spirit: wrong books wedge US, so free them. On
+            # this wire an error while a create is pending is overwhelmingly
+            # its rejection; a benign error costing one early FAILED settle is
+            # the cheaper mistake.
+            if self._awaiting_created:
+                record = self._awaiting_created.pop(0)
+                self._settle(record, link.ReplyStatus.FAILED)
         # session.updated / item.created / *.done terminators need no upward event.
 
     def _on_created(self, rid: str) -> None:
-        # Serialisation means the next created after our create is ours.
+        # Any created occupies the single slot, announced-by-us or not: hosted
+        # dialects DO announce their implicit VAD replies, and leaving those
+        # unbooked let an explicit create race straight into a rejection (C1).
+        self._slot_free.clear()
+        # Serialisation means the next created after our create is USUALLY
+        # ours. An implicit created can interleave and steal the pairing —
+        # the wire carries nothing to match on, so this stays FIFO; the floor
+        # holding injections during speech (stage-3 fix) shrinks the overlap
+        # window to near zero. Residual risk recorded in the backlog.
         if self._awaiting_created:
             record = self._awaiting_created.pop(0)
         else:  # a created we never asked for — book it so its frames land somewhere
@@ -290,6 +353,8 @@ class RealtimeClient:
         rid = payload.get("response_id")
         if not isinstance(rid, str):
             return None
+        if rid in self._tombstone_set:
+            return None  # a settled reply's late frames stay dead (C6)
         record = self._replies.get(rid)
         if record is None:
             # First frame of a reply that never announced itself: the implicit
@@ -299,10 +364,20 @@ class RealtimeClient:
             self._slot_free.clear()
         return record
 
+    def _bury(self, rid: str) -> None:
+        if rid in self._tombstone_set:
+            return
+        if len(self._tombstones) == self._tombstones.maxlen:
+            self._tombstone_set.discard(self._tombstones[0])
+        self._tombstones.append(rid)
+        self._tombstone_set.add(rid)
+
     def _on_done(self, payload: dict[str, Any] | Any) -> None:
         response = payload.get("response") or {}
         rid = str(response.get("id") or "")
         status_raw = str(response.get("status") or "completed")
+        if rid:
+            self._bury(rid)
         record = self._replies.pop(rid, None)
         if record is None:
             # A done we cannot match frees the slot anyway: wrong books held
@@ -322,6 +397,7 @@ class RealtimeClient:
         if status is not link.ReplyStatus.COMPLETED:
             record.handle.stale = True
         if record.rid is not None:
+            self._bury(record.rid)
             self._replies.pop(record.rid, None)
         if record in self._awaiting_created:
             self._awaiting_created.remove(record)

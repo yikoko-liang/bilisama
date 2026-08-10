@@ -60,6 +60,11 @@ class OpenAICompatSideModel:
                     body = (await resp.text())[:200]
                     raise SideModelError(f"侧路模型返回 {resp.status}: {body}")
                 data = await resp.json()
+        except TimeoutError as exc:
+            # aiohttp's total timeout raises bare TimeoutError (verified on
+            # 3.14.3), NOT ClientError — uncaught it killed the refresh task
+            # with "exception was never retrieved" instead of a warning (A11).
+            raise SideModelError(f"侧路模型超时（{self._timeout.total}s）") from exc
         except aiohttp.ClientError as exc:
             raise SideModelError(f"侧路模型请求失败: {exc}") from exc
         try:

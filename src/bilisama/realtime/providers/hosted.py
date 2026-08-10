@@ -72,13 +72,16 @@ class HostedLink:
         """
         if self._turn is None:
             return None
+        # Field set follows the type: threshold/silence_duration_ms belong to
+        # server_vad only — semantic_vad and smart_turn endpoints can reject
+        # them outright (C9), which would kill the session on frame one.
+        turn_detection: dict[str, Any] = {"type": self._turn.type}
+        if self._turn.type == "server_vad":
+            turn_detection["threshold"] = self._turn.threshold
+            turn_detection["silence_duration_ms"] = self._turn.silence_duration_ms
         session: dict[str, Any] = {
             self._codec.modalities_key: ["text", "audio"],
-            "turn_detection": {
-                "type": self._turn.type,
-                "threshold": self._turn.threshold,
-                "silence_duration_ms": self._turn.silence_duration_ms,
-            },
+            "turn_detection": turn_detection,
         }
         if self._codec.needs_session_type:
             session["type"] = "realtime"

@@ -57,12 +57,13 @@ class FakeClock:
     20-second danmaku window finishes in milliseconds and does so deterministically.
     """
 
-    __slots__ = ("_now", "_waiters", "_wall")
+    __slots__ = ("_advancing", "_now", "_waiters", "_wall")
 
     def __init__(self, start: float = 0.0, wall: datetime | None = None) -> None:
         self._now = start
         self._wall = wall or datetime(2026, 1, 1, tzinfo=UTC)
         self._waiters: list[tuple[float, asyncio.Future[None]]] = []
+        self._advancing = False
 
     def monotonic(self) -> float:
         return self._now
@@ -116,22 +117,31 @@ class FakeClock:
             # Rewinding a monotonic clock hides the caller's arithmetic bug behind a
             # cooldown that never expires. Making it visible is the point of the fake.
             raise ValueError("advance() only moves time forward")
-        target = self._now + seconds
-        while True:
-            due = [(t, f) for t, f in self._waiters if t <= target and not f.done()]
-            if due:
-                due.sort(key=lambda pair: pair[0])
-                when, fut = due[0]
-                self._now = when
-                self._waiters.remove((when, fut))
-                fut.set_result(None)
-                # The woken coroutine gets its turn now, at its own deadline,
-                # before any later sleeper can move the clock.
-                await asyncio.sleep(0)
-                continue
-            if not await self._settle(target):
-                break
-        self._now = target
+        if self._advancing:
+            # Two concurrent drivers would each write their own target at the
+            # end — the later finisher rewinds time past the first one's, the
+            # very jump the ValueError above exists to prevent (D9).
+            raise RuntimeError("advance() 不支持并发调用：两个驱动者会互相把时间改回去")
+        self._advancing = True
+        try:
+            target = self._now + seconds
+            while True:
+                due = [(t, f) for t, f in self._waiters if t <= target and not f.done()]
+                if due:
+                    due.sort(key=lambda pair: pair[0])
+                    when, fut = due[0]
+                    self._now = when
+                    self._waiters.remove((when, fut))
+                    fut.set_result(None)
+                    # The woken coroutine gets its turn now, at its own deadline,
+                    # before any later sleeper can move the clock.
+                    await asyncio.sleep(0)
+                    continue
+                if not await self._settle(target):
+                    break
+            self._now = target
+        finally:
+            self._advancing = False
         await asyncio.sleep(0)
 
     async def _settle(self, target: float) -> bool:
