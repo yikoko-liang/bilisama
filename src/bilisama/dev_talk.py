@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import os
 import sys
 import wave
@@ -87,7 +86,9 @@ async def _pump_wav(client: RealtimeClient, path: Path) -> None:
         await asyncio.sleep(_FRAME_MS / 1000)
 
 
-async def _pump_mic(client: RealtimeClient, device: int | None) -> None:
+async def _pump_mic(
+    client: RealtimeClient, device: int | None, speaker: _Speaker | None, mute: bool
+) -> None:
     try:
         import sounddevice
     except ImportError as exc:
@@ -98,9 +99,16 @@ async def _pump_mic(client: RealtimeClient, device: int | None) -> None:
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
 
+    def enqueue(block: bytes) -> None:
+        # Runs on the loop. Drop the oldest on overflow: live audio must stay
+        # live, and a raised QueueFull inside a loop callback would be logged
+        # as an unhandled exception once per block — the console spam bug.
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(block)
+
     def on_block(indata: Any, frames: int, time_info: Any, status: Any) -> None:
-        with contextlib.suppress(asyncio.QueueFull):
-            loop.call_soon_threadsafe(queue.put_nowait, bytes(indata))
+        loop.call_soon_threadsafe(enqueue, bytes(indata))
 
     stream = sounddevice.RawInputStream(
         samplerate=_INPUT_RATE,
@@ -110,33 +118,76 @@ async def _pump_mic(client: RealtimeClient, device: int | None) -> None:
         device=device,
         callback=on_block,
     )
+    silence = b"\x00\x00" * (_INPUT_RATE * _FRAME_MS // 1000)
     with stream:
         while True:
-            await client.push_audio(await queue.get())
+            block = await queue.get()
+            if mute and speaker is not None and speaker.busy:
+                # Echo shield for open speakers: the mic goes silent while the
+                # reply plays. Costs barge-in during playback — headphones keep
+                # it. Silence rather than nothing: stopping the append stream
+                # freezes the provider's audio clock (plan section 3.3 rule 7).
+                block = silence
+            await client.push_audio(block)
 
 
 class _Speaker:
-    """Playback with a working barge-in: SpeechStarted flushes the queue."""
+    """Callback-fed playback so the event loop never blocks on audio.
+
+    The first version called RawOutputStream.write() straight from the event
+    loop. Replies arrive as a burst far faster than they play, so the writes
+    filled PortAudio's buffer and started BLOCKING — SpeechStarted then queued
+    behind dozens of audio events, the flush ran after playback had already
+    finished, and the mic queue backed up until every block logged QueueFull.
+    One blocking call, three symptoms: barge-in that "does not stop playback",
+    an error-spamming console, and a starved uplink. The server had cancelled
+    correctly all along (probed live: status=cancelled, two late chunks).
+
+    Now the loop appends to a ring buffer and returns; the audio thread pulls.
+    flush() empties the buffer, which silences the speaker within one block.
+    """
 
     def __init__(self, device: int | None) -> None:
+        import threading
+
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
         try:
             import sounddevice
         except ImportError:
             self._stream = None
             return
+
+        def feed(outdata: Any, frames: int, time_info: Any, status: Any) -> None:
+            need = len(outdata)
+            with self._lock:
+                chunk = bytes(self._buffer[:need])
+                del self._buffer[: len(chunk)]
+            outdata[: len(chunk)] = chunk
+            if len(chunk) < need:
+                outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
+
         self._stream = sounddevice.RawOutputStream(
-            samplerate=_OUTPUT_RATE, channels=1, dtype="int16", device=device
+            samplerate=_OUTPUT_RATE,
+            channels=1,
+            dtype="int16",
+            device=device,
+            callback=feed,
         )
         self._stream.start()
 
     def play(self, pcm: bytes) -> None:
-        if self._stream is not None:
-            self._stream.write(pcm)
+        with self._lock:
+            self._buffer.extend(pcm)
 
     def flush(self) -> None:
-        if self._stream is not None:
-            self._stream.abort()
-            self._stream.start()
+        with self._lock:
+            self._buffer.clear()
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return len(self._buffer) > 0
 
 
 async def _consume(
@@ -185,7 +236,9 @@ async def run(args: argparse.Namespace) -> int:
 
     client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
     await client.connect()
-    print(f"已连接 {provider.value}（{url.split('?')[0]}），说话即可，Ctrl-C 退出。")
+    print(f"已连接 {provider.value}（{url.split("?")[0]}），说话即可，Ctrl-C 退出。")
+    if args.wav is None and not args.mute_while_speaking:
+        print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
     try:
         session_frame = _session_frame(provider)
         if session_frame is not None:
@@ -197,7 +250,9 @@ async def run(args: argparse.Namespace) -> int:
             pump = asyncio.create_task(_pump_wav(client, args.wav))
         else:
             speaker = _Speaker(args.output_device)
-            pump = asyncio.create_task(_pump_mic(client, args.input_device))
+            pump = asyncio.create_task(
+                _pump_mic(client, args.input_device, speaker, args.mute_while_speaking)
+            )
         consume = asyncio.create_task(_consume(client, speaker, reply_wav))
         done, pending = await asyncio.wait({pump, consume}, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
@@ -221,6 +276,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--wav", type=Path, default=None, help="不用麦克风，喂一段 16kHz 单声道 WAV"
+    )
+    parser.add_argument(
+        "--mute-while-speaking",
+        action="store_true",
+        help="播放期间闭麦（外放不戴耳机时防回声误打断；代价是播放中插不了话）",
     )
     parser.add_argument("--input-device", type=int, default=None)
     parser.add_argument("--output-device", type=int, default=None)
