@@ -50,9 +50,11 @@ def test_a_declared_turn_type_passes() -> None:
     assert turn_type_problems(ProviderName.DASHSCOPE, "semantic_vad") == []
 
 
-def test_dashscope_still_declares_the_suspect_value() -> None:
-    """DASHSCOPE lists "smart_turn", which is speech-to-speech's own feature
-    name, not a protocol value — flagged for the section 13 item 5 endpoint
-    test. This pin makes sure resolving that question is a deliberate edit
-    here, not a silent drift."""
-    assert "smart_turn" in PROFILES[ProviderName.DASHSCOPE].caps.turn_detection_types
+def test_dashscope_declares_smart_turn_and_the_single_slot() -> None:
+    """Resolved by the real-endpoint probe (2026-08-10): smart_turn is genuine
+    on DashScope — accepted and echoed — and the slot is single, which the old
+    guess had backwards. The scheduler's merge strategy leans on these two."""
+    caps = PROFILES[ProviderName.DASHSCOPE].caps
+    assert "smart_turn" in caps.turn_detection_types
+    assert caps.single_response_slot
+    assert not caps.out_of_band_exempt_from_slot

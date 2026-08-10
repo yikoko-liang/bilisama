@@ -60,12 +60,21 @@ S2S = Capabilities(
 
 DASHSCOPE = Capabilities(
     owns_tts=True,
-    # These three are guesses until we test against the real endpoint (plan §13).
-    # They sit in a constant, which makes them look like facts — treat with care.
-    single_response_slot=False,
+    # Verified on the real endpoint 2026-08-10 (qwen3.5-omni-flash-realtime on a
+    # dedicated MaaS instance), closing plan section 13 item 5. The old guess of
+    # False was wrong: a second in-band create is refused with "Conversation
+    # already has an active response".
+    single_response_slot=True,
+    # conversation="none" during an active reply draws the same refusal — no
+    # exemption, same as s2s. Only OpenAI GA runs out-of-band in parallel.
     out_of_band_exempt_from_slot=False,
+    # conversation.item.truncate is swallowed in silence: no truncated ack, no
+    # error, nothing. Worse than unsupported — undetectable at runtime.
     item_truncate=False,
     acknowledges_session_update=True,
+    # All three accepted AND echoed back in session.updated, smart_turn included
+    # — the value that looked like an s2s feature name leaking is real here.
+    # Accepted-and-echoed is not proof the behaviour differs; that needs audio.
     turn_detection_types=frozenset({"smart_turn", "server_vad", "semantic_vad"}),
 )
 
