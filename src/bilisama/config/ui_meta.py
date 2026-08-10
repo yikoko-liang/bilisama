@@ -376,6 +376,38 @@ UI_META: dict[str, FieldMeta] = {
         order=2,
         wizard_step=2,
     ),
+    "speech.dashscope.turn": FieldMeta(
+        label="DashScope 判停", provider_scoped="dashscope", group="判停"
+    ),
+    "speech.dashscope.turn.type": FieldMeta(
+        label="判停方式",
+        hint="server_vad 按静音时长判停，semantic_vad 按语义判停",
+        provider_scoped="dashscope",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="判停",
+        order=1,
+    ),
+    "speech.dashscope.turn.threshold": FieldMeta(
+        label="判停灵敏度",
+        hint="越高越不容易把噪音当成说话",
+        provider_scoped="dashscope",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        widget="slider",
+        group="判停",
+        order=2,
+    ),
+    "speech.dashscope.turn.silence_duration_ms": FieldMeta(
+        label="静音多久算说完",
+        hint="默认 300ms，上游默认 500——压低是 §2.8 的调优",
+        unit="ms",
+        provider_scoped="dashscope",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="判停",
+        order=3,
+    ),
     "speech.openai_ga": FieldMeta(
         label="OpenAI Realtime", provider_scoped="openai_ga", group="语音"
     ),
@@ -414,6 +446,38 @@ UI_META: dict[str, FieldMeta] = {
         order=1,
         wizard_step=2,
         aliases=("provider", "后端", "模型"),
+    ),
+    "speech.openai_ga.turn": FieldMeta(
+        label="OpenAI 判停", provider_scoped="openai_ga", group="判停"
+    ),
+    "speech.openai_ga.turn.type": FieldMeta(
+        label="判停方式",
+        hint="server_vad 按静音时长判停，semantic_vad 按语义判停",
+        provider_scoped="openai_ga",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="判停",
+        order=1,
+    ),
+    "speech.openai_ga.turn.threshold": FieldMeta(
+        label="判停灵敏度",
+        hint="越高越不容易把噪音当成说话",
+        provider_scoped="openai_ga",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        widget="slider",
+        group="判停",
+        order=2,
+    ),
+    "speech.openai_ga.turn.silence_duration_ms": FieldMeta(
+        label="静音多久算说完",
+        hint="默认 300ms，上游默认 500——压低是 §2.8 的调优",
+        unit="ms",
+        provider_scoped="openai_ga",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="判停",
+        order=3,
     ),
     "speech.s2s": FieldMeta(label="自建服务", provider_scoped="s2s", group="语音"),
     "speech.s2s.endpoint": FieldMeta(

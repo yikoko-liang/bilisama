@@ -59,12 +59,29 @@ class S2SConfig(BaseModel):
     turn: TurnConfig = Field(default_factory=TurnConfig)
 
 
+class HostedTurnConfig(BaseModel):
+    """Turn detection for a hosted provider, pushed as session.update fields.
+
+    These are the runtime-tunable OpenAI names, nothing like the s2s launch
+    knobs in TurnConfig. silence_duration_ms defaults to 300 rather than the
+    upstream 500 — the last line of the section 2.8 tuning list that had no
+    field to land in until now.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    type: str = Field("server_vad")
+    threshold: float = Field(0.5, ge=0.0, le=1.0)
+    silence_duration_ms: int = Field(300, ge=100, le=2000)
+
+
 class HostedConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     endpoint: str = Field("")
     model: str = Field("")
     api_key_ref: str = Field("")
+    turn: HostedTurnConfig = Field(default_factory=HostedTurnConfig)
 
 
 class SideModelConfig(BaseModel):

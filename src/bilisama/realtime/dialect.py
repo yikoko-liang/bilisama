@@ -53,6 +53,11 @@ class ServerEvent(StrEnum):
     AUDIO_DONE = "response.audio.done"
     TRANSCRIPT_DELTA = "response.transcript.delta"
     TRANSCRIPT_DONE = "response.transcript.done"
+    # The STREAMER's words, not the assistant's. TRANSCRIPT_* above is the
+    # assistant's own spoken transcript; mixing the two speakers is how a
+    # memory layer ends up quoting the assistant back as the streamer.
+    USER_TRANSCRIPT_DELTA = "user_transcript.delta"
+    USER_TRANSCRIPT_DONE = "user_transcript.done"
     FUNCTION_ARGS_DONE = "response.function_call_arguments.done"
     RESPONSE_DONE = "response.done"
     ITEM_TRUNCATED = "item.truncated"
@@ -68,6 +73,8 @@ _GA_INBOUND: Mapping[str, ServerEvent] = {
     "conversation.item.created": ServerEvent.ITEM_CREATED,
     "conversation.item.added": ServerEvent.ITEM_CREATED,
     "conversation.item.truncated": ServerEvent.ITEM_TRUNCATED,
+    "conversation.item.input_audio_transcription.delta": ServerEvent.USER_TRANSCRIPT_DELTA,
+    "conversation.item.input_audio_transcription.completed": ServerEvent.USER_TRANSCRIPT_DONE,
     "response.created": ServerEvent.RESPONSE_CREATED,
     "response.output_text.delta": ServerEvent.TEXT_DELTA,
     "response.output_text.done": ServerEvent.TEXT_DONE,
@@ -91,6 +98,8 @@ _BETA_INBOUND: Mapping[str, ServerEvent] = {
     # the entry, wire_name() raises on the first barge-in against a beta endpoint
     # that supports truncate.
     "conversation.item.truncated": ServerEvent.ITEM_TRUNCATED,
+    "conversation.item.input_audio_transcription.delta": ServerEvent.USER_TRANSCRIPT_DELTA,
+    "conversation.item.input_audio_transcription.completed": ServerEvent.USER_TRANSCRIPT_DONE,
     "response.created": ServerEvent.RESPONSE_CREATED,
     "response.text.delta": ServerEvent.TEXT_DELTA,
     "response.text.done": ServerEvent.TEXT_DONE,
@@ -159,6 +168,32 @@ class Codec:
         if text_only:
             session[self.modalities_key] = ["text"]
         return {"type": ClientEvent.SESSION_UPDATE.value, "session": session}
+
+    def response_create(
+        self,
+        *,
+        out_of_band: bool,
+        text_only: bool,
+        instructions: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Build a response.create frame in this dialect.
+
+        text_only writes the modality key explicitly because absent means audio
+        on the real server (utils/utils.py:20-23) — the trap §15.8 found the
+        fake hiding. out_of_band sets conversation="none"; the caller must NOT
+        pass input alongside (chat.py:830-835 would replace the whole history).
+        """
+        response: dict[str, Any] = {}
+        if out_of_band:
+            response["conversation"] = "none"
+        if text_only:
+            response[self.modalities_key] = ["text"]
+        if instructions is not None:
+            response["instructions"] = instructions
+        if max_output_tokens is not None:
+            response["max_output_tokens"] = max_output_tokens
+        return {"type": ClientEvent.RESPONSE_CREATE.value, "response": response}
 
     def tool_spec(self, name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
         flat = {

@@ -193,3 +193,45 @@ def test_tool_spec_shape_follows_nested_tools() -> None:
     # The flat keys must not also be present, or a strict endpoint rejects the frame.
     assert "name" not in beta
     assert "parameters" not in beta
+
+
+def test_response_create_writes_the_dialect_modality_key() -> None:
+    """The client-side counterpart of the mock modality fix: asking for text
+    must name the field this dialect uses, because absent means audio on the
+    real server (utils/utils.py:20-23)."""
+    ga = GA.response_create(
+        out_of_band=True, text_only=True, instructions="说点什么", max_output_tokens=64
+    )
+    assert ga["type"] == "response.create"
+    assert ga["response"]["output_modalities"] == ["text"]
+    assert ga["response"]["conversation"] == "none"
+    assert ga["response"]["max_output_tokens"] == 64
+
+    beta = BETA.response_create(out_of_band=True, text_only=True)
+    assert beta["response"]["modalities"] == ["text"]
+    assert "output_modalities" not in beta["response"]
+
+
+def test_response_create_omits_what_was_not_asked() -> None:
+    """In-band, audio, no instructions: the frame stays minimal — an empty
+    conversation key would still mean something to the server."""
+    frame = GA.response_create(out_of_band=False, text_only=False)
+    assert frame["response"] == {}
+
+
+def test_user_transcript_events_normalise_in_both_dialects() -> None:
+    """The streamer's words are the only source for "what did they just say";
+    both dialects must recognise them, and they must stay distinct from the
+    assistant's own transcript (TRANSCRIPT_*)."""
+    for codec in (GA, BETA):
+        kind, _ = codec.normalize(
+            {"type": "conversation.item.input_audio_transcription.completed", "transcript": "你好"}
+        )
+        assert kind is ServerEvent.USER_TRANSCRIPT_DONE
+        kind, _ = codec.normalize(
+            {"type": "conversation.item.input_audio_transcription.delta", "delta": "你"}
+        )
+        assert kind is ServerEvent.USER_TRANSCRIPT_DELTA
+    # Two members with equal values would silently alias in a StrEnum and
+    # normalize() would conflate the speakers. Assert no aliasing anywhere.
+    assert len(ServerEvent) == len({e.value for e in ServerEvent})
