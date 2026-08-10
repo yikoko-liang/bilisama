@@ -1189,9 +1189,45 @@ async def test_session_update_ack_follows_capability() -> None:
     ):
         async with MockRealtimeServer(caps=caps) as server, websockets.connect(server.url) as ws:
             await _recv_until(ws, "session.created")
-            await ws.send(json.dumps({"type": "session.update", "session": {"instructions": "x"}}))
+            await ws.send(
+                json.dumps(
+                    {"type": "session.update", "session": {"type": "realtime", "instructions": "x"}}
+                )
+            )
             names = _types(await _drain(ws))
             assert ("session.updated" in names) is expect_ack
+
+
+async def test_ga_session_update_without_type_is_refused() -> None:
+    """The real GA server rejects a session.update missing session.type with
+    exactly this error (probed live on v0.2.12-40). The fake accepting bare
+    frames certified a client whose protection patches the server threw away —
+    found by a live /gift test, not by the suite."""
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(json.dumps({"type": "session.update", "session": {"instructions": "x"}}))
+        frames = await _drain(ws)
+        names = _types(frames)
+        assert "session.updated" not in names
+        errors = [f for f in frames if f.get("type") == "error"]
+        assert errors and errors[0]["error"]["type"] == "unknown_or_invalid_event"
+        assert errors[0]["error"]["message"] == "Unknown or invalid event: session.update"
+
+
+async def test_beta_session_update_accepts_a_bare_session() -> None:
+    """DashScope's dialect has no session.type at all — the requirement must
+    not leak across dialects."""
+    async with (
+        MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(json.dumps({"type": "session.update", "session": {"instructions": "x"}}))
+        names = _types(await _drain(ws))
+        assert "error" not in names
 
 
 def test_expr_tags_safe_is_derived_not_stored() -> None:

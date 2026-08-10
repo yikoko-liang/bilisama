@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import importlib.util
 import itertools
 import json
 import math
@@ -626,39 +628,76 @@ async def run_director(args: argparse.Namespace) -> int:
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
-    # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
-    # default executor on shutdown, and a worker parked in readline() holds
-    # that join until one more Enter — Ctrl-C would hang the exit (C7). A
-    # daemon thread just dies with the process.
-    lines: asyncio.Queue[str | None] = asyncio.Queue()
-    loop = asyncio.get_running_loop()
+    async def handle_line(line: str) -> None:
+        if not line.strip():
+            return  # a bare Enter injects nothing and lectures nobody
+        event = _parse_console_event(line, next(seq))
+        if event is None:
+            print("弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额")
+            return
+        label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
+        money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
+        body = f"：{event.text}" if event.text else ""
+        print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
+        await console.push(event)
 
-    def read_stdin() -> None:
-        while True:
-            line = sys.stdin.readline()
-            try:
-                loop.call_soon_threadsafe(lines.put_nowait, line or None)
-            except RuntimeError:
-                return  # loop already closed; we are exiting
-            if not line:
-                return
+    # A bottom-pinned input line when prompt_toolkit is installed: everything
+    # the session prints (replies, verdicts, log lines) lands ABOVE the line
+    # being typed instead of tearing through it. Optional exactly like
+    # sounddevice; --plain-console or piped stdin falls back to the raw reader.
+    use_prompt = (
+        not args.plain_console
+        and sys.stdin.isatty()
+        and importlib.util.find_spec("prompt_toolkit") is not None
+    )
+    if not args.plain_console and sys.stdin.isatty() and not use_prompt:
+        print("提示：装上 prompt_toolkit 后，打弹幕不再被输出打乱（pip install prompt_toolkit）。")
 
-    threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
+    if use_prompt:
 
-    async def stdin_pump() -> None:
-        while True:
-            line = await lines.get()
-            if line is None:
-                return  # stdin closed; keep the rest running
-            event = _parse_console_event(line, next(seq))
-            if event is None:
-                print("弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额")
-                continue
-            label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
-            money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
-            body = f"：{event.text}" if event.text else ""
-            print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
-            await console.push(event)
+        async def stdin_pump() -> None:
+            from prompt_toolkit import PromptSession
+
+            session: PromptSession[str] = PromptSession("弹幕> ")
+            while True:
+                try:
+                    line = await session.prompt_async()
+                except KeyboardInterrupt:
+                    # Raw mode turns Ctrl-C into a key press on the prompt, so
+                    # the loop-level SIGINT handler never sees it — route it to
+                    # the same graceful stop.
+                    stop.set()
+                    return
+                except EOFError:
+                    return  # Ctrl-D: console closed; the rest keeps running
+                await handle_line(line)
+
+    else:
+        # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
+        # default executor on shutdown, and a worker parked in readline() holds
+        # that join until one more Enter — Ctrl-C would hang the exit (C7). A
+        # daemon thread just dies with the process.
+        lines: asyncio.Queue[str | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def read_stdin() -> None:
+            while True:
+                raw_line = sys.stdin.readline()
+                try:
+                    loop.call_soon_threadsafe(lines.put_nowait, raw_line or None)
+                except RuntimeError:
+                    return  # loop already closed; we are exiting
+                if not raw_line:
+                    return
+
+        threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
+
+        async def stdin_pump() -> None:
+            while True:
+                line = await lines.get()
+                if line is None:
+                    return  # stdin closed; keep the rest running
+                await handle_line(line)
 
     async def drain_controls() -> None:
         while True:
@@ -666,6 +705,17 @@ async def run_director(args: argparse.Namespace) -> int:
             if speaker is not None:
                 speaker.flush()
             print(f"[打断] playback.clear（{clear.reason}）")
+
+    console_patch = contextlib.ExitStack()
+    if use_prompt:
+        from prompt_toolkit.patch_stdout import patch_stdout
+
+        # While the prompt is live, print() and the log stream both write
+        # through a proxy that repaints the input line beneath them. Logging
+        # re-targets onto the patched stdout for the window; the shutdown
+        # chain restores it.
+        console_patch.enter_context(patch_stdout(raw=True))
+        logging_setup(level=settings.runtime.log_level, stream=sys.stdout)
 
     print(
         f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
@@ -698,6 +748,11 @@ async def run_director(args: argparse.Namespace) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # The prompt died with its task; unpatch stdout before the shutdown
+        # chain prints, and point logging back at stderr.
+        console_patch.close()
+        if use_prompt:
+            logging_setup(level=settings.runtime.log_level)
         # Every step below gets its own try: this is a chain of unrelated
         # resources, and one refusing to close must not leak the rest — a
         # failed distillation would otherwise leave the WS and the DB open
@@ -811,6 +866,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--persona", default=None, help="临时换人设（director 用，不改配置文件）")
     parser.add_argument(
         "--show-context", action="store_true", help="每次上下文推送时把全文打出来（director 用）"
+    )
+    parser.add_argument(
+        "--plain-console",
+        action="store_true",
+        help="不用底部输入行，退回逐行读 stdin（终端行为怪异时的逃生口）",
     )
     args = parser.parse_args(argv)
     if args.director:

@@ -131,7 +131,12 @@ class S2SLink:
     def _interrupt_patch(self, interruptible: bool) -> dict[str, Any]:
         # Runtime-tunable on this provider (runtime_config.py:58-76); only the
         # two turn_detection fields it actually reads travel with it.
-        return {
-            "type": dia.ClientEvent.SESSION_UPDATE.value,
-            "session": {"turn_detection": {"interrupt_response": interruptible}},
-        }
+        session: dict[str, Any] = {"turn_detection": {"interrupt_response": interruptible}}
+        if self._codec.needs_session_type:
+            # The server rejects any session.update without this as
+            # "Unknown or invalid event" (probed live, v0.2.12-40) — the same
+            # quirk Codec.session_patch handles for set_context. Forgetting it
+            # here made every paid reply's protection silently fail (found by
+            # a live /gift test, 2026-08-11).
+            session["type"] = "realtime"
+        return {"type": dia.ClientEvent.SESSION_UPDATE.value, "session": session}

@@ -504,6 +504,17 @@ class MockRealtimeServer:
     async def _dispatch(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == dia.ClientEvent.SESSION_UPDATE.value:
+            if self.codec.needs_session_type and event.get("session", {}).get("type") != "realtime":
+                # The GA server refuses a session.update without session.type,
+                # with exactly this message (probed live on v0.2.12-40). The
+                # fake used to accept anything here, which certified a client
+                # whose protection patches the real server threw away — the
+                # charter's "model the ugly thing" failure, caught by a live
+                # /gift test.
+                await self._error(
+                    "unknown_or_invalid_event", "Unknown or invalid event: session.update"
+                )
+                return
             if self.caps.acknowledges_session_update:
                 await self.send(dia.ServerEvent.SESSION_UPDATED, session=event.get("session", {}))
         elif kind == dia.ClientEvent.AUDIO_APPEND.value:
