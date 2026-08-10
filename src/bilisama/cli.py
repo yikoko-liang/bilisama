@@ -190,10 +190,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--level", default="medium")
     p_chat.set_defaults(func=cmd_chattiness)
 
+    # Registered lazily: dev-talk pulls in the realtime stack and possibly
+    # sounddevice, none of which `config validate` should pay for.
+    sub.add_parser("dev-talk", help="拿真人声音测语音链路（开发用）", add_help=False)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    if raw and raw[0] == "dev-talk":
+        from bilisama.dev_talk import main as dev_talk_main
+
+        return dev_talk_main(raw[1:])
     args = build_parser().parse_args(argv)
     result: int = args.func(args)
     return result

@@ -72,10 +72,12 @@ class RealtimeClient:
         codec: dia.Codec,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.caps = caps
         self.codec = codec
         self._url = url
+        self._headers = headers or {}
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
         self._ws: Any = None
@@ -93,7 +95,9 @@ class RealtimeClient:
     # ------------------------------------------------------------ lifecycle
 
     async def connect(self) -> None:
-        self._ws = await websockets.connect(self._url, max_size=16 * 1024 * 1024)
+        self._ws = await websockets.connect(
+            self._url, max_size=16 * 1024 * 1024, additional_headers=self._headers
+        )
         first = json.loads(await self._ws.recv())
         kind, _ = self.codec.normalize(first)
         if kind is not dia.ServerEvent.SESSION_CREATED:

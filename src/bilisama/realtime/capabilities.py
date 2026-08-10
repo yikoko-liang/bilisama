@@ -72,9 +72,13 @@ DASHSCOPE = Capabilities(
     # error, nothing. Worse than unsupported — undetectable at runtime.
     item_truncate=False,
     acknowledges_session_update=True,
-    # All three accepted AND echoed back in session.updated, smart_turn included
-    # — the value that looked like an s2s feature name leaking is real here.
-    # Accepted-and-echoed is not proof the behaviour differs; that needs audio.
+    # Per-MODEL, not per-provider, it turns out (probed live 2026-08-10):
+    # qwen3.5-omni-flash-realtime accepts and echoes all three;
+    # qwen-audio-3.0-realtime-flash/-plus refuse semantic_vad outright
+    # ("Supported values: server_vad, smart_turn. Use turn_detection: null for
+    # push-to-talk mode."). This constant keeps the omni set; the dashscope
+    # adapter narrows by model when it lands — a provider-level intersection
+    # would wrongly refuse semantic_vad on omni.
     turn_detection_types=frozenset({"smart_turn", "server_vad", "semantic_vad"}),
 )
 

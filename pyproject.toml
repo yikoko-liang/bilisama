@@ -85,7 +85,8 @@ warn_unreachable = true
 plugins = ["pydantic.mypy"]
 # 第三方库没有类型标注的，单独放行
 [[tool.mypy.overrides]]
-module = ["pysbd.*", "brotli.*", "mlx_audio.*"]
+# sounddevice is dev-talk's optional mic layer, installed on demand.
+module = ["pysbd.*", "brotli.*", "mlx_audio.*", "sounddevice.*"]
 ignore_missing_imports = true
 
 # speech-to-speech 装在它自己的 venv 里，这边解析不到是预期的。
