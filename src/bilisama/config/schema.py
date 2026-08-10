@@ -121,12 +121,15 @@ class SpeechConfig(BaseModel):
 # ---------------------------------------------------------------- everything else
 
 
-class TTSConfig(BaseModel):
-    """Our own TTS, used only when the speech provider does not produce audio itself.
+class CustomTTSConfig(BaseModel):
+    """Our own pluggable TTS chain (stage 4), engine-agnostic by design.
 
-    When the provider speaks for us, nothing here is read. Plan §7.6 wants that
-    combination reported rather than left looking configured; `validate.check` does
-    not catch it yet.
+    qwen3_cloud is only today's runnable default; the strategic main engine is
+    IndexTTS once its licence and a CUDA box land (plan §4.8), with volcengine
+    and gpt_sovits registered behind the same ABC. Used only when the speech
+    provider does not produce audio itself — when the provider speaks for us,
+    nothing here is read. Plan §7.6 wants that combination reported rather
+    than left looking configured; `validate.check` does not catch it yet.
     """
 
     model_config = {"extra": "forbid"}
@@ -270,7 +273,7 @@ class Settings(BaseModel):
 
     room: RoomConfig = Field(default_factory=RoomConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
-    tts: TTSConfig = Field(default_factory=TTSConfig)
+    custom_tts: CustomTTSConfig = Field(default_factory=CustomTTSConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)

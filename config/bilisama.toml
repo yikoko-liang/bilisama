@@ -24,7 +24,7 @@ managed = true                          # false = 你自己在别处跑，这里
 llm_base_url = "http://127.0.0.1:9010/v1"
 llm_model = "our-s2t-v1"
 patches = ["text_modality", "raw_instructions"]
-server_tts = "kokoro"                   # s2s 服务器端加载的引擎；产品路径纯文本时只是占位
+server_tts = "kokoro"                   # speech-to-speech 自带的引擎（零补丁模式我们用 qwen3）；产品路径纯文本时只是占位
 server_tts_speaker = "vivian"           # 服务端 TTS 音色（零补丁模式才出声）；不钉会每句换嗓子
 
 # 判停三件套。字段名跟上游 vad_arguments.py 逐字对齐，CI 有一条门禁对账。
@@ -56,7 +56,9 @@ base_url = ""
 model = ""
 api_key_ref = "side"
 
-[tts]                                   # 我们自己的 TTS 链路（阶段 4 交付），只在语音后端不自带音频时生效
+# 我们自己的可插拔 TTS 链路（阶段 4 交付），只在语音后端不自带音频时生效。
+# 主力规划是 IndexTTS（授权和 GPU 到位即切，见计划 §4.8）；qwen3_cloud 只是当前能跑的默认。
+[custom_tts]
 engine = "qwen3_cloud"
 voice = ""
 speed = 1.0

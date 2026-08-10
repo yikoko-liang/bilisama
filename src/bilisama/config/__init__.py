@@ -27,6 +27,7 @@ from bilisama.config.loader import load
 from bilisama.config.schema import (
     AudioConfig,
     AvatarConfig,
+    CustomTTSConfig,
     HostedConfig,
     InteractionConfig,
     MemoryConfig,
@@ -39,7 +40,6 @@ from bilisama.config.schema import (
     SideModelConfig,
     SpeakSwitches,
     SpeechConfig,
-    TTSConfig,
     TurnConfig,
 )
 from bilisama.config.ui_meta import UI_META, FieldMeta
@@ -53,6 +53,7 @@ __all__ = [
     "Chattiness",
     "ConfigError",
     "ConfigProblem",
+    "CustomTTSConfig",
     "DerivedThresholds",
     "FieldMeta",
     "HostedConfig",
@@ -69,7 +70,6 @@ __all__ = [
     "SideModelConfig",
     "SpeakSwitches",
     "SpeechConfig",
-    "TTSConfig",
     "TurnConfig",
     "check",
     "derive",

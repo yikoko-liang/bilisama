@@ -710,22 +710,22 @@ UI_META: dict[str, FieldMeta] = {
         group="后台模型",
         order=5,
     ),
-    "tts.api_key_ref": FieldMeta(
+    "custom_tts.api_key_ref": FieldMeta(
         label="语音引擎 Key", secret=True, reload=Reload.LIVE, group="声音", order=4
     ),
-    "tts.engine": FieldMeta(
+    "custom_tts.engine": FieldMeta(
         label="语音引擎",
-        hint="云端首包约 97ms，本地约 400ms",
+        hint="可插拔；主力规划是 IndexTTS（授权和 GPU 到位即切），qwen3_cloud 是当前默认",
         audience=Audience.STREAMER,
         reload=Reload.LIVE,
         group="声音",
         order=1,
         wizard_step=3,
     ),
-    "tts.speed": FieldMeta(
+    "custom_tts.speed": FieldMeta(
         label="语速", audience=Audience.STREAMER, reload=Reload.LIVE, group="声音", order=3
     ),
-    "tts.voice": FieldMeta(
+    "custom_tts.voice": FieldMeta(
         label="音色",
         audience=Audience.STREAMER,
         reload=Reload.LIVE,
