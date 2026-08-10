@@ -8,6 +8,7 @@ acceptance: growth files on disk, zero of their text in the pushed context.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -122,7 +123,7 @@ async def test_growth_injects_on_on_and_stays_out_on_collect(tmp_path: Path) -> 
 
 
 async def test_context_carries_anchors_rules_and_memory(tmp_path: Path) -> None:
-    assembly, store, persona, _intents, _pushed, _clock = _assembly(tmp_path)
+    assembly, store, _persona, _intents, _pushed, _clock = _assembly(tmp_path)
     (tmp_path / "live").mkdir(exist_ok=True)
     (tmp_path / "live" / "pinned.md").write_text("今晚不聊工作", encoding="utf-8")
     store.replace_facts("streamer", "", [("主播在写编译器", "")])
@@ -220,8 +221,6 @@ async def test_cancellation_passes_straight_through_supervision(tmp_path: Path) 
     task = asyncio.create_task(supervised.start(sink))
     await asyncio.sleep(0.01)
     task.cancel()
-    try:
+    with contextlib.suppress(asyncio.CancelledError):
         await task
-    except asyncio.CancelledError:
-        pass
     assert task.cancelled(), "supervision must not swallow a cancel"

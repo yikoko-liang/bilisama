@@ -68,7 +68,7 @@ async def _running(
 
 
 async def test_dead_air_produces_exactly_one_topic() -> None:
-    async with _running(side=FakeSide()) as (loop, _floor, intents, clock):
+    async with _running(side=FakeSide()) as (_loop, _floor, intents, clock):
         await clock.advance(11.0)
         assert len(intents) == 1, "one topic per idle stretch, not a monologue"
 

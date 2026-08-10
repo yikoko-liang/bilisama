@@ -78,6 +78,32 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 ~/.local/share/bilisama/engines/s2s/bin/speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
 ```
 
+## 人设与生长层
+
+人设文件的活副本在 `~/.local/share/bilisama/personas/<id>/`（`persona.data_dir` 可改），
+全是明文 markdown，随时可以打开手改：
+
+| 文件 | 谁写 | 干什么 |
+|---|---|---|
+| identity.md / personality.md | 人 | 锚。不存在或清空时回退到 config/personas/ 的随包模板 |
+| relationship.md / voice.md | 蒸馏 | 生长层。开关在 `[persona.growth]`，默认全关 |
+| pinned.md | 人 | 置顶记忆，整段注入并声明始终保留 |
+
+生长层三态：`off` 不长；`collect` 只攒进文件、不进提示词（先看几场、翻文件放心了再开）；
+`on` 攒并注入。口癖层每场至多换 2 句，预算 12 句；共同经历 30 条 800 字，超了旧的出。
+
+晋升口（锚只有人能动，这条命令就是那只手）：
+
+```bash
+.venv/bin/bilisama persona review                 # 列出生长层条目，带编号
+.venv/bin/bilisama persona review --promote v1    # 点头：这条合并进 personality.md
+.venv/bin/bilisama persona review --drop r2       # 划掉不喜欢的
+```
+
+蒸馏和主动话题都走 `[speech.side]` 的侧路模型。没配地址它们不干活：生长层开着时
+`config validate` 会提醒；主动话题的缺配在运行期日志（`proactive.no_side_model`）
+和 health 探针里报。health 端点本体在 `obs/health.py`，挂到 UI 服务器是阶段 5 的事。
+
 ## 门禁与测试
 
 ```bash

@@ -147,7 +147,7 @@ class Assembly:
         while True:
             try:
                 await self.refresh_context()
-            except Exception as exc:  # noqa: BLE001 — the ticker must outlive one bad push
+            except Exception as exc:
                 log.warning("assembly.context_push_failed", error=str(exc))
             await self._clock.sleep(self._refresh_s)
 

@@ -16,13 +16,17 @@ from bilisama.persona.loader import PersonaStore
 def config_tree(tmp_path: Path) -> Path:
     """A minimal but strictly loadable config with its own persona templates."""
     (tmp_path / "personas" / "mia").mkdir(parents=True)
-    (tmp_path / "personas" / "mia" / "identity.md").write_text("# 我是谁\n测试人设", encoding="utf-8")
-    (tmp_path / "personas" / "mia" / "personality.md").write_text("# 性格\n- 爱接梗", encoding="utf-8")
+    (tmp_path / "personas" / "mia" / "identity.md").write_text(
+        "# 我是谁\n测试人设", encoding="utf-8"
+    )
+    (tmp_path / "personas" / "mia" / "personality.md").write_text(
+        "# 性格\n- 爱接梗", encoding="utf-8"
+    )
     config = tmp_path / "bilisama.toml"
     config.write_text(
         "\n".join(
             [
-                '[speech.s2s]',
+                "[speech.s2s]",
                 'llm_model = "test-model"',
                 "[persona]",
                 'id = "mia"',

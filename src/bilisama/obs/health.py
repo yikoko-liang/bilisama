@@ -34,7 +34,7 @@ class HealthRegistry:
         for name, probe in self._probes.items():
             try:
                 components[name] = dict(probe())
-            except Exception as exc:  # noqa: BLE001 — a broken probe IS the finding
+            except Exception as exc:
                 healthy = False
                 components[name] = {"error": str(exc)}
         return {"status": "ok" if healthy else "degraded", "components": components}
