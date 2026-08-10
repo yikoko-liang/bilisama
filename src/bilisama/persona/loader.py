@@ -143,6 +143,29 @@ class PersonaStore:
         text = f"{_GROWTH_HEADERS[layer]}\n{body}\n" if body else f"{_GROWTH_HEADERS[layer]}\n"
         self.growth_path(layer).write_text(text, encoding="utf-8")
 
+    # ------------------------------------------------------------ proactive
+
+    def proactive_prompt(
+        self, default_path: Path, variables: Mapping[str, str] | None = None
+    ) -> str:
+        """The topic-loop prompt, most specific first.
+
+        The streamer's own copy wins, then the persona's shipped one (its
+        adapted yuan — each openhanako port thinks in its own scaffold), then
+        the global default under config/prompts/. Empty means none anywhere.
+        """
+        candidates = (
+            self._data_dir / "proactive.md",
+            self._template_dir / "proactive.md",
+            default_path,
+        )
+        for path in candidates:
+            if path.is_file():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    return _substitute(text, variables or {})
+        return ""
+
     # ------------------------------------------------------------ pinned
 
     def pinned_text(self) -> str:

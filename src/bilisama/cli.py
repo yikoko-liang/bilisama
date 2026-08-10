@@ -150,6 +150,42 @@ def cmd_render_s2s(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_persona_list(args: argparse.Namespace) -> int:
+    """Every persona the config dir ships, the active one marked. Switching
+    is one line in the TOML (`[persona] id`) or a profile override."""
+    from bilisama.persona.loader import default_data_dir
+
+    settings = _load(args.config, strict=False)
+    personas_dir = args.config.parent / "personas"
+    if not personas_dir.is_dir():
+        print(f"没有人设目录：{personas_dir}", file=sys.stderr)
+        return 2
+    for d in sorted(p for p in personas_dir.iterdir() if p.is_dir()):
+        pid = d.name
+        marker = "＊" if pid == settings.persona.id else "　"
+        live_dir = (
+            Path(settings.persona.data_dir).expanduser()
+            if pid == settings.persona.id and settings.persona.data_dir != "auto"
+            else default_data_dir(pid)
+        )
+        tags = []
+        if (live_dir / "identity.md").is_file() or (live_dir / "personality.md").is_file():
+            tags.append("锚有活副本")
+        tags.append("专属话题脑" if (d / "proactive.md").is_file() else "全局话题脑")
+        for layer in ("relationship", "voice"):
+            path = live_dir / f"{layer}.md"
+            if path.is_file():
+                count = sum(
+                    1
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("- ")
+                )
+                tags.append(f"{layer} {count} 条")
+        print(f"{marker} {pid:<8} {'、'.join(tags)}")
+    print("切换：改 bilisama.toml 的 [persona] id，或 dev-talk --director --persona <id> 临时切。")
+    return 0
+
+
 def cmd_persona_review(args: argparse.Namespace) -> int:
     """The promotion gate from plan section 4.6: only a human moves an entry
     from a growth file into personality.md, and this command is that hand."""
@@ -236,6 +272,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     persona = sub.add_parser("persona", help="人设相关")
     persona_sub = persona.add_subparsers(dest="persona_command", required=True)
+    p_list = persona_sub.add_parser("list", help="列出可选人设，标出当前生效的")
+    p_list.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p_list.set_defaults(func=cmd_persona_list)
     p_review = persona_sub.add_parser(
         "review", help="翻生长层（共同经历/口癖），点头的合并进 personality.md"
     )

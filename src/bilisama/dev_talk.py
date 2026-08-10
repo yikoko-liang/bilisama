@@ -21,16 +21,29 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import os
+import signal
 import sys
 import wave
+import zlib
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from bilisama.config.enums import ProviderName
+from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.providers import profile_for
+
+
+class _AudioIn(Protocol):
+    """What the pumps need: anything with push_audio — the raw client in wire
+    mode, the fanned-out adapter in director mode."""
+
+    async def push_audio(self, pcm: bytes) -> None: ...
+
 
 _INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
 _OUTPUT_RATE = 24000  # and answer at 24 kHz (plan section 3.1 table)
@@ -68,7 +81,7 @@ def _session_frame(provider: ProviderName) -> dict[str, Any] | None:
     return None
 
 
-async def _pump_wav(client: RealtimeClient, path: Path) -> None:
+async def _pump_wav(client: _AudioIn, path: Path) -> None:
     with wave.open(str(path), "rb") as w:
         if w.getframerate() != _INPUT_RATE or w.getnchannels() != 1:
             raise SystemExit(
@@ -87,7 +100,7 @@ async def _pump_wav(client: RealtimeClient, path: Path) -> None:
 
 
 async def _pump_mic(
-    client: RealtimeClient, device: int | None, speaker: _Speaker | None, mute: bool
+    client: _AudioIn, device: int | None, speaker: _Speaker | None, mute: bool
 ) -> None:
     try:
         import sounddevice
@@ -193,8 +206,14 @@ class _Speaker:
 async def _consume(
     client: RealtimeClient, speaker: _Speaker | None, reply_wav: Path | None
 ) -> None:
+    await _consume_events(client.events(), speaker, reply_wav)
+
+
+async def _consume_events(
+    events: AsyncIterator[link.LinkEvent], speaker: _Speaker | None, reply_wav: Path | None
+) -> None:
     collected: list[bytes] = []
-    async for event in client.events():
+    async for event in events:
         if isinstance(event, link.UserTranscriptDone):
             print(f"你说：{event.text}")
         elif isinstance(event, link.ReplyTextDelta):
@@ -219,6 +238,330 @@ async def _consume(
             collected.clear()
         elif isinstance(event, link.LinkError):
             print(f"[错误] {event.code}: {event.detail}", file=sys.stderr)
+
+
+class _Fanout:
+    """One adapter, several event consumers.
+
+    SpeechLink.events() hands out one stream and the scheduler is its single
+    consumer by design. Director mode also needs the frames for playback, so
+    this wrapper pumps the real stream once and copies every event into each
+    view — every events() call is a fresh view. Dev-tool plumbing, same
+    wire-level licence as the rest of this file.
+    """
+
+    def __init__(self, inner: link.SpeechLink) -> None:
+        self._inner = inner
+        self._sinks: list[asyncio.Queue[link.LinkEvent]] = []
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._pump(), name="dev-talk:fanout")
+
+    async def _pump(self) -> None:
+        async for event in self._inner.events():
+            for sink in self._sinks:
+                sink.put_nowait(event)
+
+    def events(self) -> AsyncIterator[link.LinkEvent]:
+        queue: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
+        self._sinks.append(queue)
+
+        async def drain() -> AsyncIterator[link.LinkEvent]:
+            while True:
+                yield await queue.get()
+
+        return drain()
+
+    # ---- passthrough: the SpeechLink surface minus events() ----
+
+    async def connect(self) -> None:
+        await self._inner.connect()
+
+    async def aclose(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        await self._inner.aclose()
+
+    async def set_context(self, instructions: str) -> None:
+        await self._inner.set_context(instructions)
+
+    async def push_audio(self, pcm: bytes) -> None:
+        await self._inner.push_audio(pcm)
+
+    async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        await self._inner.add_context_item(text, role=role)
+
+    async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
+        return await self._inner.request_reply(spec)
+
+    async def cancel(self, handle: link.ReplyHandle) -> None:
+        await self._inner.cancel(handle)
+
+
+def _console_viewer(name: str) -> Viewer:
+    # A stable uid per name, so memory sees 测试观众 as the same person every time.
+    return Viewer(uid=10000 + zlib.crc32(name.encode()) % 90000, name=name)
+
+
+def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
+    """One typed line, one simulated live event.
+
+    "你好" — danmaku from 测试观众; "阿强:你好" — danmaku from 阿强;
+    "/sc 阿强 30 主播玩什么" — Super Chat; "/gift 阿强 52" — paid gift.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    event_id = f"console-{seq}"
+    if text.startswith("/sc "):
+        parts = text[4:].split(maxsplit=2)
+        if len(parts) < 3:
+            return None
+        name, amount, body = parts[0], parts[1], parts[2]
+        try:
+            value = float(amount)
+        except ValueError:
+            return None
+        return LiveEvent(
+            kind=EventKind.SUPER_CHAT,
+            viewer=_console_viewer(name),
+            text=body,
+            value_cny=value,
+            event_id=event_id,
+        )
+    if text.startswith("/gift "):
+        parts = text[6:].split()
+        if len(parts) < 2:
+            return None
+        try:
+            value = float(parts[1])
+        except ValueError:
+            return None
+        return LiveEvent(
+            kind=EventKind.GIFT,
+            viewer=_console_viewer(parts[0]),
+            gift=Gift(name="礼物", num=1, coin_type="gold", total_coin=int(value * 1000)),
+            value_cny=value,
+            event_id=event_id,
+        )
+    if text.startswith("/"):
+        return None
+    name, sep, body = text.partition(":")
+    if not sep:
+        name, sep, body = text.partition("：")
+    if sep and name.strip() and body.strip():
+        return LiveEvent(
+            kind=EventKind.DANMAKU,
+            viewer=_console_viewer(name.strip()),
+            text=body.strip(),
+            event_id=event_id,
+        )
+    return LiveEvent(
+        kind=EventKind.DANMAKU,
+        viewer=_console_viewer("测试观众"),
+        text=text,
+        event_id=event_id,
+    )
+
+
+async def run_director(args: argparse.Namespace) -> int:
+    """The whole stage-3 assembly behind the mic, before Electron exists.
+
+    Wire mode (the default) talks straight through RealtimeClient and knows
+    nothing of L3. This mode stands the real stack up instead: persona,
+    memory, distiller, proactive loop, scheduler — the same objects the
+    acceptance tests compose, with a microphone on one side and the console
+    standing in for the danmaku feed on the other.
+    """
+    from bilisama.app import Assembly
+    from bilisama.cli import DEFAULT_CONFIG
+    from bilisama.clock import SystemClock
+    from bilisama.config import derive, load
+    from bilisama.config.schema import SideModelConfig
+    from bilisama.director.floor import SpeakingFloor
+    from bilisama.director.scheduler import Scheduler
+    from bilisama.ingest.sources import QueueSource
+    from bilisama.memory.distill import Distiller
+    from bilisama.memory.store import MemoryStore
+    from bilisama.obs.outcome import Outcome, Verdict
+    from bilisama.persona.loader import PersonaStore, default_data_dir
+    from bilisama.proactive import ProactiveTopicLoop
+    from bilisama.realtime.providers.s2s import S2SLink
+    from bilisama.side import OpenAICompatSideModel, SideModel
+
+    provider = ProviderName(args.provider)
+    if provider is not ProviderName.S2S:
+        raise SystemExit(
+            "--director 目前只支持 --provider s2s：托管 adapter 的会话引导还在收尾（欠账 #19）。"
+        )
+    config_path: Path = args.config or DEFAULT_CONFIG
+    overrides = {"persona": {"id": args.persona}} if args.persona else None
+    settings = load(config_path, overrides=overrides, strict=False)
+    clock = SystemClock()
+    thresholds = derive(settings.interaction.chattiness)
+
+    # Memory persists across runs on purpose: streams_seen is the point.
+    # Same data home the personas use, one directory up from them.
+    room_dir = default_data_dir(settings.persona.id).parent.parent / "rooms" / "dev-talk"
+    room_dir.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(room_dir / "memory.db", clock)
+    store.prune_events(retain_days=settings.memory.retain_event_days)
+    store.begin_stream()
+
+    persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
+    variables = {"userName": "主播", "agentName": settings.persona.id}
+
+    side: SideModel | None = None
+    side_cfg = settings.speech.side
+    if side_cfg.base_url:
+        side = OpenAICompatSideModel(side_cfg, api_key=os.environ.get("OPENAI_API_KEY", ""))
+    elif os.environ.get("base_url"):  # noqa: SIM112  (path.sh 里的原名)
+        side = OpenAICompatSideModel(
+            SideModelConfig.model_validate(
+                {
+                    "base_url": os.environ.get("base_url", ""),  # noqa: SIM112
+                    "model": os.environ.get("model_name", ""),  # noqa: SIM112
+                }
+            ),
+            api_key=os.environ.get("api_key", ""),  # noqa: SIM112
+        )
+    if side is None:
+        print("提示：没配侧路模型（[speech.side] 或 source path.sh），主动话题和蒸馏这场不干活。")
+
+    speech = _Fanout(S2SLink(args.url))
+    await speech.connect()
+    speech.start()
+
+    distiller = Distiller(
+        side,
+        store,
+        persona,
+        settings.persona.growth,
+        clock,
+        every_n_events=settings.memory.distill_every_n_events,
+    )
+    floor = SpeakingFloor(clock)
+
+    def verdict_sink(verdict: Verdict) -> None:
+        if verdict.outcome is not Outcome.SPOKEN:
+            print(f"[调度] {verdict.source} → {verdict}")
+
+    scheduler = Scheduler(
+        speech,
+        floor,
+        clock,
+        cooldown_s=float(thresholds.cooldown_s),
+        verdict_sink=verdict_sink,
+        spoken_sink=distiller.note_assistant_line,
+    )
+    proactive = ProactiveTopicLoop(
+        side,
+        store,
+        floor,
+        clock,
+        submit=scheduler.submit if settings.interaction.speak.proactive else lambda _i: None,
+        prompt=persona.proactive_prompt(config_path.parent / "prompts" / "proactive.md", variables),
+        idle_threshold_s=float(thresholds.idle_threshold_s),
+        wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
+        max_per_hour=settings.interaction.proactive.max_per_hour,
+        max_tokens=thresholds.max_output_tokens,
+    )
+
+    async def push_context(text: str) -> None:
+        await speech.set_context(text)
+        print(f"[上下文] 已推送（{len(text)} 字）")
+        if args.show_context:
+            print("─" * 40 + f"\n{text}\n" + "─" * 40)
+
+    assembly = Assembly(
+        store=store,
+        distiller=distiller,
+        proactive=proactive,
+        persona=persona,
+        growth=settings.persona.growth,
+        speak_enabled=lambda s: bool(getattr(settings.interaction.speak, s, False)),
+        submit=scheduler.submit,
+        push_context=push_context,
+        clock=clock,
+        max_tokens=thresholds.max_output_tokens,
+        variables=variables,
+    )
+
+    console = QueueSource("console")
+    seq = itertools.count(1)
+    speaker = _Speaker(args.output_device)
+
+    async def stdin_pump() -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+            if not line:
+                return  # stdin closed; keep the rest running
+            event = _parse_console_event(line, next(seq))
+            if event is None:
+                print("弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额")
+                continue
+            await console.push(event)
+
+    async def drain_controls() -> None:
+        while True:
+            clear = await scheduler.controls.get()
+            if speaker is not None:
+                speaker.flush()
+            print(f"[打断] playback.clear（{clear.reason}）")
+
+    stop = asyncio.Event()
+    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
+
+    print(
+        f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
+        f"  人设 {settings.persona.id}（persona list 可看全部）  "
+        f"话痨度 {settings.interaction.chattiness.value}"
+        f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
+        f"  生长层 relationship={settings.persona.growth.relationship.value} "
+        f"voice={settings.persona.growth.voice.value}\n"
+        "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
+    )
+    if not args.mute_while_speaking:
+        print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
+
+    await assembly.refresh_context()
+    tasks = [
+        asyncio.create_task(scheduler.run(), name="director:scheduler"),
+        asyncio.create_task(proactive.run(), name="director:proactive"),
+        asyncio.create_task(assembly.run([console]), name="director:assembly"),
+        asyncio.create_task(
+            _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
+            name="director:mic",
+        ),
+        asyncio.create_task(_consume_events(speech.events(), speaker, None), name="director:play"),
+        asyncio.create_task(drain_controls(), name="director:controls"),
+        asyncio.create_task(stdin_pump(), name="director:stdin"),
+    ]
+    try:
+        await stop.wait()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        print("\n下播蒸馏中…")
+        report = await distiller.end_of_stream()
+        print(f"[蒸馏] ran={report.ran} reason={report.reason}")
+        store.end_stream()
+        rel, voc = persona.growth_entries("relationship"), persona.growth_entries("voice")
+        if rel or voc:
+            print(
+                f"[生长层] 共同经历 {len(rel)} 条、口癖 {len(voc)} 句。"
+                "翻看：bilisama persona review"
+            )
+        store.close()
+        if side is not None:
+            await side.aclose()
+        await speech.aclose()
+        print("再见。")
+    return 0
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -284,7 +627,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--input-device", type=int, default=None)
     parser.add_argument("--output-device", type=int, default=None)
+    parser.add_argument(
+        "--director",
+        action="store_true",
+        help="全装配模式：人设+记忆+蒸馏+主动话题+调度器全部上线，终端打字模拟弹幕",
+    )
+    parser.add_argument(
+        "--config", type=Path, default=None, help="bilisama.toml 路径（director 用）"
+    )
+    parser.add_argument("--persona", default=None, help="临时换人设（director 用，不改配置文件）")
+    parser.add_argument(
+        "--show-context", action="store_true", help="每次上下文推送时把全文打出来（director 用）"
+    )
     args = parser.parse_args(argv)
+    if args.director:
+        return asyncio.run(run_director(args))
     try:
         return asyncio.run(run(args))
     except KeyboardInterrupt:

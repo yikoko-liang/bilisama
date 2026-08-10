@@ -21,7 +21,9 @@ QwenAudio/qwen-audio-agent (Apache-2.0)
 
 liliMozi/openhanako (Apache-2.0)
   Persona layering with fallback chain, SQLite fact store, the MoodParser
-  incremental tag state machine (planned for stage 4-5).
+  incremental tag state machine (planned for stage 4-5). The hanako, ming and
+  butter persona texts under config/personas/ are ported verbatim from its
+  identity/ishiki templates; their proactive prompts adapt its yuan scaffolds.
 
 Project-N-E-K-O/N.E.K.O (Apache-2.0)
   Danmaku scoring and selection, the paid-event lane, SafetyGuard
