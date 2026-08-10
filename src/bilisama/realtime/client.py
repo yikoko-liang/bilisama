@@ -246,6 +246,21 @@ class RealtimeClient:
                         arguments=str(payload.get("arguments") or ""),
                     )
                 )
+        elif kind is dia.ServerEvent.TRANSCRIPT_DONE:
+            # Audio replies on s2s carry their text as ONE done event with the
+            # full transcript and no deltas (upstream handlers/response.py:362,
+            # the response_wants_audio branch). Fold it into the record so
+            # ReplyDone.text is never empty for a spoken reply. The emptiness
+            # check keeps dialects that DO stream transcript deltas (DashScope)
+            # from getting the text twice.
+            record = self._record_for(payload)
+            if record is not None and not record.handle.stale:
+                transcript = str(payload.get("transcript") or "")
+                if transcript and not "".join(record.text):
+                    if not record.text:
+                        emit(link.ReplyStarted(record.handle))
+                    record.text.append(transcript)
+                    emit(link.ReplyTextDelta(record.handle, transcript))
         elif kind is dia.ServerEvent.RESPONSE_DONE:
             self._on_done(payload)
         elif kind is dia.ServerEvent.USER_TRANSCRIPT_DELTA:

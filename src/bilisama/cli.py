@@ -171,7 +171,7 @@ def cmd_persona_list(args: argparse.Namespace) -> int:
         tags = []
         if (live_dir / "identity.md").is_file() or (live_dir / "personality.md").is_file():
             tags.append("锚有活副本")
-        tags.append("专属话题脑" if (d / "proactive.md").is_file() else "全局话题脑")
+        tags.append("专属话题提示词" if (d / "proactive.md").is_file() else "话题提示词用全局默认")
         for layer in ("relationship", "voice"):
             path = live_dir / f"{layer}.md"
             if path.is_file():

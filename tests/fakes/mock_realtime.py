@@ -671,7 +671,15 @@ class MockRealtimeServer:
             # sharing starts stamping a new one mid-stream.
             rid = self._ensure_response_id(reply)
             if not reply.text_reply:
-                await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
+                # Transcript DELTAS only exist on the beta dialect (DashScope
+                # streams response.audio_transcript.delta — probed live). The
+                # GA-speaking s2s server sends NO deltas for an audio reply:
+                # its text arrives as ONE output_audio_transcript.done below
+                # (handlers/response.py:362). Streaming deltas here on GA made
+                # the fake kinder than the real server, which hid a client that
+                # dropped the done event — the muted-voice-box bug.
+                if self.codec.dialect is dia.Dialect.BETA:
+                    await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
                 await self.send(
                     dia.ServerEvent.AUDIO_DELTA,
                     response_id=rid,

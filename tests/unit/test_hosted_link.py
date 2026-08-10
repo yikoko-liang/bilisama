@@ -85,12 +85,22 @@ async def test_s2s_audio_mode_leaves_the_session_unpinned_and_replies_carry_pcm(
             await s2s.add_context_item("[弹幕] 阿强: 你好")
             await s2s.request_reply(link.ReplySpec(instructions="回一句"))
             audio = 0
+            text_deltas: list[str] = []
+            done_text = ""
             async for event in s2s.events():
                 if isinstance(event, link.ReplyAudioDelta):
                     audio += len(event.pcm)
+                elif isinstance(event, link.ReplyTextDelta):
+                    text_deltas.append(event.text)
                 elif isinstance(event, link.ReplyDone):
+                    done_text = event.text
                     break
             assert audio > 0, "audio mode must yield PCM from a TTS-owning server"
+            # The GA server sends no transcript deltas — the text arrives as one
+            # output_audio_transcript.done, and the client must fold it in so a
+            # spoken reply never reports empty text (the starved-exemplar bug).
+            assert done_text == server.script.reply_text
+            assert "".join(text_deltas) == server.script.reply_text
             updates = [
                 e["session"] for e in server.recorded.events if e.get("type") == "session.update"
             ]

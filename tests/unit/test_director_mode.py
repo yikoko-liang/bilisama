@@ -72,9 +72,9 @@ def test_mia_falls_back_to_the_global_proactive_prompt(tmp_path: Path) -> None:
 def test_a_streamer_copy_of_the_proactive_prompt_wins(tmp_path: Path) -> None:
     live = tmp_path / "live"
     live.mkdir()
-    (live / "proactive.md").write_text("我自己的话题脑", encoding="utf-8")
+    (live / "proactive.md").write_text("我自己的话题提示词", encoding="utf-8")
     store = PersonaStore(live, CONFIG_DIR / "personas" / "hanako")
-    assert store.proactive_prompt(GLOBAL_PROACTIVE) == "我自己的话题脑"
+    assert store.proactive_prompt(GLOBAL_PROACTIVE) == "我自己的话题提示词"
 
 
 # ------------------------------------------------------------ console events
@@ -206,4 +206,4 @@ def test_persona_list_shows_all_and_marks_the_active_one(tmp_path: Path) -> None
     assert "＊ hanako" in text
     for pid in ("mia", "ming", "butter"):
         assert pid in text
-    assert "专属话题脑" in text and "全局话题脑" in text
+    assert "专属话题提示词" in text and "话题提示词用全局默认" in text
