@@ -68,3 +68,34 @@ async def test_headers_reach_the_transport() -> None:
     # Pinned at the client attribute: the mock server ignores headers, and a
     # live assert belongs to the integration tier.
     assert hosted._client._headers == {"Authorization": "Bearer x"}
+
+
+async def test_s2s_audio_mode_leaves_the_session_unpinned_and_replies_carry_pcm() -> None:
+    """Director mode against the official pipeline: text_replies=False must not
+    pin the session to text, and explicit replies come back as audio — a
+    text-pinned session was the bug that muted an entire s2s run."""
+    from bilisama.realtime import link
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script(delta_chunks=1)) as server:
+        s2s = S2SLink(server.url, text_replies=False)
+        await s2s.connect()
+        try:
+            await s2s.set_context("人设")
+            await s2s.add_context_item("[弹幕] 阿强: 你好")
+            await s2s.request_reply(link.ReplySpec(instructions="回一句"))
+            audio = 0
+            async for event in s2s.events():
+                if isinstance(event, link.ReplyAudioDelta):
+                    audio += len(event.pcm)
+                elif isinstance(event, link.ReplyDone):
+                    break
+            assert audio > 0, "audio mode must yield PCM from a TTS-owning server"
+            updates = [
+                e["session"] for e in server.recorded.events if e.get("type") == "session.update"
+            ]
+            assert updates and all(
+                "output_modalities" not in s for s in updates
+            ), "the session must not be pinned to text in audio mode"
+        finally:
+            await s2s.aclose()

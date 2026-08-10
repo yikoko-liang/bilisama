@@ -450,7 +450,10 @@ async def run_director(args: argparse.Namespace) -> int:
 
     inner: link.SpeechLink
     if provider is ProviderName.S2S:
-        inner = S2SLink(args.url)
+        # Audio replies, not the shipping default: this stands against the
+        # zero-patch official pipeline whose own TTS does the speaking. A
+        # text-pinned session would mute every reply until stage 4 exists.
+        inner = S2SLink(args.url, text_replies=False)
     elif provider is ProviderName.DASHSCOPE:
         from bilisama.realtime.providers.hosted import HostedLink
 

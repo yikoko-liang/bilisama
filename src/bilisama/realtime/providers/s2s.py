@@ -43,12 +43,28 @@ __all__ = ["S2SLink"]
 class S2SLink:
     """SpeechLink over a speech-to-speech server."""
 
-    def __init__(self, url: str, *, clock: Clock | None = None, watchdog_s: float = 25.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        clock: Clock | None = None,
+        watchdog_s: float = 25.0,
+        text_replies: bool = True,
+    ) -> None:
+        """Args:
+        text_replies: True (the shipping path) pins the session and every
+            explicit create to text — the patched server hands us prose and
+            stage 4's TTS speaks it. False leaves the modality at the
+            server's default (audio), which is what dev-talk's director mode
+            wants against the zero-patch official pipeline: that server owns
+            a real TTS, and a text-pinned session would mute the whole run.
+        """
         profile = profile_for(ProviderName.S2S)
         self._client = RealtimeClient(
             url, caps=profile.caps, codec=profile.codec, clock=clock, watchdog_s=watchdog_s
         )
         self._codec = profile.codec
+        self._text_replies = text_replies
 
     async def connect(self) -> None:
         await self._client.connect()
@@ -59,7 +75,7 @@ class S2SLink:
     async def set_context(self, instructions: str) -> None:
         # text_only pins the SESSION, which is what the implicit VAD turn obeys.
         await self._client.send_command(
-            self._codec.session_patch(instructions=instructions, text_only=True)
+            self._codec.session_patch(instructions=instructions, text_only=self._text_replies)
         )
 
     async def push_audio(self, pcm: bytes) -> None:
@@ -95,7 +111,7 @@ class S2SLink:
             await self._client.send_command(self._interrupt_patch(False))
         frame = self._codec.response_create(
             out_of_band=True,
-            text_only=True,
+            text_only=self._text_replies,
             instructions=spec.instructions,
             max_output_tokens=spec.max_tokens,
         )
