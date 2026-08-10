@@ -46,6 +46,20 @@ export no_proxy="$NO_PROXY"
 真实内网 IP 在能访问该域名的机器上 `nslookup` 一次即得。端口开了不等于模型加载完，
 等日志里出现 `Uvicorn running` 才算就绪（全冷启动约 40 秒）。
 
+**免 VPN 变体**（2026-08-11 验证）：LLM 段不走内网 deepseek，改走阿里 compatible-mode
+的 qwen3.7-flash——渲染配置前把三个环境变量换掉即可，其余照旧，不需要 EasyConnect
+和 no_proxy 那三行：
+
+```bash
+source path.sh
+export base_url="$openai_compatible_url" model_name="qwen3.7-flash" OPENAI_API_KEY="$ali_api_key"
+.venv/bin/python scripts/make_official_pipe_config.py
+BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json scripts/smoke_provider_b.sh serve
+```
+
+要换回 deepseek 就按原样重渲染（配置文件是生成产物，覆盖无所谓）。注意服务器不是
+守护进程，跟着起它的终端一起退出——「服务挂了」十有八九是那个终端关了。
+
 ## dev-talk：真人语音测试（两档）
 
 **裸链路档（默认）**：拿真人声音测 RealtimeClient + 方言 codec，不带 L3。这也是目前
