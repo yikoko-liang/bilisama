@@ -143,6 +143,17 @@ class PersonaStore:
         text = f"{_GROWTH_HEADERS[layer]}\n{body}\n" if body else f"{_GROWTH_HEADERS[layer]}\n"
         self.growth_path(layer).write_text(text, encoding="utf-8")
 
+    # ------------------------------------------------------------ pinned
+
+    def pinned_text(self) -> str:
+        """The streamer's pinned memory, verbatim. Not a growth layer — it is
+        the one deterministic write channel (plan section 4.7), file-edited by
+        hand until the pin/unpin tools arrive."""
+        path = self._data_dir / "pinned.md"
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+
     # ------------------------------------------------------------ promotion
 
     def promote(self, layer: GrowthLayer, entry: str) -> None:

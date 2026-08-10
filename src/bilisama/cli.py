@@ -150,6 +150,50 @@ def cmd_render_s2s(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_persona_review(args: argparse.Namespace) -> int:
+    """The promotion gate from plan section 4.6: only a human moves an entry
+    from a growth file into personality.md, and this command is that hand."""
+    from bilisama.persona.loader import GrowthLayer, PersonaStore
+
+    settings = _load(args.config)
+    store = PersonaStore.from_config(settings.persona, config_dir=args.config.parent)
+
+    layers: list[tuple[str, GrowthLayer, str]] = [
+        ("r", "relationship", "共同经历"),
+        ("v", "voice", "口癖样本"),
+    ]
+    entries: dict[str, tuple[GrowthLayer, str]] = {}
+    for short, layer, label in layers:
+        rows = store.growth_entries(layer)
+        print(f"{label}（{layer}，{len(rows)} 条）")
+        for i, row in enumerate(rows, start=1):
+            ref = f"{short}{i}"
+            entries[ref] = (layer, row)
+            print(f"  [{ref}] {row}")
+        if not rows:
+            print("  （空）")
+
+    def _pick(ref: str) -> tuple[GrowthLayer, str]:
+        if ref not in entries:
+            print(f"没有编号 {ref}，看上面的列表。", file=sys.stderr)
+            raise SystemExit(2)
+        return entries[ref]
+
+    if args.promote:
+        layer, entry = _pick(args.promote)
+        store.promote(layer, entry)
+        print(f"已合并进 personality.md：{entry}")
+    elif args.drop:
+        layer, entry = _pick(args.drop)
+        rows = store.growth_entries(layer)
+        rows.remove(entry)
+        store.write_growth(layer, rows)
+        print(f"已删掉：{entry}")
+    else:
+        print("用法：--promote r1 把那条合并进 personality.md；--drop v2 划掉不喜欢的。")
+    return 0
+
+
 def cmd_chattiness(args: argparse.Namespace) -> int:
     """Print the thresholds each chattiness level derives.
 
@@ -189,6 +233,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat = config_sub.add_parser("chattiness", help="打印话痨度三档派生出的阈值")
     p_chat.add_argument("--level", default="medium")
     p_chat.set_defaults(func=cmd_chattiness)
+
+    persona = sub.add_parser("persona", help="人设相关")
+    persona_sub = persona.add_subparsers(dest="persona_command", required=True)
+    p_review = persona_sub.add_parser(
+        "review", help="翻生长层（共同经历/口癖），点头的合并进 personality.md"
+    )
+    p_review.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    p_review.add_argument("--promote", metavar="编号", help="把这条合并进 personality.md")
+    p_review.add_argument("--drop", metavar="编号", help="把这条从生长层删掉")
+    p_review.set_defaults(func=cmd_persona_review)
 
     # Registered lazily: dev-talk pulls in the realtime stack and possibly
     # sounddevice, none of which `config validate` should pay for.

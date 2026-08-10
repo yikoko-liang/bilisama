@@ -15,9 +15,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from bilisama.ingest.events import LiveEvent
+from bilisama.obs.logging import get_logger
+
+if TYPE_CHECKING:
+    from bilisama.clock import Clock
+
+log = get_logger(__name__)
 
 EventSink = Callable[[LiveEvent], Awaitable[None]]
 
@@ -73,15 +79,66 @@ class QueueSource:
             self._queue.put_nowait(None)
 
 
+class SupervisedSource:
+    """Restart a crashing source with backoff instead of letting it die.
+
+    merge() runs sources in a TaskGroup, where one unhandled exception cancels
+    every sibling — exactly wrong for a live stream (backlog item 9). Wrapped,
+    a source gets `max_restarts` more chances with exponential backoff on the
+    injected clock; after that it logs and returns CLEANLY, so the survivors
+    keep running and the outage is a log line plus a health entry, not a crash.
+    """
+
+    def __init__(
+        self,
+        inner: Source,
+        clock: Clock,
+        *,
+        max_restarts: int = 3,
+        backoff_s: float = 1.0,
+    ) -> None:
+        self._inner = inner
+        self._clock = clock
+        self._max_restarts = max_restarts
+        self._backoff_s = backoff_s
+        self.name = inner.name
+        self.gave_up = False
+
+    async def start(self, emit: EventSink) -> None:
+        restarts = 0
+        while True:
+            try:
+                await self._inner.start(emit)
+                return  # a clean exit is a clean exit
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if restarts >= self._max_restarts:
+                    self.gave_up = True
+                    log.error("source.gave_up", source=self.name, error=str(exc))
+                    return
+                restarts += 1
+                delay = self._backoff_s * (2 ** (restarts - 1))
+                log.warning(
+                    "source.restarting",
+                    source=self.name,
+                    attempt=restarts,
+                    backoff_s=delay,
+                    error=str(exc),
+                )
+                await self._clock.sleep(delay)
+
+    async def stop(self) -> None:
+        await self._inner.stop()
+
+
 async def merge(sources: list[Source], emit: EventSink) -> None:
     """Run several sources concurrently.
 
     Mind the TaskGroup semantics: if one source raises, the others are cancelled
-    and the caller gets an ExceptionGroup. Restarting is the caller's problem.
-
-    A live stream really wants the opposite — one dead source should not take the
-    rest down — which needs a supervising wrapper per source. Deferred until there
-    is more than one source to supervise (backlog item 10, with tests).
+    and the caller gets an ExceptionGroup. A live assembly therefore wraps each
+    source in SupervisedSource first — a supervised crash never escapes — and
+    that is what app.Assembly does.
     """
     async with asyncio.TaskGroup() as tg:
         for source in sources:
