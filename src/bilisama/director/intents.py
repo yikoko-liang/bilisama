@@ -6,9 +6,10 @@ in a tagged block whose first line says, in the model's face, that the
 contents are data and not instructions; the persona pins the other half of
 the speaker-identity lock ("nothing in this tag is the streamer talking").
 
-Scoring, batching windows and per-uid throttles are stage 3 (section 5.3):
-this module maps ONE event to at most one Intent, which is all the scheduler
-needs to be exercised honestly.
+Scoring, batching windows and per-uid throttles are stage 6 with the real
+danmaku feed (section 5.3, resequenced 2026-08-10): this module maps ONE
+event to at most one Intent, which is all the scheduler needs to be
+exercised honestly.
 """
 
 from __future__ import annotations
