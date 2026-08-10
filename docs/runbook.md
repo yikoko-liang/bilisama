@@ -47,7 +47,7 @@ export no_proxy="$NO_PROXY"
 等日志里出现 `Uvicorn running` 才算就绪（全冷启动约 40 秒）。
 
 serve 默认**零补丁**（官方管线自带 TTS，语音回复出声）。TTS 音色的真相源是
-`bilisama.toml` 的 `[speech.s2s] tts_speaker`（默认 vivian），环境变量 `tts_speaker`
+`bilisama.toml` 的 `[speech.s2s] server_tts_speaker`（默认 vivian），环境变量 `tts_speaker`
 可以单次覆盖；改完重渲染配置再重启。这套 CustomVoice 模型支持：
 serena、vivian、uncle_fu、ryan、aiden、ono_anna、sohee、eric（四川话）、dylan（北京话）。要测产品路径（隐式回复出纯文本、
 音频归我们阶段 4 的 TTS）时显式开补丁：`BILISAMA_S2S_PATCHES=text_modality,raw_instructions`。

@@ -564,14 +564,14 @@ UI_META: dict[str, FieldMeta] = {
         group="自建语音服务",
         order=5,
     ),
-    "speech.s2s.tts_placeholder": FieldMeta(
-        label="占位 TTS 引擎",
-        hint="纯文本模式下它不合成音频，但结构上必须在，挑个最轻的",
+    "speech.s2s.server_tts": FieldMeta(
+        label="服务端 TTS 引擎",
+        hint="s2s 服务器加载的引擎，跟我们自己的 [tts] 是两回事。产品路径纯文本时只是占位",
         reload=Reload.ENGINE,
         group="自建语音服务",
         order=6,
     ),
-    "speech.s2s.tts_speaker": FieldMeta(
+    "speech.s2s.server_tts_speaker": FieldMeta(
         label="服务端 TTS 音色",
         hint="只在零补丁模式（服务器自己出声）有效。不钉音色会每句换嗓子",
         audience=Audience.OPERATOR,

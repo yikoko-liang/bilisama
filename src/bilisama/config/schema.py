@@ -55,11 +55,15 @@ class S2SConfig(BaseModel):
     patches: tuple[Literal["text_modality", "raw_instructions"], ...] = Field(
         ("text_modality", "raw_instructions")
     )
-    tts_placeholder: str = Field("kokoro")
+    # The TTS engine the s2s SERVER loads — distinct from [tts], which is our
+    # own stage-4 chain. On the patched product path it never synthesises (a
+    # structural placeholder, pick the lightest); in zero-patch mode it is the
+    # voice the audience hears.
+    server_tts: str = Field("kokoro")
     # Only audible when the server's own TTS speaks (zero-patch mode). The
     # CustomVoice model generates a random voice per reply when unset upstream
     # (measured live 2026-08-11), so the render always pins one.
-    tts_speaker: str = Field("vivian")
+    server_tts_speaker: str = Field("vivian")
     turn: TurnConfig = Field(default_factory=TurnConfig)
 
 

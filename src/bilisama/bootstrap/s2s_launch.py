@@ -95,10 +95,10 @@ def render(cfg: S2SConfig) -> dict[str, object]:
         "responses_api_api_key": "none",
         "responses_api_stream": True,
         "responses_api_audio_content_type": "input_audio",
-        "tts": cfg.tts_placeholder,
+        "tts": cfg.server_tts,
         # Unused by non-qwen3 placeholder engines, load-bearing in zero-patch
         # mode: an unset speaker means a random voice per reply upstream.
-        "qwen3_tts_speaker": cfg.tts_speaker,
+        "qwen3_tts_speaker": cfg.server_tts_speaker,
         "host": "127.0.0.1",
         "port": _port_of(cfg.endpoint),
         "num_pipelines": 1,
