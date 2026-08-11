@@ -24,6 +24,7 @@ scripts/gate.sh                                 # 全套检查：格式、类型
 | [CLAUDE.md](CLAUDE.md) | 会话准则：指导原则、代码规范、文风、流程纪律 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 提交门禁、代码语言分界、commit 写法 |
 | [docs/runbook.md](docs/runbook.md) | 操作手册：起服务器、dev-talk、测试、常见坑 |
+| [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |
 | [NOTICE](NOTICE) / [LICENSE](LICENSE) | 六个上游项目的署名；Apache-2.0 |
 | [config/bilisama.toml](config/bilisama.toml) | 唯一配置真相源，注释即文档 |

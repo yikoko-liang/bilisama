@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BiliSama · 分层架构与调用链路</title>
+<style>
+  /* Palette: dataviz reference instance (validated). Layer identity rides on
+     categorical slots; text always wears text tokens, never a series color. */
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --card: #ffffff;
+    --line: #e7e6e2;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-3: #8a8984;
+    --c-front: #e87ba4;   /* slot 5 magenta — P1 前端与替身 */
+    --c-l4: #eda100;      /* slot 4 yellow  — L4 接入 */
+    --c-l3: #2a78d6;      /* slot 1 blue    — L3 编排（产品核心） */
+    --c-l2: #1baf7a;      /* slot 3 aqua    — L2 传输 */
+    --c-srv: #eb6834;     /* slot 2 orange  — P3/P3' 语音服务器 */
+    --good: #008300;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface); color: var(--ink);
+    font: 15px/1.65 -apple-system, "SF Pro SC", "PingFang SC", "Hiragino Sans GB",
+          "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+  main { max-width: 1200px; margin: 0 auto; padding: 48px 32px 72px; }
+
+  /* ---------- header ---------- */
+  header h1 { font-size: 30px; letter-spacing: .01em; margin: 0 0 6px; font-weight: 700; }
+  header .sub { color: var(--ink-2); margin: 0 0 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-size: 12.5px; color: var(--ink-2); background: var(--card);
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px;
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    margin-right: 6px; vertical-align: 1px; }
+
+  /* ---------- sections ---------- */
+  section { margin-top: 52px; }
+  h2 { font-size: 19px; margin: 0 0 4px; letter-spacing: .01em; }
+  .lede { color: var(--ink-2); font-size: 13.5px; margin: 0 0 18px; max-width: 74ch; }
+  h2 .no {
+    display: inline-block; min-width: 22px; text-align: center; margin-right: 8px;
+    font-size: 12.5px; font-weight: 600; color: var(--ink-2);
+    border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+    vertical-align: 2px; padding: 0 4px;
+  }
+
+  /* ---------- legend ---------- */
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 20px; font-size: 12.5px; color: var(--ink-2); }
+  .legend .key { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; }
+
+  /* ---------- panorama grid ---------- */
+  .pano { display: grid; grid-template-columns: 220px 26px 1fr 26px 300px; align-items: stretch; }
+  .pano .arrows { display: flex; flex-direction: column; justify-content: center; gap: 10px; align-items: center; color: var(--ink-3); }
+  .pano .arrows span { font-size: 11px; writing-mode: vertical-rl; letter-spacing: .12em; }
+  .col { display: flex; flex-direction: column; gap: 14px; }
+  .proc {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.03);
+  }
+  .proc.ghost { border-style: dashed; background: transparent; box-shadow: none; }
+  .proc h3 { margin: 0; font-size: 14.5px; display: flex; align-items: baseline; gap: 8px; }
+  .proc h3 .tag { font-size: 11px; font-weight: 600; color: var(--ink-2); letter-spacing: .05em; }
+  .proc .meta { font-size: 12px; color: var(--ink-2); margin: 2px 0 10px; }
+  .layer {
+    border: 1px solid var(--line); border-left-width: 3px; border-radius: 9px;
+    padding: 10px 12px; margin-top: 10px; background: var(--card);
+  }
+  .layer.front { border-left-color: var(--c-front); }
+  .layer.l4 { border-left-color: var(--c-l4); }
+  .layer.l3 { border-left-color: var(--c-l3); }
+  .layer.l2 { border-left-color: var(--c-l2); }
+  .layer.srv { border-left-color: var(--c-srv); }
+  .layer h4 { margin: 0 0 2px; font-size: 13.5px; }
+  .layer h4 small { font-weight: 400; color: var(--ink-2); margin-left: 6px; }
+  .layer p { margin: 0; font-size: 12.5px; color: var(--ink-2); }
+  .mods { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .mod {
+    font-size: 12px; border: 1px solid var(--line); border-radius: 6px;
+    padding: 1px 8px; background: var(--surface); color: var(--ink);
+  }
+  .mod small { color: var(--ink-3); }
+  .mod.todo { border-style: dashed; color: var(--ink-3); background: transparent; }
+  .stepflow { display: flex; flex-direction: column; gap: 0; margin-top: 8px; }
+  .stepflow .s { font-size: 12.5px; padding: 2px 0; }
+  .stepflow .s b { font-weight: 600; }
+  .stepflow .s small { color: var(--ink-2); }
+  .stepflow .v { color: var(--ink-3); font-size: 11px; padding-left: 10px; }
+
+  /* ---------- call chains ---------- */
+  .chain { margin-top: 26px; }
+  .chain h3 { font-size: 14.5px; margin: 0 0 2px; }
+  .chain .note { font-size: 12.5px; color: var(--ink-2); margin: 0 0 10px; max-width: 80ch; }
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; row-gap: 14px; }
+  .step {
+    background: var(--card); border: 1px solid var(--line); border-left-width: 3px;
+    border-radius: 8px; padding: 6px 12px 7px; max-width: 240px;
+  }
+  .step .t { font-size: 13px; font-weight: 600; }
+  .step .d { font-size: 11.5px; color: var(--ink-2); line-height: 1.5; }
+  .step.front { border-left-color: var(--c-front); }
+  .step.l4 { border-left-color: var(--c-l4); }
+  .step.l3 { border-left-color: var(--c-l3); }
+  .step.l2 { border-left-color: var(--c-l2); }
+  .step.srv { border-left-color: var(--c-srv); }
+  .arr { align-self: center; color: var(--ink-3); font-size: 15px; }
+
+  /* ---------- priority ladder (sequential single hue) ---------- */
+  .ladder { display: grid; grid-template-columns: 150px 1fr 46px; gap: 6px 12px; align-items: center; max-width: 640px; }
+  .ladder .name { font-size: 13px; text-align: right; }
+  .ladder .name small { color: var(--ink-3); display: block; font-size: 11px; line-height: 1.3; }
+  .ladder .bar { height: 14px; border-radius: 0 4px 4px 0; }
+  .ladder .val { font-size: 12.5px; color: var(--ink-2); }
+
+  .cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+  .cols3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; align-items: start; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .panel h3 { margin: 0 0 8px; font-size: 14.5px; }
+  .panel ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
+  .panel ul li { margin: 4px 0; }
+  .panel ul li b { color: var(--ink); font-weight: 600; }
+  .gates { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 4px; }
+  .gate { font-size: 12.5px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 11px; background: var(--surface); }
+  .gate small { color: var(--ink-3); }
+
+  /* ---------- tables ---------- */
+  table { border-collapse: collapse; width: 100%; font-size: 13px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+  thead th { border-top: none; font-size: 12px; color: var(--ink-2); font-weight: 600;
+    letter-spacing: .04em; background: var(--surface); }
+  td small { color: var(--ink-3); }
+  .st { font-size: 11.5px; border-radius: 999px; padding: 1px 9px; white-space: nowrap; }
+  .st.done { color: var(--good); border: 1px solid color-mix(in srgb, var(--good) 35%, transparent); }
+  .st.next { color: var(--c-l3); border: 1px solid color-mix(in srgb, var(--c-l3) 40%, transparent); }
+  .st.wait { color: var(--ink-3); border: 1px solid var(--line); }
+
+  footer { margin-top: 60px; padding-top: 16px; border-top: 1px solid var(--line);
+    font-size: 12px; color: var(--ink-3); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+
+  @media (max-width: 960px) {
+    .pano { grid-template-columns: 1fr; }
+    .pano .arrows { display: none; }
+    .cols2, .cols3 { grid-template-columns: 1fr; }
+  }
+  @media print {
+    body { background: #fff; }
+    section { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>BiliSama · 分层架构与调用链路</h1>
+  <p class="sub">B 站直播 AI 伴播 —— 实时全双工语音、判停打断、人设记忆、弹幕调度。四个进程、四个功能域，调用方向 L4 → L3 → L2。</p>
+  <div class="chips">
+    <span class="chip"><span class="dot" style="background:var(--good)"></span>阶段 0–3 已关闭</span>
+    <span class="chip"><b>713</b> 单元 + <b>24</b> 集成测试全绿</span>
+    <span class="chip">真机验证：本地 s2s ＋ DashScope 云端</span>
+    <span class="chip">下一站：阶段 4 TTS 与形象</span>
+  </div>
+  <div class="legend">
+    <span class="key"><span class="swatch" style="background:var(--c-front)"></span>P1 前端（dev-talk 替身）</span>
+    <span class="key"><span class="swatch" style="background:var(--c-l4)"></span>L4 接入</span>
+    <span class="key"><span class="swatch" style="background:var(--c-l3)"></span>L3 编排</span>
+    <span class="key"><span class="swatch" style="background:var(--c-l2)"></span>L2 传输</span>
+    <span class="key"><span class="swatch" style="background:var(--c-srv)"></span>P3 / P3&#8242; 语音服务器</span>
+  </div>
+</header>
+
+<!-- ================================================================ -->
+<section>
+  <h2><span class="no">一</span>进程全景</h2>
+  <p class="lede">拆成多个进程只有一个硬理由：speech-to-speech 把 torch / transformers / mlx 的版本写死，跟谁的环境都合不来，必须住独立 venv。产品逻辑全部收在 P2 一个 Python 进程里。</p>
+
+  <div class="pano">
+    <!-- P1 -->
+    <div class="col">
+      <div class="proc">
+        <h3><span class="tag">P1</span>前端</h3>
+        <p class="meta">Electron ＋ Live2D（阶段 5）。开发期由 <b>dev-talk</b> 顶替：</p>
+        <div class="layer front">
+          <h4>dev-talk --director</h4>
+          <p>麦克风采集 · 扬声器播放 · 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· 打断本地半边（flush）</p>
+        </div>
+        <div class="layer front" style="border-style:dashed">
+          <h4 style="color:var(--ink-3)">Electron<small>待建</small></h4>
+          <p>Live2D 舞台 · 口型 · 控制面板 · playback 回执</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrows"><span>音频双向 · 弹幕注入</span></div>
+
+    <!-- P2 -->
+    <div class="col">
+      <div class="proc">
+        <h3><span class="tag">P2</span>bilisama<span class="tag" style="font-weight:400">Python 3.12 · 单进程 asyncio</span></h3>
+        <p class="meta">事件从上往下流：接入产事件 → 编排决定「说不说、说什么、什么时候说」 → 传输负责把话送到语音服务器。</p>
+
+        <div class="layer l4">
+          <h4>L4 接入<small>ingest/</small></h4>
+          <p>事件一律入库，「不发声」不等于「不知道」；speak 开关只闸最后一步。</p>
+          <div class="mods">
+            <span class="mod">events <small>统一事件模型</small></span>
+            <span class="mod">sources <small>监管重启·健康回血</small></span>
+            <span class="mod todo">blivedm 弹幕源（阶段 6）</span>
+            <span class="mod todo">打分/限流/熔断（阶段 6）</span>
+          </div>
+        </div>
+
+        <div class="layer l3">
+          <h4>L3 编排<small>director/ · persona/ · memory/ · app.py</small></h4>
+          <p>产品核心。只认 SpeechLink 接口和归一化事件，一行协议都不碰（grep 门禁钉死）。</p>
+          <div class="mods">
+            <span class="mod">Assembly <small>装配环·上下文推送</small></span>
+            <span class="mod">Scheduler <small>优先级堆·单槽·抢占</small></span>
+            <span class="mod">SpeakingFloor <small>说话权六闸门</small></span>
+            <span class="mod">intents <small>敌意输入包裹</small></span>
+            <span class="mod">OutputGuard <small>敏感词流式兜底</small></span>
+            <span class="mod">Proactive <small>冷场话题</small></span>
+            <span class="mod">Persona <small>锚＋生长层</small></span>
+            <span class="mod">Memory <small>SQLite·两层蒸馏</small></span>
+            <span class="mod">obs <small>日志·终局·health</small></span>
+          </div>
+        </div>
+
+        <div class="layer l2">
+          <h4>L2 传输<small>realtime/</small></h4>
+          <p>一份客户端说两种方言，provider 的怪癖全部收进 adapter，不外漏。</p>
+          <div class="mods">
+            <span class="mod">SpeechLink <small>对 L3 的唯一接口</small></span>
+            <span class="mod">RealtimeClient <small>单槽账本·墓碑·25s 看门狗</small></span>
+            <span class="mod">Codec GA / BETA <small>方言</small></span>
+            <span class="mod">providers/s2s · hosted</span>
+            <span class="mod">Capabilities <small>能力位</small></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrows"><span>OpenAI Realtime 协议 (wss)</span></div>
+
+    <!-- P3 -->
+    <div class="col">
+      <div class="proc">
+        <h3><span class="tag">P3&#8242;</span>本地语音服务器</h3>
+        <p class="meta">speech-to-speech · 独立 venv · <code>ws://127.0.0.1:8765</code> · 现跑零补丁官方管线：</p>
+        <div class="layer srv">
+          <div class="stepflow">
+            <div class="s"><b>Silero VAD</b> <small>有没有人声 · 本地 CPU</small></div>
+            <div class="v">↓ 累计 384ms 真实语音才算数</div>
+            <div class="s"><b>SmartTurn v3.2</b> <small>这句说完没 · 本地 CPU</small></div>
+            <div class="v">↓ 判停宽限 1200 / 400ms（两分支）</div>
+            <div class="s"><b>paraformer-zh</b> <small>语音转文字 · 本地</small></div>
+            <div class="v">↓ 文字</div>
+            <div class="s"><b>qwen3.7-flash</b> <small>想出回答 · 阿里云</small></div>
+            <div class="v">↓ 回复文本（流式）</div>
+            <div class="s"><b>Qwen3-TTS</b> <small>vivian 音色 · 云</small></div>
+          </div>
+          <p style="margin-top:8px">产品路径（阶段 4 起）：音频直送自研 S2T 模型 ＋ 补丁 A 纯文本 ＋ 我们自己的 TTS（主力规划 IndexTTS）。</p>
+        </div>
+      </div>
+      <div class="proc ghost">
+        <h3><span class="tag">P3</span>托管备选 · DashScope</h3>
+        <p class="meta"><b>qwen-audio-3.0-realtime-flash</b> 一个模型包办识别＋对话＋合成，beta 方言，云端 VAD。同一套 L2 客户端换个 URL 即达。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <h2><span class="no">二</span>五条调用链</h2>
+  <p class="lede">箭头上跑的都是真实协议事件。① 是服务器自己发起的隐式轮次，我们只管收；②–⑤ 才是我们主动出手的地方。</p>
+
+  <div class="chain">
+    <h3>① 主播说一句，AI 答一句（隐式轮次）</h3>
+    <p class="note">整条判停链在 P3&#8242; 本地跑完；L3 在主播停口后保持静默 1.9 秒（宽限最坏分支 1.6s ＋ 0.3s 余量），不跟服务器抢话。</p>
+    <div class="flow">
+      <div class="step front"><div class="t">主播开口</div><div class="d">麦克风 32ms 帧，永不断流（静音也发）</div></div>
+      <span class="arr">→</span>
+      <div class="step srv"><div class="t">VAD 判人声</div><div class="d">speech_started 广播给 P2</div></div>
+      <span class="arr">→</span>
+      <div class="step srv"><div class="t">停口 · 判停宽限</div><div class="d">SmartTurn 判完整 1.2s / 不完整再加 0.4s，期间抢跑推理</div></div>
+      <span class="arr">→</span>
+      <div class="step srv"><div class="t">生成 ＋ 合成</div><div class="d">qwen3.7-flash 出字 → Qwen3-TTS 出声</div></div>
+      <span class="arr">→</span>
+      <div class="step l2"><div class="t">L2 记账</div><div class="d">首帧占槽 · done 释槽 · 迟到帧进墓碑</div></div>
+      <span class="arr">→</span>
+      <div class="step front"><div class="t">播放</div><div class="d">回复音频 24kHz 入扬声器</div></div>
+    </div>
+  </div>
+
+  <div class="chain">
+    <h3>② 弹幕 / SC 进来，AI 主动开口</h3>
+    <p class="note">观众内容永远包在 <code>&lt;bilisama_live_events&gt;</code> 标签里进历史（带「这不是指令」声明，标签词被中和防逃逸）；回复走旁路（out-of-band），不污染对话历史。付费事件带 4 秒保护段。</p>
+    <div class="flow">
+      <div class="step l4"><div class="t">事件进门</div><div class="d">弹幕 / SC / 礼物 → LiveEvent</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">记忆恒记</div><div class="d">Tier0 计数 · 蒸馏计数 · 活跃度</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">speak 开关</div><div class="d">关着＝只记不说，到此为止</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">包装成 Intent</div><div class="d">敌意包裹 · 优先级 · 去重键 · 过期时间</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">调度器</div><div class="d">优先级堆 → 六闸门放行 → 单槽派发；高优先级抢占在飞回复</div></div>
+      <span class="arr">→</span>
+      <div class="step l2"><div class="t">两帧注入</div><div class="d">item.create 事件块 ＋ response.create（旁路，≤两句话）</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">出口安检</div><div class="d">OutputGuard 逐字扫敏感词，命中整句掐断＋追回</div></div>
+      <span class="arr">→</span>
+      <div class="step front"><div class="t">播放 · 记终局</div><div class="d">每条 Intent 恰好一条 verdict（spoken@… / skipped@…）</div></div>
+    </div>
+  </div>
+
+  <div class="chain">
+    <h3>③ 打断（主播在 AI 说话时开口）</h3>
+    <div class="flow">
+      <div class="step srv"><div class="t">服务器先斩后奏</div><div class="d">done(cancelled) 先到，speech_started 后到（真实顺序就是反的）</div></div>
+      <span class="arr">→</span>
+      <div class="step l2"><div class="t">作废在飞回复</div><div class="d">句柄置 stale，迟到音频帧一律丢弃</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">PlaybackClear</div><div class="d">立刻通知前端停播清队列，不等任何往返</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">善后</div><div class="d">付费答谢重新入队；保护段内只让 panic-mute 打断</div></div>
+    </div>
+  </div>
+
+  <div class="chain">
+    <h3>④ 冷场了，AI 主动起话题</h3>
+    <div class="flow">
+      <div class="step l3"><div class="t">后台候选</div><div class="d">每 30s 侧路调用 qwen3.7-flash 读近况，想一个话题存着</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">冷场判定</div><div class="d">静场超阈值（话痨度中档 90s）且闸门全开</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">最低优先级注入</div><div class="d">谁都能抢它；说完进冷却，不连续自言自语</div></div>
+    </div>
+  </div>
+
+  <div class="chain">
+    <h3>⑤ 人设与记忆推送（「上下文已推送」那条日志）</h3>
+    <div class="flow">
+      <div class="step l3"><div class="t">拼装</div><div class="d">锚（identity＋personality）→ 直播规则 → 生长层/置顶 → 主播事实 → 本场进展 → 在场常客 → 时钟</div></div>
+      <span class="arr">→</span>
+      <div class="step l3"><div class="t">10s 检查一次</div><div class="d">全文没变不推，护住服务器的前缀缓存</div></div>
+      <span class="arr">→</span>
+      <div class="step l2"><div class="t">session.update</div><div class="d">instructions 字段＝模型的系统提示词</div></div>
+      <span class="arr">→</span>
+      <div class="step srv"><div class="t">服务器收存</div><div class="d">之后每一轮生成都以它开头</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <h2><span class="no">三</span>调度核心：一个名额，七方抢用</h2>
+  <p class="lede">协议硬约束：同一时刻只允许一个回复在生成。三个 provider 实测全部单槽——没有调度器，礼物风暴一来 AI 就对着付费观众沉默。</p>
+  <div class="cols2">
+    <div class="panel">
+      <h3>优先级阶梯（数值大者抢占小者）</h3>
+      <div class="ladder">
+        <div class="name">主播语音<small>永不被抢</small></div><div class="bar" style="width:100%;background:#1c56a0"></div><div class="val">100</div>
+        <div class="name">Super Chat<small>受保护 4s·被打断重排</small></div><div class="bar" style="width:80%;background:#2a78d6"></div><div class="val">80</div>
+        <div class="name">大额礼物</div><div class="bar" style="width:70%;background:#4a8edd"></div><div class="val">70</div>
+        <div class="name">上舰</div><div class="bar" style="width:65%;background:#6aa3e5"></div><div class="val">65</div>
+        <div class="name">VIP 进房</div><div class="bar" style="width:50%;background:#8ab8ec"></div><div class="val">50</div>
+        <div class="name">普通弹幕<small>窗口攒批择一</small></div><div class="bar" style="width:30%;background:#aecdf2"></div><div class="val">30</div>
+        <div class="name">主动话题<small>谁都让·过期即弃</small></div><div class="bar" style="width:10%;background:#cfe1f8"></div><div class="val">10</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>说话权闸门（任一为真即闭嘴）</h3>
+      <div class="gates">
+        <span class="gate">主播在说话</span>
+        <span class="gate">上一句没答完</span>
+        <span class="gate">音频还没播完</span>
+        <span class="gate">隐式回复占场</span>
+        <span class="gate">投机静默窗 <small>1.9s</small></span>
+        <span class="gate">话痨度冷却 <small>中档 12s</small></span>
+      </div>
+      <h3 style="margin-top:18px">安全三件套</h3>
+      <ul>
+        <li><b>输入侧</b>：观众内容标签隔离＋标签词中和，说话人身份锁（观众的话永远不冒充主播）。</li>
+        <li><b>输出侧</b>：OutputGuard 跨分片扫词表，白名单缓判（「河北」不误伤「河」），命中整句不发＋追回已播。</li>
+        <li><b>红色按钮</b>：panic-mute 唯一能打断受保护答谢，清队列、拒新派发，直到人工解除。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <h2><span class="no">四</span>人设与记忆：锚不动，往外长</h2>
+  <p class="lede">调研过的框架都踩过同一个坑——让 AI 改写自己的人设，最后忘了自己是谁。结构上把这条路堵死：锚只有人能写，机器长出来的东西住在旁边。</p>
+  <div class="cols3">
+    <div class="panel">
+      <h3>锚 · 人写，机器只读</h3>
+      <ul>
+        <li><b>identity.md</b> —— 我是谁、和主播什么关系</li>
+        <li><b>personality.md</b> —— 说话风格与边界</li>
+        <li>四个随包人设：mia ＋ openhanako 移植的 hanako / ming / butter</li>
+        <li>测试断言：三场回放后锚文件哈希逐字节不变</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>生长层 · 机器写，人可删</h3>
+      <ul>
+        <li><b>relationship.md</b> 共同经历（30 条 / 800 字封顶）</li>
+        <li><b>voice.md</b> 口癖样本（12 句 / 每场至多换 2 句）</li>
+        <li>三态开关 off / collect / on，默认全关</li>
+        <li>晋升口：<code>persona review</code> 主播点头才进性格</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>记忆 · SQLite 一房一库</h3>
+      <ul>
+        <li><b>Tier 0</b> 纯计数，不用模型：阿强第 5 次来，一句 SELECT 的事</li>
+        <li><b>Tier 1</b> 后台蒸馏（qwen3.7-flash）：滚动本场摘要＋下播批量出观众事实</li>
+        <li>语音循环永不等它；直播时区钉死 UTC+8，凌晨 4 点翻逻辑日</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <h2><span class="no">五</span>模型清单与阶段路线</h2>
+  <div class="cols2">
+    <div>
+      <table>
+        <thead><tr><th>环节</th><th>模型</th><th>跑在哪</th></tr></thead>
+        <tbody>
+          <tr><td>人声检测</td><td>Silero VAD</td><td>本地 CPU</td></tr>
+          <tr><td>判停</td><td>SmartTurn v3.2</td><td>本地 CPU</td></tr>
+          <tr><td>语音识别</td><td>paraformer-zh</td><td>本地</td></tr>
+          <tr><td>对话</td><td>qwen3.7-flash <small>（将来：自研 S2T 直吃音频）</small></td><td>阿里云</td></tr>
+          <tr><td>语音合成</td><td>Qwen3-TTS · vivian <small>（阶段 4：可插拔，主力 IndexTTS）</small></td><td>云</td></tr>
+          <tr><td>侧路（话题/蒸馏）</td><td>qwen3.7-flash</td><td>阿里云</td></tr>
+          <tr><td>托管备选整包</td><td>qwen-audio-3.0-realtime-flash</td><td>DashScope 云</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <table>
+        <thead><tr><th>阶段</th><th>交付</th><th>状态</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>地基 · Mock · 配置真相源 · 门禁</td><td><span class="st done">关闭</span></td></tr>
+          <tr><td>1</td><td>L2 语音链路 · 双方言 · 八条规则</td><td><span class="st done">关闭</span></td></tr>
+          <tr><td>2</td><td>L3 骨架 · 调度 · 说话权 · 兜底</td><td><span class="st done">关闭</span></td></tr>
+          <tr><td>3</td><td>人设记忆 · 蒸馏 · 主动话题 · 装配</td><td><span class="st done">关闭</span></td></tr>
+          <tr><td>4</td><td>TTS 与形象（tagparser / chunker / mux）</td><td><span class="st next">下一站</span></td></tr>
+          <tr><td>5</td><td>Electron ＋ Live2D 桌面端</td><td><span class="st wait">待排</span></td></tr>
+          <tr><td>6</td><td>弹幕接入（blivedm · 打分 · 熔断）</td><td><span class="st wait">待排</span></td></tr>
+          <tr><td>7</td><td>打包签名 · 一键化交付</td><td><span class="st wait">待排</span></td></tr>
+          <tr><td>8</td><td>真直播间逐级联调</td><td><span class="st wait">待排</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <span>BiliSama 架构展示 · 2026-08-11 · 依据实现代码与计划文档 §2–§4 生成</span>
+  <span>验证口径：scripts/gate.sh 全绿 ＋ 本地 s2s / DashScope 真机探针</span>
+</footer>
+
+</main>
+</body>
+</html>
