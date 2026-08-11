@@ -466,7 +466,9 @@ async def run_director(args: argparse.Namespace) -> int:
     # Same data home the personas use, one directory up from them.
     room_dir = default_data_dir(settings.persona.id).parent.parent / "rooms" / "dev-talk"
     room_dir.mkdir(parents=True, exist_ok=True)
-    store = MemoryStore(room_dir / "memory.db", clock)
+    store = MemoryStore(
+        room_dir / "memory.db", clock, write_batch_ms=settings.memory.write_batch_ms
+    )
     store.prune_events(retain_days=settings.memory.retain_event_days)
     store.begin_stream()
 

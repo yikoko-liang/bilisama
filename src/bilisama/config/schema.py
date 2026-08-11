@@ -213,6 +213,12 @@ class MemoryConfig(BaseModel):
     db_path: str = Field("auto")
     distill_every_n_events: int = Field(40, ge=5)
     retain_event_days: int = Field(7, ge=1)
+    # 0 = write-through (each event lands in its own transaction, the target-
+    # scale default). >0 = write-behind: events buffer in memory and land as
+    # one transaction when the window ages out or 200 rows accumulate; every
+    # read flushes first, so read-after-write semantics are unchanged. For
+    # flood-rate rooms (plan section 16.8 item 26).
+    write_batch_ms: int = Field(0, ge=0, le=5000)
 
 
 class RoomConfig(BaseModel):

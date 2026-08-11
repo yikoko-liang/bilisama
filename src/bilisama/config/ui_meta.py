@@ -299,6 +299,14 @@ UI_META: dict[str, FieldMeta] = {
         group="记忆",
         order=3,
     ),
+    "memory.write_batch_ms": FieldMeta(
+        label="写库攒批窗口",
+        hint="0 = 来一条落一条。事件洪峰的大房间再开：事件先攒在内存，"
+        "窗口到期或攒满 200 条打包落库；任何读取前先落盘，读写语义不变",
+        unit="毫秒",
+        group="记忆",
+        order=4,
+    ),
     "persona.id": FieldMeta(
         label="人设",
         hint="对应 config/personas/<id>/",

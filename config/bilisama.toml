@@ -105,6 +105,7 @@ wake_interval_s = 30                    # 后台思考节奏，不是开口节�
 db_path = "auto"
 distill_every_n_events = 40             # 按事件计数触发，不按定时器
 retain_event_days = 7
+write_batch_ms = 0                      # 0=来一条落一条；事件洪峰的大房间再调大（计划 §16.8 第 26 条）
 
 [persona]
 id = "mia"

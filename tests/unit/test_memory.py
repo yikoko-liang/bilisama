@@ -8,6 +8,7 @@ stream, not once per event (plan section 9, stage 3).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -199,3 +200,91 @@ def test_memory_segments_bundle_everything(store: MemoryStore, clock: FakeClock)
     assert "开播" in segments.clock_line
     assert segments.regulars == ""
     assert segments.session_progress == ""
+
+
+# ------------------------------------------------------------ write-behind
+
+
+def _independent_count(db_path: str, table: str) -> int:
+    """Row count through a SECOND connection — sees only what was committed,
+    never the buffer, which is exactly the point."""
+    import sqlite3
+
+    db = sqlite3.connect(db_path)
+    try:
+        return int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    finally:
+        db.close()
+
+
+def test_write_through_is_the_default_and_lands_immediately(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    path = str(tmp_path / "wt.db")
+    s = MemoryStore(path, clock)
+    s.begin_stream()
+    s.on_event(_event())
+    assert _independent_count(path, "event") == 1, "batch off: every event lands at once"
+    s.close()
+
+
+def test_batched_writes_hold_until_a_read_flushes(tmp_path: Path, clock: FakeClock) -> None:
+    path = str(tmp_path / "wb.db")
+    s = MemoryStore(path, clock, write_batch_ms=200)
+    s.begin_stream()
+    s.on_event(_event(text="第一条"))
+    assert _independent_count(path, "event") == 0, "inside the window: buffered, not committed"
+    # Any read flushes first — the caller can never observe a stale answer.
+    assert s.recent_events() == ["[danmaku] 路人甲: 第一条"]
+    assert _independent_count(path, "event") == 1
+    s.close()
+
+
+def test_batch_flushes_when_the_window_ages_out(tmp_path: Path, clock: FakeClock) -> None:
+    path = str(tmp_path / "age.db")
+    s = MemoryStore(path, clock, write_batch_ms=200)
+    s.begin_stream()
+    s.on_event(_event(text="先攒着"))
+    clock._now += 0.3  # past the 200ms window; sync code, direct nudge is fine
+    s.on_event(_event(text="这条触发落盘"))
+    assert _independent_count(path, "event") == 2
+    s.close()
+
+
+def test_batch_flushes_at_the_row_cap(tmp_path: Path, clock: FakeClock) -> None:
+    path = str(tmp_path / "cap.db")
+    s = MemoryStore(path, clock, write_batch_ms=5000)
+    s.begin_stream()
+    for i in range(200):
+        s.on_event(_event(uid=2000 + i, text=f"第{i}条"))
+    assert _independent_count(path, "event") == 200, "200 rows must not wait for the window"
+    s.close()
+
+
+def test_stream_end_flushes_and_aggregation_matches_write_through(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    """The acceptance property of write-behind: after a flush, the viewer
+    aggregates are byte-for-byte what per-event writes would have produced."""
+    path = str(tmp_path / "agg.db")
+    s = MemoryStore(path, clock, write_batch_ms=5000)
+    s.begin_stream()
+    s.on_event(_event(uid=7, name="老板", text="来了", kind=EventKind.DANMAKU))
+    s.on_event(_event(uid=7, name="老板", text="", kind=EventKind.GIFT, value_cny=52.0))
+    s.end_stream()
+    assert _independent_count(path, "event") == 2
+    row = s.viewer("uid:7")
+    assert row is not None
+    assert row.streams_seen == 1, "two events in one stream still count one visit"
+    assert row.msg_count == 1, "only the text-bearing event counts as a message"
+    assert row.gift_value_cny == 52.0
+    s.close()
+
+
+def test_close_flushes_the_tail(tmp_path: Path, clock: FakeClock) -> None:
+    path = str(tmp_path / "tail.db")
+    s = MemoryStore(path, clock, write_batch_ms=5000)
+    s.begin_stream()
+    s.on_event(_event(text="最后一条"))
+    s.close()
+    assert _independent_count(path, "event") == 1, "close() must not drop the buffer"
