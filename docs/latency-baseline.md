@@ -30,7 +30,7 @@
 - **SmartTurn 的 `inference_ms` 和 complete/incomplete 分支直接解析它自己的日志**，
   不改 s2s。
 - **`t_grace` = 首个 delta − speech_stopped − 推理耗时**。这个值应该正好等于
-  800 或 2000；不等于，就说明模型首包时间捅穿了宽限，真正的瓶颈找到了。
+  800 或 2000；不等于，就说明模型首包时间超出了宽限，真正的瓶颈找到了。
 - **不用真麦克风**——走 `input_audio_buffer.append` 喂 WAV 语料保证可复现。
   语料要覆盖：干净的句末下降调、拖尾语气词（「那个…」「然后…」）、句中 500ms
   停顿、2s / 5s / 12s 三种长度。
@@ -44,9 +44,9 @@
 |---|---|---|
 | s2s 内部五跳（VAD 软结束、SmartTurn 推理、宽限、LLM 首包、TTS 首包） | — | 真服务器起来即可 |
 | `branch_rate`、`t_grace` | — | 同上 |
-| — | 采集分帧、回传、播放那几跳（预算表第 1、2、3、10 跳） | P1 Electron，阶段 6 |
-| — | 文本 → TTS 首包那一跳（第 9 跳） | 我们自己的 TTS 链，阶段 5 |
-| — | 闸门等待直方图（`t_gate` 按五个条件分别出） | SpeakingFloor，阶段 2 |
+| — | 采集分帧、回传、播放那几跳（预算表第 1、2、3、10 跳） | P1 Electron，阶段 5 |
+| — | 文本 → 合成首包那一跳（第 9 跳） | 我们自己的 TTS 链，阶段 4 |
+| — | 说话权等待直方图（`t_gate` 按条件分桶） | 检查本体已建（阶段 2），差 `gate.blocked` 日志埋点 |
 
 所以第一版 bench 交付的是「s2s 内部五跳 + branch_rate + 探针名字表」，
 不是十跳全图。这一点要写进 bench 的 docstring，免得下一个人以为它坏了。
@@ -62,7 +62,7 @@
 | chunker 首句逗号切分保持开启 | 上游默认即开，无需动作 |
 | `speculative_reopen_ms` 800→400 | **有意押后**，等 `branch_rate` |
 | provider (a) 的 `silence_duration_ms` 500→300 | **落不了地**——`HostedConfig` 还没有判停段，字段加了才能设（计划 §17.5 B 组第 6 条） |
-| 能量门 duck 默认开 | 已落地（`echo_guard` 默认 `duck`）。它的前提「AEC 实测干净」要等 P1 就位，归阶段 6 验 |
+| 能量门 duck 默认开 | 已落地（`echo_guard` 默认 `duck`）。它的前提「回声消除实测干净」要等 P1 就位，归阶段 5（Electron）验 |
 
 ## 探针点名字表（预留，与 obs 日志事件名对齐）
 
@@ -78,4 +78,4 @@ reply.done                  response.done
 ```
 
 后续阶段补：`playback.started` / `playback.ended`（P1 回执）、`tts.first_pcm`
-（阶段 5）、`gate.blocked`（阶段 2，按五个闸门条件分桶）。
+（阶段 5）、`gate.blocked`（按说话权条件分桶，检查本体已建、埋点未做）。

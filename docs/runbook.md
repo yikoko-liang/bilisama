@@ -12,7 +12,7 @@
 | BiliSama 本体 | 仓库下 `.venv/` | bilisama + 轻依赖（websockets、pydantic、pytest、sounddevice） |
 | 语音引擎 | `~/.local/share/bilisama/engines/s2s/` | speech-to-speech 全家桶（torch、mlx、funasr），约 2GB |
 
-模型缓存在 `~/.cache/huggingface/`（判停、TTS）和 `~/.cache/modelscope/`（paraformer），
+模型缓存在 `~/.cache/huggingface/`（判停模型、合成模型）和 `~/.cache/modelscope/`（识别模型 paraformer），
 首次启动自动下载，之后离线复用。
 
 本地凭据在仓库根的 `path.sh`（已 gitignore，永不入库）：
@@ -25,7 +25,7 @@ export dashscope_url=...    # 阿里 MaaS 实例地址
 export ali_api_key=...      # 它的 key
 ```
 
-## 起本地语音服务器（官方三段管线）
+## 起本地语音服务器（原装三段管线：识别 → 对话 → 合成）
 
 ```bash
 source path.sh && export OPENAI_API_KEY="$api_key"
@@ -46,12 +46,12 @@ export no_proxy="$NO_PROXY"
 真实内网 IP 在能访问该域名的机器上 `nslookup` 一次即得。端口开了不等于模型加载完，
 等日志里出现 `Uvicorn running` 才算就绪（全冷启动约 40 秒）。
 
-serve 默认**零补丁**（官方管线自带 TTS，语音回复出声）。TTS 音色的真相源是
+serve 默认**零补丁**——不改上游任何行为，用它自带的合成器出声。音色的真相源是
 `bilisama.toml` 的 `[speech.s2s] server_tts_speaker`（默认 vivian），环境变量 `tts_speaker`
 可以单次覆盖；改完重渲染配置再重启。这套 CustomVoice 模型支持：
-serena、vivian、uncle_fu、ryan、aiden、ono_anna、sohee、eric（四川话）、dylan（北京话）。要测产品路径（隐式回复出纯文本、
-音频归我们阶段 4 的 TTS）时显式开补丁：`BILISAMA_S2S_PATCHES=text_modality,raw_instructions`。
-2026-08-11 之前脚本吃 shim 的补丁全开默认值，隐式回复被钉成纯文本，表现为「说话没人声回」。
+serena、vivian、uncle_fu、ryan、aiden、ono_anna、sohee、eric（四川话）、dylan（北京话）。要测正式产品的路径（服务器的自动应答只出文字，
+声音归我们阶段 4 自己的合成器）时显式开补丁：`BILISAMA_S2S_PATCHES=text_modality,raw_instructions`。
+2026-08-11 之前这个脚本误用了补丁全开的默认值，自动应答被固定成纯文字输出，表现为「说话没人声回」。
 
 **免 VPN 变体**（2026-08-11 验证）：LLM 段不走内网 deepseek，改走阿里 compatible-mode
 的 qwen3.7-flash——渲染配置前把三个环境变量换掉即可，其余照旧，不需要 EasyConnect
@@ -69,9 +69,9 @@ BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json scripts/smoke_provider_b
 
 ## dev-talk：真人语音测试（两档）
 
-**裸链路档（默认）**：拿真人声音测 RealtimeClient + 方言 codec，不带 L3。这也是目前
-唯一能用嗓子测 DashScope 的方式——上游 `talk` 客户端只认 GA 事件名，对 beta
-方言的 DashScope 连上也只有沉默。
+**裸链路档（默认）**：拿真人声音测 RealtimeClient 和协议转换层，不带 L3。这也是目前
+唯一能用嗓子测 DashScope 的方式——上游 `talk` 客户端只认新版协议的事件名，
+连上说早期版协议的 DashScope 就只有沉默。
 
 ```bash
 source path.sh && export OPENAI_API_KEY="$api_key"
@@ -83,9 +83,9 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 .venv/bin/bilisama dev-talk --provider dashscope --model qwen-audio-3.0-realtime-flash
 ```
 
-**全装配档（`--director`，阶段 3 的体验入口）**：把人设、记忆、蒸馏、主动话题、
-调度器整套真栈立起来，麦克风在一头，终端打字在另一头顶替弹幕源。s2s 和 DashScope
-都能接（HostedLink 会在连接后自动发会话引导帧，判停参数读 `[speech.dashscope.turn]`；
+**全装配档（`--director`，阶段 3 的体验入口）**：把人设、记忆、后台提炼、主动话题、
+调度器整套真实组件立起来，麦克风在一头，终端打字在另一头顶替弹幕源。s2s 和 DashScope
+都能接（HostedLink 连接后自动发一帧会话设置，判停参数读 `[speech.dashscope.turn]`；
 2026-08-11 对真端点验证过：注入回复 completed 且带音频）。
 
 ```bash
@@ -98,7 +98,7 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 
 director 档里的动作：
 
-- **说话**照常聊（判停、打断都是真栈）。s2s 上的回复音频来自官方管线自带的 TTS：
+- **说话**照常聊（判停、打断走的都是真实链路）。s2s 上的回复声音来自它自带的合成器：
   serve 现在默认零补丁（见上一节），adapter 也以 `text_replies=False` 请求音频。
   正式产品是纯文本＋我们自己的 TTS，那是阶段 4 的事。
 - **终端打字＝模拟观众**：直接打字是弹幕；`阿强:内容` 指定观众名（同名同记忆行）；
@@ -106,9 +106,9 @@ director 档里的动作：
   （`uv pip install prompt_toolkit`，dev 依赖组自带）会有一条固定在底部的
   `弹幕>` 输入行——所有输出往上滚，不再打断你正在敲的字，上下箭头翻历史；
   空行不注入也不刷提示。终端表现怪异时加 `--plain-console` 退回逐行模式。
-- 屏幕上会打出调度终局（`[调度] …` 为什么没说话）、上下文推送（`[上下文] N 字`）、
+- 屏幕上会打出每条事件的调度结论（`[调度] …`，说了没说、为什么）、上下文推送（`[上下文] N 字`）、
   打断（`[打断] …`）。
-- **Ctrl-C＝下播**：触发下播蒸馏（配了侧路模型的话），生长层落盘，提示去
+- **Ctrl-C＝下播**：触发下播整理（配了 `[speech.side]` 的辅助模型才有），生长层落盘，提示去
   `persona review` 翻看。记忆库在 `~/.local/share/bilisama/rooms/dev-talk/`，
   跨场保留（常客计数靠它长），想清零删目录即可。退出前会打一行 `[状态]`
   （装配/主动话题/调度器的健康快照）；卡在连接或收尾时**再按一次 Ctrl-C 强退**。
@@ -164,13 +164,13 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/mia/pinned.m
 | 文件 | 谁写 | 干什么 |
 |---|---|---|
 | identity.md / personality.md | 人 | 锚。不存在或清空时回退到 config/personas/ 的随包模板 |
-| relationship.md / voice.md | 蒸馏 | 生长层。开关在 `[persona.growth]`，默认全关 |
-| pinned.md | 人 | 置顶记忆，整段注入并声明始终保留 |
+| relationship.md / voice.md | 后台提炼 | 生长层。开关在 `[persona.growth]`，默认全关 |
+| pinned.md | 人 | 置顶记忆，整段带进提示词并声明始终保留 |
 
 生长层三态：`off` 不长；`collect` 只攒进文件、不进提示词（先看几场、翻文件放心了再开）；
-`on` 攒并注入。口癖层每场至多换 2 句，预算 12 句；共同经历 30 条 800 字，超了旧的出。
+`on` 攒并进提示词。口癖层每场至多换 2 句，预算 12 句；共同经历 30 条 800 字，超了从最旧的丢。
 
-晋升口（锚只有人能动，这条命令就是那只手）：
+转正入口（锚只有人能改，这条命令就是那只手）：
 
 ```bash
 .venv/bin/bilisama persona review                 # 列出生长层条目，带编号
@@ -178,14 +178,15 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/mia/pinned.m
 .venv/bin/bilisama persona review --drop r2       # 划掉不喜欢的
 ```
 
-蒸馏和主动话题都走 `[speech.side]` 的侧路模型。没配地址它们不干活：生长层开着时
+后台提炼和主动话题都走侧路模型——跑在对话主链路旁边的便宜辅助模型，配置段
+`[speech.side]`。没配地址它们不干活：生长层开着时
 `config validate` 会提醒；主动话题的缺配在运行期日志（`proactive.no_side_model`）
 和 health 探针里报。health 端点本体在 `obs/health.py`，挂到 UI 服务器是阶段 5 的事。
 
 ## 阶段 3 体验对比方案
 
 目的：亲手确认阶段 3 的每个核心件真的在工作。**对照组**是裸链路档
-`dev-talk`（没有 L3，模型裸奔），**实验组**是 `dev-talk --director`。同一个服务器、
+`dev-talk`（没有 L3，模型不带任何人设记忆），**实验组**是 `dev-talk --director`。同一个服务器、
 同一个麦克风，逐项对比：
 
 | # | 操作 | 对照组（裸链路） | 实验组（--director）应看到 | 验证的模块 |
@@ -201,7 +202,7 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/mia/pinned.m
 | 9 | 拨到 `on` 再跑一场 | — | 上下文里出现「你说话的样子」「你们的共同经历」两段 | on＝注入；换入限速（每场至多 2 句口癖） |
 | 10 | `persona review --promote v1` 后开新场 | — | personality.md 活副本多出「长出来的性格」段且进了静态前缀 | 晋升口（锚只有人能动） |
 | 11 | 任何时候 `git diff config/personas/` + 对比活副本 | — | 锚文件一个字节没变（review 除外） | 防漂移不变量 |
-| 12 | 不 source path.sh（无侧路模型）跑 director | — | 一切照常，只是无话题无蒸馏；启动就一句提示，日志有 `proactive.no_side_model` | 有声降级，不静默 |
+| 12 | 不 source path.sh（无侧路模型）跑 director | — | 一切照常，只是不起话题、不做提炼；启动就一句提示，日志有 `proactive.no_side_model` | 降级会说出来，不悄悄少功能 |
 
 第 4/6/8/9 条要配侧路模型（`source path.sh`，或在 `[speech.side]` 里配地址）。
 一轮走完，阶段 3 的验收判据（冷场恰好一次、生长层三态、锚不变、streams_seen 累计）
@@ -216,7 +217,7 @@ scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测
 装了 s2s 引擎它连集成层一起跑；没装会明说跳过了哪层。CI 上设
 `BILISAMA_GATE_REQUIRE_INTEGRATION=1` 可以把"没装"直接判失败。
 
-真机合同测试（要求服务器在跑）：
+真机契约测试——对着真服务器验证协议行为（要求服务器在跑）：
 
 ```bash
 .venv/bin/python -m pytest tests/integration/test_real_server.py -m integration -q
@@ -225,10 +226,10 @@ scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测
 服务器没起时它们会明确跳过，不弄红门禁。上游 checkout 的版本钉在该文件的
 `UPSTREAM_DESCRIBE`，上游一动测试就提醒。
 
-## 能力位探测
+## 能力探测
 
-对新的 realtime 端点（换模型、换实例）验四件事：单响应槽、out-of-band 豁免、
-`item.truncate`、判停类型。已知结论记录在 `src/bilisama/realtime/capabilities.py`
+对新的 realtime 端点（换模型、换实例）验四件事：是否同时只能生成一句、
+旁路回复占不占这个名额、支不支持 `item.truncate`、支持哪些判停类型。已知结论记录在 `src/bilisama/realtime/capabilities.py`
 的注释里（**能力按模型分，不只按 provider 分**——semantic_vad 在 qwen3.5-omni 有、
 在 qwen-audio-3.0 没有）。探测方法：连上后发两条并发 `response.create` 看第二条
 的回应，具体脚本形状参考 `tests/integration/test_real_server.py` 的写法。
@@ -245,4 +246,4 @@ scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测
 | NLTK LookupError | 它的下载器把假 IP 网段当 SSRF 拦了；用 curl 手动下数据包解压到 venv 的 `nltk_data/` |
 | director 刷 `proactive.refresh_failed` | 侧路模型连不上。回退顺序：`[speech.side]` 配置 → path.sh 的阿里 compatible-mode（免 VPN，默认 qwen3.7-flash）→ 内网 LLM（要 EasyConnect + no_proxy 那套）。启动时看 `[侧路]` 那行用的是哪个 |
 | TTS 音色不正常 / 每次回复换嗓子 | CustomVoice 模型没拿到 speaker 就无条件生成（同句实测基频漂 36 Hz）。配置生成脚本已默认钉 `vivian`；重渲染配置并重启服务器即可，换音色设 `tts_speaker` |
-| director 打字「没反应」 | 按顺序看：有没有 `[已注入 弹幕]` 回显（没有＝输入没进来）→ 有没有 `[调度] danmaku → …` 终局（`expired@queued`＝排队超 20 秒 TTL，多半是外放回声让闸门常闭——戴耳机或 `--mute-while-speaking`；每答完一句还有 12 秒话痨度冷却，medium 档） |
+| director 打字「没反应」 | 按顺序看：有没有 `[已注入 弹幕]` 回显（没有＝输入没进来）→ 有没有 `[调度] danmaku → …` 结论（`expired@queued`＝排队超过 20 秒有效期，多半是外放回声让说话权一直放不开——戴耳机或 `--mute-while-speaking`；每答完一句还有 12 秒话痨度冷却，medium 档） |
