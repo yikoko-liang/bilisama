@@ -51,7 +51,7 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ASYNC"]
 # 注释和 docstring 一律英文。用户可见的文案（CLI 输出、设置界面标签、
 # 人设文本）保持中文 —— 主播是中文用户。
 ignore = [
@@ -61,6 +61,16 @@ ignore = [
     "RUF001",
     "RUF002",
     "RUF003",
+    # The ASYNC family is the static half of the blocking-call defence (plan
+    # section 16.8 item 25): sync HTTP, subprocess, time.sleep and open()
+    # written directly in async functions fail the gate. Three style-opinion
+    # rules are excluded because they flag things that do NOT block the loop:
+    # 240 (pathlib micro-stats at startup; we don't use anyio paths), 109
+    # (test helpers taking a timeout parameter), 110 (polling waits in tests —
+    # asyncio.sleep yields, it doesn't stall).
+    "ASYNC109",
+    "ASYNC110",
+    "ASYNC240",
 ]
 
 [tool.black]

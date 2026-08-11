@@ -418,6 +418,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.memory.distill import Distiller
     from bilisama.memory.store import MemoryStore
     from bilisama.obs.health import HealthRegistry
+    from bilisama.obs.loop_lag import LoopLagMonitor
     from bilisama.obs.outcome import Outcome, Verdict
     from bilisama.persona.loader import PersonaStore, default_data_dir
     from bilisama.proactive import ProactiveTopicLoop
@@ -623,6 +624,10 @@ async def run_director(args: argparse.Namespace) -> int:
     registry.register("assembly", assembly.status)
     registry.register("proactive", proactive.status)
     registry.register("scheduler", scheduler.status)
+    # The runtime half of the blocking-call defence (plan section 16.8 item
+    # 25): a synchronous stall anywhere shows up as loop.lag with a number.
+    lag_monitor = LoopLagMonitor()
+    registry.register("loop", lag_monitor.status)
 
     console = QueueSource("console")
     seq = itertools.count(1)
@@ -741,6 +746,7 @@ async def run_director(args: argparse.Namespace) -> int:
         asyncio.create_task(_consume_events(speech.events(), speaker, None), name="director:play"),
         asyncio.create_task(drain_controls(), name="director:controls"),
         asyncio.create_task(stdin_pump(), name="director:stdin"),
+        asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
     ]
     try:
         await stop.wait()
