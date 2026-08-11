@@ -165,15 +165,15 @@
 
 <header>
   <h1>BiliSama · 分层架构与调用链路</h1>
-  <p class="sub">B 站直播 AI 伴播 —— 实时全双工语音、判停打断、人设记忆、弹幕调度。四个进程、四个功能域，调用方向 L4 → L3 → L2。</p>
+  <p class="sub">B 站直播 AI 伴播——能边听边说，判断得出主播一句话说完了没，说话时随时可以被打断；有人设、有记忆，弹幕分轻重缓急地回。四个进程、四个功能域，调用方向 L4 → L3 → L2。</p>
   <div class="chips">
-    <span class="chip"><span class="dot" style="background:var(--good)"></span>阶段 0–3 已关闭</span>
+    <span class="chip"><span class="dot" style="background:var(--good)"></span>阶段 0–3 已完成</span>
     <span class="chip"><b>713</b> 单元 + <b>24</b> 集成测试全绿</span>
     <span class="chip">真机验证：本地 s2s ＋ DashScope 云端</span>
     <span class="chip">下一站：阶段 4 TTS 与形象</span>
   </div>
   <div class="legend">
-    <span class="key"><span class="swatch" style="background:var(--c-front)"></span>P1 前端（dev-talk 替身）</span>
+    <span class="key"><span class="swatch" style="background:var(--c-front)"></span>P1 前端（开发期由 dev-talk 顶替）</span>
     <span class="key"><span class="swatch" style="background:var(--c-l4)"></span>L4 接入</span>
     <span class="key"><span class="swatch" style="background:var(--c-l3)"></span>L3 编排</span>
     <span class="key"><span class="swatch" style="background:var(--c-l2)"></span>L2 传输</span>
@@ -194,7 +194,7 @@
         <p class="meta">Electron ＋ Live2D（阶段 5）。开发期由 <b>dev-talk</b> 顶替：</p>
         <div class="layer front">
           <h4>dev-talk --director</h4>
-          <p>麦克风采集 · 扬声器播放 · 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· 打断本地半边（flush）</p>
+          <p>麦克风采集 · 扬声器播放 · 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· 收到打断信号立刻静音</p>
         </div>
         <div class="layer front" style="border-style:dashed">
           <h4 style="color:var(--ink-3)">Electron<small>待建</small></h4>
@@ -203,50 +203,50 @@
       </div>
     </div>
 
-    <div class="arrows"><span>音频双向 · 弹幕注入</span></div>
+    <div class="arrows"><span>音频双向 · 弹幕输入</span></div>
 
     <!-- P2 -->
     <div class="col">
       <div class="proc">
         <h3><span class="tag">P2</span>bilisama<span class="tag" style="font-weight:400">Python 3.12 · 单进程 asyncio</span></h3>
-        <p class="meta">事件从上往下流：接入产事件 → 编排决定「说不说、说什么、什么时候说」 → 传输负责把话送到语音服务器。</p>
+        <p class="meta">事件从上往下流：接入层收进事件 → 编排层决定「说不说、说什么、什么时候说」 → 传输层把话送到语音服务器。</p>
 
         <div class="layer l4">
           <h4>L4 接入<small>ingest/</small></h4>
-          <p>事件一律入库，「不发声」不等于「不知道」；speak 开关只闸最后一步。</p>
+          <p>弹幕礼物一律先记进记忆，开关只管要不要开口回应——不说话不等于不知道。</p>
           <div class="mods">
             <span class="mod">events <small>统一事件模型</small></span>
-            <span class="mod">sources <small>监管重启·健康回血</small></span>
+            <span class="mod">sources <small>断线自动重启</small></span>
             <span class="mod todo">blivedm 弹幕源（阶段 6）</span>
-            <span class="mod todo">打分/限流/熔断（阶段 6）</span>
+            <span class="mod todo">挑弹幕·限流量（阶段 6）</span>
           </div>
         </div>
 
         <div class="layer l3">
           <h4>L3 编排<small>director/ · persona/ · memory/ · app.py</small></h4>
-          <p>产品核心。只认 SpeechLink 接口和归一化事件，一行协议都不碰（grep 门禁钉死）。</p>
+          <p>产品核心。只通过一个统一接口（SpeechLink）跟语音服务器打交道，不碰任何协议细节——有自动检查守着这条边界。</p>
           <div class="mods">
-            <span class="mod">Assembly <small>装配环·上下文推送</small></span>
-            <span class="mod">Scheduler <small>优先级堆·单槽·抢占</small></span>
-            <span class="mod">SpeakingFloor <small>说话权六闸门</small></span>
-            <span class="mod">intents <small>敌意输入包裹</small></span>
-            <span class="mod">OutputGuard <small>敏感词流式兜底</small></span>
+            <span class="mod">Assembly <small>总装配·人设推送</small></span>
+            <span class="mod">Scheduler <small>排队·插队·一次一句</small></span>
+            <span class="mod">SpeakingFloor <small>现在能不能开口</small></span>
+            <span class="mod">intents <small>观众内容隔离</small></span>
+            <span class="mod">OutputGuard <small>敏感词最后拦截</small></span>
             <span class="mod">Proactive <small>冷场话题</small></span>
-            <span class="mod">Persona <small>锚＋生长层</small></span>
-            <span class="mod">Memory <small>SQLite·两层蒸馏</small></span>
-            <span class="mod">obs <small>日志·终局·health</small></span>
+            <span class="mod">Persona <small>人设文件</small></span>
+            <span class="mod">Memory <small>SQLite 记忆库</small></span>
+            <span class="mod">obs <small>日志与健康状态</small></span>
           </div>
         </div>
 
         <div class="layer l2">
           <h4>L2 传输<small>realtime/</small></h4>
-          <p>一份客户端说两种方言，provider 的怪癖全部收进 adapter，不外漏。</p>
+          <p>同一份客户端代码兼容两家服务器各自的协议写法；各家的特殊行为关在各自的适配器里，不往上渗。</p>
           <div class="mods">
             <span class="mod">SpeechLink <small>对 L3 的唯一接口</small></span>
-            <span class="mod">RealtimeClient <small>单槽账本·墓碑·25s 看门狗</small></span>
-            <span class="mod">Codec GA / BETA <small>方言</small></span>
+            <span class="mod">RealtimeClient <small>收发对账·25s 超时自救</small></span>
+            <span class="mod">Codec GA / BETA <small>两种协议写法的翻译</small></span>
             <span class="mod">providers/s2s · hosted</span>
-            <span class="mod">Capabilities <small>能力位</small></span>
+            <span class="mod">Capabilities <small>能力表</small></span>
           </div>
         </div>
       </div>
@@ -258,25 +258,25 @@
     <div class="col">
       <div class="proc">
         <h3><span class="tag">P3&#8242;</span>本地语音服务器</h3>
-        <p class="meta">speech-to-speech · 独立 venv · <code>ws://127.0.0.1:8765</code> · 现跑零补丁官方管线：</p>
+        <p class="meta">speech-to-speech · 独立 venv · <code>ws://127.0.0.1:8765</code> · 目前用它原装的整条管线：</p>
         <div class="layer srv">
           <div class="stepflow">
             <div class="s"><b>Silero VAD</b> <small>有没有人声 · 本地 CPU</small></div>
             <div class="v">↓ 累计 384ms 真实语音才算数</div>
             <div class="s"><b>SmartTurn v3.2</b> <small>这句说完没 · 本地 CPU</small></div>
-            <div class="v">↓ 判停宽限 1200 / 400ms（两分支）</div>
+            <div class="v">↓ 确认说完没：再等 1.2s，像没说完加 0.4s</div>
             <div class="s"><b>paraformer-zh</b> <small>语音转文字 · 本地</small></div>
             <div class="v">↓ 文字</div>
             <div class="s"><b>qwen3.7-flash</b> <small>想出回答 · 阿里云</small></div>
             <div class="v">↓ 回复文本（流式）</div>
             <div class="s"><b>Qwen3-TTS</b> <small>vivian 音色 · 云</small></div>
           </div>
-          <p style="margin-top:8px">产品路径（阶段 4 起）：音频直送自研 S2T 模型 ＋ 补丁 A 纯文本 ＋ 我们自己的 TTS（主力规划 IndexTTS）。</p>
+          <p style="margin-top:8px">正式产品（阶段 4 起）改为：音频直接交给自研模型理解，回复由我们自己的合成器发声（主力规划 IndexTTS）。</p>
         </div>
       </div>
       <div class="proc ghost">
         <h3><span class="tag">P3</span>托管备选 · DashScope</h3>
-        <p class="meta"><b>qwen-audio-3.0-realtime-flash</b> 一个模型包办识别＋对话＋合成，beta 方言，云端 VAD。同一套 L2 客户端换个 URL 即达。</p>
+        <p class="meta"><b>qwen-audio-3.0-realtime-flash</b> 一个模型包办识别＋对话＋合成；协议用的是早期版本写法，说没说完由云端判断。同一套客户端换个地址就能接上。</p>
       </div>
     </div>
   </div>
@@ -285,21 +285,21 @@
 <!-- ================================================================ -->
 <section>
   <h2><span class="no">二</span>五条调用链</h2>
-  <p class="lede">箭头上跑的都是真实协议事件。① 是服务器自己发起的隐式轮次，我们只管收；②–⑤ 才是我们主动出手的地方。</p>
+  <p class="lede">箭头上跑的都是真实协议事件。① 由语音服务器自动发起——听到主播说完就答，我们只管接；②–⑤ 才是我们主动出手的地方。</p>
 
   <div class="chain">
-    <h3>① 主播说一句，AI 答一句（隐式轮次）</h3>
-    <p class="note">整条判停链在 P3&#8242; 本地跑完；L3 在主播停口后保持静默 1.9 秒（宽限最坏分支 1.6s ＋ 0.3s 余量），不跟服务器抢话。</p>
+    <h3>① 主播说一句，AI 答一句（服务器自动应答）</h3>
+    <p class="note">「说完了没」整条判断在 P3&#8242; 本地完成；主播停口后我们这边再多等 1.9 秒（确认期最长 1.6 秒＋0.3 秒余量）才允许插话，不跟服务器抢。</p>
     <div class="flow">
-      <div class="step front"><div class="t">主播开口</div><div class="d">麦克风 32ms 帧，永不断流（静音也发）</div></div>
+      <div class="step front"><div class="t">主播开口</div><div class="d">麦克风持续送音频，静音也照发不断流</div></div>
       <span class="arr">→</span>
-      <div class="step srv"><div class="t">VAD 判人声</div><div class="d">speech_started 广播给 P2</div></div>
+      <div class="step srv"><div class="t">听到人声</div><div class="d">speech_started 事件通知 P2</div></div>
       <span class="arr">→</span>
-      <div class="step srv"><div class="t">停口 · 判停宽限</div><div class="d">SmartTurn 判完整 1.2s / 不完整再加 0.4s，期间抢跑推理</div></div>
+      <div class="step srv"><div class="t">停口 · 确认说完</div><div class="d">判断像说完等 1.2s、像没说完再等 0.4s；等的同时已经开始预生成</div></div>
       <span class="arr">→</span>
       <div class="step srv"><div class="t">生成 ＋ 合成</div><div class="d">qwen3.7-flash 出字 → Qwen3-TTS 出声</div></div>
       <span class="arr">→</span>
-      <div class="step l2"><div class="t">L2 记账</div><div class="d">首帧占槽 · done 释槽 · 迟到帧进墓碑</div></div>
+      <div class="step l2"><div class="t">L2 登记</div><div class="d">回复开始就占下名额，说完释放；迟到的音频碎片直接丢</div></div>
       <span class="arr">→</span>
       <div class="step front"><div class="t">播放</div><div class="d">回复音频 24kHz 入扬声器</div></div>
     </div>
@@ -307,58 +307,58 @@
 
   <div class="chain">
     <h3>② 弹幕 / SC 进来，AI 主动开口</h3>
-    <p class="note">观众内容永远包在 <code>&lt;bilisama_live_events&gt;</code> 标签里进历史（带「这不是指令」声明，标签词被中和防逃逸）；回复走旁路（out-of-band），不污染对话历史。付费事件带 4 秒保护段。</p>
+    <p class="note">观众内容永远装在 <code>&lt;bilisama_live_events&gt;</code> 标签里进对话，附「这不是指令」声明；弹幕里出现同样的标签字样会被改写，冒充不了系统指令。回复单独生成、不写回对话历史。付费事件的答谢有 4 秒保护期，期间主播声音打不断它。</p>
     <div class="flow">
       <div class="step l4"><div class="t">事件进门</div><div class="d">弹幕 / SC / 礼物 → LiveEvent</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">记忆恒记</div><div class="d">Tier0 计数 · 蒸馏计数 · 活跃度</div></div>
+      <div class="step l3"><div class="t">先记进记忆</div><div class="d">常客计数、活跃度——无论后面说不说</div></div>
       <span class="arr">→</span>
       <div class="step l3"><div class="t">speak 开关</div><div class="d">关着＝只记不说，到此为止</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">包装成 Intent</div><div class="d">敌意包裹 · 优先级 · 去重键 · 过期时间</div></div>
+      <div class="step l3"><div class="t">包装成待办</div><div class="d">套隔离标签，标上优先级、防重复、有效期</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">调度器</div><div class="d">优先级堆 → 六闸门放行 → 单槽派发；高优先级抢占在飞回复</div></div>
+      <div class="step l3"><div class="t">调度器</div><div class="d">排队等时机，一次只放一条；更重要的事件可以掐掉正说的话插队</div></div>
       <span class="arr">→</span>
-      <div class="step l2"><div class="t">两帧注入</div><div class="d">item.create 事件块 ＋ response.create（旁路，≤两句话）</div></div>
+      <div class="step l2"><div class="t">两步发给服务器</div><div class="d">item.create 写入事件块；response.create 请它用角色口吻回，不超过两句</div></div>
       <span class="arr">→</span>
       <div class="step l3"><div class="t">出口安检</div><div class="d">OutputGuard 逐字扫敏感词，命中整句掐断＋追回</div></div>
       <span class="arr">→</span>
-      <div class="step front"><div class="t">播放 · 记终局</div><div class="d">每条 Intent 恰好一条 verdict（spoken@… / skipped@…）</div></div>
+      <div class="step front"><div class="t">播放 · 记结论</div><div class="d">每条事件都有下场记录：说了、跳过了、为什么</div></div>
     </div>
   </div>
 
   <div class="chain">
     <h3>③ 打断（主播在 AI 说话时开口）</h3>
     <div class="flow">
-      <div class="step srv"><div class="t">服务器先斩后奏</div><div class="d">done(cancelled) 先到，speech_started 后到（真实顺序就是反的）</div></div>
+      <div class="step srv"><div class="t">服务器先斩后奏</div><div class="d">先发「这句作废」，再发「主播开口了」——真实顺序就是反的</div></div>
       <span class="arr">→</span>
-      <div class="step l2"><div class="t">作废在飞回复</div><div class="d">句柄置 stale，迟到音频帧一律丢弃</div></div>
+      <div class="step l2"><div class="t">作废没说完的话</div><div class="d">迟到的音频一律丢弃，不会漏播半句</div></div>
       <span class="arr">→</span>
       <div class="step l3"><div class="t">PlaybackClear</div><div class="d">立刻通知前端停播清队列，不等任何往返</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">善后</div><div class="d">付费答谢重新入队；保护段内只让 panic-mute 打断</div></div>
+      <div class="step l3"><div class="t">善后</div><div class="d">付费答谢重新排队再说一次；保护期内只有一键闭嘴能打断</div></div>
     </div>
   </div>
 
   <div class="chain">
     <h3>④ 冷场了，AI 主动起话题</h3>
     <div class="flow">
-      <div class="step l3"><div class="t">后台候选</div><div class="d">每 30s 侧路调用 qwen3.7-flash 读近况，想一个话题存着</div></div>
+      <div class="step l3"><div class="t">后台候选</div><div class="d">每 30 秒让 qwen3.7-flash 在后台读读近况，想一个话题存着</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">冷场判定</div><div class="d">静场超阈值（话痨度中档 90s）且闸门全开</div></div>
+      <div class="step l3"><div class="t">冷场判定</div><div class="d">安静超过阈值（话痨度中档 90 秒），而且场上没人在说话</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">最低优先级注入</div><div class="d">谁都能抢它；说完进冷却，不连续自言自语</div></div>
+      <div class="step l3"><div class="t">以最低优先级排队</div><div class="d">谁都能抢它；说完进冷却，不连续自言自语</div></div>
     </div>
   </div>
 
   <div class="chain">
     <h3>⑤ 人设与记忆推送（「上下文已推送」那条日志）</h3>
     <div class="flow">
-      <div class="step l3"><div class="t">拼装</div><div class="d">锚（identity＋personality）→ 直播规则 → 生长层/置顶 → 主播事实 → 本场进展 → 在场常客 → 时钟</div></div>
+      <div class="step l3"><div class="t">拼装</div><div class="d">人设正文（身份＋性格）→ 直播规则 → 长出来的口癖与共同经历（开了才带上）→ 置顶记忆 → 主播事实 → 本场进展 → 在场常客 → 时钟</div></div>
       <span class="arr">→</span>
-      <div class="step l3"><div class="t">10s 检查一次</div><div class="d">全文没变不推，护住服务器的前缀缓存</div></div>
+      <div class="step l3"><div class="t">10 秒检查一次</div><div class="d">全文没变就不重发，服务器能接着用上次算过的部分</div></div>
       <span class="arr">→</span>
-      <div class="step l2"><div class="t">session.update</div><div class="d">instructions 字段＝模型的系统提示词</div></div>
+      <div class="step l2"><div class="t">session.update</div><div class="d">等于给模型换一份角色说明书（系统提示词）</div></div>
       <span class="arr">→</span>
       <div class="step srv"><div class="t">服务器收存</div><div class="d">之后每一轮生成都以它开头</div></div>
     </div>
@@ -368,35 +368,35 @@
 <!-- ================================================================ -->
 <section>
   <h2><span class="no">三</span>调度核心：一个名额，七方抢用</h2>
-  <p class="lede">协议硬约束：同一时刻只允许一个回复在生成。三个 provider 实测全部单槽——没有调度器，礼物风暴一来 AI 就对着付费观众沉默。</p>
+  <p class="lede">协议的硬规矩：同一时刻只能生成一句话，三家服务器实测都如此。没有调度，礼物一多 AI 就对着付费观众沉默。</p>
   <div class="cols2">
     <div class="panel">
       <h3>优先级阶梯（数值大者抢占小者）</h3>
       <div class="ladder">
         <div class="name">主播语音<small>永不被抢</small></div><div class="bar" style="width:100%;background:#1c56a0"></div><div class="val">100</div>
-        <div class="name">Super Chat<small>受保护 4s·被打断重排</small></div><div class="bar" style="width:80%;background:#2a78d6"></div><div class="val">80</div>
+        <div class="name">Super Chat<small>受保护 4 秒·被打断会重说</small></div><div class="bar" style="width:80%;background:#2a78d6"></div><div class="val">80</div>
         <div class="name">大额礼物</div><div class="bar" style="width:70%;background:#4a8edd"></div><div class="val">70</div>
         <div class="name">上舰</div><div class="bar" style="width:65%;background:#6aa3e5"></div><div class="val">65</div>
         <div class="name">VIP 进房</div><div class="bar" style="width:50%;background:#8ab8ec"></div><div class="val">50</div>
-        <div class="name">普通弹幕<small>窗口攒批择一</small></div><div class="bar" style="width:30%;background:#aecdf2"></div><div class="val">30</div>
-        <div class="name">主动话题<small>谁都让·过期即弃</small></div><div class="bar" style="width:10%;background:#cfe1f8"></div><div class="val">10</div>
+        <div class="name">普通弹幕<small>攒一批挑一条回</small></div><div class="bar" style="width:30%;background:#aecdf2"></div><div class="val">30</div>
+        <div class="name">主动话题<small>谁都让·过期就算了</small></div><div class="bar" style="width:10%;background:#cfe1f8"></div><div class="val">10</div>
       </div>
     </div>
     <div class="panel">
-      <h3>说话权闸门（任一为真即闭嘴）</h3>
+      <h3>开口前的六条检查（任一条为真就先不说）</h3>
       <div class="gates">
         <span class="gate">主播在说话</span>
         <span class="gate">上一句没答完</span>
         <span class="gate">音频还没播完</span>
-        <span class="gate">隐式回复占场</span>
-        <span class="gate">投机静默窗 <small>1.9s</small></span>
+        <span class="gate">服务器正自动作答</span>
+        <span class="gate">停口确认期 <small>1.9s</small></span>
         <span class="gate">话痨度冷却 <small>中档 12s</small></span>
       </div>
       <h3 style="margin-top:18px">安全三件套</h3>
       <ul>
-        <li><b>输入侧</b>：观众内容标签隔离＋标签词中和，说话人身份锁（观众的话永远不冒充主播）。</li>
-        <li><b>输出侧</b>：OutputGuard 跨分片扫词表，白名单缓判（「河北」不误伤「河」），命中整句不发＋追回已播。</li>
-        <li><b>红色按钮</b>：panic-mute 唯一能打断受保护答谢，清队列、拒新派发，直到人工解除。</li>
+        <li><b>输入侧</b>：观众内容装进隔离标签、标签字样改写防伪；观众说的话永远冒充不了主播。</li>
+        <li><b>输出侧</b>：OutputGuard 逐字扫敏感词，词被拆在两段里也拼得回来；白名单会多等一段再下结论（「河北」不被「河」误伤）；命中整句不发，已播的部分追回。</li>
+        <li><b>一键闭嘴</b>：唯一能打断受保护答谢的开关——清空待播、不接新话，直到主播解除。</li>
       </ul>
     </div>
   </div>
@@ -413,7 +413,7 @@
         <li><b>identity.md</b> —— 我是谁、和主播什么关系</li>
         <li><b>personality.md</b> —— 说话风格与边界</li>
         <li>四个随包人设：mia ＋ openhanako 移植的 hanako / ming / butter</li>
-        <li>测试断言：三场回放后锚文件哈希逐字节不变</li>
+        <li>有自动测试盯着：连跑三场，人设文件一个字节都没被改动</li>
       </ul>
     </div>
     <div class="panel">
@@ -421,16 +421,16 @@
       <ul>
         <li><b>relationship.md</b> 共同经历（30 条 / 800 字封顶）</li>
         <li><b>voice.md</b> 口癖样本（12 句 / 每场至多换 2 句）</li>
-        <li>三态开关 off / collect / on，默认全关</li>
-        <li>晋升口：<code>persona review</code> 主播点头才进性格</li>
+        <li>三档开关：关 / 只攒不用 / 启用，默认全关</li>
+        <li>转正入口：<code>persona review</code> 列出候选，主播点头才写进性格</li>
       </ul>
     </div>
     <div class="panel">
       <h3>记忆 · SQLite 一房一库</h3>
       <ul>
         <li><b>Tier 0</b> 纯计数，不用模型：阿强第 5 次来，一句 SELECT 的事</li>
-        <li><b>Tier 1</b> 后台蒸馏（qwen3.7-flash）：滚动本场摘要＋下播批量出观众事实</li>
-        <li>语音循环永不等它；直播时区钉死 UTC+8，凌晨 4 点翻逻辑日</li>
+        <li><b>Tier 1</b> 后台提炼（qwen3.7-flash）：边播边更新本场摘要，下播一次性整理观众事实</li>
+        <li>说话永远不等提炼；时区固定东八区，凌晨 4 点才算新的一天（通宵直播不断档）</li>
       </ul>
     </div>
   </div>
@@ -445,12 +445,12 @@
         <thead><tr><th>环节</th><th>模型</th><th>跑在哪</th></tr></thead>
         <tbody>
           <tr><td>人声检测</td><td>Silero VAD</td><td>本地 CPU</td></tr>
-          <tr><td>判停</td><td>SmartTurn v3.2</td><td>本地 CPU</td></tr>
+          <tr><td>判断说完没</td><td>SmartTurn v3.2</td><td>本地 CPU</td></tr>
           <tr><td>语音识别</td><td>paraformer-zh</td><td>本地</td></tr>
-          <tr><td>对话</td><td>qwen3.7-flash <small>（将来：自研 S2T 直吃音频）</small></td><td>阿里云</td></tr>
+          <tr><td>对话</td><td>qwen3.7-flash <small>（将来换自研模型，直接理解音频）</small></td><td>阿里云</td></tr>
           <tr><td>语音合成</td><td>Qwen3-TTS · vivian <small>（阶段 4：可插拔，主力 IndexTTS）</small></td><td>云</td></tr>
-          <tr><td>侧路（话题/蒸馏）</td><td>qwen3.7-flash</td><td>阿里云</td></tr>
-          <tr><td>托管备选整包</td><td>qwen-audio-3.0-realtime-flash</td><td>DashScope 云</td></tr>
+          <tr><td>后台帮手（想话题、整理记忆）</td><td>qwen3.7-flash</td><td>阿里云</td></tr>
+          <tr><td>云端备选（一个模型全包）</td><td>qwen-audio-3.0-realtime-flash</td><td>DashScope 云</td></tr>
         </tbody>
       </table>
     </div>
@@ -458,15 +458,15 @@
       <table>
         <thead><tr><th>阶段</th><th>交付</th><th>状态</th></tr></thead>
         <tbody>
-          <tr><td>0</td><td>地基 · Mock · 配置真相源 · 门禁</td><td><span class="st done">关闭</span></td></tr>
-          <tr><td>1</td><td>L2 语音链路 · 双方言 · 八条规则</td><td><span class="st done">关闭</span></td></tr>
-          <tr><td>2</td><td>L3 骨架 · 调度 · 说话权 · 兜底</td><td><span class="st done">关闭</span></td></tr>
-          <tr><td>3</td><td>人设记忆 · 蒸馏 · 主动话题 · 装配</td><td><span class="st done">关闭</span></td></tr>
+          <tr><td>0</td><td>地基 · Mock · 配置真相源 · 门禁</td><td><span class="st done">完成</span></td></tr>
+          <tr><td>1</td><td>L2 语音链路 · 兼容两种协议写法</td><td><span class="st done">完成</span></td></tr>
+          <tr><td>2</td><td>L3 骨架 · 调度 · 说话权 · 兜底</td><td><span class="st done">完成</span></td></tr>
+          <tr><td>3</td><td>人设记忆 · 后台提炼 · 主动话题 · 总装配</td><td><span class="st done">完成</span></td></tr>
           <tr><td>4</td><td>TTS 与形象（tagparser / chunker / mux）</td><td><span class="st next">下一站</span></td></tr>
-          <tr><td>5</td><td>Electron ＋ Live2D 桌面端</td><td><span class="st wait">待排</span></td></tr>
-          <tr><td>6</td><td>弹幕接入（blivedm · 打分 · 熔断）</td><td><span class="st wait">待排</span></td></tr>
-          <tr><td>7</td><td>打包签名 · 一键化交付</td><td><span class="st wait">待排</span></td></tr>
-          <tr><td>8</td><td>真直播间逐级联调</td><td><span class="st wait">待排</span></td></tr>
+          <tr><td>5</td><td>Electron ＋ Live2D 桌面端</td><td><span class="st wait">未开始</span></td></tr>
+          <tr><td>6</td><td>弹幕接入（blivedm · 打分 · 熔断）</td><td><span class="st wait">未开始</span></td></tr>
+          <tr><td>7</td><td>打包签名 · 一键化交付</td><td><span class="st wait">未开始</span></td></tr>
+          <tr><td>8</td><td>真直播间逐级联调</td><td><span class="st wait">未开始</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -475,7 +475,7 @@
 
 <footer>
   <span>BiliSama 架构展示 · 2026-08-11 · 依据实现代码与计划文档 §2–§4 生成</span>
-  <span>验证口径：scripts/gate.sh 全绿 ＋ 本地 s2s / DashScope 真机探针</span>
+  <span>数据口径：全部自动化测试通过 ＋ 本地与云端真机验证</span>
 </footer>
 
 </main>
