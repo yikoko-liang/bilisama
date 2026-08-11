@@ -29,23 +29,38 @@ class MemorySegments:
     clock_line: str = ""
 
 
-def _uptime_phrase(minutes: int) -> str:
+def _uptime_phrase(minutes: int, *, about: bool) -> str:
+    prefix = "开播约" if about else "开播"
     hours, mins = divmod(max(minutes, 0), 60)
     if hours:
-        return f"开播 {hours} 小时 {mins} 分"
-    return f"开播 {mins} 分钟"
+        return f"{prefix} {hours} 小时 {mins} 分"
+    return f"{prefix} {mins} 分钟"
 
 
-def clock_line(store: MemoryStore, clock: Clock) -> str:
+def clock_line(store: MemoryStore, clock: Clock, *, granularity_min: int = 1) -> str:
+    """The time segment of the dynamic tail.
+
+    granularity_min floors both numbers to that many minutes. The point is
+    push cadence, not display: the assembled tail is re-pushed whenever its
+    text changes, so a minute-precision clock forces one session.update per
+    minute. At the default 5 the same push happens a fifth as often, and the
+    wording turns approximate (「开播约」「左右」) so the model does not quote
+    a floored value as exact.
+    """
     started = store.stream_started_at()
     if started is None:
         return ""
     now = clock.wall()
-    minutes = int((now - started).total_seconds() // 60)
+    step = max(granularity_min, 1)
+    minutes = int((now - started).total_seconds() // 60) // step * step
     # China time, same zone the 04:00 day boundary uses — one clock line must
     # not mix two zones (B4). wall() itself stays UTC in rows.
-    hhmm = now.astimezone(STREAM_TZ).strftime("%H:%M")
-    return f"{_uptime_phrase(minutes)}，现在 {hhmm}，本周第 {store.streams_this_week()} 场"
+    local = now.astimezone(STREAM_TZ)
+    hhmm = local.replace(minute=local.minute // step * step).strftime("%H:%M")
+    about = step > 1
+    tail = " 左右" if about else ""
+    uptime = _uptime_phrase(minutes, about=about)
+    return f"{uptime}，现在 {hhmm}{tail}，本周第 {store.streams_this_week()} 场"
 
 
 def regulars_line(store: MemoryStore, *, limit: int = 5) -> str:
@@ -66,10 +81,12 @@ def session_progress_text(store: MemoryStore) -> str:
     return rows[-1].text if rows else ""
 
 
-def memory_segments(store: MemoryStore, clock: Clock) -> MemorySegments:
+def memory_segments(
+    store: MemoryStore, clock: Clock, *, clock_granularity_min: int = 1
+) -> MemorySegments:
     return MemorySegments(
         streamer_facts=streamer_facts_text(store),
         session_progress=session_progress_text(store),
         regulars=regulars_line(store),
-        clock_line=clock_line(store, clock),
+        clock_line=clock_line(store, clock, granularity_min=clock_granularity_min),
     )

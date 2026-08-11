@@ -106,6 +106,7 @@ db_path = "auto"
 distill_every_n_events = 40             # 按事件计数触发，不按定时器
 retain_event_days = 7
 write_batch_ms = 0                      # 0=来一条落一条；事件洪峰的大房间再调大（计划 §16.8 第 26 条）
+clock_granularity_min = 5               # 推给模型的时间按几分钟取整；粒度越粗，安静时的上下文推送越少
 
 [persona]
 id = "mia"

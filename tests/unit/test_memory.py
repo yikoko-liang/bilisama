@@ -288,3 +288,32 @@ def test_close_flushes_the_tail(tmp_path: Path, clock: FakeClock) -> None:
     s.on_event(_event(text="最后一条"))
     s.close()
     assert _independent_count(path, "event") == 1, "close() must not drop the buffer"
+
+
+# ------------------------------------------------------------ clock granularity
+
+
+def test_clock_line_floors_both_numbers_to_the_granularity(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    """granularity_min is the push-cadence knob: at 5, minutes 5-9 all render
+    the same line, so the assembled tail stops changing every minute."""
+    clock._now += 7 * 60  # wall follows monotonic: 04:00 CST -> 04:07
+    exact = clock_line(store, clock)
+    assert exact.startswith("开播 7 分钟，现在 04:07，")
+    coarse = clock_line(store, clock, granularity_min=5)
+    assert coarse.startswith("开播约 5 分钟，现在 04:05 左右，")
+    clock._now += 2 * 60  # 04:09 — still inside the same 5-minute step
+    assert clock_line(store, clock, granularity_min=5) == coarse
+    clock._now += 60  # 04:10 — the step turns over
+    assert clock_line(store, clock, granularity_min=5).startswith(
+        "开播约 10 分钟，现在 04:10 左右，"
+    )
+
+
+def test_memory_segments_passes_the_granularity_through(
+    store: MemoryStore, clock: FakeClock
+) -> None:
+    clock._now += 7 * 60
+    segments = memory_segments(store, clock, clock_granularity_min=5)
+    assert segments.clock_line.startswith("开播约 5 分钟，现在 04:05 左右，")

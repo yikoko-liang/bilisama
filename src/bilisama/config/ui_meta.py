@@ -299,6 +299,14 @@ UI_META: dict[str, FieldMeta] = {
         group="记忆",
         order=3,
     ),
+    "memory.clock_granularity_min": FieldMeta(
+        label="时钟粒度",
+        hint="推给模型的时间段按几分钟取整。取整越粗，安静时段的上下文推送越少；" "设 1 回到分钟级",
+        unit="分钟",
+        reload=Reload.RESTART,
+        group="记忆",
+        order=5,
+    ),
     "memory.write_batch_ms": FieldMeta(
         label="写库攒批窗口",
         hint="0 = 来一条落一条。事件洪峰的大房间再开：事件先攒在内存，"

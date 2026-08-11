@@ -58,6 +58,7 @@ class Assembly:
         protect_ms: int = 4000,
         variables: Mapping[str, str] | None = None,
         context_refresh_s: float = 10.0,
+        clock_granularity_min: int = 1,
     ) -> None:
         self._store = store
         self._distiller = distiller
@@ -71,6 +72,7 @@ class Assembly:
         self._max_tokens = max_tokens
         self._protect_ms = protect_ms
         self._refresh_s = context_refresh_s
+        self._clock_granularity_min = clock_granularity_min
         # Anchors are read once: editing an anchor is a restart-level change
         # (ui_meta says so), and re-reading per push would let a mid-stream
         # edit shift the cached prefix under the provider.
@@ -105,7 +107,9 @@ class Assembly:
     def build_context(self) -> str:
         """Prefix plus current tail. Growth injects on ON only — collect
         grows files silently, off contributes nothing at all."""
-        segments = memory_segments(self._store, self._clock)
+        segments = memory_segments(
+            self._store, self._clock, clock_granularity_min=self._clock_granularity_min
+        )
         ctx = DynamicContext(
             voice_lines=(
                 tuple(self._persona.growth_entries("voice"))

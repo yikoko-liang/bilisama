@@ -219,6 +219,11 @@ class MemoryConfig(BaseModel):
     # read flushes first, so read-after-write semantics are unchanged. For
     # flood-rate rooms (plan section 16.8 item 26).
     write_batch_ms: int = Field(0, ge=0, le=5000)
+    # The clock segment of the pushed context floors its numbers to this many
+    # minutes. Every text change triggers a session.update, so this IS the
+    # idle-time push cadence: 1 = one push per minute, the default 5 = one
+    # per five.
+    clock_granularity_min: int = Field(5, ge=1, le=30)
 
 
 class RoomConfig(BaseModel):

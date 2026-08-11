@@ -618,6 +618,7 @@ async def run_director(args: argparse.Namespace) -> int:
         max_tokens=thresholds.max_output_tokens,
         protect_ms=settings.interaction.sc_protect_ms,
         variables=variables,
+        clock_granularity_min=settings.memory.clock_granularity_min,
     )
 
     # The same probes stage 5's UI server will mount; until then the exit
