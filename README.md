@@ -17,10 +17,10 @@ B 站直播的 AI 伴播：听得见主播说话、看得见弹幕礼物、用�
 uv sync
 ```
 
-装完先跑一遍全套检查，确认这份代码在你机器上是好的：
+装完花一秒确认一下装对了——能打出版本号、配置能读通，就说明环境是好的：
 
 ```bash
-scripts/gate.sh
+.venv/bin/bilisama --version && .venv/bin/bilisama config validate
 ```
 
 接下来看你想怎么试。**想最快听到声音**就走云端，只要一份 DashScope 凭据，不用下模型：
@@ -41,6 +41,9 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 
 两条路的 `--director` 都会把人设、记忆、调度整套立起来；去掉它就只测语音链路本身。
 终端打字模拟弹幕、`/sc` 模拟付费消息这些玩法，runbook 里有完整清单。
+
+要改代码的话，提交前跑一遍门禁 `scripts/gate.sh`（格式、类型、测试、集成层一条龙），
+规矩写在 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 文档索引
 
