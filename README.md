@@ -8,12 +8,39 @@ B 站直播的 AI 伴播：听得见主播说话、看得见弹幕礼物、用�
 直播间外围功能往后排。详见实施计划 §9 / §15。
 现在就能跑的东西和跑法见 [docs/runbook.md](docs/runbook.md)。
 
-## 快速开始
+## 从零开始
+
+需要 Python 3.12 以上和 [uv](https://docs.astral.sh/uv/)（`brew install uv`）。装依赖只要一条命令，
+它会自己建好 `.venv` 并按 `uv.lock` 里锁定的版本安装：
 
 ```bash
-scripts/gate.sh                                 # 全套检查：格式、类型、测试
-.venv/bin/bilisama dev-talk --provider s2s      # 真人语音对话（先起服务器，见 runbook）
+uv sync
 ```
+
+装完先跑一遍全套检查，确认这份代码在你机器上是好的：
+
+```bash
+scripts/gate.sh
+```
+
+接下来看你想怎么试。**想最快听到声音**就走云端，只要一份 DashScope 凭据，不用下模型：
+
+```bash
+source path.sh                                  # 凭据文件，格式见 .env.example
+.venv/bin/bilisama dev-talk --director --provider dashscope --model qwen-audio-3.0-realtime-flash
+```
+
+**想跑全本地**（识别、对话、合成都在自己机器上）就得先装语音引擎，约 2 GB，
+首次启动还要下模型，步骤和排错都在 [docs/runbook.md](docs/runbook.md)：
+
+```bash
+scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
+# 起服务器的命令见 runbook「起本地语音服务器」一节
+.venv/bin/bilisama dev-talk --director
+```
+
+两条路的 `--director` 都会把人设、记忆、调度整套立起来；去掉它就只测语音链路本身。
+终端打字模拟弹幕、`/sc` 模拟付费消息这些玩法，runbook 里有完整清单。
 
 ## 文档索引
 
@@ -28,6 +55,6 @@ scripts/gate.sh                                 # 全套检查：格式、类型
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |
 | [NOTICE](NOTICE) / [LICENSE](LICENSE) | 六个上游项目的署名；Apache-2.0 |
 | [config/bilisama.toml](config/bilisama.toml) | 唯一配置真相源，注释即文档 |
-| `path.sh`（本地，不入库） | LLM / DashScope 凭据，格式见 runbook |
+| [.env.example](.env.example) | 所有环境变量的清单与说明；真值写进本地的 `path.sh`，永不入库 |
 
 新增重要文档时在这张表挂号（CLAUDE.md 的流程纪律）。

@@ -7,23 +7,36 @@
 
 两个互相隔离的 Python 环境，别混：
 
-| 环境 | 位置 | 装了什么 |
-|---|---|---|
-| BiliSama 本体 | 仓库下 `.venv/` | bilisama + 轻依赖（websockets、pydantic、pytest、sounddevice） |
-| 语音引擎 | `~/.local/share/bilisama/engines/s2s/` | speech-to-speech 全家桶（torch、mlx、funasr），约 2GB |
+| 环境 | 位置 | 谁来建 | 装了什么 |
+|---|---|---|---|
+| BiliSama 本体 | 仓库下 `.venv/` | `uv sync` | bilisama 加一批轻依赖；开发组里还有 pytest、麦克风库 sounddevice、输入行库 prompt_toolkit |
+| 语音引擎 | `~/.local/share/bilisama/engines/s2s/` | `scripts/smoke_provider_b.sh install` | speech-to-speech 全家桶（torch、mlx、funasr），约 2GB |
+
+引擎那套的版本被上游焊死，跟本体的依赖合不来，所以必须分开装——这也是整个项目拆进程的
+直接原因。只用云端语音服务的话，第二个环境根本不用装。
 
 模型缓存在 `~/.cache/huggingface/`（判停模型、合成模型）和 `~/.cache/modelscope/`（识别模型 paraformer），
 首次启动自动下载，之后离线复用。
 
-本地凭据在仓库根的 `path.sh`（已 gitignore，永不入库）：
+本地凭据在仓库根的 `path.sh`（已 gitignore，永不入库）。不必全填——只用云端语音服务的话，
+前两行就够；跑本地引擎才需要给它配一个对话模型：
 
 ```bash
-export model_name=...       # 测试用 LLM 的模型名
-export api_key=...          # 它的 key
-export base_url=...         # OpenAI 兼容端点
+# 云端语音服务（dev-talk --provider dashscope 用这两行）
 export dashscope_url=...    # 阿里 MaaS 实例地址
 export ali_api_key=...      # 它的 key
+
+# 本地引擎要挂的对话模型（走公司内网那条路）
+export base_url=...         # OpenAI 兼容端点
+export api_key=...          # 它的 key
+export model_name=...       # 模型名
+
+# 免 VPN 变体：本地引擎改挂阿里的兼容端点（见下一节）
+export openai_compatible_url=...
+# export side_model_name=qwen3.7-flash   # 后台想话题、整理记忆用的模型，不填有默认值
 ```
+
+同一份变量在 `.env.example` 里也列了一份，两边保持一致。
 
 ## 起本地语音服务器（原装三段管线：识别 → 对话 → 合成）
 
