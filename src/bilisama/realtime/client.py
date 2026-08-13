@@ -47,9 +47,28 @@ from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.capabilities import Capabilities
 
-__all__ = ["RealtimeClient", "ReplyRecord"]
+__all__ = ["RealtimeClient", "ReplyRecord", "SessionRefused"]
 
 _WATCHDOG_S = 25.0  # plan section 3.3 rule 2
+
+
+class SessionRefused(ConnectionError):
+    """The handshake's first frame was not session.created.
+
+    Almost always the server's one error frame before its 1008 close — a full
+    server refuses at connect, not at response.create (the mock's SESSION_LIMIT
+    fault models this). The code survives as an attribute so a CLI can turn
+    known refusals into targeted advice instead of a traceback; code and detail
+    mirror link.LinkError's field names.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        text = f"服务端第一帧不是 session.created：{code}"
+        if detail:
+            text += f"（{detail}）"
+        super().__init__(text)
+        self.code = code
+        self.detail = detail
 
 
 @dataclass(slots=True)
@@ -111,7 +130,15 @@ class RealtimeClient:
         first = json.loads(await self._ws.recv())
         kind, _ = self.codec.normalize(first)
         if kind is not dia.ServerEvent.SESSION_CREATED:
-            raise ConnectionError(f"服务端第一帧不是 session.created：{first.get('type')}")
+            # A refused handshake leaves nothing worth keeping: close before
+            # raising so a caller that catches and retries does not leak sockets.
+            await self._ws.close()
+            self._ws = None
+            error = first.get("error") or {}
+            raise SessionRefused(
+                code=str(error.get("type") or first.get("type") or "unknown"),
+                detail=str(error.get("message") or ""),
+            )
         self._recv_task = asyncio.create_task(self._recv_loop(), name="realtime:recv")
 
     async def aclose(self) -> None:

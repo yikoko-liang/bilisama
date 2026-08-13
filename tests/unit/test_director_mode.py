@@ -7,18 +7,23 @@ variables substitute, and each hanako port carries its own proactive prompt
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import io
+import socket
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
+from bilisama import dev_talk
 from bilisama.cli import main
+from bilisama.config.enums import ProviderName
 from bilisama.dev_talk import _Fanout, _parse_console_event
 from bilisama.ingest.events import EventKind
 from bilisama.persona.loader import PersonaStore
 from bilisama.realtime import link
+from tests.fakes.mock_realtime import Fault, MockRealtimeServer, Script
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 GLOBAL_PROACTIVE = CONFIG_DIR / "prompts" / "proactive.md"
@@ -182,6 +187,77 @@ async def test_fanout_passthrough_reaches_the_inner_link() -> None:
     await fan.push_audio(b"\x00\x01")
     assert stub.pushed == [b"\x00\x01"]
     await fan.aclose()
+
+
+# ------------------------------------------------------------ connect failures
+
+
+def _talk_args(url: str) -> argparse.Namespace:
+    """The wire-mode argument set, as main()'s parser would build it."""
+    return argparse.Namespace(
+        provider="s2s",
+        url=url,
+        model="qwen-audio-3.0-realtime-flash",
+        wav=None,
+        mute_while_speaking=False,
+        input_device=None,
+        output_device=None,
+        director=False,
+        config=None,
+        persona=None,
+        show_context=False,
+        room=None,
+        plain_console=False,
+    )
+
+
+async def test_a_full_server_exits_with_advice_not_a_traceback() -> None:
+    """The reported failure (2026-08-14): a stale client held the single s2s
+    session slot, and dev-talk answered with a raw ConnectionError traceback.
+    The exit must say what is wrong and what to do next (CLAUDE.md 报错人话条款),
+    which pytest.raises(SystemExit) is the machine half of: SystemExit prints
+    its message without a traceback and exits non-zero.
+    """
+    async with MockRealtimeServer(script=Script(faults={Fault.SESSION_LIMIT})) as server:
+        with pytest.raises(SystemExit) as excinfo:
+            await dev_talk.run(_talk_args(server.url))
+        message = str(excinfo.value)
+        assert "会话槽" in message
+        assert "关掉其他 dev-talk" in message
+
+
+async def test_a_dead_port_exits_with_the_serve_recipe() -> None:
+    """Nothing listening at all — the other connect failure a dev box hits."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    with pytest.raises(SystemExit) as excinfo:
+        await dev_talk.run(_talk_args(f"ws://127.0.0.1:{port}/v1/realtime"))
+    message = str(excinfo.value)
+    assert "没有 s2s 服务" in message
+    assert "起 serve" in message
+
+
+def test_connect_failures_without_a_recipe_keep_endpoint_and_reason() -> None:
+    """Advice may compress, but not at the cost of the facts: whatever we
+    cannot diagnose still says where we dialed and what came back."""
+    message = dev_talk._connect_advice(
+        OSError("no route to host"), ProviderName.S2S, "ws://10.0.0.9:8765/v1/realtime?x=1"
+    )
+    assert "ws://10.0.0.9:8765/v1/realtime" in message
+    assert "no route to host" in message
+
+
+def test_the_serve_recipe_is_only_offered_for_the_local_provider() -> None:
+    """A refused DashScope connection is a network problem, not a missing
+    serve terminal — the s2s recipe there would send the user the wrong way."""
+    message = dev_talk._connect_advice(
+        ConnectionRefusedError(61, "Connection refused"),
+        ProviderName.DASHSCOPE,
+        "wss://dashscope.example/api-ws/v1/realtime?model=m",
+    )
+    assert "起 serve" not in message
+    assert "wss://dashscope.example/api-ws/v1/realtime" in message
 
 
 # ------------------------------------------------------------ persona list CLI
