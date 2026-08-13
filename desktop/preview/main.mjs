@@ -51,15 +51,20 @@ function discoverUrl() {
 }
 
 // The waiting page is inline data:, so the shell needs no served assets of
-// its own before dev-talk exists.
+// its own before dev-talk exists. The window is transparent: no panel, no
+// slab — just a faint ghost breathing on the desktop until she shows up.
 const WAITING_PAGE = `data:text/html;charset=utf-8,${encodeURIComponent(`
+  <style>
+    @keyframes breathe { 0%,100% { opacity:.28 } 50% { opacity:.62 } }
+  </style>
   <body style="margin:0;height:100vh;display:grid;place-items:center;
-               background:rgba(24,25,28,.86);border-radius:18px;
-               font-family:system-ui,'PingFang SC',sans-serif;color:#98958b">
-    <div style="text-align:center;font-size:13px;line-height:1.9">
-      <div style="font-size:30px;opacity:.6">◌</div>
-      等待 dev-talk 启动…<br>
-      <span style="font-size:11px;opacity:.7">bilisama dev-talk --director</span>
+               background:transparent;-webkit-user-select:none;
+               font-family:system-ui,'PingFang SC',sans-serif">
+    <div style="text-align:center;animation:breathe 2.8s ease-in-out infinite">
+      <div style="font-size:34px;color:#9a968c;
+                  text-shadow:0 1px 3px rgba(0,0,0,.35)">◌</div>
+      <div style="font-size:11px;color:#9a968c;margin-top:6px;
+                  text-shadow:0 1px 2px rgba(0,0,0,.4)">等待 dev-talk…</div>
     </div>
   </body>`)}`;
 

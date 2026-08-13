@@ -10,6 +10,12 @@
   overflow: hidden;
 }
 
+/* Inside the desktop shell the window itself is transparent; painting --page
+   here would put an opaque slab on the desktop — the pet floats, nothing else. */
+body.shell {
+  background: transparent;
+}
+
 .pet-mount {
   position: relative;
   width: var(--pet-size);
@@ -242,32 +248,51 @@ body.shell .pet-mount.dragging {
   z-index: 2;
 }
 
-/* ------------------------------------------------------------ corner icon */
+/* ------------------------------------------------------------ corner icon
+
+   A frosted pill that stays out of the way: barely-there at rest, a real
+   button on approach. Sliders glyph = "controls", the one icon every
+   settings surface has taught people to read. */
 
 .corner {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  right: 14px;
+  bottom: 14px;
   z-index: var(--z-corner);
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
-  border: 0;
   padding: 0;
-  border-radius: 50%;
+  border: 1px solid transparent;
+  border-radius: 10px;
   background: transparent;
   color: var(--ink-dim);
-  opacity: 0.18;
+  opacity: 0.35;
   cursor: pointer;
-  transition: opacity var(--dur-fast) ease, transform var(--dur-fast) ease;
+  transition:
+    opacity var(--dur-fast) ease,
+    background var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
 }
 
 .corner:hover,
 .corner:focus-visible {
   opacity: 1;
-  transform: scale(1.08);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  border-color: var(--panel-edge);
+  box-shadow: var(--shadow-1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transform: translateY(-1px);
   outline: none;
+}
+
+.corner:active {
+  transform: translateY(0) scale(0.95);
 }
 
 /* ------------------------------------------------------------ keyframes */
