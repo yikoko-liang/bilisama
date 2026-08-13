@@ -1,0 +1,92 @@
+{
+  "frame": {
+    "width": 156,
+    "height": 168,
+    "columns": 8,
+    "rows": 3
+  },
+  "image": "spritesheet.png",
+  "animations": {
+    "idle": {
+      "frames": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "fps": 2.5
+    },
+    "waiting": {
+      "frames": [
+        2,
+        3
+      ],
+      "fps": 2.0
+    },
+    "review": {
+      "frames": [
+        4,
+        5
+      ],
+      "fps": 2.0
+    },
+    "waving": {
+      "frames": [
+        6,
+        7
+      ],
+      "fps": 4.0
+    },
+    "jumping": {
+      "frames": [
+        8,
+        9,
+        10
+      ],
+      "fps": 6.0,
+      "loop": false
+    },
+    "failed": {
+      "frames": [
+        11,
+        12
+      ],
+      "fps": 1.0
+    },
+    "running-left": {
+      "frames": [
+        13,
+        14
+      ],
+      "fps": 5.0
+    },
+    "running-right": {
+      "frames": [
+        15,
+        16
+      ],
+      "fps": 5.0
+    },
+    "running": {
+      "frames": [
+        13,
+        14
+      ],
+      "fps": 7.0
+    },
+    "working": {
+      "frames": [
+        13,
+        14
+      ],
+      "fps": 5.0
+    },
+    "attention": {
+      "frames": [
+        17,
+        18
+      ],
+      "fps": 3.0
+    }
+  }
+}
