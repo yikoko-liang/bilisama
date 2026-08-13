@@ -126,9 +126,11 @@ voice = "off"
 
 # renderer 三选一：theme 内置形象（零素材）| sprite 精灵图皮肤包 | live2d 待接入（阶段 5）。
 # model_id 跟着 renderer 解释：theme 留空用内置小机器人；sprite 填皮肤包目录名；live2d 填模型目录名。
+# 本分支出厂默认 kirby（仅内部使用，约束见 src/bilisama/ui/web/skins/kirby/README.md；
+# 正式化前删皮肤目录并改回 theme）。皮肤缺失或损坏会自动退回内置小机器人。
 [avatar]
-renderer = "theme"
-model_id = ""
+renderer = "sprite"
+model_id = "kirby"
 expression_source = "tag"               # 只在我们自己做 TTS 时安全
 
 [runtime]
