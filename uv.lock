@@ -258,6 +258,7 @@ mlx = [
 [package.dev-dependencies]
 dev = [
     { name = "black" },
+    { name = "httpx" },
     { name = "mypy" },
     { name = "prompt-toolkit" },
     { name = "pytest" },
@@ -286,6 +287,7 @@ provides-extras = ["mlx"]
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = ">=24.10" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "pytest", specifier = ">=8.3" },
