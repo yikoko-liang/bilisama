@@ -91,6 +91,10 @@ class Assembly:
         # Both keys, always: a partial mapping leaves the raw {{agentName}} in
         # the prompt (three of the four shipped personas use it in their title).
         # Callers pass persona.template_variables(cfg); this is only the floor.
+        # One greeting per VIP per stream (plan section 2.7's acceptance):
+        # the fixture's captain walks in twice and gets named once. Assembly
+        # lives for one stream, so the set needs no reset hook.
+        self._vip_greeted: set[str] = set()
         self._prefix = static_prefix(
             persona.anchors(variables or {"userName": "主播", "agentName": "助手"})
         )
@@ -122,6 +126,10 @@ class Assembly:
                 )
         if not self._speak_enabled(event.kind.value):
             return
+        if event.kind is EventKind.VIP_ENTER:
+            if event.viewer.identity in self._vip_greeted:
+                return
+            self._vip_greeted.add(event.viewer.identity)
         if self._selector is not None and event.kind in SELECTOR_KINDS:
             # The funnel lane: danmaku compete for one window slot, gifts
             # aggregate. Winners re-enter through deliver_selected.

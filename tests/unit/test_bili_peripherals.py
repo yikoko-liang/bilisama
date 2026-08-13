@@ -25,6 +25,7 @@ from bilisama.memory.distill import Distiller
 from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
 from bilisama.proactive import ProactiveTopicLoop
+from tests.fakes.replay import FIXTURE_DIR, read_fixture
 from tests.unit.test_bili_translate import _danmu_info, _sc_data
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -133,6 +134,22 @@ async def test_known_spender_walking_in_is_promoted_to_vip(tmp_path: Path) -> No
     assert [i.source for i in intents] == ["vip_enter"], "memory promoted the arrival"
     await assembly.on_event(_entry(56))
     assert len(intents) == 1, "a stranger's entry stays feed-only"
+
+
+async def test_presence_replay_one_hello_and_one_named_greeting(tmp_path: Path) -> None:
+    """The section 2.7 L2+L4 acceptance against the presence fixture: the
+    captain arrives twice and is named once; 121 arrivals buy one hello."""
+    assembly, _store, intents, clock = _assembly(tmp_path)
+    cursor = 0.0
+    for at_s, event in read_fixture(FIXTURE_DIR / "presence.jsonl", room_id=777):
+        if at_s > cursor:
+            await clock.advance(at_s - cursor)
+            cursor = at_s
+        await assembly.on_event(event)
+    vips = [i for i in intents if i.source == "vip_enter"]
+    hellos = [i for i in intents if i.source == "entry"]
+    assert len(vips) == 1, "the second arrival stays silent"
+    assert len(hellos) == 1, "a hundred entries is one hello, not a greeting machine"
 
 
 # ------------------------------------------------------------------ gift tiers

@@ -182,6 +182,45 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/mia/pinned.m
 ~/.local/share/bilisama/engines/s2s/bin/speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
 ```
 
+## 连真直播间（弹幕）
+
+dev-talk 挂上 `--room` 就连真直播间，一边语音对话一边收真弹幕：
+
+```bash
+.venv/bin/bilisama dev-talk --mic --director --room <房间号>
+```
+
+默认（normal 档）就是互动模式：按窗口挑弹幕回应，SC / 礼物 / 上舰即时答谢。
+只想观察不想让它开口，把 `bilisama.toml` 的 `active_profile` 改成 `"chat"` 再跑
+同一条命令——弹幕礼物照常进记忆和退出快照，它只是不回。
+
+先说凭据。不配登录态也能连，但 B 站会把大部分观众的 uid 打码成 0、名字变
+`***`——认不出常客，也没法点名。所以正式测试前在 `path.sh` 加一行：
+
+```bash
+export BILI_SESSDATA=<浏览器 cookie 里的 SESSDATA>
+```
+
+配置文件走 `[room] credential_ref = "env:BILI_SESSDATA"`（已是默认）；`--room` 只是
+临时覆盖 `[room] room_id`，不动配置文件。短号可以直接填，连接时自动解析成真实房间号。
+
+连上后能看到什么：
+
+- 启动行 `[弹幕] 连接房间 <号>（登录态/匿名…）`——匿名会直接把后果写在脸上
+- 弹幕按窗口挑一条回（窗口长度、打分门槛由话痨度派生；回过谁 60 秒内不再挑他）
+- 礼物连击结算成一句谢（空闲 1 秒结算，同一组合 10 分钟内不谢第二次）
+- 退出快照里 `bilibili` 一节有事件计数、掩码比例、丢弃账目；`selector` 一节有
+  每条弹幕的去向（选中，或某个 `selection.*` 跳过原因）
+
+常见情况：
+
+| 现象 | 说明 |
+|---|---|
+| 观众全叫 `***` | 没配 SESSDATA，见上 |
+| `shed` 里有数字 | 洪峰限额在干活：弹幕每秒最多解析 80 条、进房类 40 条，付费事件永不丢 |
+| 断线后自己回来了 | blivedm 自带重连；它救不回来的由监管层重启。旧连接迟到的事件会被认出来丢掉，不会重复回应 |
+| SC 撤回 | 队列里还没说出口的答谢直接撤下（`platform.revoked`）；已经在说的让它说完 |
+
 ## 人设与生长层
 
 人设文件的活副本在 `~/.local/share/bilisama/personas/<id>/`（`persona.data_dir` 可改），

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import http.cookies
+import logging
 from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -49,6 +50,12 @@ if TYPE_CHECKING:
 __all__ = ["BilibiliEventSource"]
 
 log = get_logger(__name__)
+
+# Upstream logs every command it has no parser for at WARNING — a busy room
+# emits HOT_ROOM_NOTIFY / POPULARITY_CHANGE every few seconds, which would
+# shred dev-talk's danmaku input line (the exact console-noise complaint the
+# _Speaker rewrite fixed once already). Errors still surface.
+logging.getLogger("bilisama.ingest.bilibili._vendor.blivedm").setLevel(logging.ERROR)
 
 _QUEUE_SIZE = 1024
 # Parse-budget sampling (plan section 16.8 item 27): commands are classified

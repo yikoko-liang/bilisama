@@ -26,8 +26,11 @@ liliMozi/openhanako (Apache-2.0)
   identity/ishiki templates; their proactive prompts adapt its yuan scaffolds.
 
 Project-N-E-K-O/N.E.K.O (Apache-2.0)
-  Danmaku scoring and selection, the paid-event lane, SafetyGuard
-  (planned for stage 6, in progress 2026-08).
+  Danmaku scoring order (guard > admin > medal > level > length,
+  livedanmaku.py:477, renormalised to 0..1), the windowed pick-one
+  selection, the paid-event lane, and the safety values our components
+  reuse: 0.35s dedup window, 60s per-uid cooldown, 3-failures/60s
+  breaker, 1.0s combo settle with 600s suppression (landed 2026-08-13).
 
 Open-LLM-VTuber (MIT)
   sentence_divider (CJK chunking), tts_manager ordered delivery,

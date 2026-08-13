@@ -194,7 +194,7 @@
         <p class="meta">Electron ＋ Live2D（阶段 5）。开发期由 <b>dev-talk</b> 顶替：</p>
         <div class="layer front">
           <h4>dev-talk --director</h4>
-          <p>麦克风采集 · 扬声器播放 · 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· 收到打断信号立刻静音</p>
+          <p>麦克风采集 · 扬声器播放 · 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· <code>--room</code> 连真直播间 · 收到打断信号立刻静音</p>
         </div>
         <div class="layer front" style="border-style:dashed">
           <h4 style="color:var(--ink-3)">Electron<small>待建</small></h4>
@@ -217,8 +217,10 @@
           <div class="mods">
             <span class="mod">events <small>统一事件模型</small></span>
             <span class="mod">sources <small>断线自动重启</small></span>
-            <span class="mod todo">blivedm 弹幕源（阶段 6）</span>
-            <span class="mod todo">挑弹幕·限流量（阶段 6）</span>
+            <span class="mod">blivedm 弹幕源 <small>连真直播间</small></span>
+            <span class="mod">挑弹幕 <small>一个窗口回一条</small></span>
+            <span class="mod">安全闸 <small>去重·冷却·熔断·连击合并</small></span>
+            <span class="mod">批量欢迎 <small>来一波人打一次招呼</small></span>
           </div>
         </div>
 
@@ -464,7 +466,7 @@
           <tr><td>3</td><td>人设记忆 · 后台提炼 · 主动话题 · 总装配</td><td><span class="st done">完成</span></td></tr>
           <tr><td>4</td><td>TTS 与形象（tagparser / chunker / mux）</td><td><span class="st next">下一站</span></td></tr>
           <tr><td>5</td><td>Electron ＋ Live2D 桌面端</td><td><span class="st wait">未开始</span></td></tr>
-          <tr><td>6</td><td>弹幕接入（blivedm · 打分 · 熔断）</td><td><span class="st wait">未开始</span></td></tr>
+          <tr><td>6</td><td>弹幕接入（blivedm · 打分 · 熔断）· 提前施工</td><td><span class="st done">完成</span></td></tr>
           <tr><td>7</td><td>打包签名 · 一键化交付</td><td><span class="st wait">未开始</span></td></tr>
           <tr><td>8</td><td>真直播间逐级联调</td><td><span class="st wait">未开始</span></td></tr>
         </tbody>
@@ -474,8 +476,8 @@
 </section>
 
 <footer>
-  <span>BiliSama 架构展示 · 2026-08-11 · 依据实现代码与计划文档 §2–§4 生成</span>
-  <span>数据口径：全部自动化测试通过 ＋ 本地与云端真机验证</span>
+  <span>BiliSama 架构展示 · 2026-08-13 · 依据实现代码与计划文档 §2–§4 生成</span>
+  <span>数据口径：全部自动化测试通过 ＋ 本地与云端真机验证 ＋ 真直播间弹幕演练</span>
 </footer>
 
 </main>
