@@ -19,7 +19,7 @@ import { app, BrowserWindow, ipcMain, screen } from "electron";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PET_WIDTH = 240;
-const PET_HEIGHT = 340;
+const PET_HEIGHT = 240;
 const PANEL_WIDTH = 420;
 const PANEL_HEIGHT = 680;
 const POLL_MS = 2000;
@@ -51,20 +51,28 @@ function discoverUrl() {
 }
 
 // The waiting page is inline data:, so the shell needs no served assets of
-// its own before dev-talk exists. The window is transparent: no panel, no
-// slab — just a faint ghost breathing on the desktop until she shows up.
+// its own before dev-talk exists. The window is transparent; what waits on
+// the desktop is a small card, not a window-sized slab: pill glyph breathing
+// in bili pink, one line of text, hairline border.
 const WAITING_PAGE = `data:text/html;charset=utf-8,${encodeURIComponent(`
   <style>
-    @keyframes breathe { 0%,100% { opacity:.28 } 50% { opacity:.62 } }
+    @keyframes pulse { 0%,100% { opacity:.35; transform:scale(.94) }
+                       50% { opacity:.9; transform:scale(1) } }
   </style>
   <body style="margin:0;height:100vh;display:grid;place-items:center;
                background:transparent;-webkit-user-select:none;
                font-family:system-ui,'PingFang SC',sans-serif">
-    <div style="text-align:center;animation:breathe 2.8s ease-in-out infinite">
-      <div style="font-size:34px;color:#9a968c;
-                  text-shadow:0 1px 3px rgba(0,0,0,.35)">◌</div>
-      <div style="font-size:11px;color:#9a968c;margin-top:6px;
-                  text-shadow:0 1px 2px rgba(0,0,0,.4)">等待 dev-talk…</div>
+    <div style="width:112px;height:112px;border-radius:26px;
+                background:rgba(30,29,34,.55);
+                border:1px solid rgba(255,255,255,.09);
+                box-shadow:0 8px 28px rgba(0,0,0,.25);
+                backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+                display:grid;place-items:center;align-content:center;gap:9px">
+      <div style="width:14px;height:14px;border-radius:50%;
+                  background:#fb7299;box-shadow:0 0 12px 2px rgba(251,114,153,.55);
+                  animation:pulse 2.4s ease-in-out infinite"></div>
+      <div style="font-size:11px;color:rgba(255,255,255,.55);
+                  letter-spacing:.04em">等待 dev-talk</div>
     </div>
   </body>`)}`;
 

@@ -11,9 +11,27 @@
 }
 
 /* Inside the desktop shell the window itself is transparent; painting --page
-   here would put an opaque slab on the desktop — the pet floats, nothing else. */
+   here would put an opaque slab on the desktop — the pet floats, nothing else.
+   The shell window is a compact 240x240 square, so the pet anchors to the
+   floor and the bubble gets the headroom, sized to fit. */
 body.shell {
   background: transparent;
+  --pet-size: 104px;
+}
+
+body.shell #stage {
+  align-items: end;
+  padding-bottom: 16px;
+}
+
+body.shell .bubble {
+  bottom: calc(var(--pet-size) * 1.18 + 20px);
+  max-width: 206px;
+  font-size: 13px;
+  /* three lines: headroom above the pet in a 240px window is ~95px, and a
+     bubble the window cannot contain is worse than a scrolling one */
+  max-height: calc(1.5em * 3 + 16px);
+  line-height: 1.5;
 }
 
 .pet-mount {
