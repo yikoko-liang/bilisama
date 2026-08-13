@@ -40,6 +40,10 @@ dev = [
     "httpx>=0.28",
     # tools/skin_pack.py assembles sprite skin packs; dev-only like the tool.
     "pillow>=11.0",
+    # Browser-driven UI tests (tests/ui, ui_browser marker). Python binding —
+    # no node test stack. One-time browser fetch:
+    #   .venv/bin/python -m playwright install chromium
+    "playwright>=1.49",
     # 下面两个是 dev-talk 的本机输入输出，只有开发期用得上，产品不带：
     # 麦克风采集与扬声器播放；没装的话 dev-talk 会明说要装什么，并且 --wav 模式照常能跑
     "sounddevice>=0.5",
@@ -141,6 +145,7 @@ markers = [
     "integration: 需要真实的 speech-to-speech 服务，默认不跑",
     "provider_a: 需要真实的托管 Realtime 端点，默认不跑",
     "manual: 一次性探针，手动跑",
+    "ui_browser: 浏览器驱动的界面测试（要 playwright + chromium），gate 单独跑",
 ]
 # Keeps the inner loop down to the tier that needs nothing installed. The cost is
 # that a bare `pytest` cannot see the integration tier at all, which is how five of
@@ -148,4 +153,4 @@ markers = [
 # way to a commit. scripts/gate.sh runs `-m integration` as a step of its own and
 # reports the skip when the venv is missing; tests/unit/test_gate.py fails if a
 # marker is deselected here without either a gate step or a written reason.
-addopts = "-m 'not integration and not provider_a and not manual'"
+addopts = "-m 'not integration and not provider_a and not manual and not ui_browser'"

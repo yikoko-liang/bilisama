@@ -206,7 +206,7 @@ def test_a_new_deselected_marker_forces_a_decision() -> None:
     output anywhere. This is the thing that turns it into a conversation.
     """
     pyproject = _PYPROJECT.read_text(encoding="utf-8").replace(
-        "not manual'", "not manual and not slow'"
+        "not ui_browser'", "not ui_browser and not slow'"
     )
     assert _unaccounted(pyproject, _GATE.read_text(encoding="utf-8")) == {"slow"}
 
