@@ -262,7 +262,7 @@ def test_paid_events_take_the_side_pocket_and_drain_first() -> None:
     source.offer(danmaku)
     source.offer(sc)
     assert list(source._paid) == [sc]
-    assert source._queue.qsize() == 1
+    assert source._queue.qsize() == 2, "the danmaku plus the paid wake token"
 
 
 def test_full_queue_sheds_the_oldest_and_keeps_the_account() -> None:
@@ -273,7 +273,7 @@ def test_full_queue_sheds_the_oldest_and_keeps_the_account() -> None:
     assert source._queue.qsize() == 4
     assert source.status()["dropped"] == 2
     oldest_left = source._queue.get_nowait()
-    assert oldest_left.viewer.uid == 102, "the two oldest were shed"
+    assert oldest_left is not None and oldest_left.viewer.uid == 102, "the two oldest were shed"
 
 
 def test_guard_double_send_merges_within_the_window() -> None:
@@ -302,3 +302,54 @@ def test_guard_double_send_merges_within_the_window() -> None:
     clock._now += 31.0
     source.offer(legacy)  # a genuinely new purchase later goes through
     assert len(source._paid) == 2
+
+
+def test_gift_with_no_transaction_id_falls_back_to_the_identity_key() -> None:
+    """An empty tid/rnd must NOT mint the constant key "gift:" — that one
+    truthy string would make every viewer's gift a duplicate of every other's
+    (the SEND_GIFT_V2 protobuf path can leave both fields unset)."""
+    message = web_models.GiftMessage.from_command(_gift_data(tid="", rnd=""))
+    event = event_from_gift(message, **_KW)
+    assert event.event_id == ""
+    assert event.dedup_key.startswith("gift:uid:9:"), "identity+bucket fallback engaged"
+
+
+def test_masked_guard_buyers_do_not_merge_each_other_away() -> None:
+    """Two DIFFERENT masked buyers share the "anon" identity; only the
+    purchase timestamp tells them apart, so the merge key must include it."""
+    source, _clock = _source()
+    first = event_from_guard_buy(
+        web_models.GuardBuyMessage.from_command(
+            {
+                "uid": 0,
+                "username": "***",
+                "guard_level": 3,
+                "num": 1,
+                "price": 198000,
+                "gift_id": 10003,
+                "gift_name": "舰长",
+                "start_time": 1755000300,
+                "end_time": 1755000300,
+            }
+        ),
+        **_KW,
+    )
+    second = event_from_guard_buy(
+        web_models.GuardBuyMessage.from_command(
+            {
+                "uid": 0,
+                "username": "***",
+                "guard_level": 3,
+                "num": 1,
+                "price": 198000,
+                "gift_id": 10003,
+                "gift_name": "舰长",
+                "start_time": 1755000310,  # ten seconds later: a different person
+                "end_time": 1755000310,
+            }
+        ),
+        **_KW,
+    )
+    source.offer(first)
+    source.offer(second)
+    assert len(source._paid) == 2, "distinct purchases both survive"

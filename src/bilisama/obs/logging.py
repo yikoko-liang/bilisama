@@ -207,3 +207,8 @@ def setup(
     # Quiet the third-party chatter.
     for noisy in ("websockets", "asyncio", "aiohttp", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # The vendored danmaku client logs on its own hardcoded 'blivedm' name —
+    # NOT its module path — and a busy room draws unknown-command WARNINGs
+    # every few seconds, which would shred dev-talk's input line. Real errors
+    # (parse failures, giving up on reconnect) still surface at ERROR.
+    logging.getLogger("blivedm").setLevel(logging.ERROR)

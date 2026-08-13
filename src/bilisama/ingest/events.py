@@ -148,7 +148,7 @@ class LiveEvent:
     event_id: str = ""  # primary dedup key when the platform gives us one
     ts_ms: int = 0  # platform timestamp
     recv_at: float = 0.0  # our monotonic clock
-    session_generation: int = 0  # bumped on reconnect so late events can be dropped
+    session_generation: int = 0  # bumped on outer restart (observability; dedup is the ring's job)
     raw: dict[str, Any] | None = None
 
     @property
@@ -181,6 +181,16 @@ class LiveEvent:
         if self.raw is None:
             return self
         return dataclasses.replace(self, raw=None)
+
+
+def sc_dedup_key(sc_id: int) -> str:
+    """The dedup key a super chat's LiveEvent will carry, from its platform id.
+
+    SUPER_CHAT_MESSAGE_DELETE only gives us the id, and the revoke path must
+    produce byte-identical keys to the ones the mapping layer minted — one
+    builder, not two f-strings that must stay in sync by luck.
+    """
+    return f"{EventKind.SUPER_CHAT}:sc:{sc_id}"
 
 
 def cny_from_gold(total_coin: int) -> float:

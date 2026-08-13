@@ -8,8 +8,11 @@ regular.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from bilisama.app import Assembly
 from bilisama.clock import FakeClock
@@ -214,7 +217,9 @@ def test_room_state_is_lifted_out_of_the_ignore_list() -> None:
     forwarder.handle(None, {"cmd": "PREPARING", "data": {}})
     kinds = []
     while not source._queue.empty():
-        kinds.append(source._queue.get_nowait())
+        item = source._queue.get_nowait()
+        if item is not None:
+            kinds.append(item)
     assert [e.text for e in kinds] == ["live", "preparing"]
     assert all(e.kind is EventKind.ROOM_STATE for e in kinds)
     assert source.status()["room_state"] == "preparing"
@@ -248,3 +253,139 @@ def test_shipped_chat_profile_loads_and_means_no_danmaku() -> None:
     speak = settings.interaction.speak
     assert not speak.danmaku and not speak.gift and not speak.super_chat
     assert speak.proactive, "chat mode still starts topics — that is its point"
+
+
+# ------------------------------------------------------------------ start() paths
+
+
+class _FakeClient:
+    """Stands in for bili_web.BLiveClient: no network, scripted init result."""
+
+    init_result = True
+    room_id = 7734200
+
+    def __init__(self, room_id: int, uid: int | None = None, session: object = None) -> None:
+        self._need_init_room = True
+
+    def set_handler(self, handler: object) -> None:
+        self.handler = handler
+
+    async def init_room(self) -> bool:
+        return type(self).init_result
+
+    def start(self) -> None:
+        return None
+
+    async def stop_and_close(self) -> None:
+        return None
+
+
+async def _drain_nothing(event: LiveEvent) -> None:
+    return None
+
+
+async def test_failed_init_raises_instead_of_degrading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream returns False and silently falls back to the short room id;
+    we refuse — a wrong room id poisons medal matching for the whole run."""
+    from bilisama.clock import SystemClock
+
+    monkeypatch.setattr("bilisama.ingest.bilibili.source.bili_web.BLiveClient", _FakeClient)
+    monkeypatch.setattr(_FakeClient, "init_result", False)
+    source = BilibiliEventSource(6, SystemClock())
+    with pytest.raises(RuntimeError, match="初始化失败"):
+        await source.start(_drain_nothing)
+
+
+async def test_client_death_escapes_start_for_the_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bilisama.clock import SystemClock
+
+    monkeypatch.setattr("bilisama.ingest.bilibili.source.bili_web.BLiveClient", _FakeClient)
+    monkeypatch.setattr(_FakeClient, "init_result", True)
+    source = BilibiliEventSource(6, SystemClock())
+    task = asyncio.create_task(source.start(_drain_nothing))
+    for _ in range(200):
+        if source.status()["connected"]:
+            break
+        await asyncio.sleep(0.01)
+    source.on_client_stopped(ConnectionError("ws torn down"))
+    with pytest.raises(RuntimeError, match="弹幕连接挂了"):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_stop_exits_cleanly_without_a_restart_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bilisama.clock import SystemClock
+
+    monkeypatch.setattr("bilisama.ingest.bilibili.source.bili_web.BLiveClient", _FakeClient)
+    monkeypatch.setattr(_FakeClient, "init_result", True)
+    source = BilibiliEventSource(6, SystemClock())
+    task = asyncio.create_task(source.start(_drain_nothing))
+    for _ in range(200):
+        if source.status()["connected"]:
+            break
+        await asyncio.sleep(0.01)
+    await source.stop()
+    await asyncio.wait_for(task, timeout=2.0)  # no exception: a clean exit
+
+
+async def test_three_mapping_failures_trip_the_breaker_and_escalate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The breaker's documented job: caught mapping failures stop the lane,
+    and the stop surfaces as a raise the supervisor can act on."""
+    from bilisama.clock import SystemClock
+
+    monkeypatch.setattr("bilisama.ingest.bilibili.source.bili_web.BLiveClient", _FakeClient)
+    monkeypatch.setattr(_FakeClient, "init_result", True)
+    source = BilibiliEventSource(6, SystemClock())
+    task = asyncio.create_task(source.start(_drain_nothing))
+    for _ in range(200):
+        if source.status()["connected"]:
+            break
+        await asyncio.sleep(0.01)
+    for i in range(3):
+        source.note_error(ValueError(f"info 布局变了 {i}"))
+    with pytest.raises(RuntimeError, match="熔断"):
+        await asyncio.wait_for(task, timeout=2.0)
+    assert source.status()["breaker_open"] is True
+
+
+def test_mirror_danmaku_is_dropped_and_accounted() -> None:
+    source, forwarder, _clock = _source()
+
+    class _Mirror:
+        is_mirror = True
+
+    forwarder._on_danmaku(None, _Mirror())
+    assert source.status()["counts"] == {}, "never mapped, never offered"
+    shed = source.status()["shed"]
+    assert isinstance(shed, dict) and shed["mirror"] == 1
+
+
+def test_sc_delete_purges_the_paid_pocket_before_revoking() -> None:
+    """The delete can arrive in the same bundle as the SC itself, while the
+    event still sits in the paid deque — pulling it there is what makes the
+    withdrawal real; the scheduler never sees a key to revoke."""
+    from bilisama.ingest.bilibili._vendor.blivedm.models import web as web_models
+    from bilisama.ingest.bilibili.source import event_from_super_chat
+    from tests.unit.test_bili_translate import _sc_data as sc_payload
+
+    clock = FakeClock(wall=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
+    revoked: list[str] = []
+    source = BilibiliEventSource(777, clock, on_sc_delete=revoked.append)
+    sc = event_from_super_chat(
+        web_models.SuperChatMessage.from_command(sc_payload()),
+        room_id=777,
+        recv_at=1.0,
+        generation=1,
+    )
+    source.offer(sc)
+    assert len(source._paid) == 1
+    source.on_sc_delete([888001])
+    assert len(source._paid) == 0, "withdrawn before it ever reached the scheduler"
+    assert revoked == ["super_chat:sc:888001"]
