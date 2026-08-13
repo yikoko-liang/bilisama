@@ -139,6 +139,17 @@ hanako/ming/butter 的身份和性格原样移植自 openhanako；各自的 yuan
 四池内心独白）改造成了各自专属的主动话题提示词——四池只在后台想话题时用，不再堵在
 每句话前面。切人设改 `[persona] id`，或 director 模式 `--persona` 临时切。
 
+**让它叫你的名字**：人设文件里的 `{{userName}}` 和 `{{agentName}}` 由配置填值，
+改完重启生效：
+
+```toml
+[persona]
+streamer_name = "阿强"      # AI 怎么称呼你，默认「主播」
+display_name = "花子"       # AI 自己的名字，留空用人设目录名（英文）
+```
+
+填之前 hanako 的开头是「# hanako／主播的个人助手」，填之后是「# 花子／阿强的个人助手」。
+
 **置顶备忘（pinned.md，手动通道）**：想让 AI 永久记住某件事，直接往活人设目录的
 `pinned.md` 里写，一行一条，文件不存在就新建：
 

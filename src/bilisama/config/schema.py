@@ -255,6 +255,14 @@ class PersonaConfig(BaseModel):
     # auto = <data home>/personas/<id>. Live copies of all four persona files;
     # the shipped templates under config/personas/ carry only the two anchors.
     data_dir: str = Field("auto")
+    # What the persona calls the streamer — every template's {{userName}}.
+    # "主播" is the neutral default; a real name is what makes it sound like
+    # someone sitting next to you rather than a service announcement.
+    streamer_name: str = Field("主播")
+    # The persona's own name in its templates ({{agentName}}). Empty falls back
+    # to `id`, which is a lowercase directory name — fine as a fallback, worth
+    # overriding with the Chinese name the audience actually hears.
+    display_name: str = Field("")
     growth: GrowthSwitches = Field(default_factory=GrowthSwitches)
 
 

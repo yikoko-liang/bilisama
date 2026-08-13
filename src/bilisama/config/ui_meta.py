@@ -332,7 +332,25 @@ UI_META: dict[str, FieldMeta] = {
         group="人设",
         order=2,
     ),
-    "persona.growth": FieldMeta(label="生长层", group="人设", order=3),
+    "persona.streamer_name": FieldMeta(
+        label="AI 怎么称呼你",
+        hint="填你的名字或昵称，它说话时就会带上；留「主播」也行，只是生分一点",
+        audience=Audience.STREAMER,
+        reload=Reload.RESTART,
+        group="人设",
+        order=2,
+        wizard_step=5,
+    ),
+    "persona.display_name": FieldMeta(
+        label="AI 叫什么",
+        hint="留空就用人设的目录名（英文），填了才是观众听到的那个名字",
+        audience=Audience.STREAMER,
+        reload=Reload.RESTART,
+        group="人设",
+        order=3,
+        wizard_step=5,
+    ),
+    "persona.growth": FieldMeta(label="生长层", group="人设", order=4),
     "persona.growth.relationship": FieldMeta(
         label="共同经历",
         hint="off 不长；collect 只攒进文件不进提示词；on 攒并注入",
@@ -732,7 +750,10 @@ UI_META: dict[str, FieldMeta] = {
     "custom_tts.engine": FieldMeta(
         label="语音引擎",
         hint="可插拔；主力规划是 IndexTTS（授权和 GPU 到位即切），qwen3_cloud 是当前默认",
-        audience=Audience.STREAMER,
+        # 主播挑的是「音色」和「语速」，不是 qwen3_local 还是 gpt_sovits——
+        # 那取决于这台机器部署了什么，是运营的事。加「AI 怎么称呼你」那两项时
+        # 撞上了主播视图 20 项的上限，回头一查，标错受众的是这一条。
+        audience=Audience.OPERATOR,
         reload=Reload.LIVE,
         group="声音",
         order=1,

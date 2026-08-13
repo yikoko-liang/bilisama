@@ -147,6 +147,44 @@ async def test_refresh_pushes_only_when_the_text_changed(tmp_path: Path) -> None
     assert len(pushed) == 2
 
 
+def test_a_ported_persona_leaks_no_placeholder_through_the_fallback(tmp_path: Path) -> None:
+    """Assembly's built-in variable pair is the floor for callers that pass
+    none. hanako's identity titles itself with {{agentName}}, so a one-key
+    fallback would put that literal text in the system prompt."""
+    templates = TEMPLATE_ROOT.parent / "hanako"
+    clock = FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    persona = PersonaStore(tmp_path / "live", templates)
+    growth = GrowthSwitches()
+
+    async def push(text: str) -> None:
+        return None
+
+    assembly = Assembly(
+        store=store,
+        distiller=Distiller(None, store, persona, growth, clock),
+        proactive=ProactiveTopicLoop(
+            None,
+            store,
+            SpeakingFloor(clock),
+            clock,
+            submit=lambda i: None,
+            prompt="",
+            idle_threshold_s=90.0,
+        ),
+        persona=persona,
+        growth=growth,
+        speak_enabled=lambda source: False,
+        submit=lambda intent: None,
+        push_context=push,
+        clock=clock,
+    )
+    context = assembly.build_context()
+    assert "{{" not in context, context[:200]
+    store.close()
+
+
 # ------------------------------------------------------------ supervision
 
 

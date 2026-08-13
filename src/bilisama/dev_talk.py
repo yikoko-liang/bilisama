@@ -420,7 +420,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
     from bilisama.obs.outcome import Outcome, Verdict
-    from bilisama.persona.loader import PersonaStore, default_data_dir
+    from bilisama.persona.loader import PersonaStore, default_data_dir, template_variables
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
@@ -473,7 +473,7 @@ async def run_director(args: argparse.Namespace) -> int:
     store.begin_stream()
 
     persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
-    variables = {"userName": "主播", "agentName": settings.persona.id}
+    variables = template_variables(settings.persona)
 
     # Side-model resolution, most reliable first: explicit config wins, then
     # the aliyun compatible-mode endpoint from path.sh (public network, no VPN

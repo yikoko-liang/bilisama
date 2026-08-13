@@ -76,7 +76,12 @@ class Assembly:
         # Anchors are read once: editing an anchor is a restart-level change
         # (ui_meta says so), and re-reading per push would let a mid-stream
         # edit shift the cached prefix under the provider.
-        self._prefix = static_prefix(persona.anchors(variables or {"userName": "主播"}))
+        # Both keys, always: a partial mapping leaves the raw {{agentName}} in
+        # the prompt (three of the four shipped personas use it in their title).
+        # Callers pass persona.template_variables(cfg); this is only the floor.
+        self._prefix = static_prefix(
+            persona.anchors(variables or {"userName": "主播", "agentName": "助手"})
+        )
         self._last_pushed = ""
         self._supervised: list[SupervisedSource] = []
         self.events_seen = 0

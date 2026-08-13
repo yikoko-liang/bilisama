@@ -232,3 +232,37 @@ def test_empty_segments_leave_no_headers_behind() -> None:
 def test_assemble_puts_the_tail_after_the_prefix() -> None:
     text = assemble(static_prefix(_ANCHORS), DynamicContext(clock_line="开播 5 分钟"))
     assert text.index("直播规则") < text.index("开播 5 分钟")
+
+
+# ------------------------------------------------------------ template variables
+
+
+def test_template_variables_come_from_config() -> None:
+    """The streamer's own name is the whole point of {{userName}}: with it set,
+    the persona addresses a person instead of announcing 「主播」."""
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import template_variables
+
+    cfg = PersonaConfig.model_validate({"id": "hanako", "streamer_name": "阿强"})
+    assert template_variables(cfg) == {"userName": "阿强", "agentName": "hanako"}
+
+    named = PersonaConfig.model_validate({"id": "hanako", "display_name": "花子"})
+    assert template_variables(named)["agentName"] == "花子", "display_name wins over the id"
+    assert template_variables(named)["userName"] == "主播", "the neutral default still works"
+
+
+@pytest.mark.parametrize("persona_id", ["mia", "hanako", "ming", "butter"])
+def test_no_shipped_template_leaks_a_raw_placeholder(persona_id: str) -> None:
+    """Every {{name}} any shipped persona uses must be one template_variables
+    supplies. A missing key is silent: the raw {{agentName}} simply sits in the
+    system prompt for the model to read out."""
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import PersonaStore, template_variables
+
+    cfg = PersonaConfig.model_validate({"id": persona_id})
+    store = PersonaStore(Path("/nonexistent-live-dir"), TEMPLATE_ROOT.parent / persona_id)
+    anchors = store.anchors(template_variables(cfg))
+    assert "{{" not in anchors.identity, anchors.identity
+    assert "{{" not in anchors.personality
+    prompt = store.proactive_prompt(Path("/nonexistent-global.md"), template_variables(cfg))
+    assert "{{" not in prompt

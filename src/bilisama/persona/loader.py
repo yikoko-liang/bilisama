@@ -35,6 +35,7 @@ __all__ = [
     "PersonaAnchors",
     "PersonaStore",
     "default_data_dir",
+    "template_variables",
 ]
 
 AnchorName = Literal["identity", "personality"]
@@ -59,6 +60,19 @@ def default_data_dir(persona_id: str) -> Path:
     base = os.environ.get("XDG_DATA_HOME", "")
     root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
     return root / "bilisama" / "personas" / persona_id
+
+
+def template_variables(cfg: PersonaConfig) -> dict[str, str]:
+    """Every {{name}} a persona template may use, resolved from config.
+
+    One place decides this mapping so no caller can supply half of it: a
+    missing key is not an error, it leaves the raw `{{agentName}}` sitting in
+    the system prompt for the model to read aloud.
+    """
+    return {
+        "userName": cfg.streamer_name,
+        "agentName": cfg.display_name or cfg.id,
+    }
 
 
 @dataclass(frozen=True, slots=True)
