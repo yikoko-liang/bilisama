@@ -91,12 +91,15 @@ def write_endpoint_file(path: Path, *, url: str, pid: int) -> None:
     """Publish where the UI lives, atomically and owner-only.
 
     The URL embeds the auth token, hence 0600 and the tmp+rename: a reader
-    never sees a half-written file, and other local users never read it at all.
+    never sees a half-written file, and other local users never read it at
+    all. The file is BORN 0600 — a write-then-chmod would leave a umask-wide
+    window with the token readable.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"url": url, "pid": pid}, ensure_ascii=False), encoding="utf-8")
-    tmp.chmod(0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"url": url, "pid": pid}, ensure_ascii=False))
     os.replace(tmp, path)
 
 
@@ -224,11 +227,17 @@ def create_ui_app(
         except WebSocketDisconnect:
             pass
         finally:
+            # Detach FIRST: the sender dies with WebSocketDisconnect when the
+            # client vanished mid-send, and awaiting it re-raises that inside
+            # this finally — a detach placed after would be skipped, leaking
+            # one dead 256-frame queue per hard-closed tab.
+            hub.detach(queue)
             if sender is not None:
                 sender.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                # CancelledError is a BaseException and needs naming; the
+                # Exception arm swallows the send-failure the pump died of.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await sender
-            hub.detach(queue)
 
     # Static mounts come after the routes so /, /ws and /config win; the
     # health app mounts last because its prefix is the bare token and a mount
@@ -255,7 +264,12 @@ async def _dispatch(raw: str, handlers: Mapping[ClientEvent, Handler]) -> None:
     """Route one client frame; bad input logs and is dropped, never raises."""
     try:
         message = json.loads(raw)
-        event = ClientEvent(message.get("event"))
+        # Legal JSON is not necessarily an object: [1,2], null and "str" all
+        # parse fine and then have no .get — treat them as invalid frames, not
+        # as a reason to kill the connection.
+        if not isinstance(message, dict):
+            raise TypeError("frame is not an object")
+        event = ClientEvent(str(message.get("event")))
     except (ValueError, TypeError):
         log.warning("ui.client_frame_invalid", size=len(raw))
         return
@@ -270,6 +284,14 @@ async def _dispatch(raw: str, handlers: Mapping[ClientEvent, Handler]) -> None:
 
 
 # ------------------------------------------------------------ server
+
+
+def _report_server_death(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("ui.server_died", error_text=str(exc))
 
 
 class _QuietServer(uvicorn.Server):
@@ -310,6 +332,9 @@ class UiServer:
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._server.serve(sockets=[self._sock]), name="ui:server")
+        # A dead server otherwise fails silently: browsers just retry forever
+        # and the voice loop never notices. One warning names the corpse.
+        self._task.add_done_callback(_report_server_death)
 
     async def stop(self) -> None:
         """Graceful first, three seconds of patience, then the axe."""

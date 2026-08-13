@@ -51,6 +51,13 @@ _COLUMNS = 8
 _DEFAULT_FPS = 8.0
 _MAX_FPS = 60.0
 
+# The renderer's hard caps (ui/web/js/skins/sprite.js MAX_GRID / MAX_FRAME_PX /
+# MAX_SHEET_PX). A pack past these "builds fine" and then silently degrades to
+# the built-in skin at load time — refuse at build time with the numbers.
+_MAX_GRID = 32
+_MAX_FRAME_PX = 512
+_MAX_SHEET_PX = 4096
+
 
 class MappingError(ValueError):
     """A mapping file problem, reported in full before giving up."""
@@ -81,12 +88,20 @@ def _collect_cells(
     cells: list[tuple[Path, bool]] = []
     index: dict[tuple[str, bool], int] = {}
     for name, spec in animations.items():
+        if not isinstance(spec, dict):
+            raise MappingError(f"轨道 {name} 要是对象，拿到 {type(spec).__name__}")
         frames = spec.get("frames")
         if not isinstance(frames, list) or not frames:
             raise MappingError(f"轨道 {name} 的 frames 要是非空数组")
-        fps = float(spec.get("fps", _DEFAULT_FPS))
+        try:
+            fps = float(spec.get("fps", _DEFAULT_FPS))
+        except (TypeError, ValueError) as exc:
+            raise MappingError(f"轨道 {name} 的 fps 不是数字：{spec.get('fps')!r}") from exc
         if not 0 < fps <= _MAX_FPS:
-            raise MappingError(f"轨道 {name} 的 fps 非法：{fps}")
+            raise MappingError(f"轨道 {name} 的 fps 非法：{fps}（要在 0 到 {_MAX_FPS} 之间）")
+        fallback = spec.get("fallback")
+        if fallback is not None and fallback not in animations:
+            raise MappingError(f"轨道 {name} 的 fallback 指向不存在的轨道：{fallback}")
         for frame in frames:
             file_name = frame.get("file") if isinstance(frame, dict) else None
             if not isinstance(file_name, str):
@@ -130,6 +145,14 @@ def build_pack(frames_dir: Path, mapping_path: Path, out_dir: Path) -> Path:
     cell_w = max(image.width for image in images)
     cell_h = max(image.height for image in images)
     rows = (len(images) + _COLUMNS - 1) // _COLUMNS
+    if cell_w > _MAX_FRAME_PX or cell_h > _MAX_FRAME_PX:
+        raise MappingError(f"单帧 {cell_w}x{cell_h} 超出渲染器上限 {_MAX_FRAME_PX}px——先把源帧缩小")
+    if rows > _MAX_GRID:
+        raise MappingError(f"帧数太多：{len(images)} 帧要 {rows} 行，渲染器上限 {_MAX_GRID} 行")
+    if cell_w * _COLUMNS > _MAX_SHEET_PX or cell_h * rows > _MAX_SHEET_PX:
+        raise MappingError(
+            f"整图 {cell_w * _COLUMNS}x{cell_h * rows} 超出渲染器上限 {_MAX_SHEET_PX}px"
+        )
     sheet = Image.new("RGBA", (_COLUMNS * cell_w, rows * cell_h), (0, 0, 0, 0))
     for i, image in enumerate(images):
         x = (i % _COLUMNS) * cell_w + (cell_w - image.width) // 2

@@ -123,6 +123,12 @@ class UiHub:
         replay = [self._sticky[event] for event in _STICKY if event in self._sticky]
         replay.extend(self._feed_ring)
         replay.extend(self._log_ring)
+        if self._closed:
+            # A connection that squeezed in between aclose() and the server
+            # actually stopping would otherwise wait on a queue nobody feeds
+            # until the shutdown axe falls; hand it the hang-up straight away.
+            queue.put_nowait(None)
+            return replay, queue
         self._clients.append(queue)
         return replay, queue
 
@@ -146,7 +152,10 @@ class UiHub:
         if self._closed:
             return
         payload = dict(data)
-        payload.setdefault("ts", self._clock.wall().isoformat(timespec="seconds"))
+        # Local time, not UTC: log.line rows carry the formatter's local
+        # timestamps, and one panel showing two clocks eight hours apart
+        # reads as broken.
+        payload.setdefault("ts", self._clock.wall().astimezone().isoformat(timespec="seconds"))
         line = frame(event, payload)
         if event in _STICKY:
             self._sticky[event] = line

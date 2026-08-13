@@ -13,6 +13,7 @@ import json
 import logging
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -84,7 +85,11 @@ async def test_broadcast_reaches_an_attached_client_with_a_timestamp() -> None:
     payload = _payload(line)
     assert payload["event"] == "reply.delta"
     assert payload["data"]["text"] == "你好"
-    assert payload["data"]["ts"].startswith("2026-01-01T")
+    # Stamped in LOCAL time (the panel sits next to local-time log lines), so
+    # compare the instant, not the string.
+    stamped = datetime.fromisoformat(payload["data"]["ts"])
+    assert stamped == datetime(2026, 1, 1, tzinfo=UTC)
+    assert stamped.utcoffset() == datetime.now().astimezone().utcoffset()
 
 
 async def test_full_queue_drops_the_oldest_frame_and_keeps_the_newest() -> None:
@@ -210,3 +215,15 @@ async def test_aclose_reaches_a_full_queue() -> None:
     hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "占满"})
     await hub.aclose()
     assert queue.get_nowait() is None
+
+
+async def test_attach_after_aclose_hands_over_the_sentinel_immediately() -> None:
+    """A connection squeezing in between aclose() and the server stopping
+    must not wait on a queue nobody feeds until the shutdown axe falls."""
+    hub = UiHub(FakeClock())
+    hub.broadcast(ServerEvent.VOICE_STATE, {"state": "idle"})
+    await hub.aclose()
+    replay, queue = hub.attach()
+    assert replay  # history still served; the page shows the last state
+    assert queue.get_nowait() is None
+    assert hub.clients == 0

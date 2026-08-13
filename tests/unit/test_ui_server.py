@@ -202,8 +202,13 @@ def test_malformed_and_unknown_client_frames_are_dropped_quietly() -> None:
         ws.receive_text()  # hello
         ws.send_text("not json at all")
         ws.send_text(json.dumps({"event": "no.such.event", "data": {}}))
+        # Legal JSON that is not an object parses fine and then has no .get —
+        # it must be dropped, not kill the connection.
+        ws.send_text("[1, 2]")
+        ws.send_text("null")
+        ws.send_text('"just a string"')
         ws.send_text(json.dumps({"event": "pet.poke", "data": "not a dict"}))
-    # The two bad frames vanished; the poke with a bad payload got {}.
+    # Every bad frame vanished; the poke with a bad payload got {}.
     assert calls == [(ClientEvent.PET_POKE, {})]
 
 

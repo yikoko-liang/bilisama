@@ -133,7 +133,10 @@ class S2SLink:
         None: the server then falls back to the session instructions, which
         are exactly the persona already.
         """
-        if turn is None:
+        if not turn:
+            # None and "" both mean "no per-turn ask": stay bare so the server
+            # falls back to the session instructions — an empty turn composed
+            # onto the persona would send a dangling "本轮要求：" tail.
             return None
         if not self._context:
             return turn

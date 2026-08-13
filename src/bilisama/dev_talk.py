@@ -867,16 +867,25 @@ async def run_director(args: argparse.Namespace) -> int:
         pet_dir = Path(__file__).resolve().parents[2] / "desktop" / "preview"
         electron = pet_dir / "node_modules" / ".bin" / "electron"
         if electron.is_file():
-            pet_proc = await asyncio.create_subprocess_exec(
-                str(electron),
-                ".",
-                cwd=pet_dir,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走）")
+            try:
+                pet_proc = await asyncio.create_subprocess_exec(
+                    str(electron),
+                    ".",
+                    cwd=pet_dir,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                # The shell is a passenger of a passenger; failing to spawn it
+                # must not touch the voice loop.
+                print(f"[桌宠] 壳拉不起来（{exc}）；手动 npm start 也行")
+            else:
+                print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走）")
         else:
             print(f"[桌宠] 壳还没装：cd {pet_dir} && npm install，之后 --pet 才有东西可拉")
+    elif args.pet and not args.no_ui:
+        # The user wanted a UI; the port bind above is what failed.
+        print("[桌宠] 界面服务器没起来（端口问题，见上面），这场壳没有可显示的东西")
     elif args.pet:
         print("[桌宠] --pet 需要界面服务器；--no-ui 下没有可显示的东西")
 
@@ -974,48 +983,54 @@ async def run_director(args: argparse.Namespace) -> int:
     if not args.mute_while_speaking:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
 
-    await assembly.refresh_context()
-    tasks = [
-        asyncio.create_task(scheduler.run(), name="director:scheduler"),
-        asyncio.create_task(proactive.run(), name="director:proactive"),
-        asyncio.create_task(
-            assembly.run([console] + ([bili_source] if bili_source is not None else [])),
-            name="director:assembly",
-        ),
-        asyncio.create_task(
-            _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
-            name="director:mic",
-        ),
-        asyncio.create_task(_consume_events(speech.events(), speaker, None), name="director:play"),
-        asyncio.create_task(drain_controls(), name="director:controls"),
-        asyncio.create_task(stdin_pump(), name="director:stdin"),
-        asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
-    ]
-    if hub is not None:
-        live_hub = hub
-
-        def read_signals() -> VoiceSignals:
-            status = scheduler.status()
-            return VoiceSignals(
-                streamer_speaking=floor.streamer_speaking,
-                dispatching=bool(status.get("dispatching")),
-                active=status.get("active_source") is not None,
-                implicit=floor.implicit_active,
-                audio_busy=speaker.busy,
-            )
-
-        async def ui_feed() -> None:
-            # The fanout's third view (scheduler and director:play hold the
-            # other two); link_frames drops PCM before it can reach a browser.
-            async for ev in speech.events():
-                for name, data in link_frames(ev):
-                    live_hub.broadcast(name, data)
-
-        tasks += [
-            asyncio.create_task(ui_feed(), name="director:ui-feed"),
-            asyncio.create_task(live_hub.run(read_signals), name="director:ui-state"),
-        ]
+    # Everything below runs under the finally: the UI server, the endpoint
+    # file and the pet shell already exist, and refresh_context is a real
+    # network send — a failure past this point must still tear them down.
+    tasks: list[asyncio.Task[None]] = []
     try:
+        await assembly.refresh_context()
+        tasks = [
+            asyncio.create_task(scheduler.run(), name="director:scheduler"),
+            asyncio.create_task(proactive.run(), name="director:proactive"),
+            asyncio.create_task(
+                assembly.run([console] + ([bili_source] if bili_source is not None else [])),
+                name="director:assembly",
+            ),
+            asyncio.create_task(
+                _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
+                name="director:mic",
+            ),
+            asyncio.create_task(
+                _consume_events(speech.events(), speaker, None), name="director:play"
+            ),
+            asyncio.create_task(drain_controls(), name="director:controls"),
+            asyncio.create_task(stdin_pump(), name="director:stdin"),
+            asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
+        ]
+        if hub is not None:
+            live_hub = hub
+
+            def read_signals() -> VoiceSignals:
+                status = scheduler.status()
+                return VoiceSignals(
+                    streamer_speaking=floor.streamer_speaking,
+                    dispatching=bool(status.get("dispatching")),
+                    active=status.get("active_source") is not None,
+                    implicit=floor.implicit_active,
+                    audio_busy=speaker.busy,
+                )
+
+            async def ui_feed() -> None:
+                # The fanout's third view (scheduler and director:play hold the
+                # other two); link_frames drops PCM before it can reach a browser.
+                async for ev in speech.events():
+                    for name, data in link_frames(ev):
+                        live_hub.broadcast(name, data)
+
+            tasks += [
+                asyncio.create_task(ui_feed(), name="director:ui-feed"),
+                asyncio.create_task(live_hub.run(read_signals), name="director:ui-state"),
+            ]
         await stop.wait()
     finally:
         for task in tasks:
@@ -1039,12 +1054,15 @@ async def run_director(args: argparse.Namespace) -> int:
             with contextlib.suppress(OSError):
                 endpoint_file.unlink(missing_ok=True)
         if pet_proc is not None and pet_proc.returncode is None:
-            # A viewer, not a dependent: terminate is enough, and a shell the
-            # user closed by hand already has a returncode.
+            # A viewer, not a dependent: terminate politely, then the axe — a
+            # shell that shrugs off SIGTERM must not outlive its dev-talk.
             with contextlib.suppress(ProcessLookupError):
                 pet_proc.terminate()
-            with contextlib.suppress(TimeoutError):
+            try:
                 await asyncio.wait_for(pet_proc.wait(), timeout=3.0)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    pet_proc.kill()
         # Every step below gets its own try: this is a chain of unrelated
         # resources, and one refusing to close must not leak the rest — a
         # failed distillation would otherwise leave the WS and the DB open

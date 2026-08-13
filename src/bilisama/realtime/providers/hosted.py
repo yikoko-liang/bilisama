@@ -132,7 +132,7 @@ class HostedLink:
 
     def _compose(self, turn: str | None) -> str | None:
         """Persona plus the per-turn ask; see S2SLink._compose for the why."""
-        if turn is None:
+        if not turn:
             return None
         if not self._context:
             return turn
