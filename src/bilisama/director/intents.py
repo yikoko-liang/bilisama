@@ -59,6 +59,7 @@ _PRIORITY: dict[EventKind, Priority] = {
 # Paid attention must survive an interruption; a stale danmaku must not.
 _REQUEUE = {EventKind.SUPER_CHAT, EventKind.GIFT, EventKind.GUARD_BUY}
 _DANMAKU_TTL_S = 20.0
+_DISPATCH_FLOOR_S = 5.0  # minimum runway once an already-old winner leaves the window
 
 
 def wrap_events(lines: list[str]) -> str:
@@ -141,6 +142,11 @@ def intent_for(
         protected=protected,
         protect_ms=protect_ms,
     )
+    # Staleness counts from ARRIVAL, not from when the window happened to
+    # close — a reply 50s after the message answers a conversation the room
+    # left behind. The dispatch floor keeps a slow window's winner from
+    # arriving pre-expired.
+    arrived = event.recv_at if event.recv_at > 0 else now
     return Intent(
         source=event.kind.value,
         priority=priority,
@@ -149,7 +155,7 @@ def intent_for(
         event=event,
         dedup_key=event.dedup_key,
         created_at=now,
-        expires_at=None if paid else now + _DANMAKU_TTL_S,
+        expires_at=None if paid else max(arrived + _DANMAKU_TTL_S, now + _DISPATCH_FLOOR_S),
         requeue_on_interrupt=paid,
     )
 
@@ -157,9 +163,10 @@ def intent_for(
 def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> Intent:
     """One greeting for a burst of new arrivals — the entry lane's only voice.
 
-    Fires from the presence counter, NOT from the speak.entry switch: that
-    switch stays off by default precisely because this batched welcome is
-    the designed fallback (plan section 2.7).
+    Fires from the presence counter once the assembly's speak.entry gate
+    has passed: the switch governs the entry lane's ONE voice (this batched
+    hello — individual arrivals never speak), so turning it off is what
+    makes chat/observe mode genuinely silent.
     """
     spec = ReplySpec(
         instructions="刚进来一批新观众，用一句话热络地打个招呼，别逐个点名。",
@@ -167,7 +174,10 @@ def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> In
     )
     return Intent(
         source="entry",
-        priority=Priority.BACKGROUND_RESULT,
+        # DANMAKU, deliberately: under strict-greater preemption a hello must
+        # QUEUE behind an answer being spoken, never cut it off mid-sentence
+        # (plan section 2.7: the L4 lanes preempt nobody).
+        priority=Priority.DANMAKU,
         injection=Injection(
             reply=spec, item_text=wrap_events([f"[进房] 新观众 {count} 位刚进直播间"])
         ),

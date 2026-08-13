@@ -646,9 +646,8 @@ async def run_director(args: argparse.Namespace) -> int:
     if room_id:
         from bilisama.ingest.bilibili import BilibiliEventSource
 
-        sessdata = secrets.resolve(settings.room.credential_ref) or os.environ.get(
-            "BILI_SESSDATA", ""
-        )
+        # One truth: the config reference (shipped default env:BILI_SESSDATA).
+        sessdata = secrets.resolve(settings.room.credential_ref) or ""
         bili_source = BilibiliEventSource(
             room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
         )

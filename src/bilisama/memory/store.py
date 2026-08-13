@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from bilisama.ingest.events import LiveEvent
+from bilisama.ingest.events import GuardLevel, LiveEvent
 
 if TYPE_CHECKING:
     from bilisama.clock import Clock
@@ -59,7 +59,14 @@ _VIEWER_UPSERT = """
     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     ON CONFLICT(identity) DO UPDATE SET
         uname = COALESCE(NULLIF(excluded.uname, ''), uname),
-        guard_level = excluded.guard_level,
+        -- Only real tiers overwrite: entry/interact events carry no guard
+        -- field on the wire and would otherwise wipe the tier recorded from
+        -- danmaku right before the VIP promotion reads it. Cost: an expired
+        -- guard sticks until the next tier-carrying event says otherwise.
+        guard_level = CASE
+            WHEN excluded.guard_level != 'none' THEN excluded.guard_level
+            ELSE viewer.guard_level
+        END,
         last_seen = excluded.last_seen,
         streams_seen = streams_seen
             + (last_stream_id != excluded.last_stream_id),
@@ -78,12 +85,21 @@ def logical_date(wall: datetime) -> datetime:
     return wall.astimezone(STREAM_TZ) - timedelta(hours=_DAY_BOUNDARY_H)
 
 
+def _parse_guard(raw: str) -> GuardLevel:
+    """Stored strings become the enum ONCE, at the storage boundary — every
+    consumer would otherwise repeat this defensive parse, each differently."""
+    try:
+        return GuardLevel(raw)
+    except ValueError:
+        return GuardLevel.NONE
+
+
 @dataclass(frozen=True, slots=True)
 class ViewerRow:
     identity: str
     uid: int
     uname: str
-    guard_level: str
+    guard_level: GuardLevel
     first_seen: str
     last_seen: str
     streams_seen: int
@@ -270,7 +286,7 @@ class MemoryStore:
             identity=row["identity"],
             uid=row["uid"],
             uname=row["uname"],
-            guard_level=row["guard_level"],
+            guard_level=_parse_guard(row["guard_level"]),
             first_seen=row["first_seen"],
             last_seen=row["last_seen"],
             streams_seen=row["streams_seen"],

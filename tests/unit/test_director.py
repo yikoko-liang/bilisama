@@ -295,6 +295,30 @@ async def test_revoked_super_chat_is_withdrawn_before_it_speaks() -> None:
         assert by_id["super_chat:sc:1"].outcome is Outcome.SPOKEN
 
 
+async def test_settling_clears_a_revoke_that_raced_the_active_reply() -> None:
+    """Revoking the ACTIVE intent's key lets it finish — and the settle must
+    sweep the stranded entry, or any future intent reusing the key would be
+    silently expired as platform.revoked."""
+    script = Script(delta_chunks=3, delta_interval_s=0.03)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        async with _running_scheduler(server) as (scheduler, _):
+            scheduler.submit(
+                _intent("super_chat", Priority.SUPERCHAT, dedup="super_chat:sc:9", requeue=True)
+            )
+            for _ in range(200):
+                if scheduler._active is not None:
+                    break
+                await asyncio.sleep(0.01)
+            scheduler.revoke("super_chat:sc:9")  # too late: it is being spoken
+            await _wait_verdicts(scheduler, 1)
+            assert scheduler.verdicts[0].outcome is Outcome.SPOKEN
+            scheduler.submit(
+                _intent("super_chat", Priority.SUPERCHAT, dedup="super_chat:sc:9", requeue=True)
+            )
+            await _wait_verdicts(scheduler, 2)
+        assert scheduler.verdicts[1].outcome is Outcome.SPOKEN, "the key was not left poisoned"
+
+
 async def test_expired_intents_never_dispatch() -> None:
     """A stale danmaku answered late is worse than unanswered."""
     clock = FakeClock()

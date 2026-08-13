@@ -2,6 +2,7 @@
 
 [interaction.speak]
 danmaku = false
+entry = false
 gift = false
 super_chat = false
 guard_buy = false

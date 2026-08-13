@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING
 
 from bilisama.config.enums import GrowthMode
 from bilisama.director.intents import burst_welcome_intent, intent_for
+from bilisama.ingest.bilibili.safety import DedupRing
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
-from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
+from bilisama.ingest.events import EventKind, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
 from bilisama.memory.context import memory_segments
 from bilisama.obs.logging import get_logger
@@ -93,8 +95,17 @@ class Assembly:
         # Callers pass persona.template_variables(cfg); this is only the floor.
         # One greeting per VIP per stream (plan section 2.7's acceptance):
         # the fixture's captain walks in twice and gets named once. Assembly
-        # lives for one stream, so the set needs no reset hook.
-        self._vip_greeted: set[str] = set()
+        # lives for one stream, so these need no reset hook; both are bounded
+        # because a marathon mega-room stream must not grow them forever.
+        self._vip_greeted: OrderedDict[str, None] = OrderedDict()
+        self._promoted: OrderedDict[str, bool] = OrderedDict()
+        # Replay shield for the direct lane (SC / guard / VIP and selector
+        # winners): blivedm's inner reconnect re-delivers recent packets, and
+        # the paid kinds never pass the selector's 0.35s ring. 30s covers the
+        # supervised-restart backoff too; event ids are per-event unique, so
+        # the wide window cannot eat genuine reposts.
+        self._direct_ring = DedupRing(window_s=30.0, capacity=2048)
+        self.events_deduped = 0
         self._prefix = static_prefix(
             persona.anchors(variables or {"userName": "主播", "agentName": "助手"})
         )
@@ -113,26 +124,33 @@ class Assembly:
         self.events_seen += 1
         if event.kind is EventKind.ENTRY:
             event = self._promote_entry(event)
-        if event.kind is EventKind.ENTRY and self._presence is not None:
-            # Deliberately ahead of the speak switch: speak.entry defaults to
-            # off BECAUSE this batched welcome is the designed fallback.
-            burst = self._presence.note(event.viewer.identity, self._clock.monotonic())
-            if burst is not None:
-                self.intents_submitted += 1
-                self._submit(
-                    burst_welcome_intent(
-                        burst, now=self._clock.monotonic(), max_tokens=self._max_tokens
-                    )
-                )
         if not self._speak_enabled(event.kind.value):
+            return
+        if event.kind is EventKind.ENTRY:
+            # The entry lane's one voice is the batched hello — individual
+            # arrivals never speak — so speak.entry (checked above) is the
+            # switch that makes chat/observe mode genuinely silent.
+            if self._presence is not None:
+                burst = self._presence.note(event.viewer.identity, self._clock.monotonic())
+                if burst is not None:
+                    self.intents_submitted += 1
+                    self._submit(
+                        burst_welcome_intent(
+                            burst, now=self._clock.monotonic(), max_tokens=self._max_tokens
+                        )
+                    )
             return
         if event.kind is EventKind.VIP_ENTER:
             if event.viewer.identity in self._vip_greeted:
                 return
-            self._vip_greeted.add(event.viewer.identity)
-        if self._selector is not None and event.kind in SELECTOR_KINDS:
+            self._vip_greeted[event.viewer.identity] = None
+            if len(self._vip_greeted) > 4096:
+                self._vip_greeted.popitem(last=False)
+        if self._selector is not None and event.kind in SELECTOR_KINDS and event.room_id:
             # The funnel lane: danmaku compete for one window slot, gifts
-            # aggregate. Winners re-enter through deliver_selected.
+            # aggregate. Winners re-enter through deliver_selected. Events
+            # without a real room (the dev console, direct-fed fixtures) skip
+            # the crowd funnel — a keyboard is not a crowd.
             self._selector.offer(event)
             return
         self._submit_event(event)
@@ -142,6 +160,13 @@ class Assembly:
         self._submit_event(event)
 
     def _submit_event(self, event: LiveEvent) -> None:
+        # Re-checked here because selector winners arrive up to a window
+        # later: a switch flipped mid-window must silence the delivery too.
+        if not self._speak_enabled(event.kind.value):
+            return
+        if event.dedup_key and self._direct_ring.seen(event.dedup_key, self._clock.monotonic()):
+            self.events_deduped += 1
+            return
         intent = intent_for(
             event.redacted(),
             now=self._clock.monotonic(),
@@ -161,14 +186,24 @@ class Assembly:
         so the promotion is store-based: past gifts or a recorded guard tier
         earn a greeting by name.
         """
-        record = self._store.viewer(event.viewer.identity)
-        if record is None:
-            return event
-        try:
-            guard = GuardLevel(record.guard_level)
-        except ValueError:
-            guard = GuardLevel.NONE
-        if guard.is_patron or is_vip_entry(event.viewer, lifetime_gift_cny=record.gift_value_cny):
+        identity = event.viewer.identity
+        if identity == "anon":
+            return event  # masked arrivals carry no lookupable history
+        cached = self._promoted.get(identity)
+        if cached is None:
+            record = self._store.viewer(identity)
+            cached = record is not None and (
+                record.guard_level.is_patron
+                or is_vip_entry(event.viewer, lifetime_gift_cny=record.gift_value_cny)
+            )
+            # Cached per stream: without this, every arrival costs a store
+            # read that flushes the write batch — 40/s at the presence budget,
+            # on the loop the voice pipeline shares. The price is that a
+            # first-ever gift mid-stream promotes on the NEXT stream.
+            self._promoted[identity] = cached
+            if len(self._promoted) > 4096:
+                self._promoted.popitem(last=False)
+        if cached:
             return dataclasses.replace(event, kind=EventKind.VIP_ENTER)
         return event
 
@@ -248,6 +283,7 @@ class Assembly:
         return {
             "events_seen": self.events_seen,
             "intents_submitted": self.intents_submitted,
+            "events_deduped": self.events_deduped,
             "context_chars": len(self._last_pushed),
             "sources": {s.name: ("gave_up" if s.gave_up else "ok") for s in self._supervised},
         }

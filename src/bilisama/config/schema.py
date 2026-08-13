@@ -173,7 +173,10 @@ class SpeakSwitches(BaseModel):
     super_chat: bool = True
     guard_buy: bool = True
     vip_enter: bool = True
-    entry: bool = False
+    # Governs the entry lane's ONE voice, the batched welcome — individual
+    # arrivals never speak at any setting. Off in the chat profile is what
+    # makes observe mode genuinely silent.
+    entry: bool = True
     follow: bool = False
     like: bool = False
     share: bool = False

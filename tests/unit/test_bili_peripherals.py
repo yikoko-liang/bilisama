@@ -65,13 +65,15 @@ def test_stale_arrivals_age_out_of_the_window() -> None:
 # ------------------------------------------------------------------ assembly lanes
 
 
-def _assembly(tmp_path: Path) -> tuple[Assembly, MemoryStore, list[Intent], FakeClock]:
+def _assembly(
+    tmp_path: Path, *, speak: SpeakSwitches | None = None
+) -> tuple[Assembly, MemoryStore, list[Intent], FakeClock]:
     clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
     store = MemoryStore(":memory:", clock)
     store.begin_stream()
     persona = PersonaStore(tmp_path / "live", TEMPLATE_ROOT)
     growth = GrowthSwitches()
-    speak = SpeakSwitches()  # entry stays False — the burst must not care
+    speak = speak or SpeakSwitches()
     distiller = Distiller(None, store, persona, growth, clock)
     intents: list[Intent] = []
     proactive = ProactiveTopicLoop(
@@ -111,14 +113,23 @@ def _entry(uid: int) -> LiveEvent:
     )
 
 
-async def test_five_entries_buy_one_welcome_with_speak_entry_off(tmp_path: Path) -> None:
-    """Plan section 2.7: speak.entry defaults off BECAUSE this is the fallback."""
+async def test_five_entries_buy_one_welcome_at_default_switches(tmp_path: Path) -> None:
+    """speak.entry governs the entry lane's one voice — the batched hello."""
     assembly, _store, intents, _clock = _assembly(tmp_path)
     for uid in range(1, 6):
         await assembly.on_event(_entry(uid))
     assert [i.source for i in intents] == ["entry"]
-    assert intents[0].priority is Priority.BACKGROUND_RESULT
+    assert intents[0].priority is Priority.DANMAKU, "a hello queues, it never preempts an answer"
     assert "5 位" in (intents[0].injection.item_text or "")
+
+
+async def test_entry_off_silences_the_burst_for_observe_mode(tmp_path: Path) -> None:
+    """The chat profile's promise — "它只是不回" — must hold for the hello too."""
+    assembly, store, intents, _clock = _assembly(tmp_path, speak=SpeakSwitches(entry=False))
+    for uid in range(1, 8):
+        await assembly.on_event(_entry(uid))
+    assert intents == []
+    assert store.viewer("uid:3") is not None, "memory still saw everyone"
 
 
 async def test_known_spender_walking_in_is_promoted_to_vip(tmp_path: Path) -> None:
@@ -252,6 +263,7 @@ def test_shipped_chat_profile_loads_and_means_no_danmaku() -> None:
     assert settings.active_profile == "chat"
     speak = settings.interaction.speak
     assert not speak.danmaku and not speak.gift and not speak.super_chat
+    assert not speak.entry, "observe mode must silence the batched hello too"
     assert speak.proactive, "chat mode still starts topics — that is its point"
 
 
@@ -389,3 +401,150 @@ def test_sc_delete_purges_the_paid_pocket_before_revoking() -> None:
     source.on_sc_delete([888001])
     assert len(source._paid) == 0, "withdrawn before it ever reached the scheduler"
     assert revoked == ["super_chat:sc:888001"]
+
+
+# ------------------------------------------------------------------ review-round fixes
+
+
+def _sc_event(sc_id: int = 1) -> LiveEvent:
+    return LiveEvent(
+        kind=EventKind.SUPER_CHAT,
+        room_id=777,
+        viewer=Viewer(uid=77, name="金主"),
+        text="加油",
+        value_cny=30.0,
+        event_id=f"sc:{sc_id}",
+    )
+
+
+async def test_replayed_super_chat_is_deduped_at_the_assembly(tmp_path: Path) -> None:
+    """An inner-reconnect replay arrives seconds later — long after the
+    scheduler settled and freed the key. The 30s assembly ring is the cover
+    the paid lane never had."""
+    assembly, _store, intents, clock = _assembly(tmp_path)
+    await assembly.on_event(_sc_event())
+    await clock.advance(3.0)
+    await assembly.on_event(_sc_event())  # byte-identical replay
+    assert len([i for i in intents if i.source == "super_chat"]) == 1
+    assert assembly.events_deduped == 1
+
+
+async def test_captain_by_tier_is_promoted_even_with_zero_gifts(tmp_path: Path) -> None:
+    """The scenario the upsert guard unblocks: tier recorded from danmaku,
+    wallet empty, and the ENTRY (which carries no guard field) must not wipe
+    the tier before the promotion reads it."""
+    from bilisama.ingest.events import GuardLevel
+
+    assembly, store, intents, _clock = _assembly(tmp_path)
+    store.on_event(
+        LiveEvent(
+            kind=EventKind.DANMAKU,
+            room_id=777,
+            viewer=Viewer(uid=55, name="老舰长", guard_level=GuardLevel.CAPTAIN),
+            text="来了",
+            event_id="dm:seed",
+        )
+    )
+    await assembly.on_event(_entry(55))
+    assert [i.source for i in intents] == ["vip_enter"]
+
+
+async def test_console_events_skip_the_crowd_funnel(tmp_path: Path) -> None:
+    """room_id 0 marks keyboard input (the dev console): a typed 你好 must
+    answer immediately instead of losing to the spam bar."""
+    from bilisama.ingest.bilibili.selector import DanmakuSelector
+
+    clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    persona = PersonaStore(tmp_path / "live", TEMPLATE_ROOT)
+    intents: list[Intent] = []
+    proactive = ProactiveTopicLoop(
+        None,
+        store,
+        SpeakingFloor(clock),
+        clock,
+        submit=intents.append,
+        prompt="",
+        idle_threshold_s=90.0,
+    )
+
+    async def push(text: str) -> None:
+        return None
+
+    from bilisama.config.derive import derive
+    from bilisama.config.enums import Chattiness
+
+    assembly = Assembly(
+        store=store,
+        distiller=Distiller(None, store, persona, GrowthSwitches(), clock),
+        proactive=proactive,
+        persona=persona,
+        growth=GrowthSwitches(),
+        speak_enabled=lambda source: True,
+        submit=intents.append,
+        push_context=push,
+        clock=clock,
+        selector=DanmakuSelector(
+            clock, thresholds=lambda: derive(Chattiness.MEDIUM), per_uid_cooldown_s=60.0
+        ),
+    )
+    console = LiveEvent(
+        kind=EventKind.DANMAKU,
+        viewer=Viewer(uid=1, name="测试观众"),
+        text="你好",
+        event_id="console:1",
+    )
+    await assembly.on_event(console)
+    assert [i.source for i in intents] == ["danmaku"], "no window, no score bar"
+
+
+async def test_speak_toggle_mid_window_silences_the_delivery(tmp_path: Path) -> None:
+    switches = SpeakSwitches()
+    assembly, _store, intents, _clock = _assembly(tmp_path, speak=switches)
+    winner = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=777,
+        viewer=Viewer(uid=1, name="观众"),
+        text="主播怎么看",
+        event_id="dm:late",
+    )
+    switches.danmaku = False  # flipped while the window was open
+    await assembly.deliver_selected(winner)
+    assert intents == []
+
+
+def test_danmaku_ttl_counts_from_arrival_with_a_dispatch_floor() -> None:
+    stale = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=777,
+        viewer=Viewer(uid=1, name="观众"),
+        text="老问题",
+        event_id="dm:old",
+        recv_at=100.0,
+    )
+    intent = intent_for(stale, now=128.0)  # a LOW-chattiness 30s window later
+    assert intent is not None and intent.expires_at is not None
+    assert intent.expires_at == 133.0, "floor: 5s of runway, not 20 more seconds of staleness"
+    fresh = intent_for(stale, now=101.0)
+    assert fresh is not None and fresh.expires_at == 120.0, "arrival + 20s while fresh"
+
+
+def test_tierless_upsert_never_erases_a_recorded_guard_level() -> None:
+    from bilisama.ingest.events import GuardLevel
+
+    clock = FakeClock(wall=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    store.on_event(
+        LiveEvent(
+            kind=EventKind.DANMAKU,
+            room_id=777,
+            viewer=Viewer(uid=55, name="老舰长", guard_level=GuardLevel.CAPTAIN),
+            text="来了",
+            event_id="dm:1",
+        )
+    )
+    store.on_event(_entry(55))  # wire entries carry no guard field
+    record = store.viewer("uid:55")
+    assert record is not None and record.guard_level is GuardLevel.CAPTAIN

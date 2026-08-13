@@ -13,7 +13,7 @@ active_profile = "normal"
 [room]
 room_id = 0
 platform = "bilibili"
-credential_ref = ""
+credential_ref = "env:BILI_SESSDATA"       # 登录态 cookie 的引用；没设这个环境变量就匿名连（观众全打码）
 
 [speech]
 provider = "s2s"                        # s2s | dashscope | openai_ga
@@ -91,7 +91,7 @@ gift = true
 super_chat = true
 guard_buy = true
 vip_enter = true
-entry = false                           # 普通观众进房，靠批量欢迎兜底
+entry = true                            # 管的是批量欢迎那一声；单人进房任何档位都不发声
 follow = false
 like = false
 share = false

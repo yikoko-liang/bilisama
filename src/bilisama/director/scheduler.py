@@ -528,6 +528,10 @@ class Scheduler:
     def _free_key(self, intent: Intent) -> None:
         if intent.dedup_key:
             self._queued_keys.discard(intent.dedup_key)
+            # A revoke that raced the active reply (the "let it finish" case)
+            # must not outlive the settle: a stranded entry would silently
+            # expire any future intent that reuses the key.
+            self._revoked.discard(intent.dedup_key)
 
     def _expired(self, intent: Intent) -> bool:
         return intent.expires_at is not None and self._clock.monotonic() >= intent.expires_at
