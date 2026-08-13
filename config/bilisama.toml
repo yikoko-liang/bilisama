@@ -97,6 +97,9 @@ share = false
 proactive = true
 background_result = false               # MVP 默认关
 
+[interaction.danmaku]                   # 弹幕挑选（L3）。窗口长度和打分门槛由话痨度派生，不在这里
+per_uid_cooldown_s = 60                 # 回应过谁之后，多少秒内不再挑他的弹幕；他的话照常入库
+
 [interaction.proactive]                 # 主动话题（L1）。开口时机由冷场阈值（话痨度派生）决定
 max_per_hour = 12
 wake_interval_s = 30                    # 后台思考节奏，不是开口节奏

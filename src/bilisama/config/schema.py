@@ -194,6 +194,18 @@ class ProactiveConfig(BaseModel):
     wake_interval_s: int = Field(30, ge=5, le=300)
 
 
+class DanmakuConfig(BaseModel):
+    """Danmaku-lane knobs. Window length and score threshold are derived from
+    chattiness (derive.py) — single-writer rule — so only the per-viewer
+    cooldown lives here."""
+
+    model_config = {"extra": "forbid"}
+
+    # Seconds before the same viewer can win the danmaku window again. Armed
+    # by the reply, not the attempt (safety.PerUidCooldown).
+    per_uid_cooldown_s: int = Field(60, ge=0, le=600)
+
+
 class InteractionConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -204,6 +216,7 @@ class InteractionConfig(BaseModel):
     gift_gold_medium: int = Field(1000, ge=0)
     burst_uniques: int = Field(5, ge=1)
     burst_window_s: int = Field(45, ge=5)
+    danmaku: DanmakuConfig = Field(default_factory=DanmakuConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
 
 

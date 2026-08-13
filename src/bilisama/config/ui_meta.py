@@ -249,6 +249,16 @@ UI_META: dict[str, FieldMeta] = {
         group="互动",
         order=3,
     ),
+    "interaction.danmaku": FieldMeta(label="弹幕", group="互动", order=8),
+    "interaction.danmaku.per_uid_cooldown_s": FieldMeta(
+        label="同一观众回应间隔",
+        hint="回应过某位观众后，这么多秒内他的弹幕不再参与挑选；他的话照常记录",
+        unit="s",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="互动",
+        order=9,
+    ),
     "interaction.speak": FieldMeta(
         label="回应哪些",
         widget="switch_matrix",
