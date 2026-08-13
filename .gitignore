@@ -21,3 +21,4 @@ path.sh
 
 # Claude Code 本地工具配置（launch.json 端口是本机偏好，不进库）
 .claude/
+desktop/preview/node_modules/

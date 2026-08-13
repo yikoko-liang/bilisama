@@ -1,0 +1,14 @@
+{
+  "name": "bilisama-preview",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Disposable desktop-pet shell for the dev-talk preview UI. Stage 7 replaces this whole directory with the real desktop/ tree.",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.2.0"
+  }
+}
