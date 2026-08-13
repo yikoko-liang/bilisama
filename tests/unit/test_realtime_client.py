@@ -439,3 +439,25 @@ async def test_protected_reply_wraps_itself_in_interrupt_patches() -> None:
             if e.get("type") == "session.update" and "turn_detection" in (e.get("session") or {})
         ]
         assert patches == [False, True]
+
+
+# ------------------------------------------------------------ the handshake
+
+
+async def test_a_refused_handshake_names_the_servers_reason() -> None:
+    """A full server's one error frame must survive into the exception text.
+
+    「服务端第一帧不是 session.created：error」 tells the operator nothing:
+    error.type says WHICH refusal this is and error.message says why, and both
+    die with the 1008 close unless connect() carries them out. Hit live when a
+    stale client held the single s2s session slot (2026-08-14).
+    """
+    async with MockRealtimeServer(script=Script(faults={Fault.SESSION_LIMIT})) as server:
+        linkobj = S2SLink(server.url)
+        try:
+            with pytest.raises(ConnectionError) as excinfo:
+                await linkobj.connect()
+        finally:
+            await linkobj.aclose()
+        assert "session_limit_reached" in str(excinfo.value)
+        assert "session slots are in use" in str(excinfo.value)

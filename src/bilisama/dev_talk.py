@@ -36,10 +36,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol
 
+import websockets
+
 from bilisama.config.enums import ProviderName
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.realtime import link
-from bilisama.realtime.client import RealtimeClient
+from bilisama.realtime.client import RealtimeClient, SessionRefused
 from bilisama.realtime.providers import profile_for
 
 
@@ -48,6 +50,13 @@ class _AudioIn(Protocol):
     mode, the fanned-out adapter in director mode."""
 
     async def push_audio(self, pcm: bytes) -> None: ...
+
+
+class _Connects(Protocol):
+    """What _connect_or_exit needs: the raw client in wire mode, the
+    fanned-out adapter in director mode."""
+
+    async def connect(self) -> None: ...
 
 
 _INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
@@ -84,6 +93,29 @@ def _session_frame(provider: ProviderName) -> dict[str, Any] | None:
             },
         }
     return None
+
+
+def _connect_advice(exc: BaseException, provider: ProviderName, url: str) -> str:
+    """One line of Chinese with a fix action (CLAUDE.md's error-wording rule).
+
+    The two connect failures a dev box actually hits each get their recipe;
+    anything else keeps the endpoint and the underlying reason.
+    """
+    where = url.split("?")[0]
+    if isinstance(exc, SessionRefused) and exc.code == "session_limit_reached":
+        return "s2s 只有一个会话槽，被别的客户端占着：关掉其他 dev-talk，或重启 serve 终端。"
+    if isinstance(exc, ConnectionRefusedError) and provider is ProviderName.S2S:
+        return f"{where} 上没有 s2s 服务：先按 runbook 起 serve。"
+    return f"连不上 {where}：{exc}"
+
+
+async def _connect_or_exit(target: _Connects, provider: ProviderName, url: str) -> None:
+    """Connect, or exit through the file's established fatal path: SystemExit
+    prints its message without a traceback and exits non-zero."""
+    try:
+        await target.connect()
+    except (OSError, websockets.WebSocketException) as exc:
+        raise SystemExit(_connect_advice(exc, provider, url)) from exc
 
 
 async def _pump_wav(client: _AudioIn, path: Path) -> None:
@@ -546,6 +578,7 @@ async def run_director(args: argparse.Namespace) -> int:
         print(f"[侧路] {side_desc}")
 
     inner: link.SpeechLink
+    connect_url: str = args.url
     if provider is ProviderName.S2S:
         # Audio replies, not the shipping default: this stands against the
         # zero-patch official pipeline whose own TTS does the speaking. A
@@ -564,8 +597,9 @@ async def run_director(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
+        connect_url = _dashscope_url(args.model)
         inner = HostedLink(
-            _dashscope_url(args.model),
+            connect_url,
             ProviderName.DASHSCOPE,
             headers={"Authorization": f"Bearer {key}"},
             turn=settings.speech.dashscope.turn,
@@ -573,7 +607,7 @@ async def run_director(args: argparse.Namespace) -> int:
     else:
         raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
     speech = _Fanout(inner)
-    await speech.connect()
+    await _connect_or_exit(speech, provider, connect_url)
     speech.start()
 
     from bilisama.director.output_guard import load_guard
@@ -1159,7 +1193,7 @@ async def run(args: argparse.Namespace) -> int:
         url = args.url
 
     client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
-    await client.connect()
+    await _connect_or_exit(client, provider, url)
     print(f"已连接 {provider.value}（{url.split("?")[0]}），说话即可，Ctrl-C 退出。")
     if args.wav is None and not args.mute_while_speaking:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
