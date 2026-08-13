@@ -41,6 +41,23 @@ async function mountRenderer(avatar) {
   renderer?.destroy();
   renderer = mounted;
   renderer.setState(resolveVisual(state));
+  fitToSkin();
+}
+
+// The mount box follows the skin's natural proportions, and inside the shell
+// the WINDOW follows the mount: pet box + three bubble lines of headroom +
+// breathing room, bottom-anchored on the main side so the pet stays planted.
+// Numbers over measurement for the headroom: the bubble may not exist yet.
+function fitToSkin() {
+  const canvas = document.querySelector("#pet-mount canvas");
+  const aspect =
+    canvas && canvas.width > 0 ? canvas.height / canvas.width : 1.18; // CSS robot default
+  document.documentElement.style.setProperty("--pet-aspect", String(aspect));
+  const fit = window.bilisamaShell?.fit;
+  if (!fit) return;
+  const rect = document.getElementById("pet-mount").getBoundingClientRect();
+  // 208 keeps three 13px bubble lines readable; 118 = bubble cap + gap + floor.
+  fit(Math.round(Math.max(rect.width + 56, 208)), Math.round(rect.height + 118));
 }
 
 function applyVisual() {

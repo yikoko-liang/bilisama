@@ -219,6 +219,28 @@ ipcMain.on("pet:open-panel", (event) => {
   if (fromPet(event)) openPanelWindow();
 });
 
+// The page measures the mounted skin and asks the window to hug it: the less
+// invisible window there is around the pet, the less "a window" it feels like.
+// Bottom-center anchored so a size change never lifts the pet off its spot.
+ipcMain.on("pet:fit", (event, w, h) => {
+  if (!fromPet(event) || !Number.isFinite(w) || !Number.isFinite(h)) return;
+  const width = Math.round(Math.min(Math.max(w, 160), 480));
+  const height = Math.round(Math.min(Math.max(h, 160), 560));
+  const [ow, oh] = petWindow.getSize();
+  if (ow === width && oh === height) return;
+  const [x, y] = petWindow.getPosition();
+  // resizable:false blocks programmatic resizes on some platforms; lift the
+  // latch just for the setBounds and put it back.
+  petWindow.setResizable(true);
+  petWindow.setBounds({
+    x: Math.round(x + (ow - width) / 2),
+    y: y + (oh - height),
+    width,
+    height,
+  });
+  petWindow.setResizable(false);
+});
+
 // ------------------------------------------------------------ lifecycle
 
 app.whenReady().then(() => {

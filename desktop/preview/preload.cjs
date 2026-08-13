@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld("bilisamaShell", {
   dragMove: (x, y) => ipcRenderer.send("pet:drag-move", x, y),
   dragEnd: () => ipcRenderer.send("pet:drag-end"),
   openPanel: () => ipcRenderer.send("pet:open-panel"),
+  // The page asks the window to hug the mounted skin (bottom-anchored).
+  fit: (w, h) => ipcRenderer.send("pet:fit", w, h),
 });
