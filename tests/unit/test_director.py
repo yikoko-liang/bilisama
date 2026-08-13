@@ -215,6 +215,58 @@ async def test_panic_mute_kills_even_protected_and_drains_the_queue() -> None:
         assert cancelled, "the active protected reply must die under panic"
 
 
+async def test_protected_reply_survives_a_real_barge_in() -> None:
+    """Backlog #3 closed end-to-end: the link's protection frame flips the
+    server's interrupt gate, so a barge-in mid-thank-you cancels nothing on
+    EITHER side — the server keeps generating (rule 6 modelled) and the
+    scheduler's protection window holds its own axe too."""
+    script = Script(delta_chunks=8, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        async with _running_scheduler(server) as (scheduler, _):
+            scheduler.submit(
+                Intent(
+                    source="super_chat",
+                    priority=Priority.SUPERCHAT,
+                    injection=Injection(
+                        reply=ReplySpec(instructions="谢一句", protected=True, protect_ms=4000),
+                        item_text="[SC ¥30] 金主: 加油",
+                    ),
+                    dedup_key="sc_protected",
+                    requeue_on_interrupt=True,
+                )
+            )
+            for _ in range(200):
+                if scheduler._active is not None:
+                    break
+                await asyncio.sleep(0.01)
+            await server.barge_in()
+            await _wait_verdicts(scheduler, 1)
+        verdict = scheduler.verdicts[0]
+        assert verdict.outcome is Outcome.SPOKEN, str(verdict)
+
+
+def test_orphan_speech_stopped_leaves_no_dangling_state() -> None:
+    """A speech_stopped with no speech_started before it (section 10.1's
+    orphan) arms the quiet window and nothing else — it self-heals."""
+    clock = FakeClock()
+    floor = SpeakingFloor(clock)
+    floor.on_speech_stopped(quiet_s=1.1)
+    assert not floor.streamer_speaking
+    assert floor.is_blocked(), "the quiet window armed"
+    clock._now += 1.2
+    assert not floor.is_blocked(), "and expired on its own"
+
+
+async def test_orphan_speech_stopped_from_the_server_is_harmless() -> None:
+    async with MockRealtimeServer(caps=caps_mod.S2S) as server:
+        async with _running_scheduler(server, quiet_after_speech_s=0.05) as (scheduler, _):
+            await server.speech_stopped()
+            await asyncio.sleep(0.15)
+            scheduler.submit(_intent(dedup="dan_after_orphan"))
+            await _wait_verdicts(scheduler, 1)
+        assert scheduler.verdicts[0].outcome is Outcome.SPOKEN
+
+
 async def test_revoked_super_chat_is_withdrawn_before_it_speaks() -> None:
     """SC withdrawal (stage 6 B5): the platform deleted it, so the queued
     thank-you is pulled with expired@queued(platform.revoked). An ACTIVE

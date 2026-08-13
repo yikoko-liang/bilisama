@@ -844,6 +844,60 @@ async def test_two_held_implicit_replies_both_wake_up() -> None:
         assert all(d["response"]["status"] == "completed" for d in dones)
 
 
+def _interrupt_patch(enabled: bool) -> str:
+    return json.dumps(
+        {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "turn_detection": {"type": "server_vad", "interrupt_response": enabled},
+            },
+        }
+    )
+
+
+async def test_protected_reply_survives_barge_in() -> None:
+    """Rule 6 modelled (backlog #3): interrupt_response=false mutes the axe.
+
+    The reply keeps generating through the barge-in and completes; only
+    speech_started crosses the wire. Upstream gates both the active kill
+    (handlers/audio.py:113-114) and the pending kill
+    (websocket_router.py:762-780) on the same flag.
+    """
+    script = Script(reply_text="一二三四五六七八", delta_chunks=8, delta_interval_s=0.02)
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_interrupt_patch(False))
+        await ws.send(_create_text())
+        await _await_response_started(ws)
+        await _recv_until(ws, "response.output_text.delta")
+        await server.barge_in()
+        through_started = _types(await _collect_through(ws, "input_audio_buffer.speech_started"))
+        assert "response.done" not in through_started, "protection means no cancel"
+        done = await _recv_until(ws, "response.done")
+        assert done["response"]["status"] == "completed"
+
+
+async def test_barge_in_cancels_again_once_interrupts_are_restored() -> None:
+    script = Script(reply_text="一二三四五六七八", delta_chunks=8, delta_interval_s=0.02)
+    async with (
+        MockRealtimeServer(caps=caps_mod.S2S, script=script) as server,
+        websockets.connect(server.url) as ws,
+    ):
+        await _recv_until(ws, "session.created")
+        await ws.send(_interrupt_patch(False))
+        await ws.send(_interrupt_patch(True))  # protection released
+        await ws.send(_create_text())
+        await _await_response_started(ws)
+        await _recv_until(ws, "response.output_text.delta")
+        await server.barge_in()
+        done = await _recv_until(ws, "response.done")
+        assert done["response"]["status"] == "cancelled"
+
+
 async def test_barge_in_sends_response_done_before_speech_started() -> None:
     """Counterintuitive but real: done(cancelled) arrives before speech_started."""
     script = Script(reply_text="一二三四五六七八", delta_chunks=8, delta_interval_s=0.02)

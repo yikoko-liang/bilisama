@@ -48,10 +48,16 @@ tests/unit/test_mock_realtime.py:
   behaviour rather than a fault, since implicit replies never send created
   [test_implicit_reply_never_sends_response_created].
 
-Rules 1 and 6 are not modelled. Rule 1 (`speculative_quiet`) is a condition on
-our own scheduler with no server side to fake. Rule 6 turns on `interrupt_response`:
-upstream reads it (handlers/audio.py:113-114) and this fake does not, so barge_in()
-always interrupts.
+Rule 1 (`speculative_quiet`) is not modelled: it is a condition on our own
+scheduler with no server side to fake. Rule 6 IS modelled (backlog #3):
+`turn_detection.interrupt_response` from session.update gates barge_in() the
+way upstream gates it — the active reply survives (handlers/audio.py:113-114)
+and so does a merely pending one (websocket_router.py:762-780 puts the
+pending kill behind the same interrupt_enabled flag)
+[test_protected_reply_survives_barge_in,
+test_barge_in_cancels_again_once_interrupts_are_restored]. speech_started and
+the speculative bookkeeping happen either way — protection mutes the axe, not
+the microphone.
 
 Three more quirks are modelled although they are not among the eight, because
 each costs a debugging session every time it is met cold. conversation.item.create
@@ -244,6 +250,7 @@ class MockRealtimeServer:
         self._next_response_id = 0
         self._deferred: list[dict[str, Any]] = []
         self._speculative_open = False
+        self._interrupt_response = True  # rule 6: session.update can turn the axe off
         self._appended_since_stop_ms: int | None = None
         self._audio_buffer_has_data = False
         # Total appended milliseconds: the audio clock §2.8 nominates as the
@@ -408,10 +415,10 @@ class MockRealtimeServer:
         sees nothing for it and it never speaks.
         """
         target = self._slot_holder()
-        if target is not None:
+        if target is not None and self._interrupt_response:
             await self._finish_response(target, status="cancelled", reason="turn_detected")
         pending = self._pending_slot_reply()
-        if pending is not None:
+        if pending is not None and self._interrupt_response:
             self._close_reply(pending)
             pending.first_token.set()  # let its task observe the kill and exit
         # The streamer is talking again, so the trap is armed again: the same
@@ -515,6 +522,11 @@ class MockRealtimeServer:
                     "unknown_or_invalid_event", "Unknown or invalid event: session.update"
                 )
                 return
+            turn_detection = event.get("session", {}).get("turn_detection")
+            if isinstance(turn_detection, dict) and "interrupt_response" in turn_detection:
+                # Applied regardless of the ack cap — upstream's runtime config
+                # path does the same (runtime_config.py:58-76).
+                self._interrupt_response = bool(turn_detection["interrupt_response"])
             if self.caps.acknowledges_session_update:
                 await self.send(dia.ServerEvent.SESSION_UPDATED, session=event.get("session", {}))
         elif kind == dia.ClientEvent.AUDIO_APPEND.value:
