@@ -176,6 +176,14 @@ def test_ws_without_an_origin_is_a_loopback_tool_and_allowed() -> None:
         assert json.loads(ws.receive_text())["event"] == "hello"
 
 
+def test_ws_accepts_the_localhost_spelling_of_our_own_origin() -> None:
+    """The streamer may type localhost instead of 127.0.0.1; same page."""
+    client, _, _ = _build()
+    spelled = _ORIGIN.replace("://127.0.0.1:", "://localhost:")
+    with client.websocket_connect(f"/{_TOKEN}/ws", headers={"origin": spelled}) as ws:
+        assert json.loads(ws.receive_text())["event"] == "hello"
+
+
 def test_client_frames_reach_their_handlers() -> None:
     client, _, calls = _build()
     with client.websocket_connect(f"/{_TOKEN}/ws", headers={"origin": _ORIGIN}) as ws:

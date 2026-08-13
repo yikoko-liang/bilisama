@@ -179,6 +179,9 @@ def create_ui_app(
     root = web_root or _WEB_ROOT
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     prefix = f"/{token}"
+    # The same loopback page arrives as 127.0.0.1 or localhost depending on
+    # what the streamer typed; both spellings are our own origin.
+    allowed_origins = {origin, origin.replace("://127.0.0.1:", "://localhost:")}
 
     @app.middleware("http")
     async def _security_headers(
@@ -202,7 +205,7 @@ def create_ui_app(
     @app.websocket(prefix + "/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
         client_origin = ws.headers.get("origin")
-        if client_origin is not None and client_origin != origin:
+        if client_origin is not None and client_origin not in allowed_origins:
             # A browser page from somewhere else. Refuse before accepting.
             log.warning("ui.ws_origin_refused", origin=client_origin)
             await ws.close(code=4403)
