@@ -605,6 +605,13 @@ async def run_director(args: argparse.Namespace) -> int:
         if args.show_context:
             print("─" * 40 + f"\n{text}\n" + "─" * 40)
 
+    from bilisama.ingest.bilibili.selector import DanmakuSelector
+
+    selector = DanmakuSelector(
+        clock,
+        thresholds=lambda: thresholds,
+        per_uid_cooldown_s=float(settings.interaction.danmaku.per_uid_cooldown_s),
+    )
     assembly = Assembly(
         store=store,
         distiller=distiller,
@@ -619,6 +626,7 @@ async def run_director(args: argparse.Namespace) -> int:
         protect_ms=settings.interaction.sc_protect_ms,
         variables=variables,
         clock_granularity_min=settings.memory.clock_granularity_min,
+        selector=selector,
     )
 
     # Real danmaku, when a room is named (--room beats [room] room_id). The
@@ -652,6 +660,7 @@ async def run_director(args: argparse.Namespace) -> int:
     # 25): a synchronous stall anywhere shows up as loop.lag with a number.
     lag_monitor = LoopLagMonitor()
     registry.register("loop", lag_monitor.status)
+    registry.register("selector", selector.status)
     if bili_source is not None:
         registry.register("bilibili", bili_source.status)
 
