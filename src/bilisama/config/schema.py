@@ -259,9 +259,11 @@ class PersonaConfig(BaseModel):
     # "主播" is the neutral default; a real name is what makes it sound like
     # someone sitting next to you rather than a service announcement.
     streamer_name: str = Field("主播")
-    # The persona's own name in its templates ({{agentName}}). Empty falls back
-    # to `id`, which is a lowercase directory name — fine as a fallback, worth
-    # overriding with the Chinese name the audience actually hears.
+    # What the persona calls itself in its templates ({{agentName}}). Empty
+    # falls back to `id`, the filesystem-safe folder name. Set this only when
+    # the spoken name should differ from the folder — a nickname, different
+    # capitalisation, whatever the streamer wants. A ported persona keeping its
+    # own name is the normal case, not something to translate away.
     display_name: str = Field("")
     growth: GrowthSwitches = Field(default_factory=GrowthSwitches)
 

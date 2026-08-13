@@ -343,7 +343,7 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "persona.display_name": FieldMeta(
         label="AI 叫什么",
-        hint="留空就用人设的目录名（英文），填了才是观众听到的那个名字",
+        hint="它自称什么。留空就用人设的目录名，想换个写法或起个别名再填",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
         group="人设",

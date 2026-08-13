@@ -144,11 +144,13 @@ hanako/ming/butter 的身份和性格原样移植自 openhanako；各自的 yuan
 
 ```toml
 [persona]
-streamer_name = "阿强"      # AI 怎么称呼你，默认「主播」
-display_name = "花子"       # AI 自己的名字，留空用人设目录名（英文）
+streamer_name = "阿强"      # 它怎么称呼你，默认「主播」
+display_name = ""           # 它自称什么，留空用人设的目录名
 ```
 
-填之前 hanako 的开头是「# hanako／主播的个人助手」，填之后是「# 花子／阿强的个人助手」。
+填了称呼之后，hanako 的开头从「# hanako／主播的个人助手」变成
+「# hanako／阿强的个人助手」。`display_name` 一般不用动——人设叫什么就是什么，
+只有想换个写法或起别名时才填。
 
 **置顶备忘（pinned.md，手动通道）**：想让 AI 永久记住某件事，直接往活人设目录的
 `pinned.md` 里写，一行一条，文件不存在就新建：

@@ -112,7 +112,7 @@ clock_granularity_min = 5               # 推给模型的时间按几分钟取�
 id = "mia"
 data_dir = "auto"                       # auto = 用户数据目录/personas/<id>，四个人设文件的活副本在这
 streamer_name = "主播"                  # AI 怎么称呼你。填真名它就会叫你名字，比一口一个「主播」亲切
-display_name = ""                       # AI 自己的名字，留空就用上面的 id（英文目录名）
+display_name = ""                       # 它自称什么。留空用上面的 id；想换个写法或起别名再填
 
 # 生长层三态：off 不长 | collect 只攒进文件、不进提示词 | on 攒并注入（§4.6）。
 # 默认全关。先 collect 看几场、翻文件放心了再 on；voice 影响说话风格，建议最后开。

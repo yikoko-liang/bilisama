@@ -246,8 +246,11 @@ def test_template_variables_come_from_config() -> None:
     cfg = PersonaConfig.model_validate({"id": "hanako", "streamer_name": "阿强"})
     assert template_variables(cfg) == {"userName": "阿强", "agentName": "hanako"}
 
-    named = PersonaConfig.model_validate({"id": "hanako", "display_name": "花子"})
-    assert template_variables(named)["agentName"] == "花子", "display_name wins over the id"
+    # A persona keeping its own name is the normal case; display_name is for
+    # when the spoken name should differ from the folder name, whatever the
+    # streamer wants it to be.
+    named = PersonaConfig.model_validate({"id": "hanako", "display_name": "Hanako"})
+    assert template_variables(named)["agentName"] == "Hanako", "display_name wins over the id"
     assert template_variables(named)["userName"] == "主播", "the neutral default still works"
 
 
