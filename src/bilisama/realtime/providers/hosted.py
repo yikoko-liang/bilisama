@@ -54,6 +54,7 @@ class HostedLink:
         self._codec = profile.codec
         self._caps = profile.caps
         self._turn = turn
+        self._context = ""
 
     async def connect(self) -> None:
         await self._client.connect()
@@ -94,6 +95,10 @@ class HostedLink:
         await self._client.aclose()
 
     async def set_context(self, instructions: str) -> None:
+        # Kept locally too: per-response instructions REPLACE the session's on
+        # the wire (same protocol semantics as s2s), so request_reply
+        # recomposes persona + per-turn ask.
+        self._context = instructions
         await self._client.send_command(
             self._codec.session_patch(instructions=instructions, text_only=False)
         )
@@ -120,10 +125,18 @@ class HostedLink:
         frame = self._codec.response_create(
             out_of_band=self._caps.out_of_band_exempt_from_slot,
             text_only=False,
-            instructions=spec.instructions,
+            instructions=self._compose(spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
         return await self._client.request_reply(frame)
+
+    def _compose(self, turn: str | None) -> str | None:
+        """Persona plus the per-turn ask; see S2SLink._compose for the why."""
+        if turn is None:
+            return None
+        if not self._context:
+            return turn
+        return f"{self._context}\n\n本轮要求：{turn}"
 
     async def cancel(self, handle: link.ReplyHandle) -> None:
         await self._client.cancel(handle)

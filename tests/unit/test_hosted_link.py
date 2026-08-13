@@ -70,6 +70,82 @@ async def test_headers_reach_the_transport() -> None:
     assert hosted._client._headers == {"Authorization": "Bearer x"}
 
 
+async def test_reply_instructions_carry_the_session_persona_s2s() -> None:
+    """Per the Realtime protocol, response.instructions REPLACE the session's
+    for that response — upstream picks either/or (base_openai_compatible_
+    language_model.py:709-711), and a live probe (2026-08-14) showed a
+    session-level pirate persona vanishing from an instruction-carrying
+    reply. The scheduler sends only the per-turn ask and assumes the persona
+    stays, so the adapter must recompose: persona first, then the ask."""
+    from bilisama.realtime import link
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script()) as server:
+        s2s = S2SLink(server.url, text_replies=False)
+        await s2s.connect()
+        try:
+            await s2s.set_context("你是米娅，主播的AI搭子。")
+            await s2s.request_reply(link.ReplySpec(instructions="谢谢阿强的SC，一句话。"))
+            for _ in range(50):
+                if server.recorded.count("response.create"):
+                    break
+                await asyncio.sleep(0.01)
+            creates = [e for e in server.recorded.events if e.get("type") == "response.create"]
+            assert creates, "no response.create reached the server"
+            sent = creates[0]["response"]["instructions"]
+            assert "你是米娅" in sent, "the persona must survive a per-turn instruction"
+            assert "谢谢阿强的SC" in sent
+            assert sent.index("你是米娅") < sent.index("谢谢阿强的SC"), "persona comes first"
+        finally:
+            await s2s.aclose()
+
+
+async def test_reply_without_instructions_stays_bare_s2s() -> None:
+    """No per-turn ask -> no instructions key; the server falls back to the
+    session's own instructions, which is exactly the persona already."""
+    from bilisama.realtime import link
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script()) as server:
+        s2s = S2SLink(server.url, text_replies=False)
+        await s2s.connect()
+        try:
+            await s2s.set_context("你是米娅，主播的AI搭子。")
+            await s2s.request_reply(link.ReplySpec())
+            for _ in range(50):
+                if server.recorded.count("response.create"):
+                    break
+                await asyncio.sleep(0.01)
+            creates = [e for e in server.recorded.events if e.get("type") == "response.create"]
+            assert creates
+            assert "instructions" not in creates[0]["response"]
+        finally:
+            await s2s.aclose()
+
+
+async def test_reply_instructions_carry_the_session_persona_hosted() -> None:
+    """Same protocol semantics on the hosted path (DashScope beta dialect)."""
+    from bilisama.realtime import link
+
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, script=Script()) as server:
+        hosted = HostedLink(server.url, ProviderName.DASHSCOPE)
+        await hosted.connect()
+        try:
+            await hosted.set_context("你是米娅，主播的AI搭子。")
+            await hosted.request_reply(link.ReplySpec(instructions="谢谢阿强的SC，一句话。"))
+            for _ in range(50):
+                if server.recorded.count("response.create"):
+                    break
+                await asyncio.sleep(0.01)
+            creates = [e for e in server.recorded.events if e.get("type") == "response.create"]
+            assert creates
+            sent = creates[0]["response"]["instructions"]
+            assert "你是米娅" in sent
+            assert "谢谢阿强的SC" in sent
+        finally:
+            await hosted.aclose()
+
+
 async def test_s2s_audio_mode_leaves_the_session_unpinned_and_replies_carry_pcm() -> None:
     """Director mode against the official pipeline: text_replies=False must not
     pin the session to text, and explicit replies come back as audio — a
