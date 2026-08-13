@@ -24,7 +24,7 @@ import pytest
 
 from bilisama.obs.logging import EventLogger, bind, get_logger, setup
 
-_QUIETED = ("websockets", "asyncio", "aiohttp", "httpx")
+_QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn")
 
 
 @pytest.fixture(autouse=True)
@@ -334,3 +334,50 @@ def test_third_party_loggers_are_quieted_to_warning() -> None:
     assert _lines(stream) == []
     logging.getLogger("websockets").warning("connection closed")
     assert [line["event"] for line in _lines(stream)] == ["connection closed"]
+
+
+# ------------------------------------------------------------ extra handlers
+
+
+class _ListHandler(logging.Handler):
+    """Collects formatted lines, standing in for the UI log ring."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(self.format(record))
+
+
+def test_extra_handler_receives_the_same_json_lines() -> None:
+    """An extra handler sees every line the stream handler sees, same format."""
+    extra = _ListHandler()
+    stream = io.StringIO()
+    setup(stream=stream, extra_handlers=(extra,))
+    get_logger("test.obs").info("director.spoke", turn="t-1")
+    assert len(extra.lines) == 1
+    payload = json.loads(extra.lines[0])
+    assert payload["event"] == "director.spoke"
+    assert payload["turn"] == "t-1"
+    assert _one(stream)["event"] == "director.spoke"
+
+
+def test_extra_handler_survives_repeated_setup_without_stacking() -> None:
+    """dev-talk calls setup() three times; the ring must ride along exactly once."""
+    extra = _ListHandler()
+    setup(stream=io.StringIO(), extra_handlers=(extra,))
+    setup(stream=io.StringIO(), extra_handlers=(extra,))
+    assert logging.getLogger().handlers.count(extra) == 1
+    get_logger("test.obs").info("director.spoke")
+    assert len(extra.lines) == 1
+
+
+def test_extra_handler_output_is_scrubbed_like_the_stream() -> None:
+    """Scrubbing has one source of truth; the UI ring gets no secrets either."""
+    extra = _ListHandler()
+    setup(stream=io.StringIO(), extra_handlers=(extra,))
+    get_logger("test.obs").info("ingest.danmaku", api_key="sk-live-abcdef", user_text="主播好帅")
+    payload = json.loads(extra.lines[0])
+    assert payload["api_key"] == "***"
+    assert payload["user_text"] == "<4 chars>"
