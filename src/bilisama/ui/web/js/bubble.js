@@ -17,6 +17,7 @@ export function createBubble(el) {
   let open = false;
   let hideTimer = null;
   let shatterTimer = null;
+  let replyEnded = false;
 
   const hide = () => {
     clearTimeout(hideTimer);
@@ -24,6 +25,7 @@ export function createBubble(el) {
     hideTimer = null;
     shatterTimer = null;
     open = false;
+    replyEnded = false;
     el.hidden = true;
     el.classList.remove("show", "shatter");
     el.textContent = "";
@@ -37,8 +39,12 @@ export function createBubble(el) {
       }
       clearTimeout(hideTimer);
       hideTimer = null;
-      if (!open) {
+      if (!open || replyEnded) {
+        // A finished reply is still on screen (the bubble outlives the text
+        // stream by design) — replace it rather than appending, or replies
+        // arriving inside the linger window concatenate without end.
         open = true;
+        replyEnded = false;
         el.textContent = "";
         el.hidden = false;
         el.classList.remove("shatter");
@@ -46,6 +52,12 @@ export function createBubble(el) {
       }
       el.textContent += text;
       el.scrollTop = el.scrollHeight;
+    },
+
+    endReply() {
+      // The text stream is done; the audio may still be playing, so the bubble
+      // stays. It is the NEXT delta that clears it (see above).
+      if (open) replyEnded = true;
     },
 
     onVoiceState(state) {

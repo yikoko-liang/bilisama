@@ -7,7 +7,9 @@ import { VISUAL_LABEL } from "./presentation.js";
 
 const FEED_CAP = 200;
 const LOG_CAP = 500;
-const LOG_RANK = { debug: 0, info: 1, warning: 2, error: 3 };
+// critical must outrank error: without an entry it fell back to info's 1 and
+// the worst line in the stream was the one hidden by the "warning 及以上" filter.
+const LOG_RANK = { debug: 0, info: 1, warning: 2, error: 3, critical: 4 };
 
 const SPEAK_LABEL = {
   danmaku: "普通弹幕",
@@ -107,7 +109,9 @@ export function createPanel({ send }) {
     scrim.hidden = false;
     requestAnimationFrame(() => scrim.classList.add("open"));
     startHealth();
-    loadConfig();
+    // force: the tab is only as trustworthy as its last fetch, and switches
+    // move from the live tab, from another window, and across sessions.
+    loadConfig(true);
   };
 
   const close = () => {
@@ -119,6 +123,9 @@ export function createPanel({ send }) {
       if (!isOpen) scrim.hidden = true;
     }, 200);
     stopHealth();
+    // Nothing to repaint while closed; open() refetches anyway.
+    clearTimeout(configReloadTimer);
+    clearTimeout(configRetryTimer);
   };
 
   corner.addEventListener("click", () => {
@@ -134,10 +141,9 @@ export function createPanel({ send }) {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && isOpen) close();
   });
-  if (panelOnly) {
-    startHealth();
-    loadConfig();
-  }
+  // The panel-only window's kick-off lives at the bottom of this factory: it
+  // calls loadConfig, whose state is declared further down (a `let` read
+  // before its declaration is a ReferenceError, not undefined).
 
   // ------------------------------------------------------------ tabs
 
@@ -291,11 +297,40 @@ export function createPanel({ send }) {
 
   // Which badge a frozen row wears; live rows get an editor instead.
   const RELOAD_BADGE = { reconnect: "重连生效", engine: "重启引擎", restart: "重启生效" };
+  const CONFIG_NOTE = "亮着的控件直播中能改，只管本场；带徽章的行要到标注的时机才生效。";
 
   let configReloadTimer = null;
+  let configRetryTimer = null;
+  let configSeq = 0; // only the newest fetch may paint
+  let advancedOpen = false; // the fold's state survives a rebuild
+  let configNoteEl = null;
+  // The live editors and read-only value spans, by path: a refresh updates
+  // these in place instead of rebuilding the tab, which is what keeps focus,
+  // an open dropdown and the advanced fold alive through it.
+  const configControls = new Map();
+  const configValues = new Map();
 
-  const sendEdit = (path, value) => {
+  const setConfigNote = (text, isError = false) => {
+    if (!configNoteEl) return;
+    configNoteEl.textContent = text;
+    configNoteEl.classList.toggle("cfg-note-err", isError);
+  };
+
+  const setControlValue = (ctrl, value) => {
+    // Remember what the server last said: the snap-back on a failed send has
+    // to restore that, not whatever the user just clicked.
+    ctrl.serverValue = value;
+    if (ctrl.type === "checkbox") ctrl.checked = Boolean(value);
+    else ctrl.value = String(value);
+  };
+
+  const sendEdit = (path, value, ctrl) => {
     if (!send("panel.set", { config: { path, value } })) {
+      // Nothing reached the server, so the control must not keep showing the
+      // new value — and the notice belongs on THIS tab, not only in the chat
+      // feed the user cannot see from here.
+      setControlValue(ctrl, ctrl.serverValue);
+      setConfigNote("连接断开，这条修改没发出去", true);
       feedEntry({ kind: "system", text: "连接断开，这条修改没发出去" });
       return;
     }
@@ -309,8 +344,7 @@ export function createPanel({ send }) {
     if (row.kind === "bool") {
       const box = el("input");
       box.type = "checkbox";
-      box.checked = Boolean(row.value);
-      box.addEventListener("change", () => sendEdit(row.path, box.checked));
+      box.addEventListener("change", () => sendEdit(row.path, box.checked, box));
       return box;
     }
     if (row.kind === "select") {
@@ -320,8 +354,7 @@ export function createPanel({ send }) {
         opt.value = choice;
         sel.appendChild(opt);
       }
-      sel.value = String(row.value);
-      sel.addEventListener("change", () => sendEdit(row.path, sel.value));
+      sel.addEventListener("change", () => sendEdit(row.path, sel.value, sel));
       return sel;
     }
     const input = el("input");
@@ -331,34 +364,82 @@ export function createPanel({ send }) {
       if (row.max !== null && row.max !== undefined) input.max = String(row.max);
       input.step = "any";
     }
-    input.value = String(row.value);
     input.addEventListener("change", () => {
-      sendEdit(row.path, row.kind === "number" ? Number(input.value) : input.value);
+      sendEdit(row.path, row.kind === "number" ? Number(input.value) : input.value, input);
     });
     return input;
+  };
+
+  // Push fresh values into the existing DOM. Returns false when the row set
+  // changed shape (a different process, a new field) and only a rebuild will do.
+  const updateInPlace = (rows) => {
+    if (!configControls.size) return false;
+    const editable = rows.filter((row) => row.editable && row.value !== null);
+    if (editable.length !== configControls.size) return false;
+    if (!editable.every((row) => configControls.has(row.path))) return false;
+    for (const row of editable) {
+      const ctrl = configControls.get(row.path);
+      // Never yank a value out from under the cursor mid-edit; still record
+      // what the server holds so a later failed send snaps back correctly.
+      if (document.activeElement === ctrl) ctrl.serverValue = row.value;
+      else setControlValue(ctrl, row.value);
+    }
+    for (const row of rows) {
+      const span = configValues.get(row.path);
+      if (span) span.textContent = `${row.value}${row.unit ? ` ${row.unit}` : ""}`;
+    }
+    return true;
+  };
+
+  // Speak switches have two editors (the live matrix and a config row); the
+  // pushed panel.state keeps the config one honest without a fetch.
+  const applySpeakToConfig = (speak) => {
+    for (const [key, value] of Object.entries(speak ?? {})) {
+      const ctrl = configControls.get(`interaction.speak.${key}`);
+      if (ctrl && document.activeElement !== ctrl) setControlValue(ctrl, value);
+    }
   };
 
   async function loadConfig(force = false) {
     if (configLoaded && !force) return;
     configLoaded = true;
+    const seq = ++configSeq;
     const listEl = document.getElementById("config-list");
     let rows;
     try {
       rows = await (await fetch("config", { signal: AbortSignal.timeout(4000) })).json();
     } catch {
-      listEl.textContent = "";
-      listEl.appendChild(el("p", "empty", "配置接口暂时拿不到，稍后自动重试"));
+      if (seq !== configSeq) return; // a newer attempt owns the tab now
       configLoaded = false;
-      // The sheet retries on the next open(); the #panel full-page window has
-      // no open() path, so it retries on its own.
-      if (panelOnly) setTimeout(loadConfig, 5000);
+      if (configControls.size) {
+        // Editors are already on screen: one flaky fetch must not wipe them.
+        setConfigNote("配置接口暂时拿不到，显示的是上次读到的值", true);
+        return;
+      }
+      listEl.textContent = "";
+      configNoteEl = null;
+      listEl.appendChild(el("p", "empty", "配置接口暂时拿不到，稍后自动重试"));
+      clearTimeout(configRetryTimer);
+      configRetryTimer = setTimeout(() => loadConfig(true), 5000);
+      return;
+    }
+    // A slow earlier fetch resolving last would repaint pre-edit values over a
+    // newer snapshot — the edit would appear to revert itself.
+    if (seq !== configSeq) return;
+    if (updateInPlace(rows)) {
+      setConfigNote(CONFIG_NOTE);
       return;
     }
     listEl.textContent = "";
-    listEl.appendChild(
-      el("p", "cfg-note", "亮着的控件直播中能改，只管本场；带徽章的行要到标注的时机才生效。"),
-    );
+    configControls.clear();
+    configValues.clear();
+    configNoteEl = el("p", "cfg-note", CONFIG_NOTE);
+    listEl.appendChild(configNoteEl);
     const advanced = el("details");
+    advanced.open = advancedOpen;
+    advanced.addEventListener("toggle", () => {
+      advancedOpen = advanced.open;
+    });
     advanced.appendChild(el("summary", "", "高级（开发者字段）"));
     // Group headers, tracked per container (main list vs the advanced fold).
     let currentGroup = null;
@@ -382,6 +463,8 @@ export function createPanel({ send }) {
       if (row.editable) {
         const ctrl = editorFor(row);
         ctrl.classList.add("cfg-edit");
+        setControlValue(ctrl, row.value);
+        configControls.set(row.path, ctrl);
         if (row.unit) {
           const wrap = el("span", "cfg-editwrap");
           wrap.appendChild(ctrl);
@@ -392,7 +475,9 @@ export function createPanel({ send }) {
         }
       } else {
         const unit = row.unit ? ` ${row.unit}` : "";
-        line.appendChild(el("span", "cfg-value", `${row.value}${unit}`));
+        const span = el("span", "cfg-value", `${row.value}${unit}`);
+        configValues.set(row.path, span);
+        line.appendChild(span);
         const badge = RELOAD_BADGE[row.reload];
         if (badge) line.appendChild(el("span", "cfg-badge", badge));
       }
@@ -404,6 +489,12 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ frames in
 
+  if (panelOnly) {
+    // The shell's second window has no open() to trigger the first load.
+    startHealth();
+    loadConfig();
+  }
+
   return {
     handleFrame(event, data) {
       if (event === "event.feed") feedEntry(data);
@@ -414,6 +505,7 @@ export function createPanel({ send }) {
         panicBtn.setAttribute("aria-pressed", String(panicked));
         panicBtn.textContent = panicked ? "恢复说话" : "紧急闭麦";
         renderSpeak(data.speak);
+        applySpeakToConfig(data.speak);
       }
     },
     setHello(data) {
@@ -430,6 +522,11 @@ export function createPanel({ send }) {
       timelineEl.textContent = "";
       timelineEl.appendChild(el("p", "empty", "还没有对话"));
       loglinesEl.textContent = "";
+      // The config values came from the session that just ended — a restarted
+      // dev-talk is back on the toml's values, so refetch instead of trusting
+      // what is on screen.
+      configLoaded = false;
+      if (isOpen) loadConfig(true);
     },
   };
 }

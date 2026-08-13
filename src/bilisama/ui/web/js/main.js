@@ -87,7 +87,9 @@ const handlers = {
   },
   "reply.done": () => {
     // The bubble outlives the text stream on purpose; dismissal is keyed to
-    // voice.state falling back to idle (see bubble.js).
+    // voice.state falling back to idle (see bubble.js). Marking the end is
+    // what lets the next reply replace this text instead of appending to it.
+    bubble.endReply();
   },
   "playback.clear": () => {
     bubble.shatter();

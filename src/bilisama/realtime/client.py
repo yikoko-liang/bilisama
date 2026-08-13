@@ -133,7 +133,19 @@ class RealtimeClient:
             additional_headers=self._headers,
             close_timeout=2.0,
         )
-        first = json.loads(await self._ws.recv())
+        raw = await self._ws.recv()
+        try:
+            first = json.loads(raw)
+        except ValueError:
+            first = None
+        if not isinstance(first, dict):
+            # Not a realtime endpoint at all (wrong port, an echo/HMR socket):
+            # its greeting is not even a JSON object. Refuse like any other bad
+            # handshake instead of letting JSONDecodeError — or normalize()'s
+            # AttributeError on a list — escape as a raw traceback.
+            await self._ws.close()
+            self._ws = None
+            raise SessionRefused(code="not_realtime", detail=str(raw)[:120])
         kind, _ = self.codec.normalize(first)
         if kind is not dia.ServerEvent.SESSION_CREATED:
             # A refused handshake leaves nothing worth keeping: close before

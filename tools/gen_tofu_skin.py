@@ -62,9 +62,21 @@ def px(img: Image.Image, x: int, y: int, color: Color) -> None:
 
 
 def rounded_block(
-    img: Image.Image, x0: int, y0: int, x1: int, y1: int, fill: Color, outline: Color | None
+    img: Image.Image,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    fill: Color,
+    outline: Color | None,
+    corner: Color = (0, 0, 0, 0),
 ) -> None:
-    """A chunky rounded rect: fill plus outline ring, corner pixels dropped."""
+    """A chunky rounded rect: fill plus outline ring, corners cut to `corner`.
+
+    Transparent corners round the OUTER silhouette against the desktop. An
+    inset block (the face plate) must instead cut back to whatever it sits on,
+    or the shell window shows the desktop through four holes in her face.
+    """
     rect(img, x0, y0, x1, y1, fill)
     if outline is not None:
         rect(img, x0, y0, x1, y0, outline)
@@ -72,7 +84,7 @@ def rounded_block(
         rect(img, x0, y0, x0, y1, outline)
         rect(img, x1, y0, x1, y1, outline)
     for cx, cy in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
-        px(img, cx, cy, (0, 0, 0, 0))
+        px(img, cx, cy, corner)
 
 
 # ------------------------------------------------------------ the tofu
@@ -128,7 +140,7 @@ def draw_robot(
     rect(img, 5, Y(22), 20, Y(24), PLATE)
 
     # black-tofu face plate, set in with a 1px white seam all around
-    rounded_block(img, X(6), Y(11), X(19), Y(16), PLATE, None)
+    rounded_block(img, X(6), Y(11), X(19), Y(16), PLATE, None, corner=CREAM)
 
     # cheeks on the white tofu, under the plate corners
     if powered:

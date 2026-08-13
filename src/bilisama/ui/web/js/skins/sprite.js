@@ -301,8 +301,14 @@ export async function mountSprite(mount, id, { onPoke }) {
   return {
     setState(next) {
       visual = next;
-      // Do not cut a running poke short; it settles into the new state.
-      if (track.name !== "jumping") setTrack(animationForVisual(next));
+      // Do not cut a running poke short; it settles into the new state. Only a
+      // genuine ONE-SHOT may hold the state back: a pack whose jumping track
+      // loops (the default set, or any hand-written pet.json without
+      // `loop: false`) never ends, so blocking on the name alone would leave
+      // the pet deaf to every voice state after the first poke.
+      const running = animations[track.name];
+      if (track.name === "jumping" && running && running.loopStart === null) return;
+      setTrack(animationForVisual(next));
     },
     poke,
     destroy() {

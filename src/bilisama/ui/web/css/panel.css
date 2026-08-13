@@ -347,6 +347,7 @@ body.panel-only .scrim {
 
 .logline.warning { color: var(--c-warn); }
 .logline.error { color: var(--c-err); }
+.logline.critical { color: var(--c-err); font-weight: 600; }
 
 /* ------------------------------------------------------------ config tab */
 
@@ -390,6 +391,11 @@ body.panel-only .scrim {
   color: var(--ink-dim);
   margin: 0 0 var(--space-1);
   line-height: 1.5;
+}
+
+/* A refusal or a lost connection, said on the tab the user is looking at. */
+.cfg-note.cfg-note-err {
+  color: var(--c-err);
 }
 
 /* Frozen rows fade; editable rows carry full ink and a real control. */

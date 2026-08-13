@@ -217,6 +217,25 @@ async def test_bubble_streams_then_lingers_then_hides(page: Page, harness: Harne
     await _wait(page, "document.getElementById('bubble').hidden", timeout_ms=4000)
 
 
+async def test_a_new_reply_replaces_the_lingering_one(page: Page, harness: Harness) -> None:
+    """The bubble outlives its text stream on purpose, so a reply arriving
+    inside that linger window used to be APPENDED to the previous one — on a
+    busy stream every reply concatenated until a quiet gap finally cleared it."""
+    await _wait(page, "document.title.includes('米娅')")
+    harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "speaking"})
+    harness.hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "第一句"})
+    harness.hub.broadcast(ServerEvent.REPLY_DONE, {"status": "completed", "text": "第一句"})
+    await _wait(page, "document.getElementById('bubble').textContent.includes('第一句')")
+    # Idle starts the 1.5s linger; the next reply lands well inside it.
+    harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "idle"})
+    harness.hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "第二句"})
+    await _wait(
+        page,
+        "(() => { const b = document.getElementById('bubble');"
+        " return !b.hidden && b.textContent === '第二句'; })()",
+    )
+
+
 async def test_a_reply_right_after_a_shatter_still_shows(page: Page, harness: Harness) -> None:
     """The regression the review found: the shatter animation ends invisible,
     and voice-state noise inside its window used to cancel the cleanup —
@@ -350,11 +369,20 @@ async def test_reconnect_does_not_double_the_panel(page: Page, harness: Harness)
         if harness.server.started:
             break
         await asyncio.sleep(0.01)
-    # The page reconnects on its own (same port, same token) and eats the
-    # replay onto a cleared timeline: still exactly three rows.
+    else:
+        pytest.fail("重建的 UiServer 没起来")
+    # A FOURTH entry, broadcast only after the rebuild, is what proves the page
+    # actually came back: waiting on the old count alone passes instantly
+    # against the stale pre-disconnect DOM, which made this test green even
+    # with the de-duplication deleted. The page reconnects on its own (same
+    # port, same token) and eats the replay onto a CLEARED timeline, so the
+    # replayed three plus this one is four — a broken reset gives seven.
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED, {"kind": "danmaku", "name": "阿强", "text": "重连后"}
+    )
     await _wait(
         page,
-        "document.querySelectorAll('#timeline .entry').length === 3",
+        "document.querySelectorAll('#timeline .entry').length === 4",
         timeout_ms=15000,
     )
 

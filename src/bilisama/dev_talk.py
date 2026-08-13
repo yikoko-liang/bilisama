@@ -185,8 +185,12 @@ async def _pump_mic(
         callback=on_block,
     )
     silence = b"\x00\x00" * (_INPUT_RATE * _FRAME_MS // 1000)
-    stream.start()
     try:
+        # start() inside the try: it can fail on its own (device pulled or
+        # claimed between open and start), and the stream is already OPEN by
+        # then — left unreleased it becomes the blocking atexit stall this
+        # module fixes everywhere else.
+        stream.start()
         while True:
             block = await queue.get()
             if mute and speaker is not None and speaker.busy:
@@ -198,9 +202,10 @@ async def _pump_mic(
             await client.push_audio(block)
     finally:
         # NOT `with stream:` — its __exit__ closes on the loop, which is the
-        # freeze described on _close_audio_stream. Awaiting in a cancelled
-        # task's finally is fine; only a second cancel would interrupt, and
-        # then the daemon-side thread still finishes the release.
+        # freeze described on _close_audio_stream. The release runs on a worker
+        # thread; asyncio joins that pool during shutdown, so it always
+        # completes (it does NOT make a second Ctrl-C instant — that path exits
+        # the process outright, see on_sigint).
         await asyncio.to_thread(_close_audio_stream, stream)
 
 
@@ -240,14 +245,26 @@ class _Speaker:
             if len(chunk) < need:
                 outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
 
-        self._stream = sounddevice.RawOutputStream(
+        stream = sounddevice.RawOutputStream(
             samplerate=_OUTPUT_RATE,
             channels=1,
             dtype="int16",
             device=device,
             callback=feed,
         )
-        self._stream.start()
+        try:
+            stream.start()
+        except Exception as exc:
+            # An opened-but-unstartable device (Bluetooth pulled mid-setup)
+            # would otherwise leave the stream unreachable — the constructor
+            # raises, no caller ever holds the object, and close() can never
+            # run. Release it here and carry on mute: the voice loop is worth
+            # more than the speaker.
+            _close_audio_stream(stream)
+            self._stream = None
+            print(f"[音频] 扬声器起不来（{exc}），这场没有声音输出。", file=sys.stderr)
+            return
+        self._stream = stream
 
     def play(self, pcm: bytes) -> None:
         with self._lock:
@@ -551,10 +568,16 @@ async def run_director(args: argparse.Namespace) -> int:
 
     def on_sigint() -> None:
         if stop.is_set():
-            # Second press: the polite path is stuck somewhere before
-            # stop.wait() (a hung connect, a wedged close). BaseExceptions
-            # escape loop callbacks by design, so this aborts asyncio.run.
-            raise KeyboardInterrupt
+            # Second press means "out, now". Raising KeyboardInterrupt here
+            # only unwinds asyncio.run, which still gathers every finally and
+            # then JOINS the to_thread pool — including the multi-second
+            # PortAudio release that made the user press twice in the first
+            # place. os._exit skips atexit and that join: this is the promised
+            # escape hatch, and the polite path already had its turn.
+            print("\n[退出] 强退（本场蒸馏未做）。", file=sys.stderr)
+            sys.stderr.flush()
+            sys.stdout.flush()
+            os._exit(130)  # 128 + SIGINT, the shell's own convention
         stop.set()
         # Feedback beats patience: without this line the polite teardown
         # (distill, socket farewells) looks like a hang.
@@ -831,276 +854,293 @@ async def run_director(args: argparse.Namespace) -> int:
             )
         await console.push(event)
 
-    # ------------------------------------------------------------ UI server
-
+    # Resources acquired below (UI server, endpoint file, the pet shell) must
+    # be torn down even when the console setup that follows them raises — a
+    # half-installed prompt_toolkit used to orphan the shell and leave a stale
+    # endpoint.json behind. Pre-bound here so the finally can name them.
     ui_server: UiServer | None = None
     ui_url = ""
     endpoint_file: Path | None = None
-    if hub is not None:
-        poke = PokeResponder(
-            clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
-        )
-
-        def panel_state() -> dict[str, Any]:
-            speak = settings.interaction.speak
-            return {
-                "panicked": bool(scheduler.status().get("panicked")),
-                "speak": {name: bool(getattr(speak, name)) for name in type(speak).model_fields},
-            }
-
-        async def on_poke(_data: dict[str, Any]) -> None:
-            poke.poke()  # False = cooldown; the page animates either way
-
-        async def on_panel_set(data: dict[str, Any]) -> None:
-            if "panic_mute" in data:
-                if bool(data["panic_mute"]):
-                    scheduler.panic_mute()
-                    print("[面板] 紧急闭麦")
-                else:
-                    scheduler.release_panic()
-                    print("[面板] 恢复说话")
-            speak_patch = data.get("speak")
-            if isinstance(speak_patch, dict):
-                speak = settings.interaction.speak
-                for name, value in speak_patch.items():
-                    # model_fields is the whitelist; unknown keys only warn.
-                    if name in type(speak).model_fields:
-                        setattr(speak, name, bool(value))
-                    else:
-                        print(f"[面板] 未知开关 {name}，忽略")
-            edit = data.get("config")
-            if isinstance(edit, dict):
-                # The per-field write channel (stage 5's, lit up early). The
-                # gates live in apply_config_edit; here is only the ack, the
-                # error line, and the one consumer that needs a re-poke.
-                try:
-                    meta, applied = apply_config_edit(settings, edit.get("path"), edit.get("value"))
-                except ConfigEditError as exc:
-                    print(f"[面板] {exc}")
-                    if hub is not None:
-                        hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": str(exc)})
-                else:
-                    shown = "开" if applied is True else "关" if applied is False else str(applied)
-                    line = f"配置已改：{meta.label} → {shown}（本场生效，重启还原）"
-                    print(f"[面板] {line}")
-                    if hub is not None:
-                        hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
-                    if edit.get("path") in ("runtime.log_level", "runtime.log_viewer_content"):
-                        # Logging snapshots its config at setup; re-run it so
-                        # the edit is live. Stream choice mirrors the prompt
-                        # window (use_prompt is bound late, at call time).
-                        logging_setup(
-                            level=settings.runtime.log_level,
-                            log_viewer_content=settings.runtime.log_viewer_content,
-                            stream=sys.stdout if use_prompt else None,
-                            extra_handlers=log_tee,
-                        )
-            if hub is not None:
-                hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
-
-        async def on_console_line(data: dict[str, Any]) -> None:
-            text = data.get("text")
-            if isinstance(text, str):
-                await handle_line(text)
-
-        def hello() -> dict[str, Any]:
-            return {
-                "protocol": 1,
-                "persona": {
-                    "id": settings.persona.id,
-                    "name": settings.persona.display_name or settings.persona.id,
-                },
-                "provider": provider.value,
-                "room_connected": bool(room_id),
-                "avatar": {
-                    "renderer": settings.avatar.renderer,
-                    "model_id": settings.avatar.model_id,
-                },
-                "panel": panel_state(),
-            }
-
-        try:
-            ui_sock = bind_ui_socket(settings.runtime.ui_port)
-        except OSError as exc:
-            # The UI is a passenger; the voice loop must survive a taken port.
-            print(
-                f"[界面] 端口 {settings.runtime.ui_port} 绑不上（{exc}），本场没有界面；"
-                "改 [runtime] ui_port 或空出端口。"
-            )
-            hub = None
-        else:
-            ui_port = ui_sock.getsockname()[1]
-            ui_origin = f"http://127.0.0.1:{ui_port}"
-            ui_token = token_hex(24)
-            ui_url = f"{ui_origin}/{ui_token}/"
-            app = create_ui_app(
-                hub=hub,
-                registry=registry,
-                settings=settings,
-                token=ui_token,
-                origin=ui_origin,
-                handlers={
-                    ClientEvent.PET_POKE: on_poke,
-                    ClientEvent.PANEL_SET: on_panel_set,
-                    ClientEvent.CONSOLE_LINE: on_console_line,
-                },
-                hello=hello,
-                # <data home>/bilisama/skins — user-imported packs, shadowing
-                # the packaged ones. Endpoint file and skins share the roof.
-                user_skins_root=default_endpoint_path().parent.parent / "skins",
-            )
-            ui_server = UiServer(app, ui_sock)
-            ui_server.start()
-            endpoint_file = default_endpoint_path()
-            try:
-                write_endpoint_file(endpoint_file, url=ui_url, pid=os.getpid())
-            except OSError as exc:
-                print(f"[界面] 端点文件写不了（{exc}）；壳这场要用 BILISAMA_UI_URL={ui_url}")
-                endpoint_file = None
-            hub.broadcast(ServerEvent.PANEL_STATE, panel_state())  # seed the sticky state
-            if args.open:
-                import webbrowser
-
-                webbrowser.open(ui_url)
-
-    # --pet: best-effort convenience spawn of the desktop shell. This is NOT
-    # supervision — stage 7 inverts the relationship (Electron launches P2).
-    # The shell finds the endpoint file on its own; all this saves is a second
-    # terminal. Missing electron never touches the voice loop.
     pet_proc: asyncio.subprocess.Process | None = None
-    if args.pet and ui_server is not None:
-        pet_dir = Path(__file__).resolve().parents[2] / "desktop" / "preview"
-        electron = pet_dir / "node_modules" / ".bin" / "electron"
-        if electron.is_file():
-            try:
-                pet_proc = await asyncio.create_subprocess_exec(
-                    str(electron),
-                    ".",
-                    cwd=pet_dir,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-            except OSError as exc:
-                # The shell is a passenger of a passenger; failing to spawn it
-                # must not touch the voice loop.
-                print(f"[桌宠] 壳拉不起来（{exc}）；手动 npm start 也行")
-            else:
-                print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走）")
-        else:
-            print(f"[桌宠] 壳还没装：cd {pet_dir} && npm install，之后 --pet 才有东西可拉")
-    elif args.pet and not args.no_ui:
-        # The user wanted a UI; the port bind above is what failed.
-        print("[桌宠] 界面服务器没起来（端口问题，见上面），这场壳没有可显示的东西")
-    elif args.pet:
-        print("[桌宠] --pet 需要界面服务器；--no-ui 下没有可显示的东西")
-
-    # A bottom-pinned input line when prompt_toolkit is installed: everything
-    # the session prints (replies, verdicts, log lines) lands ABOVE the line
-    # being typed instead of tearing through it. Optional exactly like
-    # sounddevice; --plain-console or piped stdin falls back to the raw reader.
-    use_prompt = (
-        not args.plain_console
-        and sys.stdin.isatty()
-        and importlib.util.find_spec("prompt_toolkit") is not None
-    )
-    if not args.plain_console and sys.stdin.isatty() and not use_prompt:
-        print("提示：装上 prompt_toolkit 后，打弹幕不再被输出打乱（pip install prompt_toolkit）。")
-
-    if use_prompt:
-
-        async def stdin_pump() -> None:
-            from prompt_toolkit import PromptSession
-
-            session: PromptSession[str] = PromptSession("弹幕> ")
-            while True:
-                try:
-                    line = await session.prompt_async()
-                except KeyboardInterrupt:
-                    # Raw mode turns Ctrl-C into a key press on the prompt, so
-                    # the loop-level SIGINT handler never sees it — route it to
-                    # the same graceful stop. Same feedback as the handler:
-                    # once the prompt returns the terminal leaves raw mode, so
-                    # a second Ctrl-C reaches the real handler and escalates.
-                    stop.set()
-                    print("\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。", file=sys.stderr)
-                    return
-                except EOFError:
-                    return  # Ctrl-D: console closed; the rest keeps running
-                await handle_line(line)
-
-    else:
-        # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
-        # default executor on shutdown, and a worker parked in readline() holds
-        # that join until one more Enter — Ctrl-C would hang the exit (C7). A
-        # daemon thread just dies with the process.
-        lines: asyncio.Queue[str | None] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def read_stdin() -> None:
-            while True:
-                raw_line = sys.stdin.readline()
-                try:
-                    loop.call_soon_threadsafe(lines.put_nowait, raw_line or None)
-                except RuntimeError:
-                    return  # loop already closed; we are exiting
-                if not raw_line:
-                    return
-
-        threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
-
-        async def stdin_pump() -> None:
-            while True:
-                line = await lines.get()
-                if line is None:
-                    return  # stdin closed; keep the rest running
-                await handle_line(line)
-
-    async def drain_controls() -> None:
-        while True:
-            clear = await scheduler.controls.get()
-            if speaker is not None:
-                speaker.flush()
-            print(f"[打断] playback.clear（{clear.reason}）")
-            if hub is not None:
-                # The bubble shatters on this; the queue stays single-consumer
-                # here and the hub only gets a copy.
-                hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": clear.reason})
-
     console_patch = contextlib.ExitStack()
-    if use_prompt:
-        from prompt_toolkit.patch_stdout import patch_stdout
-
-        # While the prompt is live, print() and the log stream both write
-        # through a proxy that repaints the input line beneath them. Logging
-        # re-targets onto the patched stdout for the window; the shutdown
-        # chain restores it.
-        console_patch.enter_context(patch_stdout(raw=True))
-        logging_setup(
-            level=settings.runtime.log_level,
-            log_viewer_content=settings.runtime.log_viewer_content,
-            stream=sys.stdout,
-            extra_handlers=log_tee,
-        )
-
-    print(
-        f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
-        f"  人设 {settings.persona.id}（persona list 可看全部）  "
-        f"话痨度 {settings.interaction.chattiness.value}"
-        f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
-        f"  生长层 relationship={settings.persona.growth.relationship.value} "
-        f"voice={settings.persona.growth.voice.value}\n"
-        "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
-    )
-    if ui_url:
-        print(f"  界面 {ui_url}\n  （浏览器打开看桌宠和面板；desktop/preview 的壳会自己找到它）")
-    if not args.mute_while_speaking:
-        print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
-
-    # Everything below runs under the finally: the UI server, the endpoint
-    # file and the pet shell already exist, and refresh_context is a real
-    # network send — a failure past this point must still tear them down.
+    use_prompt = False
     tasks: list[asyncio.Task[None]] = []
     try:
+        # ------------------------------------------------------------ UI server
+
+        if hub is not None:
+            poke = PokeResponder(
+                clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
+            )
+
+            def panel_state() -> dict[str, Any]:
+                speak = settings.interaction.speak
+                return {
+                    "panicked": bool(scheduler.status().get("panicked")),
+                    "speak": {
+                        name: bool(getattr(speak, name)) for name in type(speak).model_fields
+                    },
+                }
+
+            async def on_poke(_data: dict[str, Any]) -> None:
+                poke.poke()  # False = cooldown; the page animates either way
+
+            async def on_panel_set(data: dict[str, Any]) -> None:
+                if "panic_mute" in data:
+                    if bool(data["panic_mute"]):
+                        scheduler.panic_mute()
+                        print("[面板] 紧急闭麦")
+                    else:
+                        scheduler.release_panic()
+                        print("[面板] 恢复说话")
+                speak_patch = data.get("speak")
+                if isinstance(speak_patch, dict):
+                    speak = settings.interaction.speak
+                    for name, value in speak_patch.items():
+                        # model_fields is the whitelist; unknown keys only warn.
+                        if name in type(speak).model_fields:
+                            setattr(speak, name, bool(value))
+                        else:
+                            print(f"[面板] 未知开关 {name}，忽略")
+                edit = data.get("config")
+                if isinstance(edit, dict):
+                    # The per-field write channel (stage 5's, lit up early). The
+                    # gates live in apply_config_edit; here is only the ack, the
+                    # error line, and the one consumer that needs a re-poke.
+                    try:
+                        meta, applied = apply_config_edit(
+                            settings, edit.get("path"), edit.get("value")
+                        )
+                    except ConfigEditError as exc:
+                        print(f"[面板] {exc}")
+                        if hub is not None:
+                            hub.broadcast(
+                                ServerEvent.EVENT_FEED, {"kind": "system", "text": str(exc)}
+                            )
+                    else:
+                        shown = (
+                            "开" if applied is True else "关" if applied is False else str(applied)
+                        )
+                        line = f"配置已改：{meta.label} → {shown}（本场生效，重启还原）"
+                        print(f"[面板] {line}")
+                        if hub is not None:
+                            hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
+                        if edit.get("path") in ("runtime.log_level", "runtime.log_viewer_content"):
+                            # Logging snapshots its config at setup; re-run it so
+                            # the edit is live. Stream choice mirrors the prompt
+                            # window (use_prompt is bound late, at call time).
+                            logging_setup(
+                                level=settings.runtime.log_level,
+                                log_viewer_content=settings.runtime.log_viewer_content,
+                                stream=sys.stdout if use_prompt else None,
+                                extra_handlers=log_tee,
+                            )
+                if hub is not None:
+                    hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
+
+            async def on_console_line(data: dict[str, Any]) -> None:
+                text = data.get("text")
+                if isinstance(text, str):
+                    await handle_line(text)
+
+            def hello() -> dict[str, Any]:
+                return {
+                    "protocol": 1,
+                    "persona": {
+                        "id": settings.persona.id,
+                        "name": settings.persona.display_name or settings.persona.id,
+                    },
+                    "provider": provider.value,
+                    "room_connected": bool(room_id),
+                    "avatar": {
+                        "renderer": settings.avatar.renderer,
+                        "model_id": settings.avatar.model_id,
+                    },
+                    "panel": panel_state(),
+                }
+
+            try:
+                ui_sock = bind_ui_socket(settings.runtime.ui_port)
+            except OSError as exc:
+                # The UI is a passenger; the voice loop must survive a taken port.
+                print(
+                    f"[界面] 端口 {settings.runtime.ui_port} 绑不上（{exc}），本场没有界面；"
+                    "改 [runtime] ui_port 或空出端口。"
+                )
+                hub = None
+            else:
+                ui_port = ui_sock.getsockname()[1]
+                ui_origin = f"http://127.0.0.1:{ui_port}"
+                ui_token = token_hex(24)
+                ui_url = f"{ui_origin}/{ui_token}/"
+                app = create_ui_app(
+                    hub=hub,
+                    registry=registry,
+                    settings=settings,
+                    token=ui_token,
+                    origin=ui_origin,
+                    handlers={
+                        ClientEvent.PET_POKE: on_poke,
+                        ClientEvent.PANEL_SET: on_panel_set,
+                        ClientEvent.CONSOLE_LINE: on_console_line,
+                    },
+                    hello=hello,
+                    # <data home>/bilisama/skins — user-imported packs, shadowing
+                    # the packaged ones. Endpoint file and skins share the roof.
+                    user_skins_root=default_endpoint_path().parent.parent / "skins",
+                )
+                ui_server = UiServer(app, ui_sock)
+                ui_server.start()
+                endpoint_file = default_endpoint_path()
+                try:
+                    write_endpoint_file(endpoint_file, url=ui_url, pid=os.getpid())
+                except OSError as exc:
+                    print(f"[界面] 端点文件写不了（{exc}）；壳这场要用 BILISAMA_UI_URL={ui_url}")
+                    endpoint_file = None
+                hub.broadcast(ServerEvent.PANEL_STATE, panel_state())  # seed the sticky state
+                if args.open:
+                    import webbrowser
+
+                    webbrowser.open(ui_url)
+
+        # --pet: best-effort convenience spawn of the desktop shell. This is NOT
+        # supervision — stage 7 inverts the relationship (Electron launches P2).
+        # The shell finds the endpoint file on its own; all this saves is a second
+        # terminal. Missing electron never touches the voice loop.
+        if args.pet and ui_server is not None:
+            pet_dir = Path(__file__).resolve().parents[2] / "desktop" / "preview"
+            electron = pet_dir / "node_modules" / ".bin" / "electron"
+            if electron.is_file():
+                try:
+                    pet_proc = await asyncio.create_subprocess_exec(
+                        str(electron),
+                        ".",
+                        cwd=pet_dir,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                except OSError as exc:
+                    # The shell is a passenger of a passenger; failing to spawn it
+                    # must not touch the voice loop.
+                    print(f"[桌宠] 壳拉不起来（{exc}）；手动 npm start 也行")
+                else:
+                    print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走）")
+            else:
+                print(f"[桌宠] 壳还没装：cd {pet_dir} && npm install，之后 --pet 才有东西可拉")
+        elif args.pet and not args.no_ui:
+            # The user wanted a UI; the port bind above is what failed.
+            print("[桌宠] 界面服务器没起来（端口问题，见上面），这场壳没有可显示的东西")
+        elif args.pet:
+            print("[桌宠] --pet 需要界面服务器；--no-ui 下没有可显示的东西")
+
+        # A bottom-pinned input line when prompt_toolkit is installed: everything
+        # the session prints (replies, verdicts, log lines) lands ABOVE the line
+        # being typed instead of tearing through it. Optional exactly like
+        # sounddevice; --plain-console or piped stdin falls back to the raw reader.
+        use_prompt = (
+            not args.plain_console
+            and sys.stdin.isatty()
+            and importlib.util.find_spec("prompt_toolkit") is not None
+        )
+        if not args.plain_console and sys.stdin.isatty() and not use_prompt:
+            print(
+                "提示：装上 prompt_toolkit 后，打弹幕不再被输出打乱（pip install prompt_toolkit）。"
+            )
+
+        if use_prompt:
+
+            async def stdin_pump() -> None:
+                from prompt_toolkit import PromptSession
+
+                session: PromptSession[str] = PromptSession("弹幕> ")
+                while True:
+                    try:
+                        line = await session.prompt_async()
+                    except KeyboardInterrupt:
+                        # Raw mode turns Ctrl-C into a key press on the prompt, so
+                        # the loop-level SIGINT handler never sees it — route it to
+                        # the same graceful stop. Same feedback as the handler:
+                        # once the prompt returns the terminal leaves raw mode, so
+                        # a second Ctrl-C reaches the real handler and escalates.
+                        stop.set()
+                        print(
+                            "\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。",
+                            file=sys.stderr,
+                        )
+                        return
+                    except EOFError:
+                        return  # Ctrl-D: console closed; the rest keeps running
+                    await handle_line(line)
+
+        else:
+            # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
+            # default executor on shutdown, and a worker parked in readline() holds
+            # that join until one more Enter — Ctrl-C would hang the exit (C7). A
+            # daemon thread just dies with the process.
+            lines: asyncio.Queue[str | None] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def read_stdin() -> None:
+                while True:
+                    raw_line = sys.stdin.readline()
+                    try:
+                        loop.call_soon_threadsafe(lines.put_nowait, raw_line or None)
+                    except RuntimeError:
+                        return  # loop already closed; we are exiting
+                    if not raw_line:
+                        return
+
+            threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
+
+            async def stdin_pump() -> None:
+                while True:
+                    line = await lines.get()
+                    if line is None:
+                        return  # stdin closed; keep the rest running
+                    await handle_line(line)
+
+        async def drain_controls() -> None:
+            while True:
+                clear = await scheduler.controls.get()
+                if speaker is not None:
+                    speaker.flush()
+                print(f"[打断] playback.clear（{clear.reason}）")
+                if hub is not None:
+                    # The bubble shatters on this; the queue stays single-consumer
+                    # here and the hub only gets a copy.
+                    hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": clear.reason})
+
+        if use_prompt:
+            from prompt_toolkit.patch_stdout import patch_stdout
+
+            # While the prompt is live, print() and the log stream both write
+            # through a proxy that repaints the input line beneath them. Logging
+            # re-targets onto the patched stdout for the window; the shutdown
+            # chain restores it.
+            console_patch.enter_context(patch_stdout(raw=True))
+            logging_setup(
+                level=settings.runtime.log_level,
+                log_viewer_content=settings.runtime.log_viewer_content,
+                stream=sys.stdout,
+                extra_handlers=log_tee,
+            )
+
+        print(
+            f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
+            f"  人设 {settings.persona.id}（persona list 可看全部）  "
+            f"话痨度 {settings.interaction.chattiness.value}"
+            f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
+            f"  生长层 relationship={settings.persona.growth.relationship.value} "
+            f"voice={settings.persona.growth.voice.value}\n"
+            "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
+        )
+        if ui_url:
+            print(
+                f"  界面 {ui_url}\n  （浏览器打开看桌宠和面板；desktop/preview 的壳会自己找到它）"
+            )
+        if not args.mute_while_speaking:
+            print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
+
         await assembly.refresh_context()
         tasks = [
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
@@ -1168,8 +1208,14 @@ async def run_director(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"[收尾] 界面服务器没关上：{exc}", file=sys.stderr)
         if endpoint_file is not None:
-            with contextlib.suppress(OSError):
-                endpoint_file.unlink(missing_ok=True)
+            # Only if it is still OURS. Two --director sessions share this path
+            # (ui_port=0 gives each its own port but one endpoint file), the
+            # later one overwrites it, and deleting another live session's
+            # endpoint sends its shell back to the waiting card for good.
+            with contextlib.suppress(OSError, ValueError):
+                published = json.loads(endpoint_file.read_text(encoding="utf-8"))
+                if published.get("pid") == os.getpid():
+                    endpoint_file.unlink(missing_ok=True)
         if pet_proc is not None and pet_proc.returncode is None:
             # A viewer, not a dependent: terminate politely, then the axe — a
             # shell that shrugs off SIGTERM must not outlive its dev-talk.
@@ -1338,8 +1384,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return asyncio.run(run_director(args))
         except KeyboardInterrupt:
-            # Only the second Ctrl-C lands here (see on_sigint); the first one
-            # goes through the graceful path.
+            # The second Ctrl-C exits inside on_sigint; this catches a Ctrl-C
+            # arriving before that handler is installed.
             print("\n强退。")
             return 130
     try:

@@ -147,14 +147,19 @@ function openPanelWindow() {
 
 function harden(win) {
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  win.webContents.on("will-navigate", (event, target) => {
+  const sameOrigin = (event, target) => {
     // Only our own loopback pages; anything else stays where it is. Compare
     // parsed origins — a startsWith check would let :7777 match :77771 —
     // and treat anything unparseable as foreign.
     const wanted = currentUrl ? originOf(currentUrl) : null;
     const actual = originOf(target);
     if (wanted === null || actual === null || actual !== wanted) event.preventDefault();
-  });
+  };
+  win.webContents.on("will-navigate", sameOrigin);
+  // A 30x never fires will-navigate: without this a squatter on the recorded
+  // port could redirect this frameless always-on-top window — which holds the
+  // preload's IPC bridge — anywhere it liked.
+  win.webContents.on("will-redirect", sameOrigin);
   win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
     callback(false); // the shell needs no mic, camera or anything else
   });
