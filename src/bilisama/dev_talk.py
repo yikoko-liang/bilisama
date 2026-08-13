@@ -621,6 +621,27 @@ async def run_director(args: argparse.Namespace) -> int:
         clock_granularity_min=settings.memory.clock_granularity_min,
     )
 
+    # Real danmaku, when a room is named (--room beats [room] room_id). The
+    # credential chain: config ref first, then path.sh's BILI_SESSDATA. No
+    # credential still connects — Bilibili then masks every uid to 0, which
+    # kills regular-viewer memory, so say it out loud.
+    bili_source = None
+    room_id = args.room if args.room is not None else settings.room.room_id
+    if room_id:
+        from bilisama.ingest.bilibili import BilibiliEventSource
+
+        sessdata = secrets.resolve(settings.room.credential_ref) or os.environ.get(
+            "BILI_SESSDATA", ""
+        )
+        bili_source = BilibiliEventSource(room_id, clock, sessdata=sessdata)
+        if sessdata:
+            print(f"[弹幕] 连接房间 {room_id}（登录态）")
+        else:
+            print(
+                f"[弹幕] 连接房间 {room_id}（匿名：观众全部打码，认不出常客——"
+                "path.sh 加 export BILI_SESSDATA=... 后重跑）"
+            )
+
     # The same probes stage 5's UI server will mount; until then the exit
     # snapshot is their one reader (D3).
     registry = HealthRegistry()
@@ -631,6 +652,8 @@ async def run_director(args: argparse.Namespace) -> int:
     # 25): a synchronous stall anywhere shows up as loop.lag with a number.
     lag_monitor = LoopLagMonitor()
     registry.register("loop", lag_monitor.status)
+    if bili_source is not None:
+        registry.register("bilibili", bili_source.status)
 
     console = QueueSource("console")
     seq = itertools.count(1)
@@ -741,7 +764,10 @@ async def run_director(args: argparse.Namespace) -> int:
     tasks = [
         asyncio.create_task(scheduler.run(), name="director:scheduler"),
         asyncio.create_task(proactive.run(), name="director:proactive"),
-        asyncio.create_task(assembly.run([console]), name="director:assembly"),
+        asyncio.create_task(
+            assembly.run([console] + ([bili_source] if bili_source is not None else [])),
+            name="director:assembly",
+        ),
         asyncio.create_task(
             _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
             name="director:mic",
@@ -875,6 +901,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--persona", default=None, help="临时换人设（director 用，不改配置文件）")
     parser.add_argument(
         "--show-context", action="store_true", help="每次上下文推送时把全文打出来（director 用）"
+    )
+    parser.add_argument(
+        "--room",
+        type=int,
+        default=None,
+        help="连真实直播间（房间号，短号可）；不给则读 [room] room_id",
     )
     parser.add_argument(
         "--plain-console",
