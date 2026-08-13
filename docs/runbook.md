@@ -145,11 +145,16 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 常用参数：
 
 ```bash
+.venv/bin/bilisama dev-talk --director --pet           # 一条命令：语音+界面+桌宠壳全起
 .venv/bin/bilisama dev-talk --director --open          # 起来后自动开浏览器
 .venv/bin/bilisama dev-talk --director --no-ui         # 这场不要界面
 .venv/bin/bilisama dev-talk --director --skin theme    # 本次用内置小机器人（不改配置）
 .venv/bin/bilisama dev-talk --director --skin kirby    # 本次用指定皮肤包
 ```
+
+`--pet` 要求先装过壳（一次性：`cd desktop/preview && npm install`）；没装会提示但
+不影响语音。退出 dev-talk 时壳一并关掉。它只是省一个终端——壳单独 `npm start`
+照样能用，先开后开都行。
 
 细节与边界：
 
