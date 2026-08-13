@@ -123,6 +123,7 @@ class Scheduler:
         # same gift must not be thanked twice just because the first thanks is
         # still playing (A15).
         self._queued_keys: set[str] = set()
+        self._revoked: set[str] = set()
         self._active: _Active | None = None
         self._dispatching = False
         self._panicked = False
@@ -162,6 +163,17 @@ class Scheduler:
             self._queued_keys.add(intent.dedup_key)
         self._maybe_preempt(intent)
         self._wake.set()
+
+    def revoke(self, dedup_key: str) -> None:
+        """Withdraw a queued intent — the super-chat-delete path.
+
+        Only queued work is pulled: an answer already being spoken finishes,
+        because cutting a thank-you mid-sentence sounds worse on stream than
+        thanking a withdrawn SC.
+        """
+        if dedup_key in self._queued_keys:
+            self._revoked.add(dedup_key)
+            self._wake.set()
 
     def panic_mute(self) -> None:
         """Kill everything, protected included — the one switch allowed to."""
@@ -260,6 +272,11 @@ class Scheduler:
         while self._heap:
             entry = self._heap[0]
             intent = entry.intent
+            if intent.dedup_key and intent.dedup_key in self._revoked:
+                heapq.heappop(self._heap)
+                self._revoked.discard(intent.dedup_key)
+                self._drop_queued(intent, SkipReason.REVOKED, outcome=Outcome.EXPIRED)
+                continue
             if self._expired(intent):
                 heapq.heappop(self._heap)
                 self._drop_queued(intent, SkipReason.RESULT_EXPIRED, outcome=Outcome.EXPIRED)

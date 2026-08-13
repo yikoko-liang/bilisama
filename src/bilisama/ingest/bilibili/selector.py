@@ -22,6 +22,7 @@ on the next window with no rewiring.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from bilisama.clock import Clock
     from bilisama.config.derive import DerivedThresholds
 
-__all__ = ["SELECTOR_KINDS", "DanmakuSelector"]
+__all__ = ["SELECTOR_KINDS", "DanmakuSelector", "PresenceWelcomer"]
 
 log = get_logger(__name__)
 
@@ -163,3 +164,39 @@ class DanmakuSelector:
             "breaker_reason": self._breaker.reason,
             "combos_suppressed": self._combos.suppressed_events,
         }
+
+
+class PresenceWelcomer:
+    """New-arrival burst detector: 5 first-time uids inside 45s buys ONE hello.
+
+    Each identity counts once per stream, so a viewer bouncing in and out is
+    not five people. The cooldown keeps an opening-minute crowd from turning
+    the co-host into a greeting machine; when it ends, only arrivals still
+    inside the window count — nobody gets welcomed for walking in a minute
+    and a half ago.
+    """
+
+    def __init__(self, *, uniques: int = 5, window_s: float = 45.0, cooldown_s: float = 90.0):
+        self._uniques = uniques
+        self._window_s = window_s
+        self._cooldown_s = cooldown_s
+        self._seen: set[str] = set()
+        self._arrivals: deque[float] = deque()
+        self._last_fired: float | None = None
+
+    def note(self, identity: str, now: float) -> int | None:
+        """Count one arrival; returns the burst size when a welcome is due."""
+        if identity in self._seen:
+            return None
+        self._seen.add(identity)
+        self._arrivals.append(now)
+        while self._arrivals and now - self._arrivals[0] > self._window_s:
+            self._arrivals.popleft()
+        if self._last_fired is not None and now - self._last_fired < self._cooldown_s:
+            return None
+        if len(self._arrivals) < self._uniques:
+            return None
+        count = len(self._arrivals)
+        self._arrivals.clear()
+        self._last_fired = now
+        return count

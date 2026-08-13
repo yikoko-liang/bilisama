@@ -1,5 +1,5 @@
 # 同一批 uid 会被跨三场回放，验 Tier0 的 streams_seen 计数。
-{"at_s": 0.0, "kind": "danmaku", "text": "又来啦", "viewer": {"uid": 7001, "name": "常客0"}, "event_id": "r0", "ts_ms": 1000}
-{"at_s": 1.0, "kind": "danmaku", "text": "又来啦", "viewer": {"uid": 7002, "name": "常客1"}, "event_id": "r1", "ts_ms": 2000}
+{"at_s": 0.0, "kind": "danmaku", "text": "又来啦", "viewer": {"uid": 7001, "name": "常客0", "medal": {"name": "老粉牌", "level": 15, "up_name": "主播", "anchor_room_id": 777}}, "event_id": "r0", "ts_ms": 1000}
+{"at_s": 1.0, "kind": "danmaku", "text": "又来啦", "viewer": {"uid": 7002, "name": "常客1", "medal": {"name": "老粉牌", "level": 15, "up_name": "主播", "anchor_room_id": 777}}, "event_id": "r1", "ts_ms": 2000}
 {"at_s": 2.0, "kind": "danmaku", "text": "又来啦", "viewer": {"uid": 7003, "name": "常客2"}, "event_id": "r2", "ts_ms": 3000}
 {"at_s": 4.0, "kind": "gift", "gift": {"gift_id": 10003, "name": "舰长", "num": 1, "coin_type": "gold", "total_coin": 198000}, "value_cny": 198.0, "viewer": {"uid": 7001, "name": "常客0", "guard_level": 3}, "event_id": "rg1", "ts_ms": 5000}

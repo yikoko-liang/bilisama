@@ -82,6 +82,7 @@ gift_gold_high = 10000
 gift_gold_medium = 1000
 burst_uniques = 5
 burst_window_s = 45
+burst_cooldown_s = 90                   # 欢迎过一批后，多少秒内不再发第二次批量欢迎
 
 # 事件一律入库（记忆、字幕、事件流照常），这里只管说不说
 [interaction.speak]

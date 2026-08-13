@@ -213,6 +213,15 @@ UI_META: dict[str, FieldMeta] = {
         group="互动",
         order=7,
     ),
+    "interaction.burst_cooldown_s": FieldMeta(
+        label="批量欢迎冷却",
+        hint="欢迎过一批新观众后，这么多秒内不再发第二次批量欢迎",
+        unit="s",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="互动",
+        order=15,
+    ),
     "interaction.chattiness": FieldMeta(
         label="话痨程度",
         hint="它是冷场阈值、弹幕窗口、打分门槛、冷却、回复长度这五个数的唯一写者",

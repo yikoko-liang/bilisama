@@ -215,6 +215,34 @@ async def test_panic_mute_kills_even_protected_and_drains_the_queue() -> None:
         assert cancelled, "the active protected reply must die under panic"
 
 
+async def test_revoked_super_chat_is_withdrawn_before_it_speaks() -> None:
+    """SC withdrawal (stage 6 B5): the platform deleted it, so the queued
+    thank-you is pulled with expired@queued(platform.revoked). An ACTIVE
+    reply is deliberately left alone — cutting a thank-you mid-sentence
+    sounds worse on stream than thanking a withdrawn SC."""
+    script = Script(delta_chunks=6, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        async with _running_scheduler(server) as (scheduler, _):
+            scheduler.submit(
+                _intent("super_chat", Priority.SUPERCHAT, dedup="super_chat:sc:1", requeue=True)
+            )
+            for _ in range(200):
+                if scheduler._active is not None:
+                    break
+                await asyncio.sleep(0.01)
+            # Same priority queues behind rather than preempting.
+            scheduler.submit(
+                _intent("super_chat", Priority.SUPERCHAT, dedup="super_chat:sc:2", requeue=True)
+            )
+            scheduler.revoke("super_chat:sc:2")
+            await _wait_verdicts(scheduler, 2)
+        by_id = {v.intent_id: v for v in scheduler.verdicts}
+        revoked = by_id["super_chat:sc:2"]
+        assert revoked.outcome is Outcome.EXPIRED and revoked.phase is Phase.QUEUED
+        assert revoked.reason is SkipReason.REVOKED
+        assert by_id["super_chat:sc:1"].outcome is Outcome.SPOKEN
+
+
 async def test_expired_intents_never_dispatch() -> None:
     """A stale danmaku answered late is worse than unanswered."""
     clock = FakeClock()

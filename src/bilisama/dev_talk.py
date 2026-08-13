@@ -605,12 +605,17 @@ async def run_director(args: argparse.Namespace) -> int:
         if args.show_context:
             print("─" * 40 + f"\n{text}\n" + "─" * 40)
 
-    from bilisama.ingest.bilibili.selector import DanmakuSelector
+    from bilisama.ingest.bilibili.selector import DanmakuSelector, PresenceWelcomer
 
     selector = DanmakuSelector(
         clock,
         thresholds=lambda: thresholds,
         per_uid_cooldown_s=float(settings.interaction.danmaku.per_uid_cooldown_s),
+    )
+    presence = PresenceWelcomer(
+        uniques=settings.interaction.burst_uniques,
+        window_s=float(settings.interaction.burst_window_s),
+        cooldown_s=float(settings.interaction.burst_cooldown_s),
     )
     assembly = Assembly(
         store=store,
@@ -627,6 +632,9 @@ async def run_director(args: argparse.Namespace) -> int:
         variables=variables,
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
+        presence=presence,
+        gift_gold_high=settings.interaction.gift_gold_high,
+        gift_gold_medium=settings.interaction.gift_gold_medium,
     )
 
     # Real danmaku, when a room is named (--room beats [room] room_id). The
@@ -641,7 +649,9 @@ async def run_director(args: argparse.Namespace) -> int:
         sessdata = secrets.resolve(settings.room.credential_ref) or os.environ.get(
             "BILI_SESSDATA", ""
         )
-        bili_source = BilibiliEventSource(room_id, clock, sessdata=sessdata)
+        bili_source = BilibiliEventSource(
+            room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
+        )
         if sessdata:
             print(f"[弹幕] 连接房间 {room_id}（登录态）")
         else:

@@ -20,7 +20,14 @@ from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.ingest.events import EventKind, LiveEvent
 from bilisama.realtime.link import ReplySpec
 
-__all__ = ["WRAP_CLOSE", "WRAP_OPEN", "intent_for", "neutralize_tags", "wrap_events"]
+__all__ = [
+    "WRAP_CLOSE",
+    "WRAP_OPEN",
+    "burst_welcome_intent",
+    "intent_for",
+    "neutralize_tags",
+    "wrap_events",
+]
 
 WRAP_OPEN = "<bilisama_live_events>"
 WRAP_CLOSE = "</bilisama_live_events>"
@@ -80,27 +87,58 @@ def _line_for(event: LiveEvent) -> str:
 
 
 def intent_for(
-    event: LiveEvent, *, now: float, max_tokens: int = 120, protect_ms: int = 4000
+    event: LiveEvent,
+    *,
+    now: float,
+    max_tokens: int = 120,
+    protect_ms: int = 4000,
+    gift_gold_high: int = 10000,
+    gift_gold_medium: int = 1000,
 ) -> Intent | None:
     """Map one live event to an Intent, or None for kinds that never speak here.
+
+    Gifts are tiered by gold coin (N.E.K.O's HIGH/MEDIUM/LIGHT ladder,
+    plan section 5.3): a high-tier gift keeps the BIG_GIFT slot and its
+    protection; a medium one rides the VIP_ENTER rung — paid, requeued if
+    interrupted, but not protected; anything smaller (free gifts included)
+    competes at danmaku priority and expires like one.
 
     Args:
         event: The normalised live event.
         now: The scheduler's clock, for created_at/expires_at.
         max_tokens: Reply length cap, derived from chattiness upstream.
+        gift_gold_high: Gold coins from which a gift outranks a guard buy.
+        gift_gold_medium: Gold coins from which a gift still counts as paid.
 
     Returns:
-        An Intent, or None when this kind has no speaking path in stage 2
-        (entry/follow/like/share stay feed-only until the burst welcome).
+        An Intent, or None when this kind has no speaking path here
+        (entry/follow/like/share stay feed-only; the burst welcome is the
+        entry lane's one voice, built by burst_welcome_intent).
     """
     priority = _PRIORITY.get(event.kind)
     if priority is None:
         return None
     paid = event.kind in _REQUEUE
+    protected = paid
+    if event.kind is EventKind.GIFT:
+        coins = (
+            event.gift.total_coin
+            if event.gift is not None and event.gift.coin_type == "gold"
+            else 0
+        )
+        if coins >= gift_gold_high:
+            pass  # BIG_GIFT, protected — the tier the ladder already prices
+        elif coins >= gift_gold_medium:
+            priority = Priority.VIP_ENTER
+            protected = False
+        else:
+            priority = Priority.DANMAKU
+            paid = False
+            protected = False
     spec = ReplySpec(
         instructions="挑最值得回应的内容，用角色口吻回应，不超过两句话。",
         max_tokens=max_tokens,
-        protected=paid,
+        protected=protected,
         protect_ms=protect_ms,
     )
     return Intent(
@@ -113,4 +151,28 @@ def intent_for(
         created_at=now,
         expires_at=None if paid else now + _DANMAKU_TTL_S,
         requeue_on_interrupt=paid,
+    )
+
+
+def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> Intent:
+    """One greeting for a burst of new arrivals — the entry lane's only voice.
+
+    Fires from the presence counter, NOT from the speak.entry switch: that
+    switch stays off by default precisely because this batched welcome is
+    the designed fallback (plan section 2.7).
+    """
+    spec = ReplySpec(
+        instructions="刚进来一批新观众，用一句话热络地打个招呼，别逐个点名。",
+        max_tokens=max_tokens,
+    )
+    return Intent(
+        source="entry",
+        priority=Priority.BACKGROUND_RESULT,
+        injection=Injection(
+            reply=spec, item_text=wrap_events([f"[进房] 新观众 {count} 位刚进直播间"])
+        ),
+        trusted=False,
+        dedup_key=f"entry:burst:{now:.0f}",
+        created_at=now,
+        expires_at=now + _DANMAKU_TTL_S,
     )

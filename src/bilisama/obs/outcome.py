@@ -58,6 +58,7 @@ class SkipReason(StrEnum):
     RESULT_EXPIRED = "background.result_expired"
     PANIC_MUTE = "policy.panic_mute"
     OUTPUT_BLOCKED = "safety.output_blocked"
+    REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat
 
 
 @dataclass(frozen=True, slots=True)

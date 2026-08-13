@@ -51,10 +51,6 @@ WRAPPER_TAG = "bilisama_live_events"
 # event_flood.jsonl ends with three gift lines whose at_s (3.1, 6.4, 9.2) rewinds
 # from the 10.964 of the danmaku above them. ReplaySource emits in file order, so
 # the paid events arrive after the flood instead of during it.
-FLOOD_TIMELINE_IS_OUT_OF_ORDER = (
-    "event_flood.jsonl: the three trailing gift lines rewind at_s to 3.1, so replay "
-    "order does not match recorded order. Fixture defect, not a replay defect."
-)
 
 
 def _replay(name: str) -> list[LiveEvent]:
@@ -358,20 +354,7 @@ def test_every_fixture_event_has_its_own_dedup_key(name: str) -> None:
     assert all(event.event_id for event in events)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            n,
-            marks=(
-                pytest.mark.xfail(reason=FLOOD_TIMELINE_IS_OUT_OF_ORDER, strict=True)
-                if n == "event_flood.jsonl"
-                else ()
-            ),
-        )
-        for n in FIXTURE_NAMES
-    ],
-)
+@pytest.mark.parametrize("name", FIXTURE_NAMES)
 def test_fixture_timelines_never_run_backwards(name: str) -> None:
     """File order is replay order, so at_s going backwards means the fixture no
     longer plays the scene it records.

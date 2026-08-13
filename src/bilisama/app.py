@@ -14,12 +14,14 @@ files and puts nothing in the prompt, which is its entire meaning.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING
 
 from bilisama.config.enums import GrowthMode
-from bilisama.director.intents import intent_for
+from bilisama.director.intents import burst_welcome_intent, intent_for
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
+from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
 from bilisama.memory.context import memory_segments
 from bilisama.obs.logging import get_logger
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
     from bilisama.clock import Clock
     from bilisama.config.schema import GrowthSwitches
     from bilisama.director.intent import Intent
-    from bilisama.ingest.bilibili.selector import DanmakuSelector
+    from bilisama.ingest.bilibili.selector import DanmakuSelector, PresenceWelcomer
     from bilisama.ingest.events import LiveEvent
     from bilisama.memory.distill import Distiller
     from bilisama.memory.store import MemoryStore
@@ -62,6 +64,9 @@ class Assembly:
         context_refresh_s: float = 10.0,
         clock_granularity_min: int = 1,
         selector: DanmakuSelector | None = None,
+        presence: PresenceWelcomer | None = None,
+        gift_gold_high: int = 10000,
+        gift_gold_medium: int = 1000,
     ) -> None:
         self._store = store
         self._distiller = distiller
@@ -77,6 +82,9 @@ class Assembly:
         self._refresh_s = context_refresh_s
         self._clock_granularity_min = clock_granularity_min
         self._selector = selector
+        self._presence = presence
+        self._gift_gold_high = gift_gold_high
+        self._gift_gold_medium = gift_gold_medium
         # Anchors are read once: editing an anchor is a restart-level change
         # (ui_meta says so), and re-reading per push would let a mid-stream
         # edit shift the cached prefix under the provider.
@@ -99,6 +107,19 @@ class Assembly:
         self._distiller.note_event()
         self._proactive.note_activity()
         self.events_seen += 1
+        if event.kind is EventKind.ENTRY:
+            event = self._promote_entry(event)
+        if event.kind is EventKind.ENTRY and self._presence is not None:
+            # Deliberately ahead of the speak switch: speak.entry defaults to
+            # off BECAUSE this batched welcome is the designed fallback.
+            burst = self._presence.note(event.viewer.identity, self._clock.monotonic())
+            if burst is not None:
+                self.intents_submitted += 1
+                self._submit(
+                    burst_welcome_intent(
+                        burst, now=self._clock.monotonic(), max_tokens=self._max_tokens
+                    )
+                )
         if not self._speak_enabled(event.kind.value):
             return
         if self._selector is not None and event.kind in SELECTOR_KINDS:
@@ -106,27 +127,42 @@ class Assembly:
             # aggregate. Winners re-enter through deliver_selected.
             self._selector.offer(event)
             return
+        self._submit_event(event)
+
+    async def deliver_selected(self, event: LiveEvent) -> None:
+        """Selector winners re-enter here — memory already saw the raw hits."""
+        self._submit_event(event)
+
+    def _submit_event(self, event: LiveEvent) -> None:
         intent = intent_for(
             event.redacted(),
             now=self._clock.monotonic(),
             max_tokens=self._max_tokens,
             protect_ms=self._protect_ms,
+            gift_gold_high=self._gift_gold_high,
+            gift_gold_medium=self._gift_gold_medium,
         )
         if intent is not None:
             self.intents_submitted += 1
             self._submit(intent)
 
-    async def deliver_selected(self, event: LiveEvent) -> None:
-        """Selector winners re-enter here — memory already saw the raw hits."""
-        intent = intent_for(
-            event.redacted(),
-            now=self._clock.monotonic(),
-            max_tokens=self._max_tokens,
-            protect_ms=self._protect_ms,
-        )
-        if intent is not None:
-            self.intents_submitted += 1
-            self._submit(intent)
+    def _promote_entry(self, event: LiveEvent) -> LiveEvent:
+        """ENTRY → VIP_ENTER when memory knows this person spent money.
+
+        The wire model carries no guard level on InteractWordV2 (VENDOR.md),
+        so the promotion is store-based: past gifts or a recorded guard tier
+        earn a greeting by name.
+        """
+        record = self._store.viewer(event.viewer.identity)
+        if record is None:
+            return event
+        try:
+            guard = GuardLevel(record.guard_level)
+        except ValueError:
+            guard = GuardLevel.NONE
+        if guard.is_patron or is_vip_entry(event.viewer, lifetime_gift_cny=record.gift_value_cny):
+            return dataclasses.replace(event, kind=EventKind.VIP_ENTER)
+        return event
 
     # ------------------------------------------------------------ context
 

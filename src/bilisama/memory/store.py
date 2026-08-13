@@ -209,15 +209,21 @@ class MemoryStore:
             1 if event.text else 0,
             event.value_cny,
         )
+        # Identity-less events (ROOM_STATE and friends) record the event row
+        # only: an "anon" viewer row would accumulate streams_seen every
+        # stream and float to the top of the regulars prompt segment.
+        track_viewer = viewer.identity != "anon"
         if self._batch_s <= 0:
             self._db.execute(_EVENT_INSERT, event_row)
-            self._db.execute(_VIEWER_UPSERT, viewer_row)
+            if track_viewer:
+                self._db.execute(_VIEWER_UPSERT, viewer_row)
             self._db.commit()
             return
         if not self._pending_events:
             self._pending_since = self._clock.monotonic()
         self._pending_events.append(event_row)
-        self._pending_viewers.append(viewer_row)
+        if track_viewer:
+            self._pending_viewers.append(viewer_row)
         aged = self._clock.monotonic() - self._pending_since >= self._batch_s
         if aged or len(self._pending_events) >= _BATCH_MAX_ROWS:
             self._flush_pending()

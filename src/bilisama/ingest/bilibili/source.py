@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import http.cookies
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -50,6 +51,22 @@ __all__ = ["BilibiliEventSource"]
 log = get_logger(__name__)
 
 _QUEUE_SIZE = 1024
+# Parse-budget sampling (plan section 16.8 item 27): commands are classified
+# BEFORE full parsing. Paid commands always parse; danmaku and presence get a
+# per-second budget each and shed the excess, counted per lane. The stated
+# cost: in a ten-thousand-viewer room, regular-viewer counts become sampled
+# figures rather than a census.
+_DANMAKU_PARSE_BUDGET_PER_S = 80
+_PRESENCE_PARSE_BUDGET_PER_S = 40
+_PARSE_LANES: dict[str, str] = {
+    "DANMU_MSG": "danmaku",
+    "INTERACT_WORD": "presence",
+    "INTERACT_WORD_V2": "presence",
+}
+_LANE_BUDGETS = {
+    "danmaku": _DANMAKU_PARSE_BUDGET_PER_S,
+    "presence": _PRESENCE_PARSE_BUDGET_PER_S,
+}
 # One purchase arrives as USER_TOAST_MSG_V2 and, sometimes, a legacy GUARD_BUY
 # too; the 0.35s dedup ring downstream is far too short for that pair, so the
 # source keeps its own per-viewer window (VENDOR.md verification 4).
@@ -252,6 +269,21 @@ class _Forwarder(bili_handlers.BaseHandler):  # type: ignore[misc]
         super().__init__()
         self._owner = owner
 
+    def handle(self, client: Any, command: dict[str, Any]) -> None:
+        """Budget gate ahead of upstream's dispatch-and-parse.
+
+        LIVE / PREPARING sit in upstream's ignore list, so they are lifted
+        here into ROOM_STATE events before that list swallows them.
+        """
+        cmd = str(command.get("cmd", "")).split(":")[0]
+        if cmd in ("LIVE", "PREPARING"):
+            self._owner.on_room_state("live" if cmd == "LIVE" else "preparing")
+            return
+        lane = _PARSE_LANES.get(cmd)
+        if lane is not None and not self._owner.parse_allowed(lane):
+            return
+        super().handle(client, command)
+
     def _guarded(self, build: Any) -> None:
         try:
             self._owner.offer(build())
@@ -279,6 +311,12 @@ class _Forwarder(bili_handlers.BaseHandler):  # type: ignore[misc]
     def _on_heartbeat(self, client: Any, message: Any) -> None:
         self._owner.note_popularity(int(getattr(message, "popularity", 0) or 0))
 
+    def _on_super_chat_delete(self, client: Any, message: Any) -> None:
+        try:
+            self._owner.on_sc_delete(list(getattr(message, "ids", []) or []))
+        except Exception as exc:
+            self._owner.note_error(exc)
+
     def on_client_stopped(self, client: Any, exception: BaseException | None) -> None:
         self._owner.on_client_stopped(exception)
 
@@ -293,6 +331,7 @@ class BilibiliEventSource:
         *,
         sessdata: str = "",
         queue_size: int = _QUEUE_SIZE,
+        on_sc_delete: Callable[[str], None] | None = None,
     ) -> None:
         self.name = "bilibili"
         self._room_id_arg = room_id
@@ -315,6 +354,10 @@ class BilibiliEventSource:
         self._errors = 0
         self._danmaku_total = 0
         self._danmaku_anonymous = 0
+        self._on_sc_delete = on_sc_delete
+        self._parse_windows: dict[str, list[float]] = {}
+        self._shed: dict[str, int] = {}
+        self._room_state = ""
 
     # ---- Source protocol ----
 
@@ -392,6 +435,43 @@ class BilibiliEventSource:
             self._dropped += 1
         self._queue.put_nowait(event)
 
+    def parse_allowed(self, lane: str) -> bool:
+        """Spend one unit of this second's parse budget; False means shed."""
+        now = self._clock.monotonic()
+        window = self._parse_windows.get(lane)
+        if window is None or now - window[0] >= 1.0:
+            window = [now, 0.0]
+            self._parse_windows[lane] = window
+        if window[1] >= _LANE_BUDGETS[lane]:
+            self._shed[lane] = self._shed.get(lane, 0) + 1
+            return False
+        window[1] += 1
+        return True
+
+    def on_room_state(self, state: str) -> None:
+        self._room_state = state
+        self.offer(
+            LiveEvent(
+                kind=EventKind.ROOM_STATE,
+                room_id=self._real_room_id or self._room_id_arg,
+                text=state,
+                event_id=f"state:{state}:{int(self._clock.monotonic() * 1000)}",
+                recv_at=self._clock.monotonic(),
+                session_generation=self._generation,
+            )
+        )
+
+    def on_sc_delete(self, ids: list[int]) -> None:
+        """A withdrawn super chat: revoke its queued thank-you by dedup key.
+
+        The key mirrors LiveEvent.dedup_key for the SC (`super_chat:sc:<id>`,
+        the deletion handle from VENDOR.md verification 3).
+        """
+        if self._on_sc_delete is None:
+            return
+        for mid in ids:
+            self._on_sc_delete(f"super_chat:sc:{mid}")
+
     def note_error(self, exc: Exception) -> None:
         self._errors += 1
         log.warning("bilibili.map_failed", error_text=str(exc)[:200])
@@ -451,5 +531,7 @@ class BilibiliEventSource:
             "counts": dict(self._counts),
             "dropped": self._dropped,
             "map_errors": self._errors,
+            "shed": dict(self._shed),
+            "room_state": self._room_state,
             "anonymous_ratio": anonymous_ratio,
         }

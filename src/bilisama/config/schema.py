@@ -216,6 +216,7 @@ class InteractionConfig(BaseModel):
     gift_gold_medium: int = Field(1000, ge=0)
     burst_uniques: int = Field(5, ge=1)
     burst_window_s: int = Field(45, ge=5)
+    burst_cooldown_s: int = Field(90, ge=0)
     danmaku: DanmakuConfig = Field(default_factory=DanmakuConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
 

@@ -58,6 +58,7 @@
 {"at_s": 2.954, "kind": "danmaku", "text": "这段没看懂", "viewer": {"uid": 4014, "name": "新观众2"}, "event_id": "f56", "ts_ms": 3953}
 {"at_s": 3.008, "kind": "danmaku", "text": "666", "viewer": {"uid": 4001, "name": "挑刺哥6"}, "event_id": "f57", "ts_ms": 4008}
 {"at_s": 3.061, "kind": "danmaku", "text": "再讲讲", "viewer": {"uid": 4012, "name": "挑刺哥0"}, "event_id": "f58", "ts_ms": 4061}
+{"at_s": 3.1, "kind": "gift", "gift": {"gift_id": 30607, "name": "小星星", "num": 1, "coin_type": "gold", "total_coin": 20000}, "value_cny": 20.0, "viewer": {"uid": 4900, "name": "土豪0"}, "event_id": "bg0", "ts_ms": 4100}
 {"at_s": 3.113, "kind": "danmaku", "text": "?", "viewer": {"uid": 4022, "name": "捧场王10"}, "event_id": "f59", "ts_ms": 4112}
 {"at_s": 3.148, "kind": "danmaku", "text": "前排", "viewer": {"uid": 4014, "name": "路人甲2"}, "event_id": "f60", "ts_ms": 4148}
 {"at_s": 3.192, "kind": "danmaku", "text": "再讲讲", "viewer": {"uid": 4030, "name": "新观众1"}, "event_id": "f61", "ts_ms": 4191}
@@ -99,7 +100,7 @@
 {"at_s": 5.246, "kind": "danmaku", "text": "主播牛", "viewer": {"uid": 4014, "name": "老粉丝2"}, "event_id": "f97", "ts_ms": 6245}
 {"at_s": 5.296, "kind": "danmaku", "text": "awsl", "viewer": {"uid": 4032, "name": "挑刺哥3"}, "event_id": "f98", "ts_ms": 6295}
 {"at_s": 5.345, "kind": "danmaku", "text": "?", "viewer": {"uid": 4022, "name": "捧场王10"}, "event_id": "f99", "ts_ms": 6345}
-{"at_s": 5.416, "kind": "danmaku", "text": "?", "viewer": {"uid": 4001, "name": "新观众6"}, "event_id": "f100", "ts_ms": 6415}
+{"at_s": 5.416, "kind": "danmaku", "text": "?", "viewer": {"uid": 4001, "name": "新观众6", "medal": {"name": "小牌子", "level": 9, "up_name": "主播", "anchor_room_id": 777}}, "event_id": "f100", "ts_ms": 6415}
 {"at_s": 5.468, "kind": "danmaku", "text": "awsl", "viewer": {"uid": 4001, "name": "挑刺哥6"}, "event_id": "f101", "ts_ms": 6468}
 {"at_s": 5.524, "kind": "danmaku", "text": "笑死", "viewer": {"uid": 4018, "name": "捧场王6"}, "event_id": "f102", "ts_ms": 6524}
 {"at_s": 5.552, "kind": "danmaku", "text": "哈哈哈", "viewer": {"uid": 4014, "name": "捧场王2"}, "event_id": "f103", "ts_ms": 6552}
@@ -117,6 +118,7 @@
 {"at_s": 6.225, "kind": "danmaku", "text": "小助手说句话", "viewer": {"uid": 4019, "name": "新观众7"}, "event_id": "f115", "ts_ms": 7224}
 {"at_s": 6.298, "kind": "danmaku", "text": "前排", "viewer": {"uid": 4018, "name": "新观众6"}, "event_id": "f116", "ts_ms": 7297}
 {"at_s": 6.365, "kind": "danmaku", "text": "?", "viewer": {"uid": 4017, "name": "捧场王5"}, "event_id": "f117", "ts_ms": 7364}
+{"at_s": 6.4, "kind": "gift", "gift": {"gift_id": 30607, "name": "小星星", "num": 1, "coin_type": "gold", "total_coin": 20000}, "value_cny": 20.0, "viewer": {"uid": 4901, "name": "土豪1"}, "event_id": "bg1", "ts_ms": 7400}
 {"at_s": 6.455, "kind": "danmaku", "text": "666", "viewer": {"uid": 4002, "name": "捧场王7"}, "event_id": "f118", "ts_ms": 7454}
 {"at_s": 6.526, "kind": "danmaku", "text": "这段没看懂", "viewer": {"uid": 4035, "name": "新观众6"}, "event_id": "f119", "ts_ms": 7525}
 {"at_s": 6.579, "kind": "danmaku", "text": "哈哈哈", "viewer": {"uid": 4028, "name": "老粉丝16"}, "event_id": "f120", "ts_ms": 7579}
@@ -165,6 +167,7 @@
 {"at_s": 9.058, "kind": "danmaku", "text": "笑死", "viewer": {"uid": 4004, "name": "夜猫子9"}, "event_id": "f163", "ts_ms": 10057}
 {"at_s": 9.147, "kind": "danmaku", "text": "这段没看懂", "viewer": {"uid": 4024, "name": "路人甲12"}, "event_id": "f164", "ts_ms": 10147}
 {"at_s": 9.172, "kind": "danmaku", "text": "主播牛", "viewer": {"uid": 4005, "name": "老粉丝10"}, "event_id": "f165", "ts_ms": 10172}
+{"at_s": 9.2, "kind": "gift", "gift": {"gift_id": 30607, "name": "小星星", "num": 1, "coin_type": "gold", "total_coin": 20000}, "value_cny": 20.0, "viewer": {"uid": 4902, "name": "土豪2"}, "event_id": "bg2", "ts_ms": 10200}
 {"at_s": 9.229, "kind": "danmaku", "text": "主播牛", "viewer": {"uid": 4023, "name": "新观众11"}, "event_id": "f166", "ts_ms": 10229}
 {"at_s": 9.306, "kind": "danmaku", "text": "小助手说句话", "viewer": {"uid": 4032, "name": "捧场王3"}, "event_id": "f167", "ts_ms": 10306}
 {"at_s": 9.376, "kind": "danmaku", "text": "前排", "viewer": {"uid": 4014, "name": "夜猫子2"}, "event_id": "f168", "ts_ms": 10375}
@@ -199,6 +202,3 @@
 {"at_s": 10.86, "kind": "danmaku", "text": "这段没看懂", "viewer": {"uid": 4040, "name": "捧场王11"}, "event_id": "f197", "ts_ms": 11859}
 {"at_s": 10.899, "kind": "danmaku", "text": "awsl", "viewer": {"uid": 4015, "name": "夜猫子3"}, "event_id": "f198", "ts_ms": 11898}
 {"at_s": 10.964, "kind": "danmaku", "text": "小助手说句话", "viewer": {"uid": 4027, "name": "捧场王15"}, "event_id": "f199", "ts_ms": 11963}
-{"at_s": 3.1, "kind": "gift", "gift": {"gift_id": 30607, "name": "小星星", "num": 1, "coin_type": "gold", "total_coin": 20000}, "value_cny": 20.0, "viewer": {"uid": 4900, "name": "土豪0"}, "event_id": "bg0", "ts_ms": 4100}
-{"at_s": 6.4, "kind": "gift", "gift": {"gift_id": 30607, "name": "小星星", "num": 1, "coin_type": "gold", "total_coin": 20000}, "value_cny": 20.0, "viewer": {"uid": 4901, "name": "土豪1"}, "event_id": "bg1", "ts_ms": 7400}
-{"at_s": 9.2, "kind": "gift", "gift": {"gift_id": 30607, "name": "小星星", "num": 1, "coin_type": "gold", "total_coin": 20000}, "value_cny": 20.0, "viewer": {"uid": 4902, "name": "土豪2"}, "event_id": "bg2", "ts_ms": 10200}
