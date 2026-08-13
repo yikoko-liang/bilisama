@@ -9,13 +9,13 @@ scaled 6x with nearest-neighbour, packed by tools/skin_pack.py into the same
 sprite format every other skin uses. This file IS the source art — tweak a
 color or a pose here and rerun; no image editor in the loop.
 
-Design language: a nod to Bilibili's 小电视 without copying it — the TV-ish
-head with two short corner antennas and the bili-pink glow — kept
-deliberately spare: warm white shell, one accent color, soft cheeks, stub
-feet, nothing else.
-
-Usage:
-    python tools/gen_tofu_skin.py             # writes src/bilisama/ui/web/skins/tofu/
+Design language, third pass: ONE tofu block — head and body merged, no legs.
+White tofu body, a black-tofu face plate set in with a visible seam, a
+black-tofu base layer at the bottom (the 黑白豆腐 stack, and the visual
+ground a legless block needs), a soy-cream top bevel. Bili pink carries
+emotion (eyes, cheeks, mouth, antenna tips); bili blue appears in exactly one
+place — the thinking dots. Hands exist only while she gestures: talking
+alternates two little mitts, cheering and jumping raise both.
 """
 
 from __future__ import annotations
@@ -36,14 +36,15 @@ SCALE = 6
 
 Color = tuple[int, int, int, int]
 
-OUT: Color = (56, 52, 58, 255)  # outline, ink with a violet cast
-CREAM: Color = (250, 248, 246, 255)  # shell, warm white
-SHADE: Color = (231, 226, 228, 255)  # shell shadow
-SHEEN: Color = (255, 255, 255, 255)  # shell highlight
-VISOR: Color = (43, 40, 48, 255)  # screen face
-PINK: Color = (251, 114, 153, 255)  # bili pink, the one accent
+OUT: Color = (40, 36, 32, 255)  # outline, warm ink
+CREAM: Color = (250, 247, 240, 255)  # white tofu, soy-tinted
+SHADE: Color = (233, 227, 214, 255)  # tofu shadow, warm — no pink cast
+SHEEN: Color = (255, 255, 255, 255)  # the lit top face of the block
+PLATE: Color = (47, 43, 39, 255)  # black tofu: face plate and base layer
+PINK: Color = (251, 114, 153, 255)  # bili pink, the emotion accent
 PINK_HI: Color = (255, 163, 192, 255)
-CHEEK: Color = (250, 189, 207, 255)  # soft blush on the shell
+CHEEK: Color = (250, 189, 207, 255)  # soft blush on the white tofu
+BLUE: Color = (35, 173, 229, 255)  # bili blue, thinking only
 GRAY: Color = (155, 151, 156, 255)  # powered-down glow
 WHITE: Color = (255, 255, 255, 255)
 
@@ -74,18 +75,18 @@ def rounded_block(
         px(img, cx, cy, (0, 0, 0, 0))
 
 
-# ------------------------------------------------------------ body parts
+# ------------------------------------------------------------ the tofu
 
 
 def draw_robot(
     *,
     dy: int = 0,
+    lean: int = 0,  # face/antenna x-shift: the legless waddle
     eyes: str = "open",  # open | blink | up | wide | off
     mouth: str = "none",  # none | open | small
     antenna: str = "on",  # on | bright | off
-    arms: str = "none",  # none | right_up | right_mid | both_up
-    feet: str = "stand",  # stand | walk_a | walk_b | tucked
-    dots: str = "none",  # none | a | b        (thinking dots)
+    hands: str = "none",  # none | talk_a | talk_b | up
+    dots: str = "none",  # none | a | b        (thinking dots, bili blue)
     zzz: str = "none",  # none | a | b
     bang: bool = False,  # the "!" of surprise
     powered: bool = True,
@@ -97,106 +98,102 @@ def draw_robot(
     def Y(y: int) -> int:
         return y + dy
 
-    # the 小电视 signature: two short antennas off the head's top corners
+    def X(x: int) -> int:
+        return x + lean
+
+    # the 小电视 signature: two short antennas off the block's top corners
     if antenna != "off":
         tip = glow_hi if antenna == "bright" else glow
-        px(img, 7, Y(5), OUT)
-        px(img, 6, Y(4), OUT)
-        rect(img, 5, Y(2), 5, Y(3), tip)
-        px(img, 18, Y(5), OUT)
-        px(img, 19, Y(4), OUT)
-        rect(img, 20, Y(2), 20, Y(3), tip)
+        for sx, sy in ((7, 7), (7, 6), (7, 5), (6, 4)):
+            px(img, X(sx), Y(sy), OUT)
+        rect(img, X(5), Y(2), X(5), Y(3), tip)
+        for sx, sy in ((18, 7), (18, 6), (18, 5), (19, 4)):
+            px(img, X(sx), Y(sy), OUT)
+        rect(img, X(20), Y(2), X(20), Y(3), tip)
         if antenna == "bright":
-            px(img, 5, Y(2), WHITE)
-            px(img, 20, Y(2), WHITE)
+            px(img, X(5), Y(2), WHITE)
+            px(img, X(20), Y(2), WHITE)
 
-    # head, with two-step corners for a softer silhouette
-    rounded_block(img, 4, Y(6), 21, Y(17), CREAM, OUT)
-    for cx, cy in ((5, 6), (4, 7), (20, 6), (21, 7), (4, 16), (5, 17), (21, 16), (20, 17)):
+    # the block: one 18x18 rounded square, softer two-step corners
+    rounded_block(img, 4, Y(8), 21, Y(25), CREAM, OUT)
+    for cx, cy in ((5, 8), (4, 9), (20, 8), (21, 9), (4, 24), (5, 25), (21, 24), (20, 25)):
         px(img, cx, Y(cy), (0, 0, 0, 0))
-    for cx, cy in ((5, 7), (20, 7), (5, 16), (20, 16)):
+    for cx, cy in ((5, 9), (20, 9), (5, 24), (20, 24)):
         px(img, cx, Y(cy), OUT)
-    rect(img, 7, Y(7), 18, Y(7), SHEEN)
-    rect(img, 5, Y(16), 20, Y(16), SHADE)
+    rect(img, 6, Y(9), 19, Y(9), SHEEN)  # lit top face
 
-    # visor: a window in the shell, not the whole face
-    rounded_block(img, 7, Y(9), 18, Y(13), VISOR, None)
+    # black-tofu base layer, with a soft seam above it — the stack that also
+    # grounds a block with no legs
+    rect(img, 5, Y(21), 20, Y(21), SHADE)
+    rect(img, 5, Y(22), 20, Y(24), PLATE)
 
-    # soft cheeks on the shell, just under the visor corners
+    # black-tofu face plate, set in with a 1px white seam all around
+    rounded_block(img, X(6), Y(11), X(19), Y(16), PLATE, None)
+
+    # cheeks on the white tofu, under the plate corners
     if powered:
-        px(img, 6, Y(14), CHEEK)
-        px(img, 19, Y(14), CHEEK)
+        px(img, X(6), Y(18), CHEEK)
+        px(img, X(19), Y(18), CHEEK)
 
-    # eyes
+    # eyes on the plate
     if eyes == "blink":
-        rect(img, 9, Y(11), 10, Y(11), glow)
-        rect(img, 15, Y(11), 16, Y(11), glow)
+        rect(img, X(9), Y(13), X(10), Y(13), glow)
+        rect(img, X(15), Y(13), X(16), Y(13), glow)
     elif eyes == "off":
-        rect(img, 9, Y(11), 10, Y(11), GRAY)
-        rect(img, 15, Y(11), 16, Y(11), GRAY)
+        rect(img, X(9), Y(13), X(10), Y(13), GRAY)
+        rect(img, X(15), Y(13), X(16), Y(13), GRAY)
     elif eyes == "up":
-        rect(img, 10, Y(9), 11, Y(11), glow)
-        rect(img, 16, Y(9), 17, Y(11), glow)
-        px(img, 10, Y(9), glow_hi)
-        px(img, 16, Y(9), glow_hi)
+        rect(img, X(10), Y(11), X(11), Y(13), glow)
+        rect(img, X(16), Y(11), X(17), Y(13), glow)
+        px(img, X(10), Y(11), glow_hi)
+        px(img, X(16), Y(11), glow_hi)
     elif eyes == "wide":
-        rect(img, 9, Y(9), 11, Y(12), glow)
-        rect(img, 14, Y(9), 16, Y(12), glow)
-        px(img, 9, Y(9), WHITE)
-        px(img, 14, Y(9), WHITE)
+        rect(img, X(9), Y(11), X(11), Y(14), glow)
+        rect(img, X(14), Y(11), X(16), Y(14), glow)
+        px(img, X(9), Y(11), WHITE)
+        px(img, X(14), Y(11), WHITE)
     else:  # open
-        rect(img, 9, Y(10), 10, Y(12), glow)
-        rect(img, 15, Y(10), 16, Y(12), glow)
-        px(img, 9, Y(10), glow_hi)
-        px(img, 15, Y(10), glow_hi)
+        rect(img, X(9), Y(12), X(10), Y(14), glow)
+        rect(img, X(15), Y(12), X(16), Y(14), glow)
+        px(img, X(9), Y(12), glow_hi)
+        px(img, X(15), Y(12), glow_hi)
 
-    # mouth on the chin strip
+    # mouth on the white chin strip
     if mouth == "open":
-        rect(img, 11, Y(15), 14, Y(16), PINK)
+        rect(img, X(11), Y(18), X(14), Y(19), PINK)
     elif mouth == "small":
-        rect(img, 12, Y(15), 13, Y(15), PINK)
+        rect(img, X(12), Y(18), X(13), Y(18), PINK)
 
-    # body
-    rounded_block(img, 7, Y(18), 18, Y(22), CREAM, OUT)
-    rect(img, 8, Y(21), 17, Y(21), SHADE)
-    rect(img, 12, Y(19), 13, Y(20), glow)
+    # hands, only when she gestures. Talking alternates the two mitts —
+    # the 巴拉巴拉 hand-waving.
+    def hand(side: str, y: int) -> None:
+        if side == "left":
+            rect(img, 2, Y(y), 3, Y(y + 1), CREAM)
+            rect(img, 1, Y(y), 1, Y(y + 1), OUT)
+        else:
+            rect(img, 22, Y(y), 23, Y(y + 1), CREAM)
+            rect(img, 24, Y(y), 24, Y(y + 1), OUT)
 
-    # arms
-    if arms in ("right_up", "both_up"):
-        rect(img, 22, Y(13), 23, Y(14), CREAM)  # hand
-        rect(img, 22, Y(15), 22, Y(18), CREAM)
-        rect(img, 23, Y(13), 23, Y(18), OUT)
-    if arms == "both_up":
-        rect(img, 2, Y(13), 3, Y(14), CREAM)
-        rect(img, 3, Y(15), 3, Y(18), CREAM)
-        rect(img, 2, Y(13), 2, Y(18), OUT)
-    if arms == "right_mid":
-        rect(img, 21, Y(17), 23, Y(18), CREAM)
-        rect(img, 21, Y(19), 23, Y(19), OUT)
+    if hands == "talk_a":
+        hand("left", 12)
+        hand("right", 16)
+    elif hands == "talk_b":
+        hand("left", 16)
+        hand("right", 12)
+    elif hands == "up":
+        hand("left", 11)
+        hand("right", 11)
 
-    # feet
-    if feet == "stand":
-        rect(img, 6, 23, 10, 25, VISOR)
-        rect(img, 15, 23, 19, 25, VISOR)
-    elif feet == "walk_a":
-        rect(img, 4, 23, 8, 25, VISOR)
-        rect(img, 16, 23, 20, 25, VISOR)
-    elif feet == "walk_b":
-        rect(img, 8, 23, 12, 25, VISOR)
-        rect(img, 13, 23, 17, 25, VISOR)
-    elif feet == "tucked":
-        rect(img, 8, Y(23), 11, Y(24), VISOR)
-        rect(img, 14, Y(23), 17, Y(24), VISOR)
-
-    # thinking dots, drifting up beside the right antenna
+    # thinking dots, drifting up beside the right antenna — the one place
+    # bili blue appears
     if dots == "a":
         px(img, 22, Y(4), SHADE)
-        px(img, 23, Y(2), PINK)
+        px(img, 23, Y(2), BLUE)
         px(img, 25, Y(1), SHADE)
     elif dots == "b":
-        px(img, 22, Y(4), PINK)
+        px(img, 22, Y(4), BLUE)
         px(img, 23, Y(2), SHADE)
-        px(img, 25, Y(1), PINK)
+        px(img, 25, Y(1), BLUE)
 
     # zzz for powered-down naps
     if zzz != "none":
@@ -222,15 +219,15 @@ FRAMES: dict[str, dict[str, object]] = {
     "listen_b": {"eyes": "wide", "antenna": "on"},
     "think_a": {"eyes": "up", "dots": "a"},
     "think_b": {"eyes": "up", "dots": "b"},
-    "speak_a": {"mouth": "open", "arms": "right_up", "antenna": "bright"},
-    "speak_b": {"mouth": "small", "arms": "right_mid"},
-    "jump": {"dy": -2, "feet": "tucked", "arms": "both_up", "mouth": "open"},
+    "speak_a": {"mouth": "open", "hands": "talk_a", "antenna": "bright"},
+    "speak_b": {"mouth": "small", "hands": "talk_b"},
+    "jump": {"dy": -2, "hands": "up", "mouth": "open"},
     "squash": {"dy": 1, "eyes": "blink"},
-    "cheer": {"arms": "both_up", "mouth": "open", "eyes": "wide", "antenna": "bright"},
+    "cheer": {"hands": "up", "eyes": "wide", "mouth": "open", "antenna": "bright"},
     "sleep_a": {"eyes": "off", "antenna": "off", "powered": False, "zzz": "a"},
     "sleep_b": {"eyes": "off", "antenna": "off", "powered": False, "zzz": "b"},
-    "walk_a": {"feet": "walk_a"},
-    "walk_b": {"feet": "walk_b", "dy": -1},
+    "walk_a": {"lean": -1},
+    "walk_b": {"lean": 1, "dy": -1},
     "shock_a": {"eyes": "wide", "bang": True},
     "shock_b": {"eyes": "wide"},
 }
