@@ -1,0 +1,39 @@
+/* Structure tokens only — spacing, radii, motion, depth. Colors live in
+   theme.css / theme-dark.css so dark mode is another theme file, not a flag
+   (plan section 6.6 discipline). */
+
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 14px;
+  --space-4: 22px;
+
+  --radius-s: 8px;
+  --radius-m: 14px;
+
+  /* One motion tier: fast. Anything slower is a state loop, not a transition. */
+  --dur-fast: 160ms;
+  --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --shadow-1: 0 2px 10px rgb(0 0 0 / 0.10), 0 8px 32px rgb(0 0 0 / 0.08);
+
+  --z-bubble: 20;
+  --z-corner: 30;
+  --z-scrim: 40;
+  --z-panel: 50;
+
+  /* The pet scales with the window: full size in a browser tab, snug in the
+     180x230 shell window. */
+  --pet-size: clamp(88px, 42vmin, 150px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}

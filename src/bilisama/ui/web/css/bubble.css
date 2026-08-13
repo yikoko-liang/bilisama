@@ -1,0 +1,60 @@
+/* The speech bubble. Anti-jitter is three fixed choices: bottom-anchored so it
+   only grows upward, fixed max-width, fixed line-height — text streaming in
+   never reflows what is already on screen. */
+
+.bubble {
+  position: absolute;
+  bottom: calc(50% + var(--pet-size) * 0.64);
+  left: 50%;
+  transform: translateX(-46%);
+  max-width: min(280px, 80vw);
+  min-width: 60px;
+  max-height: calc(1.55em * 6 + 20px);
+  overflow-y: auto;
+  padding: 9px 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius-m) var(--radius-m) var(--radius-m) 4px;
+  box-shadow: var(--shadow-1);
+  font-size: 14px;
+  line-height: 1.55;
+  word-break: break-word;
+  z-index: var(--z-bubble);
+  scrollbar-width: none;
+  /* long replies scroll internally; the top edge fades instead of clipping */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 12px);
+}
+
+.bubble::-webkit-scrollbar {
+  display: none;
+}
+
+.bubble.show {
+  animation: bubble-in var(--dur-fast) var(--ease-pop);
+  transform-origin: bottom left;
+}
+
+.bubble.shatter {
+  animation: bubble-shatter 0.42s ease-in forwards;
+}
+
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateX(-46%) scale(0.9); }
+  to { opacity: 1; transform: translateX(-46%) scale(1); }
+}
+
+/* The interruption: a shake, then a quick fade — "the line got cut". */
+@keyframes bubble-shatter {
+  0% { transform: translateX(-46%); }
+  15% { transform: translateX(calc(-46% - 3px)); }
+  30% { transform: translateX(calc(-46% + 3px)); }
+  45% { transform: translateX(-46%); opacity: 1; }
+  100% { transform: translateX(-46%) scale(0.96); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble.show,
+  .bubble.shatter {
+    animation-duration: 1ms;
+  }
+}

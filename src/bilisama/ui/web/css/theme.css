@@ -1,0 +1,41 @@
+/* Light theme. Every color the page uses is named here; theme-dark.css
+   overrides the same names and nothing else. */
+
+:root {
+  color-scheme: light;
+
+  --bg: transparent; /* the shell window is transparent; browsers paint --page */
+  --page: #f6f4ef;
+  --panel: #ffffff;
+  --panel-edge: rgb(0 0 0 / 0.07);
+  --ink: #26251f;
+  --ink-dim: #8b887e;
+  --ink-faint: #c2bfb4;
+  --accent: #3f8f86;
+
+  /* The robot */
+  --pet-shell: #f7f4ec;
+  --pet-shell-deep: #e3ded2;
+  --pet-screen: #23272d;
+  --pet-glow: #5fd6c4; /* idle/speaking teal */
+  --pet-glow-listen: #7cc7ff;
+  --pet-glow-think: #c5a8ff;
+  --pet-blush: #f5b8a9;
+
+  /* Semantic colors, one per event family (section 6.6) */
+  --c-sc: #d99a1f;
+  --c-gift: #d9679a;
+  --c-danmaku: #7a90a8;
+  --c-reply: #3f8f86;
+  --c-ok: #4caf7d;
+  --c-warn: #d9903f;
+  --c-err: #d95f4d;
+
+  --scrim: rgb(20 20 18 / 0.32);
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+}

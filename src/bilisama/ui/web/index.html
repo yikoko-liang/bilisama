@@ -4,12 +4,81 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BiliSama</title>
-  <link rel="stylesheet" href="assets/css/style.css">
+  <link rel="stylesheet" href="assets/css/tokens.css">
+  <link rel="stylesheet" href="assets/css/theme.css">
+  <link rel="stylesheet" href="assets/css/theme-dark.css" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="assets/css/pet.css">
+  <link rel="stylesheet" href="assets/css/bubble.css">
+  <link rel="stylesheet" href="assets/css/panel.css">
 </head>
 <body>
-  <main id="stage">
-    <p id="state" data-state="connecting">连接中…</p>
+  <main id="stage" data-state="connecting" data-visual="offline">
+    <div id="bubble" class="bubble" hidden></div>
+    <div id="pet-mount" class="pet-mount"></div>
   </main>
+
+  <button id="corner" class="corner" title="面板" aria-label="打开面板">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <circle cx="8.4" cy="12" r="2.1" fill="currentColor"/>
+      <path d="M12.6 8.6a4.8 4.8 0 0 1 0 6.8" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round"/>
+      <path d="M15.4 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <div id="scrim" class="scrim" hidden></div>
+
+  <aside id="panel" class="panel" aria-label="控制面板">
+    <header class="panel-top">
+      <div class="panel-id">
+        <span id="p-name" class="p-name">BiliSama</span>
+        <span id="p-state" class="capsule" data-visual="offline">连接中</span>
+      </div>
+      <button id="p-panic" class="panic" data-panicked="false">紧急闭麦</button>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="live" role="tab">现场</button>
+      <button class="tab" data-tab="chat" role="tab">对话</button>
+      <button class="tab" data-tab="logs" role="tab">日志</button>
+      <button class="tab" data-tab="config" role="tab">配置</button>
+    </nav>
+
+    <section id="tab-live" class="tab-page active">
+      <h4 class="sect">健康</h4>
+      <div id="health" class="cards"><p class="empty">面板打开时每 5 秒刷新</p></div>
+      <h4 class="sect">谁能让她开口</h4>
+      <div id="speak-matrix" class="matrix"></div>
+      <h4 class="sect">事件注入</h4>
+      <form id="inject" class="inject" autocomplete="off">
+        <input id="inject-input" placeholder="弹幕直接打字 ｜ /sc 名字 金额 内容 ｜ /gift 名字 金额">
+        <button type="submit">注入</button>
+      </form>
+    </section>
+
+    <section id="tab-chat" class="tab-page">
+      <div id="timeline" class="timeline"><p class="empty">还没有对话</p></div>
+    </section>
+
+    <section id="tab-logs" class="tab-page">
+      <div class="log-tools">
+        <select id="log-level" aria-label="日志级别过滤">
+          <option value="debug">全部</option>
+          <option value="info" selected>info 及以上</option>
+          <option value="warning">warning 及以上</option>
+          <option value="error">只看 error</option>
+        </select>
+        <button id="log-pause" type="button" data-paused="false">暂停滚动</button>
+      </div>
+      <div id="loglines" class="loglines"></div>
+    </section>
+
+    <section id="tab-config" class="tab-page">
+      <div id="config-list" class="config-list"><p class="empty">载入中…</p></div>
+    </section>
+  </aside>
+
   <script type="module" src="assets/js/main.js"></script>
 </body>
 </html>

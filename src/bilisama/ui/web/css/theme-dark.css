@@ -1,0 +1,34 @@
+/* Dark theme: the same names as theme.css, different values. Loaded with a
+   prefers-color-scheme media attribute, so it IS the dark mode switch. */
+
+:root {
+  color-scheme: dark;
+
+  --page: #17181b;
+  --panel: #202226;
+  --panel-edge: rgb(255 255 255 / 0.08);
+  --ink: #e9e6de;
+  --ink-dim: #98958b;
+  --ink-faint: #55534c;
+  --accent: #63c2b5;
+
+  --pet-shell: #33373d;
+  --pet-shell-deep: #24272c;
+  --pet-screen: #121417;
+  --pet-glow: #5fd6c4;
+  --pet-glow-listen: #7cc7ff;
+  --pet-glow-think: #c5a8ff;
+  --pet-blush: #b0766a;
+
+  --c-sc: #e6b04a;
+  --c-gift: #e07eae;
+  --c-danmaku: #8fa5bc;
+  --c-reply: #63c2b5;
+  --c-ok: #5cc08c;
+  --c-warn: #e0a35a;
+  --c-err: #e07463;
+
+  --scrim: rgb(0 0 0 / 0.5);
+
+  --shadow-1: 0 2px 10px rgb(0 0 0 / 0.35), 0 8px 32px rgb(0 0 0 / 0.30);
+}
