@@ -14,30 +14,8 @@ from bilisama.ingest.bilibili.safety import (
     GiftComboAggregator,
     PerUidCooldown,
 )
-from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
-
-
-def _gift_event(
-    *, uid: int = 9, gift_id: int = 31036, num: int = 1, coin: int = 100, event_id: str = ""
-) -> LiveEvent:
-    viewer = Viewer(uid=uid, name="老板")
-    return LiveEvent(
-        kind=EventKind.GIFT,
-        room_id=777,
-        viewer=viewer,
-        gift=Gift(
-            gift_id=gift_id,
-            name="小心心",
-            num=num,
-            coin_type="gold",
-            total_coin=coin,
-            combo_id=f"{viewer.identity}:{gift_id}",
-        ),
-        value_cny=coin / 1000.0,
-        event_id=event_id,
-        ts_ms=1_755_000_000_000,
-    )
-
+from bilisama.ingest.events import Gift, LiveEvent
+from tests.fakes.bili import gift_event as _gift_event
 
 # ------------------------------------------------------------------ DedupRing
 

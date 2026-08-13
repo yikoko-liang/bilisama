@@ -17,79 +17,28 @@ from bilisama.app import Assembly
 from bilisama.clock import FakeClock
 from bilisama.config.derive import DerivedThresholds, derive
 from bilisama.config.enums import Chattiness
-from bilisama.config.schema import GrowthSwitches, SpeakSwitches
-from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Intent
 from bilisama.ingest.bilibili.scoring import danmaku_score
 from bilisama.ingest.bilibili.selector import DanmakuSelector
 from bilisama.ingest.events import (
     EventKind,
-    Gift,
     GuardLevel,
     LiveEvent,
-    Medal,
     Viewer,
 )
-from bilisama.memory.distill import Distiller
-from bilisama.memory.store import MemoryStore
-from bilisama.persona.loader import PersonaStore
-from bilisama.proactive import ProactiveTopicLoop
-from tests.fakes.replay import FIXTURE_DIR, read_fixture
+from tests.fakes.bili import danmaku_event as _dm
+from tests.fakes.bili import gift_event
+from tests.fakes.replay import FIXTURE_DIR, replay_driving_clock
+from tests.unit.conftest import build_assembly_kit
+
+
+def _gift(uid: int, *, coin: int = 20000, event_id: str = "") -> LiveEvent:
+    return gift_event(uid=uid, coin=coin, event_id=event_id)
+
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
 
 _ROOM = 777
-
-
-def _dm(
-    text: str,
-    uid: int = 1,
-    *,
-    guard: GuardLevel = GuardLevel.NONE,
-    medal_level: int = 0,
-    medal_room: int = _ROOM,
-    admin: bool = False,
-    user_level: int = 0,
-    event_id: str = "",
-) -> LiveEvent:
-    viewer = Viewer(
-        uid=uid,
-        name=f"观众{uid}",
-        guard_level=guard,
-        is_admin=admin,
-        user_level=user_level,
-        medal=(
-            Medal(name="牌子", level=medal_level, anchor_room_id=medal_room)
-            if medal_level
-            else None
-        ),
-    )
-    return LiveEvent(
-        kind=EventKind.DANMAKU,
-        room_id=_ROOM,
-        viewer=viewer,
-        text=text,
-        event_id=event_id or f"{uid}:{text}",
-    )
-
-
-def _gift(uid: int, *, coin: int = 20000, event_id: str = "") -> LiveEvent:
-    viewer = Viewer(uid=uid, name=f"老板{uid}")
-    return LiveEvent(
-        kind=EventKind.GIFT,
-        room_id=_ROOM,
-        viewer=viewer,
-        gift=Gift(
-            gift_id=30607,
-            name="小星星",
-            num=1,
-            coin_type="gold",
-            total_coin=coin,
-            combo_id=f"{viewer.identity}:30607",
-        ),
-        value_cny=coin / 1000.0,
-        event_id=event_id or f"gift:{uid}",
-    )
 
 
 # ------------------------------------------------------------------ scoring
@@ -265,43 +214,14 @@ async def test_three_delivery_failures_latch_the_breaker_for_the_run() -> None:
 def _assembly(
     tmp_path: Path, *, chattiness: Chattiness = Chattiness.HIGH
 ) -> tuple[Assembly, DanmakuSelector, list[Intent], FakeClock]:
-    clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
-    store = MemoryStore(":memory:", clock)
-    store.begin_stream()
-    persona = PersonaStore(tmp_path / "live", TEMPLATE_ROOT)
-    growth = GrowthSwitches()
-    speak = SpeakSwitches()
-    distiller = Distiller(None, store, persona, growth, clock)
-    intents: list[Intent] = []
-    proactive = ProactiveTopicLoop(
-        None,
-        store,
-        SpeakingFloor(clock),
-        clock,
-        submit=intents.append,
-        prompt="",
-        idle_threshold_s=90.0,
-    )
-
-    async def push(text: str) -> None:
-        return None
-
+    kit_clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
     selector = DanmakuSelector(
-        clock, thresholds=lambda: derive(chattiness), per_uid_cooldown_s=60.0
+        kit_clock, thresholds=lambda: derive(chattiness), per_uid_cooldown_s=60.0
     )
-    assembly = Assembly(
-        store=store,
-        distiller=distiller,
-        proactive=proactive,
-        persona=persona,
-        growth=growth,
-        speak_enabled=lambda source: bool(getattr(speak, source, False)),
-        submit=intents.append,
-        push_context=push,
-        clock=clock,
-        selector=selector,
-    )
-    return assembly, selector, intents, clock
+    kit = build_assembly_kit(tmp_path, selector=selector)
+    # One clock: the selector was built first, so rebind it to the kit's.
+    selector._clock = kit.clock
+    return kit.assembly, selector, kit.intents, kit.clock
 
 
 async def test_super_chat_bypasses_the_funnel_entirely(tmp_path: Path) -> None:
@@ -324,14 +244,11 @@ async def test_event_flood_one_danmaku_intent_per_window_paid_immediate(tmp_path
     loop = asyncio.create_task(selector.run(assembly.deliver_selected))
     await asyncio.sleep(0)
     try:
-        cursor = 0.0
         sc_done = False
-        for at_s, event in read_fixture(FIXTURE_DIR / "event_flood.jsonl", room_id=_ROOM):
-            if at_s > cursor:  # the fixture tail walks backwards (backlog #8)
-                await clock.advance(at_s - cursor)
-                cursor = at_s
+        flood = replay_driving_clock(clock, FIXTURE_DIR / "event_flood.jsonl", room_id=_ROOM)
+        async for event in flood:
             await assembly.on_event(event)
-            if not sc_done and at_s > 5.0:
+            if not sc_done and clock.monotonic() > 5.0:
                 await assembly.on_event(
                     LiveEvent(
                         kind=EventKind.SUPER_CHAT,

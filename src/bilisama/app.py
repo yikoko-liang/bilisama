@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING
 
 from bilisama.config.enums import GrowthMode
+from bilisama.config.schema import InteractionConfig
 from bilisama.director.intents import burst_welcome_intent, intent_for
 from bilisama.ingest.bilibili.safety import DedupRing
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
@@ -44,6 +45,8 @@ __all__ = ["Assembly"]
 
 log = get_logger(__name__)
 
+_TIER_DEFAULTS = InteractionConfig()
+
 
 class Assembly:
     """Owns the emit path and the context push. Wire once, at startup."""
@@ -67,8 +70,10 @@ class Assembly:
         clock_granularity_min: int = 1,
         selector: DanmakuSelector | None = None,
         presence: PresenceWelcomer | None = None,
-        gift_gold_high: int = 10000,
-        gift_gold_medium: int = 1000,
+        # Defaults READ the schema rather than repeating its numbers: retuning
+        # the tier ladder in one place must not leave shadow defaults behind.
+        gift_gold_high: int = _TIER_DEFAULTS.gift_gold_high,
+        gift_gold_medium: int = _TIER_DEFAULTS.gift_gold_medium,
     ) -> None:
         self._store = store
         self._distiller = distiller

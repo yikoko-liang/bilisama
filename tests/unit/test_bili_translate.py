@@ -24,62 +24,12 @@ from bilisama.ingest.bilibili.source import (
     event_from_user_toast,
 )
 from bilisama.ingest.events import EventKind, GuardLevel
+from tests.fakes.bili import danmu_info as _danmu_info
+from tests.fakes.bili import gift_data as _gift_data
+from tests.fakes.bili import sc_data as _sc_data
+from tests.fakes.bili import toast_data as _toast_data
 
 _KW: dict[str, Any] = {"room_id": 777, "recv_at": 1.0, "generation": 2}
-
-
-def _danmu_info(
-    *,
-    uid: int = 42,
-    uname: str = "阿强",
-    msg: str = "主播今天玩什么",
-    crc: str = "abc123ef",
-    medal: bool = True,
-    privilege: int = 3,
-    admin: int = 1,
-    wealth: int = 22,
-) -> list[Any]:
-    # Index layout verified against DanmakuMessage.from_command: info[0][1..15],
-    # info[1] text, info[2][0..7], info[3] medal, info[4] level, info[5] titles,
-    # info[7] privilege, info[16][0] wealth.
-    info0 = [
-        0,
-        1,
-        25,
-        16777215,
-        1755000000000,
-        12345,
-        0,
-        crc,
-        0,
-        0,
-        0,
-        "",
-        0,
-        "{}",
-        "{}",
-        {"user": {"base": {"face": "http://face"}}},
-    ]
-    medal_block = [21, "小牌子", "某主播", 777, 0, ""] if medal else []
-    return [
-        info0,
-        msg,
-        [uid, uname, admin, 0, 0, 10000, 1, ""],
-        medal_block,
-        [50, 0, 9868950, ">50000"],
-        ["", ""],
-        0,
-        privilege,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        [wealth],
-    ]
 
 
 def test_danmaku_maps_identity_medal_and_millisecond_timestamp() -> None:
@@ -109,29 +59,6 @@ def test_masked_danmaku_keeps_the_event_and_falls_back_to_the_hash() -> None:
     assert event.viewer.medal is None
 
 
-def _gift_data(**overrides: object) -> dict[str, Any]:
-    data: dict[str, Any] = {
-        "giftName": "小心心",
-        "num": 5,
-        "uname": "老板",
-        "face": "",
-        "guard_level": 0,
-        "uid": 9,
-        "timestamp": 1755000123,
-        "giftId": 31036,
-        "giftType": 0,
-        "gift_info": {"img_basic": ""},
-        "action": "赠送",
-        "price": 5200,
-        "rnd": "uuid-1",
-        "coin_type": "gold",
-        "total_coin": 26000,
-        "tid": "tid-777",
-    }
-    data.update(overrides)
-    return data
-
-
 def test_gold_gift_derives_cny_and_merges_on_tid() -> None:
     message = web_models.GiftMessage.from_command(_gift_data())
     event = event_from_gift(message, **_KW)
@@ -151,27 +78,6 @@ def test_silver_gift_is_worth_nothing_and_not_paid() -> None:
     assert not event.is_paid
 
 
-def _sc_data() -> dict[str, Any]:
-    return {
-        "price": 30,
-        "message": "能表演个节目吗",
-        "message_trans": "",
-        "start_time": 1755000200,
-        "end_time": 1755000260,
-        "time": 60,
-        "id": 888001,
-        "gift": {"gift_id": 12000, "gift_name": "醒目留言"},
-        "uid": 77,
-        "user_info": {"uname": "yiang", "face": "", "guard_level": 0, "user_level": 12},
-        "background_bottom_color": "",
-        "background_color": "",
-        "background_icon": "",
-        "background_image": "",
-        "background_price_color": "",
-        "medal_info": None,
-    }
-
-
 def test_super_chat_price_is_already_cny() -> None:
     message = web_models.SuperChatMessage.from_command(_sc_data())
     event = event_from_super_chat(message, **_KW)
@@ -180,17 +86,6 @@ def test_super_chat_price_is_already_cny() -> None:
     assert event.text == "能表演个节目吗"
     assert event.event_id == "sc:888001", "the id is the deletion handle"
     assert event.is_paid
-
-
-def _toast_data(source: int = 0) -> dict[str, Any]:
-    return {
-        "sender_uinfo": {"uid": 55, "base": {"name": "新舰长"}},
-        "guard_info": {"guard_level": 3, "start_time": 1755000300, "end_time": 1755000300},
-        "pay_info": {"num": 1, "price": 198000, "unit": "月"},
-        "gift_info": {"gift_id": 10003},
-        "option": {"source": source},
-        "toast_msg": "新舰长 在主播的直播间开通了舰长",
-    }
 
 
 def test_guard_toast_converts_gold_seeds_and_keeps_source_zero() -> None:

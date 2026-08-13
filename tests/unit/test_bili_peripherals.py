@@ -28,8 +28,12 @@ from bilisama.memory.distill import Distiller
 from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
 from bilisama.proactive import ProactiveTopicLoop
-from tests.fakes.replay import FIXTURE_DIR, read_fixture
-from tests.unit.test_bili_translate import _danmu_info, _sc_data
+from tests.fakes.bili import danmu_info as _danmu_info
+from tests.fakes.bili import entry_event as _entry
+from tests.fakes.bili import gift_event
+from tests.fakes.bili import sc_data as _sc_data
+from tests.fakes.replay import FIXTURE_DIR, replay_driving_clock
+from tests.unit.conftest import build_assembly_kit
 
 REPO = Path(__file__).resolve().parent.parent.parent
 TEMPLATE_ROOT = REPO / "config" / "personas" / "mia"
@@ -68,49 +72,8 @@ def test_stale_arrivals_age_out_of_the_window() -> None:
 def _assembly(
     tmp_path: Path, *, speak: SpeakSwitches | None = None
 ) -> tuple[Assembly, MemoryStore, list[Intent], FakeClock]:
-    clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
-    store = MemoryStore(":memory:", clock)
-    store.begin_stream()
-    persona = PersonaStore(tmp_path / "live", TEMPLATE_ROOT)
-    growth = GrowthSwitches()
-    speak = speak or SpeakSwitches()
-    distiller = Distiller(None, store, persona, growth, clock)
-    intents: list[Intent] = []
-    proactive = ProactiveTopicLoop(
-        None,
-        store,
-        SpeakingFloor(clock),
-        clock,
-        submit=intents.append,
-        prompt="",
-        idle_threshold_s=90.0,
-    )
-
-    async def push(text: str) -> None:
-        return None
-
-    assembly = Assembly(
-        store=store,
-        distiller=distiller,
-        proactive=proactive,
-        persona=persona,
-        growth=growth,
-        speak_enabled=lambda source: bool(getattr(speak, source, False)),
-        submit=intents.append,
-        push_context=push,
-        clock=clock,
-        presence=PresenceWelcomer(),
-    )
-    return assembly, store, intents, clock
-
-
-def _entry(uid: int) -> LiveEvent:
-    return LiveEvent(
-        kind=EventKind.ENTRY,
-        room_id=777,
-        viewer=Viewer(uid=uid, name=f"观众{uid}"),
-        event_id=f"iw:{uid}",
-    )
+    kit = build_assembly_kit(tmp_path, speak=speak, presence=PresenceWelcomer())
+    return kit.assembly, kit.store, kit.intents, kit.clock
 
 
 async def test_five_entries_buy_one_welcome_at_default_switches(tmp_path: Path) -> None:
@@ -154,11 +117,7 @@ async def test_presence_replay_one_hello_and_one_named_greeting(tmp_path: Path) 
     """The section 2.7 L2+L4 acceptance against the presence fixture: the
     captain arrives twice and is named once; 121 arrivals buy one hello."""
     assembly, _store, intents, clock = _assembly(tmp_path)
-    cursor = 0.0
-    for at_s, event in read_fixture(FIXTURE_DIR / "presence.jsonl", room_id=777):
-        if at_s > cursor:
-            await clock.advance(at_s - cursor)
-            cursor = at_s
+    async for event in replay_driving_clock(clock, FIXTURE_DIR / "presence.jsonl", room_id=777):
         await assembly.on_event(event)
     vips = [i for i in intents if i.source == "vip_enter"]
     hellos = [i for i in intents if i.source == "entry"]
@@ -170,14 +129,7 @@ async def test_presence_replay_one_hello_and_one_named_greeting(tmp_path: Path) 
 
 
 def _gift_event(coins: int, *, coin_type: str = "gold") -> LiveEvent:
-    return LiveEvent(
-        kind=EventKind.GIFT,
-        room_id=777,
-        viewer=Viewer(uid=9, name="老板"),
-        gift=Gift(gift_id=1, name="礼物", coin_type=coin_type, total_coin=coins),
-        value_cny=coins / 1000.0 if coin_type == "gold" else 0.0,
-        event_id=f"gift:{coins}:{coin_type}",
-    )
+    return gift_event(coin=coins, coin_type=coin_type)
 
 
 def test_gift_tiers_follow_the_gold_thresholds() -> None:
@@ -385,7 +337,7 @@ def test_sc_delete_purges_the_paid_pocket_before_revoking() -> None:
     withdrawal real; the scheduler never sees a key to revoke."""
     from bilisama.ingest.bilibili._vendor.blivedm.models import web as web_models
     from bilisama.ingest.bilibili.source import event_from_super_chat
-    from tests.unit.test_bili_translate import _sc_data as sc_payload
+    from tests.fakes.bili import sc_data as sc_payload
 
     clock = FakeClock(wall=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
     revoked: list[str] = []

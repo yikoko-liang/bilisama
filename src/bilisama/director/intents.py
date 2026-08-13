@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 
+from bilisama.config.schema import InteractionConfig
 from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.ingest.events import EventKind, LiveEvent
 from bilisama.realtime.link import ReplySpec
@@ -58,6 +59,7 @@ _PRIORITY: dict[EventKind, Priority] = {
 
 # Paid attention must survive an interruption; a stale danmaku must not.
 _REQUEUE = {EventKind.SUPER_CHAT, EventKind.GIFT, EventKind.GUARD_BUY}
+_TIER_DEFAULTS = InteractionConfig()
 _DANMAKU_TTL_S = 20.0
 _DISPATCH_FLOOR_S = 5.0  # minimum runway once an already-old winner leaves the window
 
@@ -93,8 +95,8 @@ def intent_for(
     now: float,
     max_tokens: int = 120,
     protect_ms: int = 4000,
-    gift_gold_high: int = 10000,
-    gift_gold_medium: int = 1000,
+    gift_gold_high: int = _TIER_DEFAULTS.gift_gold_high,
+    gift_gold_medium: int = _TIER_DEFAULTS.gift_gold_medium,
 ) -> Intent | None:
     """Map one live event to an Intent, or None for kinds that never speak here.
 

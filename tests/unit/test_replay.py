@@ -48,10 +48,6 @@ FIXTURE_NAMES = [
 # tries to close it, which is only an attack while the name matches.
 WRAPPER_TAG = "bilisama_live_events"
 
-# event_flood.jsonl ends with three gift lines whose at_s (3.1, 6.4, 9.2) rewinds
-# from the 10.964 of the danmaku above them. ReplaySource emits in file order, so
-# the paid events arrive after the flood instead of during it.
-
 
 def _replay(name: str) -> list[LiveEvent]:
     return [event for _, event in read_fixture(fixture(name))]

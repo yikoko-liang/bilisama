@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -148,3 +148,20 @@ def fixture(name: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"no such fixture: {path}")
     return path
+
+
+async def replay_driving_clock(
+    clock: Any, path: Path, *, room_id: int = 0
+) -> AsyncIterator[LiveEvent]:
+    """Yield fixture events while advancing a FakeClock to each at_s.
+
+    The timing walk two suites used to hand-roll: advance-then-yield, so the
+    caller's sink observes each event at its recorded moment and can inject
+    extra events mid-replay between iterations.
+    """
+    cursor = 0.0
+    for at_s, event in read_fixture(path, room_id=room_id):
+        if at_s > cursor:
+            await clock.advance(at_s - cursor)
+            cursor = at_s
+        yield event

@@ -23,6 +23,7 @@ from bilisama.memory.distill import Distiller
 from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
 from bilisama.proactive import ProactiveTopicLoop
+from tests.unit.conftest import build_assembly_kit
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
 
@@ -37,40 +38,8 @@ def _assembly(
     growth: GrowthSwitches | None = None,
     speak: SpeakSwitches | None = None,
 ) -> tuple[Assembly, MemoryStore, PersonaStore, list[Intent], list[str], FakeClock]:
-    clock = FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
-    store = MemoryStore(":memory:", clock)
-    store.begin_stream()
-    persona = PersonaStore(tmp_path / "live", TEMPLATE_ROOT)
-    growth = growth or GrowthSwitches()
-    speak_switches = speak or SpeakSwitches()
-    distiller = Distiller(None, store, persona, growth, clock)
-    intents: list[Intent] = []
-    pushed: list[str] = []
-    proactive = ProactiveTopicLoop(
-        None,
-        store,
-        SpeakingFloor(clock),
-        clock,
-        submit=intents.append,
-        prompt="",
-        idle_threshold_s=90.0,
-    )
-
-    async def push(text: str) -> None:
-        pushed.append(text)
-
-    assembly = Assembly(
-        store=store,
-        distiller=distiller,
-        proactive=proactive,
-        persona=persona,
-        growth=growth,
-        speak_enabled=lambda source: bool(getattr(speak_switches, source, False)),
-        submit=intents.append,
-        push_context=push,
-        clock=clock,
-    )
-    return assembly, store, persona, intents, pushed, clock
+    kit = build_assembly_kit(tmp_path, growth=growth, speak=speak)
+    return kit.assembly, kit.store, kit.persona, kit.intents, kit.pushed, kit.clock
 
 
 # ------------------------------------------------------------ emit path
