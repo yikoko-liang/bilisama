@@ -27,16 +27,17 @@ liliMozi/openhanako (Apache-2.0)
 
 Project-N-E-K-O/N.E.K.O (Apache-2.0)
   Danmaku scoring and selection, the paid-event lane, SafetyGuard
-  (planned for stage 3).
+  (planned for stage 6, in progress 2026-08).
 
 Open-LLM-VTuber (MIT)
   sentence_divider (CJK chunking), tts_manager ordered delivery,
   interruption memory rewrite (planned for stage 5).
 
 xfgryujk/blivedm (MIT)
-  Bilibili live protocol client, to be vendored under
-  src/bilisama/ingest/bilibili/_vendor/ with its LICENSE preserved
-  (planned for stage 3).
+  Bilibili live protocol client, vendored unmodified at
+  src/bilisama/ingest/bilibili/_vendor/blivedm/ with its LICENSE preserved.
+  dev branch @ 0da0c10fc50ed0ccd3e68c65f6a503cf3ca4198b, vendored 2026-08-13;
+  provenance and re-vendor steps in that directory's VENDOR.md.
 
 Live2D Cubism Core (proprietary, "Redistributable Code")
   To be redistributed unmodified with its copyright header intact and a

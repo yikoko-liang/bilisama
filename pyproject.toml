@@ -52,6 +52,10 @@ packages = ["src/bilisama"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Vendored upstream code stays byte-identical to its source (plus one UPSTREAM
+# header line per file) so quarterly re-vendors remain a plain copy — our
+# gates do not apply to it.
+extend-exclude = ["src/bilisama/ingest/bilibili/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ASYNC"]
@@ -79,6 +83,9 @@ ignore = [
 [tool.black]
 line-length = 100
 target-version = ["py312"]
+# force-exclude (not exclude): it also wins when paths are passed explicitly,
+# which is exactly how scripts/gate.sh invokes black.
+force-exclude = "src/bilisama/ingest/bilibili/_vendor"
 
 [tool.mypy]
 # Without this, bilisama only resolves when "src" is on the command line. Any
@@ -98,11 +105,23 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
+# Vendored code: exclude keeps it out of the crawl; the override further down
+# keeps strict mode quiet when our own modules import it (both are needed
+# under strict — see _vendor/blivedm/VENDOR.md).
+exclude = ["src/bilisama/ingest/bilibili/_vendor"]
 # 第三方库没有类型标注的，单独放行
 [[tool.mypy.overrides]]
 # sounddevice is dev-talk's optional mic layer, installed on demand.
 module = ["pysbd.*", "brotli.*", "mlx_audio.*", "sounddevice.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Vendored blivedm ships no py.typed; we consume it through our own typed
+# mapping layer (ingest/bilibili/source.py), which is where strictness applies.
+module = ["bilisama.ingest.bilibili._vendor.*"]
+ignore_errors = true
+ignore_missing_imports = true
+follow_imports = "skip"
 
 # speech-to-speech 装在它自己的 venv 里，这边解析不到是预期的。
 # shim 的正确性由 tests/integration/test_s2s_patches.py 在那个 venv 里验证。
