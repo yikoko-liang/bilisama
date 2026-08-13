@@ -32,11 +32,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from bilisama.config._ui import Reload
 from bilisama.config.schema import Settings
 from bilisama.config.ui_meta import UI_META
 from bilisama.obs.health import HealthRegistry
 from bilisama.obs.health import create_app as create_health_app
 from bilisama.obs.logging import get_logger
+from bilisama.ui.config_edit import field_control
 from bilisama.ui.events import ClientEvent, ServerEvent, frame
 from bilisama.ui.hub import UiHub
 
@@ -107,29 +109,42 @@ def write_endpoint_file(path: Path, *, url: str, pid: int) -> None:
 
 
 def config_snapshot(settings: Settings) -> list[dict[str, Any]]:
-    """Everything the panel's read-only config tab renders.
+    """Everything the panel's config tab renders — values plus editor facts.
 
     ui_meta's first consumer. Secret-marked fields collapse to a presence
     label before the value ever leaves the process — the panel has no business
-    holding even a credential *reference* string.
+    holding even a credential *reference* string. `editable` marks the rows
+    whose reload class is LIVE (the honest set: consumers read them at call
+    time); kind/choices/min/max come from the pydantic field so the page can
+    render the right control without guessing.
     """
     rows: list[dict[str, Any]] = []
     for path, meta in UI_META.items():
+        parent: Any = None
         value: Any = settings
         for part in path.split("."):
+            parent = value
             value = getattr(value, part)
+        control: dict[str, Any] = {"kind": None, "choices": None, "min": None, "max": None}
+        editable = False
         if isinstance(value, BaseModel):
             # Section-header entries ("speech.dashscope" etc) resolve to a whole
             # sub-model. Stringifying it would inline every child value —
             # including the secret refs the branch below exists to mask.
             value = None
-        elif meta.secret:
-            value = "已配置" if value else "未配置"
-        elif isinstance(value, float) and not math.isfinite(value):
-            # max_speech_ms defaults to inf; JSONResponse runs allow_nan=False.
-            value = str(value)
-        elif not isinstance(value, str | int | float | bool | None):
-            value = str(value)
+        else:
+            if isinstance(parent, BaseModel):
+                info = type(parent).model_fields.get(path.rsplit(".", 1)[-1])
+                if info is not None:
+                    control = field_control(info)
+            editable = meta.reload is Reload.LIVE and not meta.secret
+            if meta.secret:
+                value = "已配置" if value else "未配置"
+            elif isinstance(value, float) and not math.isfinite(value):
+                # max_speech_ms defaults to inf; JSONResponse runs allow_nan=False.
+                value = str(value)
+            elif not isinstance(value, str | int | float | bool | None):
+                value = str(value)
         rows.append(
             {
                 "path": path,
@@ -141,6 +156,8 @@ def config_snapshot(settings: Settings) -> list[dict[str, Any]]:
                 "audience": str(meta.audience),
                 "reload": str(meta.reload),
                 "value": value,
+                "editable": editable,
+                **control,
             }
         )
     rows.sort(key=lambda row: (str(row["group"]), int(row["order"]), str(row["path"])))

@@ -107,7 +107,7 @@ export function createPanel({ send }) {
     scrim.hidden = false;
     requestAnimationFrame(() => scrim.classList.add("open"));
     startHealth();
-    if (!configLoaded) loadConfig();
+    loadConfig();
   };
 
   const close = () => {
@@ -289,7 +289,57 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ config tab
 
-  async function loadConfig() {
+  // Which badge a frozen row wears; live rows get an editor instead.
+  const RELOAD_BADGE = { reconnect: "重连生效", engine: "重启引擎", restart: "重启生效" };
+
+  let configReloadTimer = null;
+
+  const sendEdit = (path, value) => {
+    if (!send("panel.set", { config: { path, value } })) {
+      feedEntry({ kind: "system", text: "连接断开，这条修改没发出去" });
+      return;
+    }
+    // The server acks into the feed; pull the canonical values shortly after
+    // so a rejected edit visibly snaps back.
+    clearTimeout(configReloadTimer);
+    configReloadTimer = setTimeout(() => loadConfig(true), 700);
+  };
+
+  const editorFor = (row) => {
+    if (row.kind === "bool") {
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = Boolean(row.value);
+      box.addEventListener("change", () => sendEdit(row.path, box.checked));
+      return box;
+    }
+    if (row.kind === "select") {
+      const sel = el("select");
+      for (const choice of row.choices ?? []) {
+        const opt = el("option", "", choice);
+        opt.value = choice;
+        sel.appendChild(opt);
+      }
+      sel.value = String(row.value);
+      sel.addEventListener("change", () => sendEdit(row.path, sel.value));
+      return sel;
+    }
+    const input = el("input");
+    input.type = row.kind === "number" ? "number" : "text";
+    if (row.kind === "number") {
+      if (row.min !== null && row.min !== undefined) input.min = String(row.min);
+      if (row.max !== null && row.max !== undefined) input.max = String(row.max);
+      input.step = "any";
+    }
+    input.value = String(row.value);
+    input.addEventListener("change", () => {
+      sendEdit(row.path, row.kind === "number" ? Number(input.value) : input.value);
+    });
+    return input;
+  };
+
+  async function loadConfig(force = false) {
+    if (configLoaded && !force) return;
     configLoaded = true;
     const listEl = document.getElementById("config-list");
     let rows;
@@ -305,6 +355,9 @@ export function createPanel({ send }) {
       return;
     }
     listEl.textContent = "";
+    listEl.appendChild(
+      el("p", "cfg-note", "亮着的控件直播中能改，只管本场；带徽章的行要到标注的时机才生效。"),
+    );
     const advanced = el("details");
     advanced.appendChild(el("summary", "", "高级（开发者字段）"));
     // Group headers, tracked per container (main list vs the advanced fold).
@@ -323,10 +376,26 @@ export function createPanel({ send }) {
         host.appendChild(el("h5", "", row.group || "其他"));
       }
       if (row.value === null) continue; // section-header rows carry no value
-      const line = el("div", "cfg-row");
+      const line = el("div", "cfg-row" + (row.editable ? " editable" : ""));
+      line.dataset.path = row.path;
       line.appendChild(el("span", "cfg-label", row.label));
-      const unit = row.unit ? ` ${row.unit}` : "";
-      line.appendChild(el("span", "cfg-value", `${row.value}${unit}`));
+      if (row.editable) {
+        const ctrl = editorFor(row);
+        ctrl.classList.add("cfg-edit");
+        if (row.unit) {
+          const wrap = el("span", "cfg-editwrap");
+          wrap.appendChild(ctrl);
+          wrap.appendChild(el("span", "cfg-unit", row.unit));
+          line.appendChild(wrap);
+        } else {
+          line.appendChild(ctrl);
+        }
+      } else {
+        const unit = row.unit ? ` ${row.unit}` : "";
+        line.appendChild(el("span", "cfg-value", `${row.value}${unit}`));
+        const badge = RELOAD_BADGE[row.reload];
+        if (badge) line.appendChild(el("span", "cfg-badge", badge));
+      }
       host.appendChild(line);
       if (row.hint) host.appendChild(el("p", "cfg-hint", row.hint));
     }

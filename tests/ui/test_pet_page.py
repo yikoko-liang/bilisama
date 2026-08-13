@@ -26,6 +26,7 @@ import pytest
 from bilisama.clock import SystemClock
 from bilisama.config.schema import Settings
 from bilisama.obs.health import HealthRegistry
+from bilisama.ui.config_edit import ConfigEditError, apply_config_edit
 from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import UiServer, bind_ui_socket, create_ui_app
@@ -49,6 +50,7 @@ class Harness:
     calls: list[tuple[ClientEvent, dict[str, Any]]]
     avatar: dict[str, str]
     server: UiServer
+    settings: Settings = field(default_factory=Settings)
     _sock_port: int = 0
 
     def hello(self) -> dict[str, Any]:
@@ -80,13 +82,44 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
     origin = f"http://127.0.0.1:{real_port}"
     registry = HealthRegistry()
     registry.register("assembly", lambda: {"events_seen": 1})
+    settings = harness_ref[0].settings if harness_ref else Settings()
+    handlers = {event: recorder.handler(event) for event in ClientEvent}
+    if harness_ref:
+        # The same glue dev-talk's on_panel_set runs, minus the log hook: apply
+        # the edit, ack (or refuse) into the feed, re-broadcast panel state.
+        record_panel_set = handlers[ClientEvent.PANEL_SET]
+
+        async def panel_set(data: dict[str, Any]) -> None:
+            await record_panel_set(data)
+            edit = data.get("config")
+            if isinstance(edit, dict):
+                try:
+                    meta, applied = apply_config_edit(settings, edit.get("path"), edit.get("value"))
+                except ConfigEditError as exc:
+                    hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": str(exc)})
+                else:
+                    shown = "开" if applied is True else "关" if applied is False else str(applied)
+                    hub.broadcast(
+                        ServerEvent.EVENT_FEED,
+                        {"kind": "system", "text": f"配置已改：{meta.label} → {shown}"},
+                    )
+            speak = settings.interaction.speak
+            hub.broadcast(
+                ServerEvent.PANEL_STATE,
+                {
+                    "panicked": False,
+                    "speak": {n: bool(getattr(speak, n)) for n in type(speak).model_fields},
+                },
+            )
+
+        handlers[ClientEvent.PANEL_SET] = panel_set
     app = create_ui_app(
         hub=hub,
         registry=registry,
-        settings=Settings(),
+        settings=settings,
         token=_TOKEN,
         origin=origin,
-        handlers={event: recorder.handler(event) for event in ClientEvent},
+        handlers=handlers,
         hello=harness_ref[0].hello if harness_ref else dict,
     )
     server = UiServer(app, sock)
@@ -240,6 +273,64 @@ async def test_pet_click_sends_a_poke(page: Page, harness: Harness) -> None:
     assert any(event is ClientEvent.PET_POKE for event, _ in harness.calls)
 
 
+async def test_config_tab_offers_editors_for_live_and_badges_for_frozen(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('米娅')")
+    await page.click("#corner")
+    await page.click("[data-tab='config']")
+    # A live field renders a control...
+    await _wait(
+        page,
+        "document.querySelector(\"[data-path='interaction.speak.danmaku'] input[type=checkbox]\")"
+        " !== null",
+    )
+    # ...a frozen field renders greyed with its reload badge, and no control.
+    await _wait(
+        page,
+        "(() => { const row = document.querySelector(\"[data-path='interaction.chattiness']\");"
+        " return row && !row.querySelector('input,select')"
+        " && row.querySelector('.cfg-badge').textContent === '重启生效'; })()",
+    )
+
+
+async def test_config_edit_round_trips_to_the_settings_object(page: Page, harness: Harness) -> None:
+    await _wait(page, "document.title.includes('米娅')")
+    await page.click("#corner")
+    await page.click("[data-tab='config']")
+    box = "[data-path='interaction.speak.danmaku'] input[type=checkbox]"
+    await _wait(page, f'document.querySelector("{box}") !== null')
+
+    # Read through a call so mypy cannot narrow the attribute to Literal[True]
+    # at the first assert and call the later False-checks unreachable.
+    def danmaku() -> bool:
+        return harness.settings.interaction.speak.danmaku
+
+    assert danmaku() is True
+    await page.click(box)
+    # The edit lands on the real Settings object on the server side...
+    for _ in range(100):
+        if danmaku() is False:
+            break
+        await asyncio.sleep(0.05)
+    assert danmaku() is False
+    # ...the ack line reaches the chat feed...
+    await page.click("[data-tab='chat']")
+    await _wait(
+        page,
+        "[...document.querySelectorAll('#timeline .entry')]"
+        ".some(e => e.textContent.includes('配置已改：普通弹幕 → 关'))",
+    )
+    # ...and the canonical re-fetch keeps the control on the applied value.
+    await page.click("[data-tab='config']")
+    await _wait(
+        page,
+        f'(() => {{ const b = document.querySelector("{box}");'
+        " return b !== null && b.checked === false; })()",
+        timeout_ms=6000,
+    )
+
+
 # ------------------------------------------------------------ reconnect
 
 
@@ -278,7 +369,7 @@ async def test_dark_mode_follows_the_system(browser: Browser, harness: Harness) 
         await dark_page.goto(harness.url)
         await _wait(dark_page, "document.title.includes('米娅')")
         bg = await dark_page.evaluate("getComputedStyle(document.body).backgroundColor")
-        assert bg == "rgb(23, 24, 27)"  # --page in theme-dark.css
+        assert bg == "rgb(31, 30, 29)"  # --page in theme-dark.css (Claude Code charcoal)
     finally:
         await context.close()
 

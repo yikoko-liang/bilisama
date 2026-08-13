@@ -148,6 +148,28 @@ def test_config_snapshot_covers_all_meta_and_serializes() -> None:
     assert sample["audience"] == "streamer"
 
 
+def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
+    rows = {row["path"]: row for row in config_snapshot(_settings())}
+    editable = {path for path, row in rows.items() if row["editable"]}
+    # The 2026-08-14 consumer audit: speak.* is read at call time, runtime.log_*
+    # goes live through the dev-talk relog hook. Everything else snapshots at
+    # construction and must NOT offer an editor. Growing this set means wiring
+    # a consumer first, then flipping its ui_meta reload back to LIVE.
+    speak = {
+        f"interaction.speak.{name}" for name in _settings().interaction.speak.__class__.model_fields
+    }
+    assert editable == speak | {"runtime.log_level", "runtime.log_viewer_content"}
+    # Section headers stay read-only even when marked LIVE for grouping.
+    assert rows["interaction.speak"]["editable"] is False
+    # Editor facts ride along: the page renders controls without guessing.
+    assert rows["interaction.speak.danmaku"]["kind"] == "bool"
+    level = rows["runtime.log_level"]
+    assert level["kind"] == "select"
+    assert level["choices"] == ["debug", "info", "warning", "error"]
+    # Secrets never become editable, whatever their reload class says.
+    assert rows["room.credential_ref"]["editable"] is False
+
+
 # ------------------------------------------------------------ websocket
 
 

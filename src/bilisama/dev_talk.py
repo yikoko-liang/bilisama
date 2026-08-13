@@ -428,6 +428,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
+    from bilisama.ui.config_edit import ConfigEditError, apply_config_edit
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
     from bilisama.ui.hub import UiHub, VoiceSignals
     from bilisama.ui.poke import PokeResponder
@@ -471,7 +472,13 @@ async def run_director(args: argparse.Namespace) -> int:
     # bind failure later just parks the hub unused (its staging is bounded).
     hub: UiHub | None = UiHub(clock) if not args.no_ui else None
     log_tee = (hub.log_handler,) if hub is not None else ()
-    logging_setup(level=settings.runtime.log_level, extra_handlers=log_tee)
+    # log_viewer_content rides along on every (re)setup — before this it was
+    # a config field nothing read, so the toml flag silently did nothing.
+    logging_setup(
+        level=settings.runtime.log_level,
+        log_viewer_content=settings.runtime.log_viewer_content,
+        extra_handlers=log_tee,
+    )
     thresholds = derive(settings.interaction.chattiness)
 
     stop = asyncio.Event()
@@ -790,6 +797,33 @@ async def run_director(args: argparse.Namespace) -> int:
                         setattr(speak, name, bool(value))
                     else:
                         print(f"[面板] 未知开关 {name}，忽略")
+            edit = data.get("config")
+            if isinstance(edit, dict):
+                # The per-field write channel (stage 5's, lit up early). The
+                # gates live in apply_config_edit; here is only the ack, the
+                # error line, and the one consumer that needs a re-poke.
+                try:
+                    meta, applied = apply_config_edit(settings, edit.get("path"), edit.get("value"))
+                except ConfigEditError as exc:
+                    print(f"[面板] {exc}")
+                    if hub is not None:
+                        hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": str(exc)})
+                else:
+                    shown = "开" if applied is True else "关" if applied is False else str(applied)
+                    line = f"配置已改：{meta.label} → {shown}（本场生效，重启还原）"
+                    print(f"[面板] {line}")
+                    if hub is not None:
+                        hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
+                    if edit.get("path") in ("runtime.log_level", "runtime.log_viewer_content"):
+                        # Logging snapshots its config at setup; re-run it so
+                        # the edit is live. Stream choice mirrors the prompt
+                        # window (use_prompt is bound late, at call time).
+                        logging_setup(
+                            level=settings.runtime.log_level,
+                            log_viewer_content=settings.runtime.log_viewer_content,
+                            stream=sys.stdout if use_prompt else None,
+                            extra_handlers=log_tee,
+                        )
             if hub is not None:
                 hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
 
@@ -967,7 +1001,12 @@ async def run_director(args: argparse.Namespace) -> int:
         # re-targets onto the patched stdout for the window; the shutdown
         # chain restores it.
         console_patch.enter_context(patch_stdout(raw=True))
-        logging_setup(level=settings.runtime.log_level, stream=sys.stdout, extra_handlers=log_tee)
+        logging_setup(
+            level=settings.runtime.log_level,
+            log_viewer_content=settings.runtime.log_viewer_content,
+            stream=sys.stdout,
+            extra_handlers=log_tee,
+        )
 
     print(
         f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
@@ -1040,7 +1079,11 @@ async def run_director(args: argparse.Namespace) -> int:
         # chain prints, and point logging back at stderr.
         console_patch.close()
         if use_prompt:
-            logging_setup(level=settings.runtime.log_level, extra_handlers=log_tee)
+            logging_setup(
+                level=settings.runtime.log_level,
+                log_viewer_content=settings.runtime.log_viewer_content,
+                extra_handlers=log_tee,
+            )
         # The UI goes first: aclose() chases the browsers off their sockets so
         # uvicorn's graceful stop is not stuck waiting on an open WebSocket.
         if ui_server is not None:
