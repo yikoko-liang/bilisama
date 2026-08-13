@@ -288,7 +288,14 @@ class PersonaConfig(BaseModel):
 class AvatarConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    renderer: Literal["live2d", "pngtuber"] = Field("live2d")
+    # theme = built-in CSS character (no assets), sprite = pet.json spritesheet
+    # skin pack, live2d = stage 5. The default must be renderable today, which
+    # is why it is theme and not live2d. model_id is whatever asset the chosen
+    # renderer loads: theme ignores it (empty = built-in), sprite reads it as a
+    # skin-pack directory name, live2d will read it as a model directory. One
+    # field on purpose — a separate skin field would allow renderer=sprite to
+    # dangle next to a live2d model id with nothing to catch it.
+    renderer: Literal["theme", "sprite", "live2d"] = Field("theme")
     model_id: str = Field("")
     expression_source: Literal["tag", "lexicon", "tool_call"] = Field("tag")
 

@@ -124,8 +124,10 @@ display_name = ""                       # 它自称什么。留空用上面的 i
 relationship = "off"
 voice = "off"
 
+# renderer 三选一：theme 内置形象（零素材）| sprite 精灵图皮肤包 | live2d 待接入（阶段 5）。
+# model_id 跟着 renderer 解释：theme 留空用内置小机器人；sprite 填皮肤包目录名；live2d 填模型目录名。
 [avatar]
-renderer = "live2d"
+renderer = "theme"
 model_id = ""
 expression_source = "tag"               # 只在我们自己做 TTS 时安全
 
