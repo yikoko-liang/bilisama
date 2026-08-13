@@ -153,16 +153,23 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 
 细节与边界：
 
-- 形象由 `[avatar]` 配置决定：`renderer = "theme"` 是内置角色，`"sprite"` 读皮肤包
-  （`model_id` 填包名）。自己导入的皮肤包放 `~/.local/share/bilisama/skins/<包名>/`，
-  与仓库内置的同名时你的优先。
+- **两个 provider 都长同一张界面**：本地 s2s 直接跑；DashScope 照常加
+  `--provider dashscope --model qwen-audio-3.0-realtime-flash`。界面层只认归一化
+  事件，不认 provider。两条路都真机验过（2026-08-14）：s2s 全套十项清单；
+  DashScope 上 SC 注入后回复以 31 段流式文字进气泡、状态 idle→thinking→speaking。
+- 形象由 `[avatar]` 配置决定：`renderer = "theme"` 是内置角色（像素小机器人），
+  `"sprite"` 读皮肤包（`model_id` 填包名）。自己导入的皮肤包放
+  `~/.local/share/bilisama/skins/<包名>/`，与仓库内置的同名时你的优先。
 - 界面只做展示和轻控制，**声音仍从 dev-talk 进程出**（浏览器不出声、不采麦）。
 - 只绑 127.0.0.1；地址里的口令就是门禁，别把整条 URL 发给别人。
 - 端口被占时 dev-talk 会明说并继续跑（语音链路不受影响）；固定端口改
   `[runtime] ui_port`，默认 0 是随机。
 - 桌面悬浮窗（真桌宠形态）见 `desktop/preview/`：dev-talk 起着的时候
   `cd desktop/preview && npm start`，它靠 `~/.local/share/bilisama/ui/endpoint.json`
-  自己找到地址，零参数。
+  自己找到地址，零参数。先开壳后开 dev-talk 也行——壳每 2 秒重读端点文件，
+  dev-talk 起来（或重启换了端口）它会自己挂上去。
+- **壳不热更新**：Electron 主进程的代码只在启动时读一次。改了 `desktop/preview/`
+  下的文件、或看到的还是旧样式（比如更新前的深色等待框），关掉重开 `npm start`。
 
 改到界面相关代码后，人工过一遍这十项（前端没有自动化测试，这个清单就是它的门禁）：
 
