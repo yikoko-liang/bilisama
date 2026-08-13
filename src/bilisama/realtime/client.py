@@ -124,8 +124,14 @@ class RealtimeClient:
     # ------------------------------------------------------------ lifecycle
 
     async def connect(self) -> None:
+        # close_timeout bounds the goodbye, not the conversation: a wedged
+        # server otherwise holds aclose() for the library's 10s default —
+        # most of the "Ctrl-C then nothing" exit stall.
         self._ws = await websockets.connect(
-            self._url, max_size=16 * 1024 * 1024, additional_headers=self._headers
+            self._url,
+            max_size=16 * 1024 * 1024,
+            additional_headers=self._headers,
+            close_timeout=2.0,
         )
         first = json.loads(await self._ws.recv())
         kind, _ = self.codec.normalize(first)

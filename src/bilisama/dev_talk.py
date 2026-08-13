@@ -136,6 +136,22 @@ async def _pump_wav(client: _AudioIn, path: Path) -> None:
         await asyncio.sleep(_FRAME_MS / 1000)
 
 
+def _close_audio_stream(stream: Any) -> None:
+    """Discard-then-release a PortAudio stream. BLOCKING — run off-loop.
+
+    close() on its own drains pending buffers, and the device release behind
+    it (worst on Bluetooth) can take whole seconds. Done on the event loop it
+    freezes everything — including the SIGINT handler, which is exactly the
+    "Ctrl-C again does nothing" exit hang. abort() first so close() has no
+    drain left to wait for; both wrapped because a half-dead stream raising
+    must not block the shutdown chain.
+    """
+    with contextlib.suppress(Exception):
+        stream.abort()
+    with contextlib.suppress(Exception):
+        stream.close()
+
+
 async def _pump_mic(
     client: _AudioIn, device: int | None, speaker: _Speaker | None, mute: bool
 ) -> None:
@@ -169,7 +185,8 @@ async def _pump_mic(
         callback=on_block,
     )
     silence = b"\x00\x00" * (_INPUT_RATE * _FRAME_MS // 1000)
-    with stream:
+    stream.start()
+    try:
         while True:
             block = await queue.get()
             if mute and speaker is not None and speaker.busy:
@@ -179,6 +196,12 @@ async def _pump_mic(
                 # freezes the provider's audio clock (plan section 3.3 rule 7).
                 block = silence
             await client.push_audio(block)
+    finally:
+        # NOT `with stream:` — its __exit__ closes on the loop, which is the
+        # freeze described on _close_audio_stream. Awaiting in a cancelled
+        # task's finally is fine; only a second cancel would interrupt, and
+        # then the daemon-side thread still finishes the release.
+        await asyncio.to_thread(_close_audio_stream, stream)
 
 
 class _Speaker:
@@ -233,6 +256,17 @@ class _Speaker:
     def flush(self) -> None:
         with self._lock:
             self._buffer.clear()
+
+    def close(self) -> None:
+        """Release the output stream. BLOCKING — call via asyncio.to_thread.
+
+        Without this the stream lived until interpreter teardown, where
+        PortAudio's atexit release ran AFTER the farewell print — the exit
+        that "hangs after 再见". Idempotent so both exit paths may call it.
+        """
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            _close_audio_stream(stream)
 
     @property
     def busy(self) -> bool:
@@ -522,6 +556,9 @@ async def run_director(args: argparse.Namespace) -> int:
             # escape loop callbacks by design, so this aborts asyncio.run.
             raise KeyboardInterrupt
         stop.set()
+        # Feedback beats patience: without this line the polite teardown
+        # (distill, socket farewells) looks like a hang.
+        print("\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。", file=sys.stderr)
 
     # Installed before the first await so a Ctrl-C during connect/setup exits
     # cleanly instead of unwinding with a traceback (C7).
@@ -981,8 +1018,11 @@ async def run_director(args: argparse.Namespace) -> int:
                 except KeyboardInterrupt:
                     # Raw mode turns Ctrl-C into a key press on the prompt, so
                     # the loop-level SIGINT handler never sees it — route it to
-                    # the same graceful stop.
+                    # the same graceful stop. Same feedback as the handler:
+                    # once the prompt returns the terminal leaves raw mode, so
+                    # a second Ctrl-C reaches the real handler and escalates.
                     stop.set()
+                    print("\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。", file=sys.stderr)
                     return
                 except EOFError:
                     return  # Ctrl-D: console closed; the rest keeps running
@@ -1175,6 +1215,12 @@ async def run_director(args: argparse.Namespace) -> int:
             await speech.aclose()
         except Exception as exc:
             print(f"[收尾] 语音连接没关上：{exc}", file=sys.stderr)
+        try:
+            # Off-loop: the PortAudio release blocks (see _close_audio_stream),
+            # and left open it would stall interpreter teardown after 再见.
+            await asyncio.to_thread(speaker.close)
+        except Exception as exc:
+            print(f"[收尾] 扬声器没关上：{exc}", file=sys.stderr)
         print("再见。")
     return 0
 
@@ -1197,11 +1243,11 @@ async def run(args: argparse.Namespace) -> int:
     print(f"已连接 {provider.value}（{url.split("?")[0]}），说话即可，Ctrl-C 退出。")
     if args.wav is None and not args.mute_while_speaking:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
+    speaker: _Speaker | None = None
     try:
         session_frame = _session_frame(provider)
         if session_frame is not None:
             await client.send_command(session_frame)
-        speaker: _Speaker | None = None
         reply_wav: Path | None = None
         if args.wav is not None:
             reply_wav = args.wav.with_name(args.wav.stem + ".reply.wav")
@@ -1221,6 +1267,8 @@ async def run(args: argparse.Namespace) -> int:
         return 0
     finally:
         await client.aclose()
+        if speaker is not None:
+            await asyncio.to_thread(speaker.close)
 
 
 def main(argv: list[str] | None = None) -> int:
