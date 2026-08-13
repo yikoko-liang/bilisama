@@ -375,7 +375,10 @@ body.shell .pet-mount.dragging {
 }
 
 /* Reduced motion: the loops stop, the blink stays (a still creature that
-   blinks reads alive; a bobbing one reads busy). */
+   blinks reads alive; a bobbing one reads busy). The poke squash and the
+   sparks are collapsed to near-instant rather than removed — a spark with
+   animation:none would never fire animationend, and its cleanup hangs off
+   that event. */
 @media (prefers-reduced-motion: reduce) {
   .robot,
   [data-visual="speaking"] .robot,
@@ -387,5 +390,11 @@ body.shell .pet-mount.dragging {
   [data-visual="speaking"] .robot .eq i,
   [data-visual="offline"] .robot .zzz {
     animation: none;
+  }
+
+  .robot.poked,
+  .robot.poked .antenna,
+  .spark {
+    animation-duration: 1ms;
   }
 }

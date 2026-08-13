@@ -16,15 +16,13 @@
   --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
 
-  --shadow-1: 0 2px 10px rgb(0 0 0 / 0.10), 0 8px 32px rgb(0 0 0 / 0.08);
-
   --z-bubble: 20;
   --z-corner: 30;
   --z-scrim: 40;
   --z-panel: 50;
 
-  /* The pet scales with the window: full size in a browser tab, snug in the
-     180x230 shell window. */
+  /* The pet scales with the window: full size in a browser tab; the 240x240
+     shell window pins its own --pet-size in pet.css instead. */
   --pet-size: clamp(88px, 42vmin, 150px);
 }
 

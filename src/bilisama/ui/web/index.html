@@ -12,8 +12,8 @@
   <link rel="stylesheet" href="assets/css/panel.css">
 </head>
 <body>
-  <main id="stage" data-state="connecting" data-visual="offline">
-    <div id="bubble" class="bubble" hidden></div>
+  <main id="stage" data-visual="offline">
+    <div id="bubble" class="bubble" aria-live="polite" hidden></div>
     <div id="pet-mount" class="pet-mount"></div>
   </main>
 
@@ -37,33 +37,38 @@
         <span id="p-name" class="p-name">BiliSama</span>
         <span id="p-state" class="capsule" data-visual="offline">连接中</span>
       </div>
-      <button id="p-panic" class="panic" data-panicked="false">紧急闭麦</button>
+      <button id="p-panic" class="panic" data-panicked="false" aria-pressed="false">紧急闭麦</button>
     </header>
 
     <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="live" role="tab">现场</button>
-      <button class="tab" data-tab="chat" role="tab">对话</button>
-      <button class="tab" data-tab="logs" role="tab">日志</button>
-      <button class="tab" data-tab="config" role="tab">配置</button>
+      <button class="tab active" id="tab-btn-live" data-tab="live" role="tab"
+              aria-selected="true" aria-controls="tab-live">现场</button>
+      <button class="tab" id="tab-btn-chat" data-tab="chat" role="tab"
+              aria-selected="false" aria-controls="tab-chat">对话</button>
+      <button class="tab" id="tab-btn-logs" data-tab="logs" role="tab"
+              aria-selected="false" aria-controls="tab-logs">日志</button>
+      <button class="tab" id="tab-btn-config" data-tab="config" role="tab"
+              aria-selected="false" aria-controls="tab-config">配置</button>
     </nav>
 
-    <section id="tab-live" class="tab-page active">
+    <section id="tab-live" class="tab-page active" role="tabpanel" aria-labelledby="tab-btn-live">
       <h4 class="sect">健康</h4>
       <div id="health" class="cards"><p class="empty">面板打开时每 5 秒刷新</p></div>
       <h4 class="sect">谁能让她开口</h4>
       <div id="speak-matrix" class="matrix"></div>
       <h4 class="sect">事件注入</h4>
       <form id="inject" class="inject" autocomplete="off">
-        <input id="inject-input" placeholder="弹幕直接打字 ｜ /sc 名字 金额 内容 ｜ /gift 名字 金额">
+        <input id="inject-input" aria-label="事件注入"
+               placeholder="弹幕直接打字 ｜ /sc 名字 金额 内容 ｜ /gift 名字 金额">
         <button type="submit">注入</button>
       </form>
     </section>
 
-    <section id="tab-chat" class="tab-page">
-      <div id="timeline" class="timeline"><p class="empty">还没有对话</p></div>
+    <section id="tab-chat" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-chat">
+      <div id="timeline" class="timeline" aria-live="polite"><p class="empty">还没有对话</p></div>
     </section>
 
-    <section id="tab-logs" class="tab-page">
+    <section id="tab-logs" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-logs">
       <div class="log-tools">
         <select id="log-level" aria-label="日志级别过滤">
           <option value="debug">全部</option>
@@ -76,7 +81,7 @@
       <div id="loglines" class="loglines"></div>
     </section>
 
-    <section id="tab-config" class="tab-page">
+    <section id="tab-config" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-config">
       <div id="config-list" class="config-list"><p class="empty">载入中…</p></div>
     </section>
   </aside>

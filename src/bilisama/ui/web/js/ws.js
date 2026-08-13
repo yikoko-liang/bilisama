@@ -1,14 +1,16 @@
 // One WebSocket to the dev-talk process, with exponential backoff reconnect.
-// The server replays sticky state and recent history on every connect, so a
-// reconnect self-heals the page — no client-side resync protocol needed.
+// The server replays sticky state and recent history on every connect; the
+// page clears its panel on reconnect so the replay lands on a clean slate.
 
 export function connect({ onFrame, onStatus }) {
   const url = `ws://${location.host}${location.pathname.replace(/\/$/, "")}/ws`;
   let sock = null;
   let closed = false;
   let attempt = 0;
+  let retryTimer = null;
 
   const open = () => {
+    if (closed) return;
     sock = new WebSocket(url);
     sock.onopen = () => {
       attempt = 0;
@@ -31,7 +33,7 @@ export function connect({ onFrame, onStatus }) {
       // 0.5s -> 8s cap, with jitter so several tabs do not stampede.
       const delay = Math.min(8000, 500 * 2 ** attempt) * (0.7 + Math.random() * 0.6);
       attempt += 1;
-      setTimeout(open, delay);
+      retryTimer = setTimeout(open, delay);
     };
     sock.onerror = () => sock.close();
   };
@@ -39,13 +41,17 @@ export function connect({ onFrame, onStatus }) {
   open();
 
   return {
+    /** True when the frame went onto the wire; false while disconnected. */
     send(event, data = {}) {
       if (sock && sock.readyState === WebSocket.OPEN) {
         sock.send(JSON.stringify({ event, data }));
+        return true;
       }
+      return false;
     },
     close() {
       closed = true;
+      clearTimeout(retryTimer);
       sock?.close();
     },
   };

@@ -61,9 +61,15 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ open/close
 
+  let healthInFlight = false;
+
   const refreshHealth = async () => {
+    if (healthInFlight) return; // a hung endpoint must not stack requests
+    healthInFlight = true;
     try {
-      const snapshot = await (await fetch("health")).json();
+      const snapshot = await (
+        await fetch("health", { signal: AbortSignal.timeout(4000) })
+      ).json();
       healthEl.textContent = "";
       for (const [name, data] of Object.entries(snapshot.components ?? {})) {
         const card = el("div", "card" + (data && data.error ? " err" : ""));
@@ -79,6 +85,8 @@ export function createPanel({ send }) {
     } catch {
       healthEl.textContent = "";
       healthEl.appendChild(el("p", "empty", "健康接口暂时拿不到"));
+    } finally {
+      healthInFlight = false;
     }
   };
 
@@ -133,14 +141,34 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ tabs
 
-  for (const tab of panel.querySelectorAll(".tab")) {
-    tab.addEventListener("click", () => {
-      for (const other of panel.querySelectorAll(".tab")) other.classList.remove("active");
-      for (const page of panel.querySelectorAll(".tab-page")) page.classList.remove("active");
-      tab.classList.add("active");
-      document.getElementById(`tab-${tab.dataset.tab}`).classList.add("active");
+  const tabs = [...panel.querySelectorAll(".tab")];
+
+  const activateTab = (tab) => {
+    for (const other of tabs) {
+      other.classList.remove("active");
+      other.setAttribute("aria-selected", "false");
+    }
+    for (const page of panel.querySelectorAll(".tab-page")) page.classList.remove("active");
+    tab.classList.add("active");
+    tab.setAttribute("aria-selected", "true");
+    const page = document.getElementById(`tab-${tab.dataset.tab}`);
+    page.classList.add("active");
+    // scrollTop written while display:none is a no-op; land at the bottom
+    // now that the page is actually visible.
+    for (const scroller of [timelineEl.parentElement, loglinesEl]) {
+      if (page.contains(scroller)) scroller.scrollTop = scroller.scrollHeight;
+    }
+  };
+
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => activateTab(tab));
+    tab.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus();
+      activateTab(next);
     });
-  }
+  });
 
   // ------------------------------------------------------------ live tab
 
@@ -148,9 +176,17 @@ export function createPanel({ send }) {
     send("panel.set", { panic_mute: !panicked });
   });
 
+  const speakBoxes = new Map();
+
   const renderSpeak = (speak) => {
-    matrixEl.textContent = "";
+    // Update in place once built: a rebuild on every panel.state echo would
+    // drop keyboard focus mid-click and flicker the matrix.
     for (const [key, value] of Object.entries(speak ?? {})) {
+      const existing = speakBoxes.get(key);
+      if (existing) {
+        existing.checked = Boolean(value);
+        continue;
+      }
       const label = el("label");
       const box = el("input");
       box.type = "checkbox";
@@ -161,6 +197,7 @@ export function createPanel({ send }) {
       label.appendChild(box);
       label.appendChild(el("span", "", SPEAK_LABEL[key] ?? key));
       matrixEl.appendChild(label);
+      speakBoxes.set(key, box);
     }
   };
 
@@ -168,8 +205,12 @@ export function createPanel({ send }) {
     e.preventDefault();
     const text = injectInput.value.trim();
     if (!text) return;
-    send("console.line", { text });
-    injectInput.value = "";
+    if (send("console.line", { text })) {
+      injectInput.value = "";
+    } else {
+      // Disconnected: keep the text instead of silently eating it.
+      feedEntry({ kind: "system", text: "连接断开，这条没发出去" });
+    }
   });
 
   // ------------------------------------------------------------ chat tab
@@ -253,11 +294,14 @@ export function createPanel({ send }) {
     const listEl = document.getElementById("config-list");
     let rows;
     try {
-      rows = await (await fetch("config")).json();
+      rows = await (await fetch("config", { signal: AbortSignal.timeout(4000) })).json();
     } catch {
       listEl.textContent = "";
-      listEl.appendChild(el("p", "empty", "配置接口暂时拿不到"));
+      listEl.appendChild(el("p", "empty", "配置接口暂时拿不到，稍后自动重试"));
       configLoaded = false;
+      // The sheet retries on the next open(); the #panel full-page window has
+      // no open() path, so it retries on its own.
+      if (panelOnly) setTimeout(loadConfig, 5000);
       return;
     }
     listEl.textContent = "";
@@ -298,6 +342,7 @@ export function createPanel({ send }) {
       else if (event === "panel.state") {
         panicked = Boolean(data.panicked);
         panicBtn.dataset.panicked = String(panicked);
+        panicBtn.setAttribute("aria-pressed", String(panicked));
         panicBtn.textContent = panicked ? "恢复说话" : "紧急闭麦";
         renderSpeak(data.speak);
       }
@@ -309,6 +354,13 @@ export function createPanel({ send }) {
     setVisual(visual) {
       stateEl.dataset.visual = visual;
       stateEl.textContent = VISUAL_LABEL[visual] ?? visual;
+    },
+    reset() {
+      // Reconnect path: the server replays its rings into a fresh attach; a
+      // panel keeping the old rows would show the history twice.
+      timelineEl.textContent = "";
+      timelineEl.appendChild(el("p", "empty", "还没有对话"));
+      loglinesEl.textContent = "";
     },
   };
 }

@@ -3,16 +3,26 @@
 // back to idle (NOT on reply.done — the text stream ends while the speaker
 // still holds audio; a bubble that vanishes before the voice stops reads
 // broken), and shatter on playback.clear (the line got cut; show it).
+//
+// The shatter is its own little state: while it plays, voice-state noise
+// (the barge-in that caused it arrives as listening within ~100ms) must not
+// cancel the cleanup — the .shatter animation ends at opacity 0 with
+// `forwards`, so a bubble left in that class is invisible forever. A fresh
+// delta during the shatter starts a NEW bubble from scratch instead.
 
 const LINGER_MS = 1500;
+const SHATTER_MS = 430;
 
 export function createBubble(el) {
   let open = false;
   let hideTimer = null;
+  let shatterTimer = null;
 
   const hide = () => {
     clearTimeout(hideTimer);
+    clearTimeout(shatterTimer);
     hideTimer = null;
+    shatterTimer = null;
     open = false;
     el.hidden = true;
     el.classList.remove("show", "shatter");
@@ -21,6 +31,10 @@ export function createBubble(el) {
 
   return {
     delta(text) {
+      if (shatterTimer !== null) {
+        // Mid-shatter: the old line is dead, this is a new one.
+        hide();
+      }
       clearTimeout(hideTimer);
       hideTimer = null;
       if (!open) {
@@ -35,7 +49,7 @@ export function createBubble(el) {
     },
 
     onVoiceState(state) {
-      if (!open) return;
+      if (!open || shatterTimer !== null) return;
       if (state === "idle" || state === "offline") {
         clearTimeout(hideTimer);
         hideTimer = setTimeout(hide, LINGER_MS);
@@ -48,11 +62,12 @@ export function createBubble(el) {
     },
 
     shatter() {
-      if (!open) return;
+      if (!open || shatterTimer !== null) return;
       clearTimeout(hideTimer);
+      hideTimer = null;
       el.classList.remove("show");
       el.classList.add("shatter");
-      hideTimer = setTimeout(hide, 430);
+      shatterTimer = setTimeout(hide, SHATTER_MS);
     },
 
     hide,

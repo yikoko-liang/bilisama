@@ -10,7 +10,8 @@
 刻意不进 NOTICE：NOTICE 是给可合规署名的开源移植用的，这份不是。
 
 素材来源：shimejishop.com 的 Kirby shimeji（整理者 tornadotasmanian，
-2026-08-14 下载），46 帧标准 shimeji 集，本包从中选 20 帧重排。
+2026-08-14 下载），46 帧标准 shimeji 集，本包选用其中 17 个源帧（走路循环
+另做左右翻转，成品共 20 格）。
 
 重建方式（源帧不入库）：
 

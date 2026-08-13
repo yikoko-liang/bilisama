@@ -241,6 +241,9 @@ export async function mountSprite(mount, id, { onPoke }) {
   let track = { name: "idle", startedAt: performance.now() };
   let timer = null;
   let destroyed = false;
+  // Under prefers-reduced-motion the loop stops: each state shows its first
+  // frame, statically — state changes stay visible, nothing animates.
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
 
   const setTrack = (name) => {
     if (track.name === name) return;
@@ -252,10 +255,15 @@ export async function mountSprite(mount, id, { onPoke }) {
     if (destroyed) return;
     clearTimeout(timer);
     const animation = animations[track.name] ?? animations.idle;
-    let frame = frameAtElapsed(animation, performance.now() - track.startedAt);
+    let frame = frameAtElapsed(animation, reducedMotion ? 0 : performance.now() - track.startedAt);
     if (frame === null) {
-      // One-shot finished: settle into whatever the current visual wants.
-      track = { name: animationForVisual(visual), startedAt: performance.now() };
+      // One-shot finished. An "idle" fallback means "whatever the current
+      // visual wants" (the poke settling home); a pack that names another
+      // track gets exactly that track — otherwise its fallback field would
+      // be validated and then ignored.
+      const declared = animation.fallback ?? "idle";
+      const next = declared === "idle" ? animationForVisual(visual) : declared;
+      track = { name: next, startedAt: performance.now() };
       frame = frameAtElapsed(animations[track.name] ?? animations.idle, 0);
       if (frame === null) return;
     }
@@ -266,7 +274,13 @@ export async function mountSprite(mount, id, { onPoke }) {
       rect.x, rect.y, rect.width, rect.height,
       0, 0, canvas.width, canvas.height,
     );
-    timer = setTimeout(draw, Math.max(16, frame.remainingMs));
+    if (!reducedMotion) {
+      timer = setTimeout(draw, Math.max(16, frame.remainingMs));
+    } else if (animation.loopStart === null) {
+      // A one-shot (the poke) still settles home under reduced motion —
+      // one static pose, then back; no in-between frames.
+      timer = setTimeout(() => setTrack(animationForVisual(visual)), 600);
+    }
   }
 
   const poke = () => {

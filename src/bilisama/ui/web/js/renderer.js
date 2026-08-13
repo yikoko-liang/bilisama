@@ -15,7 +15,7 @@ export async function createRenderer(mount, avatar, hooks) {
     return await mountSprite(mount, wanted, hooks);
   } catch (err) {
     // Missing pack, malformed manifest, oversized sheet: degrade, and say so
-    // where the panel's log tab can see it.
+    // in the browser console (the panel's log tab shows server-side lines).
     console.warn(`皮肤包 ${wanted} 加载失败，退回内置形象：`, err);
   }
   if (wanted !== BUILTIN) {
@@ -31,7 +31,16 @@ export async function createRenderer(mount, avatar, hooks) {
 // Pointer handling shared by every skin: <4px of movement is a poke, more is
 // a drag (forwarded to the desktop shell when one is hosting us). Not
 // -webkit-app-region: drag — that swallows clicks and the poke dies.
-export function attachPointer(el, { onPoke }) {
+//
+// The listeners bind to the long-lived mount element ONCE; a skin remount
+// only swaps the hook object. Re-adding listeners per mount would stack
+// them, and one click would send a poke per remount ever done.
+export function attachPointer(el, hooks) {
+  if (el.__petHooks) {
+    el.__petHooks.onPoke = hooks.onPoke;
+    return;
+  }
+  el.__petHooks = { onPoke: hooks.onPoke };
   const shell = window.bilisamaShell;
   let start = null;
   let moved = false;
@@ -60,7 +69,7 @@ export function attachPointer(el, { onPoke }) {
     moved = false;
     el.classList.remove("dragging");
     shell?.dragEnd?.();
-    if (!wasDrag && e.type === "pointerup") onPoke(e);
+    if (!wasDrag && e.type === "pointerup") el.__petHooks.onPoke(e);
   };
 
   el.addEventListener("pointerup", end);

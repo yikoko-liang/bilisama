@@ -110,6 +110,13 @@ function createPetWindow() {
   petWindow.on("closed", () => {
     petWindow = null;
   });
+  petWindow.webContents.on("did-fail-load", () => {
+    // A failed load (endpoint pinned via env but not up yet, stale pid) must
+    // not park the window on an error page forever: forget the URL so the
+    // next poll tries again from the waiting card.
+    currentUrl = null;
+    petWindow?.loadURL(WAITING_PAGE);
+  });
   harden(petWindow);
 }
 
@@ -123,7 +130,13 @@ function openPanelWindow() {
     width: PANEL_WIDTH,
     height: PANEL_HEIGHT,
     title: "BiliSama 面板",
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      // Health polling and the log stream keep running while covered.
+      backgroundThrottling: false,
+    },
   });
   panelWindow.loadURL(`${currentUrl}#panel`);
   panelWindow.on("closed", () => {
@@ -135,8 +148,12 @@ function openPanelWindow() {
 function harden(win) {
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event, target) => {
-    // Only our own loopback pages; anything else stays where it is.
-    if (!currentUrl || !target.startsWith(originOf(currentUrl))) event.preventDefault();
+    // Only our own loopback pages; anything else stays where it is. Compare
+    // parsed origins — a startsWith check would let :7777 match :77771 —
+    // and treat anything unparseable as foreign.
+    const wanted = currentUrl ? originOf(currentUrl) : null;
+    const actual = originOf(target);
+    if (wanted === null || actual === null || actual !== wanted) event.preventDefault();
   });
   win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
     callback(false); // the shell needs no mic, camera or anything else
@@ -144,7 +161,11 @@ function harden(win) {
 }
 
 function originOf(url) {
-  return new URL(url).origin;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null; // an unparseable BILISAMA_UI_URL must not crash a handler
+  }
 }
 
 // ------------------------------------------------------------ attach loop

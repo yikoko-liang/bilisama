@@ -20,6 +20,8 @@ const bubble = createBubble(document.getElementById("bubble"));
 const state = { connected: false, voice: "idle" };
 let renderer = null;
 let rendererWanted = null; // the avatar config from hello, mounted lazily
+let mountGen = 0; // guards concurrent mounts: only the latest wins
+let everConnected = false;
 
 const send = (event, data) => socket.send(event, data);
 const panel = createPanel({ send });
@@ -27,10 +29,17 @@ const panel = createPanel({ send });
 async function mountRenderer(avatar) {
   if (panelOnly) return;
   rendererWanted = avatar;
-  renderer?.destroy();
-  renderer = await createRenderer(document.getElementById("pet-mount"), avatar, {
+  const gen = ++mountGen;
+  const mounted = await createRenderer(document.getElementById("pet-mount"), avatar, {
     onPoke: () => send("pet.poke"),
   });
+  if (gen !== mountGen) {
+    // A newer mount started while this one loaded; this result is stale.
+    mounted.destroy();
+    return;
+  }
+  renderer?.destroy();
+  renderer = mounted;
   renderer.setState(resolveVisual(state));
 }
 
@@ -78,10 +87,13 @@ const handlers = {
 const socket = connect({
   onFrame: (event, data) => handlers[event]?.(data),
   onStatus: (connected) => {
+    if (connected && everConnected) {
+      // The server replays its feed and log rings on every attach; a panel
+      // that kept the old rows would show everything twice after a reconnect.
+      panel.reset();
+    }
+    everConnected = everConnected || connected;
     state.connected = connected;
     applyVisual();
   },
 });
-
-// A visible starting point before the first hello lands.
-applyVisual();

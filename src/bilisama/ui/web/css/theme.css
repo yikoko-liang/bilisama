@@ -12,6 +12,14 @@
   --ink-dim: #8b887e;
   --ink-faint: #c2bfb4;
   --accent: #3f8f86;
+  /* Solid button fills carrying white text; darker than the plain accents so
+     the text clears WCAG contrast in both themes. */
+  --accent-strong: #2e6e66;
+  --err-strong: #b03a29;
+
+  /* Depth belongs to the theme: dark mode needs a heavier shadow, so the
+     value lives here, not in tokens.css. */
+  --shadow-1: 0 2px 10px rgb(0 0 0 / 0.1), 0 8px 32px rgb(0 0 0 / 0.08);
 
   /* The robot */
   --pet-shell: #f7f4ec;

@@ -17,7 +17,11 @@ huggingface/speech-to-speech (Apache-2.0)
 QwenAudio/qwen-audio-agent (Apache-2.0)
   AnnouncementWindow (speaking-floor gate), batch-and-receipt delivery,
   the Provider/Protocol/Capabilities split, the serial command queue
-  (planned for stage 1-2).
+  (planned for stage 1-2). The desktop-pet preview (landed 2026-08-14)
+  ports its sprite-skin animation model (web/src/sprite-orb.js, itself
+  aligned with OpenAI Codex's codex-rs/tui/src/pets track shapes) into
+  src/bilisama/ui/web/js/skins/sprite.js, and follows its renderer-server
+  token-prefix pattern and desktop-orb window recipe.
 
 liliMozi/openhanako (Apache-2.0)
   Persona layering with fallback chain, SQLite fact store, the MoodParser
