@@ -858,6 +858,28 @@ async def run_director(args: argparse.Namespace) -> int:
 
                 webbrowser.open(ui_url)
 
+    # --pet: best-effort convenience spawn of the desktop shell. This is NOT
+    # supervision — stage 7 inverts the relationship (Electron launches P2).
+    # The shell finds the endpoint file on its own; all this saves is a second
+    # terminal. Missing electron never touches the voice loop.
+    pet_proc: asyncio.subprocess.Process | None = None
+    if args.pet and ui_server is not None:
+        pet_dir = Path(__file__).resolve().parents[2] / "desktop" / "preview"
+        electron = pet_dir / "node_modules" / ".bin" / "electron"
+        if electron.is_file():
+            pet_proc = await asyncio.create_subprocess_exec(
+                str(electron),
+                ".",
+                cwd=pet_dir,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走）")
+        else:
+            print(f"[桌宠] 壳还没装：cd {pet_dir} && npm install，之后 --pet 才有东西可拉")
+    elif args.pet:
+        print("[桌宠] --pet 需要界面服务器；--no-ui 下没有可显示的东西")
+
     # A bottom-pinned input line when prompt_toolkit is installed: everything
     # the session prints (replies, verdicts, log lines) lands ABOVE the line
     # being typed instead of tearing through it. Optional exactly like
@@ -1016,6 +1038,13 @@ async def run_director(args: argparse.Namespace) -> int:
         if endpoint_file is not None:
             with contextlib.suppress(OSError):
                 endpoint_file.unlink(missing_ok=True)
+        if pet_proc is not None and pet_proc.returncode is None:
+            # A viewer, not a dependent: terminate is enough, and a shell the
+            # user closed by hand already has a returncode.
+            with contextlib.suppress(ProcessLookupError):
+                pet_proc.terminate()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(pet_proc.wait(), timeout=3.0)
         # Every step below gets its own try: this is a chain of unrelated
         # resources, and one refusing to close must not leak the rest — a
         # failed distillation would otherwise leave the WS and the DB open
@@ -1150,6 +1179,11 @@ def main(argv: list[str] | None = None) -> int:
         "--open",
         action="store_true",
         help="界面起来后自动在浏览器打开（director 用）",
+    )
+    parser.add_argument(
+        "--pet",
+        action="store_true",
+        help="顺手拉起桌面桌宠壳（要先 cd desktop/preview && npm install 装过一次）",
     )
     parser.add_argument(
         "--skin",
