@@ -406,6 +406,8 @@ async def run_director(args: argparse.Namespace) -> int:
     acceptance tests compose, with a microphone on one side and the console
     standing in for the danmaku feed on the other.
     """
+    from secrets import token_hex
+
     from bilisama import secrets
     from bilisama.app import Assembly
     from bilisama.cli import DEFAULT_CONFIG
@@ -413,6 +415,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.config import check, derive, load
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
+    from bilisama.director.intent import Intent
     from bilisama.director.scheduler import Scheduler
     from bilisama.ingest.sources import QueueSource
     from bilisama.memory.distill import Distiller
@@ -425,6 +428,16 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
+    from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
+    from bilisama.ui.hub import UiHub, VoiceSignals
+    from bilisama.ui.poke import PokeResponder
+    from bilisama.ui.server import (
+        UiServer,
+        bind_ui_socket,
+        create_ui_app,
+        default_endpoint_path,
+        write_endpoint_file,
+    )
 
     provider = ProviderName(args.provider)
     config_path: Path = args.config or DEFAULT_CONFIG
@@ -432,8 +445,17 @@ async def run_director(args: argparse.Namespace) -> int:
         # load() treats a missing path as "all defaults", which silently ignores
         # a typo'd --config — the one case where defaults are a lie (D6).
         raise SystemExit(f"找不到配置文件：{config_path}")
-    overrides = {"persona": {"id": args.persona}} if args.persona else None
-    settings = load(config_path, overrides=overrides, strict=False)
+    overrides: dict[str, Any] = {}
+    if args.persona:
+        overrides["persona"] = {"id": args.persona}
+    if args.skin:
+        # A run-scoped override, same layer as --persona: nothing touches the
+        # tracked toml. "theme" selects the built-in character explicitly.
+        if args.skin == "theme":
+            overrides["avatar"] = {"renderer": "theme", "model_id": ""}
+        else:
+            overrides["avatar"] = {"renderer": "sprite", "model_id": args.skin}
+    settings = load(config_path, overrides=overrides or None, strict=False)
     # strict=False keeps a half-configured dev box usable, but the problems
     # still get said out loud instead of silently shaping behaviour (D6).
     for problem in check(settings, config_dir=config_path.parent):
@@ -444,8 +466,12 @@ async def run_director(args: argparse.Namespace) -> int:
     # reach the console as bare event names with their error fields dropped.
     from bilisama.obs.logging import setup as logging_setup
 
-    logging_setup(level=settings.runtime.log_level)
     clock = SystemClock()
+    # The hub exists before logging so its ring handler catches every line;
+    # bind failure later just parks the hub unused (its staging is bounded).
+    hub: UiHub | None = UiHub(clock) if not args.no_ui else None
+    log_tee = (hub.log_handler,) if hub is not None else ()
+    logging_setup(level=settings.runtime.log_level, extra_handlers=log_tee)
     thresholds = derive(settings.interaction.chattiness)
 
     stop = asyncio.Event()
@@ -574,6 +600,19 @@ async def run_director(args: argparse.Namespace) -> int:
     def verdict_sink(verdict: Verdict) -> None:
         if verdict.outcome is not Outcome.SPOKEN:
             print(f"[调度] {verdict.source} → {verdict}")
+        if hub is not None:
+            # The panel wants the COMPLETE per-intent record, SPOKEN included;
+            # the console keeps printing exceptions only.
+            hub.broadcast(
+                ServerEvent.EVENT_FEED,
+                {
+                    "kind": "verdict",
+                    "source": verdict.source,
+                    "outcome": str(verdict.outcome),
+                    "phase": str(verdict.phase),
+                    "reason": str(verdict.reason) if verdict.reason else "",
+                },
+            )
 
     scheduler = Scheduler(
         speech,
@@ -586,12 +625,19 @@ async def run_director(args: argparse.Namespace) -> int:
         on_hit=settings.safety.on_hit,
         spoken_sink=distiller.note_assistant_line,
     )
+
+    def proactive_submit(intent: Intent) -> None:
+        # Read the switch at submit time, not at wiring time: panel.set flips
+        # it mid-stream, and ui_meta already promises Reload.LIVE for it.
+        if settings.interaction.speak.proactive:
+            scheduler.submit(intent)
+
     proactive = ProactiveTopicLoop(
         side,
         store,
         floor,
         clock,
-        submit=scheduler.submit if settings.interaction.speak.proactive else lambda _i: None,
+        submit=proactive_submit,
         prompt=persona.proactive_prompt(config_path.parent / "prompts" / "proactive.md", variables),
         idle_threshold_s=float(thresholds.idle_threshold_s),
         wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
@@ -677,18 +723,140 @@ async def run_director(args: argparse.Namespace) -> int:
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
+    _USAGE = "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额"
+    _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
+
     async def handle_line(line: str) -> None:
         if not line.strip():
             return  # a bare Enter injects nothing and lectures nobody
         event = _parse_console_event(line, next(seq))
         if event is None:
-            print("弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额")
+            print(_USAGE)
+            if hub is not None:
+                # The panel's inject box needs the same feedback the console gets.
+                hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": _USAGE})
             return
         label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
         money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
         body = f"：{event.text}" if event.text else ""
         print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
+        if hub is not None:
+            hub.broadcast(
+                ServerEvent.EVENT_FEED,
+                {
+                    "kind": _FEED_KIND.get(event.kind, "danmaku"),
+                    "name": event.viewer.name,
+                    "text": event.text,
+                    "value_cny": event.value_cny,
+                    "injected": True,
+                },
+            )
         await console.push(event)
+
+    # ------------------------------------------------------------ UI server
+
+    ui_server: UiServer | None = None
+    ui_url = ""
+    endpoint_file: Path | None = None
+    if hub is not None:
+        poke = PokeResponder(
+            clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
+        )
+
+        def panel_state() -> dict[str, Any]:
+            speak = settings.interaction.speak
+            return {
+                "panicked": bool(scheduler.status().get("panicked")),
+                "speak": {name: bool(getattr(speak, name)) for name in type(speak).model_fields},
+            }
+
+        async def on_poke(_data: dict[str, Any]) -> None:
+            poke.poke()  # False = cooldown; the page animates either way
+
+        async def on_panel_set(data: dict[str, Any]) -> None:
+            if "panic_mute" in data:
+                if bool(data["panic_mute"]):
+                    scheduler.panic_mute()
+                    print("[面板] 紧急闭麦")
+                else:
+                    scheduler.release_panic()
+                    print("[面板] 恢复说话")
+            speak_patch = data.get("speak")
+            if isinstance(speak_patch, dict):
+                speak = settings.interaction.speak
+                for name, value in speak_patch.items():
+                    # model_fields is the whitelist; unknown keys only warn.
+                    if name in type(speak).model_fields:
+                        setattr(speak, name, bool(value))
+                    else:
+                        print(f"[面板] 未知开关 {name}，忽略")
+            if hub is not None:
+                hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
+
+        async def on_console_line(data: dict[str, Any]) -> None:
+            text = data.get("text")
+            if isinstance(text, str):
+                await handle_line(text)
+
+        def hello() -> dict[str, Any]:
+            return {
+                "protocol": 1,
+                "persona": {
+                    "id": settings.persona.id,
+                    "name": settings.persona.display_name or settings.persona.id,
+                },
+                "provider": provider.value,
+                "room_connected": bool(room_id),
+                "avatar": {
+                    "renderer": settings.avatar.renderer,
+                    "model_id": settings.avatar.model_id,
+                },
+                "panel": panel_state(),
+            }
+
+        try:
+            ui_sock = bind_ui_socket(settings.runtime.ui_port)
+        except OSError as exc:
+            # The UI is a passenger; the voice loop must survive a taken port.
+            print(
+                f"[界面] 端口 {settings.runtime.ui_port} 绑不上（{exc}），本场没有界面；"
+                "改 [runtime] ui_port 或空出端口。"
+            )
+            hub = None
+        else:
+            ui_port = ui_sock.getsockname()[1]
+            ui_origin = f"http://127.0.0.1:{ui_port}"
+            ui_token = token_hex(24)
+            ui_url = f"{ui_origin}/{ui_token}/"
+            app = create_ui_app(
+                hub=hub,
+                registry=registry,
+                settings=settings,
+                token=ui_token,
+                origin=ui_origin,
+                handlers={
+                    ClientEvent.PET_POKE: on_poke,
+                    ClientEvent.PANEL_SET: on_panel_set,
+                    ClientEvent.CONSOLE_LINE: on_console_line,
+                },
+                hello=hello,
+                # <data home>/bilisama/skins — user-imported packs, shadowing
+                # the packaged ones. Endpoint file and skins share the roof.
+                user_skins_root=default_endpoint_path().parent.parent / "skins",
+            )
+            ui_server = UiServer(app, ui_sock)
+            ui_server.start()
+            endpoint_file = default_endpoint_path()
+            try:
+                write_endpoint_file(endpoint_file, url=ui_url, pid=os.getpid())
+            except OSError as exc:
+                print(f"[界面] 端点文件写不了（{exc}）；壳这场要用 BILISAMA_UI_URL={ui_url}")
+                endpoint_file = None
+            hub.broadcast(ServerEvent.PANEL_STATE, panel_state())  # seed the sticky state
+            if args.open:
+                import webbrowser
+
+                webbrowser.open(ui_url)
 
     # A bottom-pinned input line when prompt_toolkit is installed: everything
     # the session prints (replies, verdicts, log lines) lands ABOVE the line
@@ -754,6 +922,10 @@ async def run_director(args: argparse.Namespace) -> int:
             if speaker is not None:
                 speaker.flush()
             print(f"[打断] playback.clear（{clear.reason}）")
+            if hub is not None:
+                # The bubble shatters on this; the queue stays single-consumer
+                # here and the hub only gets a copy.
+                hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": clear.reason})
 
     console_patch = contextlib.ExitStack()
     if use_prompt:
@@ -764,7 +936,7 @@ async def run_director(args: argparse.Namespace) -> int:
         # re-targets onto the patched stdout for the window; the shutdown
         # chain restores it.
         console_patch.enter_context(patch_stdout(raw=True))
-        logging_setup(level=settings.runtime.log_level, stream=sys.stdout)
+        logging_setup(level=settings.runtime.log_level, stream=sys.stdout, extra_handlers=log_tee)
 
     print(
         f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
@@ -775,6 +947,8 @@ async def run_director(args: argparse.Namespace) -> int:
         f"voice={settings.persona.growth.voice.value}\n"
         "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
     )
+    if ui_url:
+        print(f"  界面 {ui_url}\n  （浏览器打开看桌宠和面板；desktop/preview 的壳会自己找到它）")
     if not args.mute_while_speaking:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
 
@@ -795,6 +969,30 @@ async def run_director(args: argparse.Namespace) -> int:
         asyncio.create_task(stdin_pump(), name="director:stdin"),
         asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
     ]
+    if hub is not None:
+        live_hub = hub
+
+        def read_signals() -> VoiceSignals:
+            status = scheduler.status()
+            return VoiceSignals(
+                streamer_speaking=floor.streamer_speaking,
+                dispatching=bool(status.get("dispatching")),
+                active=status.get("active_source") is not None,
+                implicit=floor.implicit_active,
+                audio_busy=speaker.busy,
+            )
+
+        async def ui_feed() -> None:
+            # The fanout's third view (scheduler and director:play hold the
+            # other two); link_frames drops PCM before it can reach a browser.
+            async for ev in speech.events():
+                for name, data in link_frames(ev):
+                    live_hub.broadcast(name, data)
+
+        tasks += [
+            asyncio.create_task(ui_feed(), name="director:ui-feed"),
+            asyncio.create_task(live_hub.run(read_signals), name="director:ui-state"),
+        ]
     try:
         await stop.wait()
     finally:
@@ -805,7 +1003,19 @@ async def run_director(args: argparse.Namespace) -> int:
         # chain prints, and point logging back at stderr.
         console_patch.close()
         if use_prompt:
-            logging_setup(level=settings.runtime.log_level)
+            logging_setup(level=settings.runtime.log_level, extra_handlers=log_tee)
+        # The UI goes first: aclose() chases the browsers off their sockets so
+        # uvicorn's graceful stop is not stuck waiting on an open WebSocket.
+        if ui_server is not None:
+            try:
+                if hub is not None:
+                    await hub.aclose()
+                await ui_server.stop()
+            except Exception as exc:
+                print(f"[收尾] 界面服务器没关上：{exc}", file=sys.stderr)
+        if endpoint_file is not None:
+            with contextlib.suppress(OSError):
+                endpoint_file.unlink(missing_ok=True)
         # Every step below gets its own try: this is a chain of unrelated
         # resources, and one refusing to close must not leak the rest — a
         # failed distillation would otherwise leave the WS and the DB open
@@ -930,6 +1140,21 @@ def main(argv: list[str] | None = None) -> int:
         "--plain-console",
         action="store_true",
         help="不用底部输入行，退回逐行读 stdin（终端行为怪异时的逃生口）",
+    )
+    parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="不起桌宠界面服务器（director 模式默认起，浏览器/壳都从它看）",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="界面起来后自动在浏览器打开（director 用）",
+    )
+    parser.add_argument(
+        "--skin",
+        default=None,
+        help="本次运行的形象：皮肤包目录名（如 kirby），或 theme 用内置角色；不改配置文件",
     )
     args = parser.parse_args(argv)
     if args.director:

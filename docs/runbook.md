@@ -128,6 +128,42 @@ director 档里的动作：
 - 启动时会把 `config validate` 级别的问题念一遍（`[配置错误]`/`[配置提醒]`），
   dev-talk 照常跑，但正式启动会被这些拦下——别当没看见。
 
+### 桌宠预览（director 档自带的网页界面）
+
+director 档默认在本机起一个界面服务器，启动横幅里有它的地址（带一串随机口令，
+每次运行都换）：
+
+```
+界面 http://127.0.0.1:<端口>/<口令>/
+```
+
+浏览器打开就能看：她的形象、说话时的文字气泡、右下角图标点开的面板（现场 / 对话 /
+日志 / 配置四个页签，顶栏有紧急闭麦按钮）。面板里的注入框和终端打字完全等价，
+`/sc` `/gift` 语法通用。点击形象有动画反应，偶尔她还会开口回一句（15 秒冷却，
+说话权闸门空闲才说，不会打断正事）。
+
+常用参数：
+
+```bash
+.venv/bin/bilisama dev-talk --director --open          # 起来后自动开浏览器
+.venv/bin/bilisama dev-talk --director --no-ui         # 这场不要界面
+.venv/bin/bilisama dev-talk --director --skin theme    # 本次用内置小机器人（不改配置）
+.venv/bin/bilisama dev-talk --director --skin kirby    # 本次用指定皮肤包
+```
+
+细节与边界：
+
+- 形象由 `[avatar]` 配置决定：`renderer = "theme"` 是内置角色，`"sprite"` 读皮肤包
+  （`model_id` 填包名）。自己导入的皮肤包放 `~/.local/share/bilisama/skins/<包名>/`，
+  与仓库内置的同名时你的优先。
+- 界面只做展示和轻控制，**声音仍从 dev-talk 进程出**（浏览器不出声、不采麦）。
+- 只绑 127.0.0.1；地址里的口令就是门禁，别把整条 URL 发给别人。
+- 端口被占时 dev-talk 会明说并继续跑（语音链路不受影响）；固定端口改
+  `[runtime] ui_port`，默认 0 是随机。
+- 桌面悬浮窗（真桌宠形态）见 `desktop/preview/`：dev-talk 起着的时候
+  `cd desktop/preview && npm start`，它靠 `~/.local/share/bilisama/ui/endpoint.json`
+  自己找到地址，零参数。
+
 人设相关：
 
 ```bash

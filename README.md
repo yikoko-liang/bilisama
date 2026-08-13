@@ -42,6 +42,10 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 两条路的 `--director` 都会把人设、记忆、调度整套立起来；去掉它就只测语音链路本身。
 终端打字模拟弹幕、`/sc` 模拟付费消息这些玩法，runbook 里有完整清单。
 
+`--director` 还自带一个桌宠网页界面（形象、说话气泡、面板），启动横幅里有地址，
+加 `--open` 自动开浏览器；桌面悬浮窗形态在 `desktop/preview/`。用法见 runbook
+「桌宠预览」一节。
+
 要改代码的话，提交前跑一遍门禁 `scripts/gate.sh`（格式、类型、测试、集成层一条龙），
 规矩写在 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
