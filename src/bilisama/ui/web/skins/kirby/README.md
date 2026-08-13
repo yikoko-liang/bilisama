@@ -5,7 +5,7 @@
 - **只用于内部开发预览**，是开发者本人的桌宠形象；
 - **不得随任何对外发布的产物分发**（安装包、镜像、公开仓库都算）；
 - 本分支（内部临时分支）不进入正式发布线；**正式化之前删除整个目录**，
-  并把 `config/bilisama.toml` 的 `[avatar]` 改回 `renderer = "theme"`。
+  并把 `config/bilisama.toml` 的 `[avatar]` 改回 `renderer = "tofu"`。
 
 刻意不进 NOTICE：NOTICE 是给可合规署名的开源移植用的，这份不是。
 

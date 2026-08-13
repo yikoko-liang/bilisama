@@ -184,7 +184,7 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "avatar.model_id": FieldMeta(
         label="形象 / 皮肤包",
-        hint="跟着形象类型解释：theme 留空用内置角色；sprite 填皮肤包目录名；live2d 填模型目录名",
+        hint="跟着形象类型解释：tofu 不用填；sprite 填皮肤包目录名；live2d 填模型目录名",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
         group="形象",
@@ -193,7 +193,7 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "avatar.renderer": FieldMeta(
         label="形象类型",
-        hint="theme 内置形象，零素材；sprite 精灵图皮肤包；live2d 待接入（阶段 5）",
+        hint="tofu 内置像素机器人（豆腐），零素材；sprite 精灵图皮肤包；live2d 待接入（阶段 5）",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
         group="形象",

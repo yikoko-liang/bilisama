@@ -1,5 +1,5 @@
 /* The stage and the built-in robot. All state looks key off
-   #stage[data-visual="..."], which main.js keeps current — the theme skin has
+   #stage[data-visual="..."], which main.js keeps current — the fallback skin has
    no JS animation loop of its own beyond the blink timer. */
 
 #stage {
@@ -256,7 +256,7 @@ body.shell .pet-mount.dragging {
   transform-origin: bottom center;
 }
 
-/* click sparks, spawned by theme.js at the click point */
+/* click sparks, spawned by fallback.js at the click point */
 .spark {
   position: absolute;
   color: var(--pet-glow);

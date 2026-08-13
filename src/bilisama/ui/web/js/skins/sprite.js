@@ -15,7 +15,7 @@ const DEFAULT_FPS = 8;
 const MAX_FPS = 60;
 
 // Hard caps from plan section 15.12: a hostile or bloated pack degrades to
-// the theme skin instead of eating memory.
+// the built-in skin instead of eating memory.
 const MAX_GRID = 32;
 const MAX_FRAME_PX = 512;
 const MAX_SHEET_PX = 4096;

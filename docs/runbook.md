@@ -148,7 +148,7 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 .venv/bin/bilisama dev-talk --director --pet           # 一条命令：语音+界面+桌宠壳全起
 .venv/bin/bilisama dev-talk --director --open          # 起来后自动开浏览器
 .venv/bin/bilisama dev-talk --director --no-ui         # 这场不要界面
-.venv/bin/bilisama dev-talk --director --skin theme    # 本次用内置小机器人（不改配置）
+.venv/bin/bilisama dev-talk --director --skin tofu     # 本次用内置豆腐机器人（不改配置）
 .venv/bin/bilisama dev-talk --director --skin kirby    # 本次用指定皮肤包
 ```
 
@@ -162,7 +162,8 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
   `--provider dashscope --model qwen-audio-3.0-realtime-flash`。界面层只认归一化
   事件，不认 provider。两条路都真机验过（2026-08-14）：s2s 全套十项清单；
   DashScope 上 SC 注入后回复以 31 段流式文字进气泡、状态 idle→thinking→speaking。
-- 形象由 `[avatar]` 配置决定：`renderer = "theme"` 是内置角色（像素小机器人），
+- 形象由 `[avatar]` 配置决定：`renderer = "tofu"` 是内置角色——像素机器人「豆腐」
+  （名字来自字体行话：缺字方块「□」就叫 tofu，Noto 的使命是消灭它，我们把它养活了）；
   `"sprite"` 读皮肤包（`model_id` 填包名）。自己导入的皮肤包放
   `~/.local/share/bilisama/skins/<包名>/`，与仓库内置的同名时你的优先。
 - 界面只做展示和轻控制，**声音仍从 dev-talk 进程出**（浏览器不出声、不采麦）。
@@ -191,7 +192,7 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 7. 暗色模式：系统切深色后整页跟随，机器人换石墨壳。
 8. 系统开了「减弱动态效果」时循环动画停，眨眼保留。
 9. sprite 降级：`--skin 不存在的名字` 启动，控制台有「退回内置形象」警告，
-   像素机器人照常出现（它自己也是皮肤包，由 `tools/gen_robot_skin.py` 生成，
+   豆腐照常出现（它自己也是皮肤包，由 `tools/gen_tofu_skin.py` 生成，
    改造型改脚本重跑即可）。
 10. 断连：杀掉 dev-talk，机器人熄灯打瞌睡（灰眼＋zzz）；重启后地址会换
     （口令每次轮换），开新地址即可。

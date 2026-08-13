@@ -1,4 +1,8 @@
-"""Generate the built-in pixel robot skin (the theme renderer's real face).
+"""Generate tofu, the built-in pixel robot skin.
+
+The name is a font-engineering joke made flesh: the missing-glyph box "□" is
+called tofu (Noto literally means "no tofu"). Ours got a face, two antennas
+and the bili-pink glow instead of being eliminated.
 
 The art is programmatic on purpose: a 26x28 pixel canvas drawn with fills,
 scaled 6x with nearest-neighbour, packed by tools/skin_pack.py into the same
@@ -11,7 +15,7 @@ deliberately spare: warm white shell, one accent color, soft cheeks, stub
 feet, nothing else.
 
 Usage:
-    python tools/gen_robot_skin.py            # writes src/bilisama/ui/web/skins/robot/
+    python tools/gen_tofu_skin.py             # writes src/bilisama/ui/web/skins/tofu/
 """
 
 from __future__ import annotations
@@ -261,7 +265,7 @@ MAPPING: dict[str, object] = {
 
 
 def main() -> int:
-    out_dir = Path(__file__).parent.parent / "src" / "bilisama" / "ui" / "web" / "skins" / "robot"
+    out_dir = Path(__file__).parent.parent / "src" / "bilisama" / "ui" / "web" / "skins" / "tofu"
     with tempfile.TemporaryDirectory() as tmp:
         frames_dir = Path(tmp)
         for name, params in FRAMES.items():
@@ -269,7 +273,7 @@ def main() -> int:
         mapping_path = frames_dir / "mapping.json"
         mapping_path.write_text(json.dumps(MAPPING, ensure_ascii=False), encoding="utf-8")
         build_pack(frames_dir, mapping_path, out_dir)
-    print(f"已生成内置机器人皮肤：{out_dir}")
+    print(f"已生成豆腐皮肤：{out_dir}")
     return 0
 
 

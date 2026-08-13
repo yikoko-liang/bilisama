@@ -1,6 +1,7 @@
-// The built-in robot. Structure and reactions live here; every state look is
-// pure CSS keyed off #stage[data-visual], so this file only owns what CSS
-// cannot: the random blink, and spawning spark particles at the click point.
+// The CSS robot: the nothing-can-404 last resort when even the packaged tofu
+// skin fails to load. State looks are pure CSS keyed off #stage[data-visual];
+// this file only owns what CSS cannot: the random blink, and spawning spark
+// particles at the click point.
 
 import { attachPointer } from "../renderer.js";
 
@@ -21,7 +22,7 @@ const ROBOT_HTML = `
   <div class="ring"></div>
 `;
 
-export function mountTheme(mount, { onPoke }) {
+export function mountFallback(mount, { onPoke }) {
   mount.innerHTML = ROBOT_HTML;
   const robot = mount.querySelector(".robot");
 

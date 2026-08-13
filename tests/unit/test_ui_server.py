@@ -144,7 +144,7 @@ def test_config_snapshot_covers_all_meta_and_serializes() -> None:
     json.dumps(rows, allow_nan=False)
     sample = {row["path"]: row for row in rows}["avatar.renderer"]
     assert sample["label"] == "形象类型"
-    assert sample["value"] == "theme"
+    assert sample["value"] == "tofu"
     assert sample["audience"] == "streamer"
 
 

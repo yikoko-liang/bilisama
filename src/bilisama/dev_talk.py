@@ -450,9 +450,9 @@ async def run_director(args: argparse.Namespace) -> int:
         overrides["persona"] = {"id": args.persona}
     if args.skin:
         # A run-scoped override, same layer as --persona: nothing touches the
-        # tracked toml. "theme" selects the built-in character explicitly.
-        if args.skin == "theme":
-            overrides["avatar"] = {"renderer": "theme", "model_id": ""}
+        # tracked toml. "tofu" selects the built-in robot explicitly.
+        if args.skin == "tofu":
+            overrides["avatar"] = {"renderer": "tofu", "model_id": ""}
         else:
             overrides["avatar"] = {"renderer": "sprite", "model_id": args.skin}
     settings = load(config_path, overrides=overrides or None, strict=False)
@@ -1188,7 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skin",
         default=None,
-        help="本次运行的形象：皮肤包目录名（如 kirby），或 theme 用内置角色；不改配置文件",
+        help="本次运行的形象：皮肤包目录名（如 kirby），或 tofu 用内置豆腐机器人；不改配置文件",
     )
     args = parser.parse_args(argv)
     if args.director:
