@@ -94,7 +94,6 @@ def test_breaker_trips_on_the_third_failure_within_the_window() -> None:
     assert breaker.record_failure(60.0, "mapping exploded")
     assert breaker.is_open
     assert breaker.reason == "mapping exploded"
-    assert breaker.trip_count == 1
 
 
 def test_breaker_ignores_failures_spread_beyond_the_window() -> None:
@@ -121,13 +120,23 @@ def test_breaker_stays_open_until_reset() -> None:
 # ------------------------------------------------------------------ GiftComboAggregator
 
 
+def _drain(agg: GiftComboAggregator, now: float) -> list[LiveEvent]:
+    """Deliver-and-commit everything due, the way the selector does."""
+    out: list[LiveEvent] = []
+    while (due := agg.peek_due(now)) is not None:
+        combo_id, aggregate = due
+        out.append(aggregate)
+        agg.commit(combo_id, now)
+    return out
+
+
 def test_fifty_hit_combo_becomes_one_event_with_the_right_totals() -> None:
     agg = GiftComboAggregator()
     for i in range(50):
         agg.add(_gift_event(coin=100, event_id=f"gift:t{i}"), now=10.0 + i * 0.02)
     last_add = 10.0 + 49 * 0.02
-    assert agg.due(last_add + 0.5) == [], "still inside the 1.0s idle window"
-    settled = agg.due(last_add + 1.0)
+    assert agg.peek_due(last_add + 0.5) is None, "still inside the 1.0s idle window"
+    settled = _drain(agg, last_add + 1.0)
     assert len(settled) == 1
     event = settled[0]
     assert event.gift is not None
@@ -141,13 +150,12 @@ def test_fifty_hit_combo_becomes_one_event_with_the_right_totals() -> None:
 def test_settled_combo_is_suppressed_for_the_window_then_free_again() -> None:
     agg = GiftComboAggregator()
     agg.add(_gift_event(), now=10.0)
-    assert len(agg.due(11.5)) == 1
+    assert len(_drain(agg, 11.5)) == 1
     agg.add(_gift_event(), now=20.0)  # same viewer, same gift, settled 8.5s ago
-    assert agg.due(30.0) == []
+    assert _drain(agg, 30.0) == []
     assert agg.suppressed_events == 1
-    assert agg.suppressed_value_cny == 0.1
     agg.add(_gift_event(), now=11.5 + 601.0)  # suppress window over
-    assert len(agg.due(11.5 + 603.0)) == 1
+    assert len(_drain(agg, 11.5 + 603.0)) == 1
 
 
 def test_distinct_viewers_and_gifts_aggregate_separately() -> None:
@@ -155,17 +163,21 @@ def test_distinct_viewers_and_gifts_aggregate_separately() -> None:
     agg.add(_gift_event(uid=1), now=10.0)
     agg.add(_gift_event(uid=2), now=10.1)
     agg.add(_gift_event(uid=1, gift_id=999), now=10.2)
-    settled = agg.due(12.0)
+    settled = _drain(agg, 12.0)
     assert len(settled) == 3
 
 
-def test_flush_settles_everything_without_arming_suppression() -> None:
+def test_uncommitted_combo_survives_a_failed_delivery() -> None:
+    """peek without commit models a delivery failure: the combo stays
+    pending — retried next tick — and its suppression is never armed."""
     agg = GiftComboAggregator()
     agg.add(_gift_event(), now=10.0)
-    settled = agg.flush()
-    assert len(settled) == 1
-    agg.add(_gift_event(), now=10.1)
-    assert len(agg.due(12.0)) == 1, "a flush is shutdown, not a settlement"
+    first = agg.peek_due(11.5)
+    assert first is not None
+    again = agg.peek_due(11.6)  # no commit happened: still there
+    assert again is not None and again[0] == first[0]
+    agg.commit(first[0], 11.7)
+    assert agg.peek_due(11.8) is None, "committed and gone"
 
 
 def test_masked_viewer_combo_keys_on_the_hash() -> None:
@@ -181,6 +193,6 @@ def test_masked_viewer_combo_keys_on_the_hash() -> None:
     agg = GiftComboAggregator()
     agg.add(masked, now=10.0)
     agg.add(masked, now=10.2)
-    settled = agg.due(12.0)
+    settled = _drain(agg, 12.0)
     assert len(settled) == 1
     assert settled[0].gift is not None and settled[0].gift.aggregated_count == 2

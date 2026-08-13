@@ -445,6 +445,10 @@ class BilibiliEventSource:
         self._stop_requested = False
         self._client_dead = False
         self._client_error = None
+        # Fresh failure book per supervised run: without this, a tripped
+        # breaker would re-raise instantly on every restart and burn the
+        # supervisor's budget without giving the new connection a chance.
+        self._breaker.reset()
         # Stale chatter from the dead connection is worthless; paid events
         # survive the restart and the assembly dedup ring absorbs replays.
         while not self._queue.empty():

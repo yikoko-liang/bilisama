@@ -59,6 +59,13 @@ class SkipReason(StrEnum):
     PANIC_MUTE = "policy.panic_mute"
     OUTPUT_BLOCKED = "safety.output_blocked"
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat
+    # The danmaku funnel's accounts (selector.py). LOW_VALUE and DUPLICATE
+    # above serve the funnel too — one vocabulary, not a parallel one.
+    UID_COOLDOWN = "selection.uid_cooldown"
+    LOST_WINDOW = "selection.lost_window"
+    WINDOW_EMPTY = "selection.window_empty"
+    BREAKER_OPEN = "selection.breaker_open"
+    DELIVER_FAILED = "selection.deliver_failed"
 
 
 @dataclass(frozen=True, slots=True)

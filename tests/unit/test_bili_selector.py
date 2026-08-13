@@ -176,7 +176,7 @@ async def test_one_window_one_winner_and_losers_are_accounted() -> None:
         skips = selector.status()["skips"]
         assert isinstance(skips, dict)
         assert skips["selection.lost_window"] == 1
-        assert skips["selection.low_value_danmaku"] == 1
+        assert skips["selection.low_value"] == 1
     finally:
         await _finish(task)
 
@@ -235,7 +235,10 @@ async def test_gifts_settle_on_idle_not_on_the_window() -> None:
         await _finish(task)
 
 
-async def test_three_delivery_failures_open_the_breaker_until_reset() -> None:
+async def test_three_delivery_failures_latch_the_breaker_for_the_run() -> None:
+    """Deliver is pure intent construction plus a queue push: its failures
+    are bugs, not weather, so the latch holds until restart — and the failed
+    combo stays pending rather than being silently discarded."""
     clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
     selector = DanmakuSelector(clock, thresholds=lambda: _thresholds(), per_uid_cooldown_s=60.0)
 
@@ -245,16 +248,13 @@ async def test_three_delivery_failures_open_the_breaker_until_reset() -> None:
     task = asyncio.create_task(selector.run(deliver))
     await asyncio.sleep(0)
     try:
-        for uid in (11, 12, 13):
-            selector.offer(_gift(uid))
-            await clock.advance(1.5)
+        selector.offer(_gift(11))
+        await clock.advance(2.0)  # several ticks: each retry counts one failure
         assert selector.status()["breaker_open"] is True
+        assert selector.status()["combos_suppressed"] == 0, "never falsely settled"
         selector.offer(_dm("现在还有人在吗", uid=1))
         skips = selector.status()["skips"]
         assert isinstance(skips, dict) and skips["selection.breaker_open"] == 1
-        selector.reset_breaker()
-        selector.offer(_dm("现在还有人在吗", uid=1, event_id="again"))
-        assert selector.status()["breaker_open"] is False
     finally:
         await _finish(task)
 

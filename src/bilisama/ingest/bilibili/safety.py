@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections import OrderedDict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from bilisama.ingest.events import LiveEvent, cny_from_gold
 
@@ -102,9 +102,9 @@ class CircuitBreaker:
 
     Two books on purpose (plan section 15.11): this one counts failures our
     own code CAUGHT (mapping errors, handler exceptions); escaped crashes are
-    SupervisedSource's book. Once open it stays open — the failures it counts
-    are systematic, not transient, so there is no auto-close; `reset()` is for
-    the supervisor or the operator.
+    SupervisedSource's book. Once open it stays open for the run — no
+    auto-close, because the failures it counts are systematic. `reset()` is
+    the fresh-book call at the start of a supervised restart.
     """
 
     def __init__(self, threshold: int = BREAKER_THRESHOLD, window_s: float = BREAKER_WINDOW_S):
@@ -113,7 +113,6 @@ class CircuitBreaker:
         self._failures: deque[float] = deque()
         self._open = False
         self._reason = ""
-        self._trip_count = 0
 
     @property
     def is_open(self) -> bool:
@@ -122,10 +121,6 @@ class CircuitBreaker:
     @property
     def reason(self) -> str:
         return self._reason
-
-    @property
-    def trip_count(self) -> int:
-        return self._trip_count
 
     def record_failure(self, now: float, reason: str = "") -> bool:
         """Count one failure; returns whether the breaker is (now) open."""
@@ -137,7 +132,6 @@ class CircuitBreaker:
         if len(self._failures) >= self._threshold:
             self._open = True
             self._reason = reason or "repeated pipeline failures"
-            self._trip_count += 1
         return self._open
 
     def reset(self) -> None:
@@ -156,13 +150,6 @@ class _Combo:
     last_add: float
 
 
-@dataclass
-class _ComboTally:
-    events: int = 0
-    value_cny: float = 0.0
-    by_combo: dict[str, int] = field(default_factory=dict)
-
-
 class GiftComboAggregator:
     """Merges a gift combo into ONE aggregated event.
 
@@ -174,24 +161,32 @@ class GiftComboAggregator:
     counted, never silently discarded — memory still saw them at emit time,
     upstream of this component.
 
-    `add()` takes hits in; `due()` hands settled aggregates out, oldest
-    first. The selector polls `due()` on its own cadence (B4).
+    `add()` takes hits in. Delivery is two-phase — `peek_due()` hands the
+    oldest settled aggregate out WITHOUT removing it, and `commit()` removes
+    it and arms the suppress window once the caller has actually delivered —
+    so a delivery failure leaves the combo pending for the next tick instead
+    of silently discarding a paid thank-you and suppressing its re-send.
+
+    Combos still pending when the process exits are dropped; memory recorded
+    every hit at emit time, so the loss is one thank-you, not the money.
     """
 
     def __init__(self, idle_s: float = COMBO_IDLE_S, suppress_s: float = COMBO_SUPPRESS_S) -> None:
         self._idle_s = idle_s
         self._suppress_s = suppress_s
         self._pending: OrderedDict[str, _Combo] = OrderedDict()
-        self._settled_at: dict[str, float] = {}
-        self._suppressed = _ComboTally()
+        # Insertion-ordered by settle time, so purging expired suppressions
+        # walks the front instead of scanning the whole map on every add.
+        self._settled_at: OrderedDict[str, float] = OrderedDict()
+        self._suppressed_events = 0
 
     @property
     def suppressed_events(self) -> int:
-        return self._suppressed.events
+        return self._suppressed_events
 
     @property
-    def suppressed_value_cny(self) -> float:
-        return self._suppressed.value_cny
+    def pending_count(self) -> int:
+        return len(self._pending)
 
     def add(self, event: LiveEvent, now: float) -> None:
         if event.gift is None:
@@ -199,9 +194,7 @@ class GiftComboAggregator:
         combo_id = event.gift.combo_id or f"{event.viewer.identity}:{event.gift.gift_id}"
         self._purge_settled(now)
         if combo_id in self._settled_at:
-            self._suppressed.events += 1
-            self._suppressed.value_cny += event.value_cny
-            self._suppressed.by_combo[combo_id] = self._suppressed.by_combo.get(combo_id, 0) + 1
+            self._suppressed_events += 1
             return
         combo = self._pending.get(combo_id)
         if combo is None:
@@ -220,23 +213,17 @@ class GiftComboAggregator:
         combo.hits += 1
         combo.last_add = now
 
-    def due(self, now: float) -> list[LiveEvent]:
-        """Settled aggregates, oldest first. Settling arms the suppress window."""
-        ready: list[LiveEvent] = []
-        for combo_id, combo in list(self._pending.items()):
-            if now - combo.last_add < self._idle_s:
-                continue
-            ready.append(self._aggregate(combo))
-            del self._pending[combo_id]
-            self._settled_at[combo_id] = now
-        return ready
+    def peek_due(self, now: float) -> tuple[str, LiveEvent] | None:
+        """The oldest settled aggregate, left in place until commit()."""
+        for combo_id, combo in self._pending.items():
+            if now - combo.last_add >= self._idle_s:
+                return combo_id, self._aggregate(combo)
+        return None
 
-    def flush(self) -> list[LiveEvent]:
-        """Settle everything immediately — the shutdown path. No suppression:
-        a flush is the end of the run, not a settlement mid-stream."""
-        ready = [self._aggregate(combo) for combo in self._pending.values()]
-        self._pending.clear()
-        return ready
+    def commit(self, combo_id: str, now: float) -> None:
+        """Delivery succeeded: drop the combo and arm its suppress window."""
+        if self._pending.pop(combo_id, None) is not None:
+            self._settled_at[combo_id] = now
 
     def _aggregate(self, combo: _Combo) -> LiveEvent:
         gift = combo.last.gift
@@ -259,7 +246,8 @@ class GiftComboAggregator:
         )
 
     def _purge_settled(self, now: float) -> None:
-        expired = [cid for cid, at in self._settled_at.items() if now - at > self._suppress_s]
-        for cid in expired:
-            del self._settled_at[cid]
-            self._suppressed.by_combo.pop(cid, None)
+        while self._settled_at:
+            _, oldest = next(iter(self._settled_at.items()))
+            if now - oldest <= self._suppress_s:
+                break
+            self._settled_at.popitem(last=False)
