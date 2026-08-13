@@ -5,8 +5,10 @@ scaled 6x with nearest-neighbour, packed by tools/skin_pack.py into the same
 sprite format every other skin uses. This file IS the source art — tweak a
 color or a pose here and rerun; no image editor in the loop.
 
-Design language: Claude Code's pixel mascot in spirit, original in fact —
-cream shell, dark visor, coral glow, side pods, stub feet.
+Design language: a nod to Bilibili's 小电视 without copying it — the TV-ish
+head with two short corner antennas and the bili-pink glow — kept
+deliberately spare: warm white shell, one accent color, soft cheeks, stub
+feet, nothing else.
 
 Usage:
     python tools/gen_robot_skin.py            # writes src/bilisama/ui/web/skins/robot/
@@ -30,15 +32,16 @@ SCALE = 6
 
 Color = tuple[int, int, int, int]
 
-OUT: Color = (51, 49, 46, 255)  # outline
-CREAM: Color = (240, 238, 230, 255)  # shell
-SHADE: Color = (219, 215, 204, 255)  # shell shadow
-SHEEN: Color = (250, 249, 245, 255)  # shell highlight
-VISOR: Color = (40, 38, 35, 255)  # screen face
-CORAL: Color = (217, 119, 87, 255)  # the glow
-CORAL_HI: Color = (238, 158, 130, 255)
-GRAY: Color = (150, 146, 138, 255)  # powered-down glow
-WHITE: Color = (250, 249, 245, 255)
+OUT: Color = (56, 52, 58, 255)  # outline, ink with a violet cast
+CREAM: Color = (250, 248, 246, 255)  # shell, warm white
+SHADE: Color = (231, 226, 228, 255)  # shell shadow
+SHEEN: Color = (255, 255, 255, 255)  # shell highlight
+VISOR: Color = (43, 40, 48, 255)  # screen face
+PINK: Color = (251, 114, 153, 255)  # bili pink, the one accent
+PINK_HI: Color = (255, 163, 192, 255)
+CHEEK: Color = (250, 189, 207, 255)  # soft blush on the shell
+GRAY: Color = (155, 151, 156, 255)  # powered-down glow
+WHITE: Color = (255, 255, 255, 255)
 
 
 def rect(img: Image.Image, x0: int, y0: int, x1: int, y1: int, color: Color) -> None:
@@ -75,8 +78,7 @@ def draw_robot(
     dy: int = 0,
     eyes: str = "open",  # open | blink | up | wide | off
     mouth: str = "none",  # none | open | small
-    antenna: str = "on",  # on | bright | off | bent
-    pods: str = "dim",  # dim | lit
+    antenna: str = "on",  # on | bright | off
     arms: str = "none",  # none | right_up | right_mid | both_up
     feet: str = "stand",  # stand | walk_a | walk_b | tucked
     dots: str = "none",  # none | a | b        (thinking dots)
@@ -85,22 +87,24 @@ def draw_robot(
     powered: bool = True,
 ) -> Image.Image:
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    glow = CORAL if powered else GRAY
-    glow_hi = CORAL_HI if powered else GRAY
+    glow = PINK if powered else GRAY
+    glow_hi = PINK_HI if powered else GRAY
 
     def Y(y: int) -> int:
         return y + dy
 
-    # antenna
+    # the 小电视 signature: two short antennas off the head's top corners
     if antenna != "off":
-        rect(img, 12, Y(2), 13, Y(5), OUT)
-        if antenna == "bent":
-            px(img, 14, Y(2), OUT)  # the elbow keeps the tip attached
-            rect(img, 14, Y(0), 15, Y(1), glow)
-        else:
-            rect(img, 12, Y(0), 13, Y(1), glow if antenna != "bright" else glow_hi)
-            if antenna == "bright":
-                px(img, 12, Y(0), WHITE)
+        tip = glow_hi if antenna == "bright" else glow
+        px(img, 7, Y(5), OUT)
+        px(img, 6, Y(4), OUT)
+        rect(img, 5, Y(2), 5, Y(3), tip)
+        px(img, 18, Y(5), OUT)
+        px(img, 19, Y(4), OUT)
+        rect(img, 20, Y(2), 20, Y(3), tip)
+        if antenna == "bright":
+            px(img, 5, Y(2), WHITE)
+            px(img, 20, Y(2), WHITE)
 
     # head, with two-step corners for a softer silhouette
     rounded_block(img, 4, Y(6), 21, Y(17), CREAM, OUT)
@@ -111,17 +115,13 @@ def draw_robot(
     rect(img, 7, Y(7), 18, Y(7), SHEEN)
     rect(img, 5, Y(16), 20, Y(16), SHADE)
 
-    # side pods
-    rect(img, 2, Y(10), 2, Y(14), OUT)
-    rect(img, 3, Y(10), 3, Y(14), SHADE)
-    rect(img, 23, Y(10), 23, Y(14), OUT)
-    rect(img, 22, Y(10), 22, Y(14), SHADE)
-    pod_color = glow if pods == "lit" else SHADE
-    px(img, 3, Y(12), pod_color)
-    px(img, 22, Y(12), pod_color)
-
     # visor: a window in the shell, not the whole face
     rounded_block(img, 7, Y(9), 18, Y(13), VISOR, None)
+
+    # soft cheeks on the shell, just under the visor corners
+    if powered:
+        px(img, 6, Y(14), CHEEK)
+        px(img, 19, Y(14), CHEEK)
 
     # eyes
     if eyes == "blink":
@@ -148,9 +148,9 @@ def draw_robot(
 
     # mouth on the chin strip
     if mouth == "open":
-        rect(img, 11, Y(15), 14, Y(16), CORAL)
+        rect(img, 11, Y(15), 14, Y(16), PINK)
     elif mouth == "small":
-        rect(img, 12, Y(15), 13, Y(15), CORAL)
+        rect(img, 12, Y(15), 13, Y(15), PINK)
 
     # body
     rounded_block(img, 7, Y(18), 18, Y(22), CREAM, OUT)
@@ -184,15 +184,15 @@ def draw_robot(
         rect(img, 8, Y(23), 11, Y(24), VISOR)
         rect(img, 14, Y(23), 17, Y(24), VISOR)
 
-    # thinking dots, drifting up beside the antenna
+    # thinking dots, drifting up beside the right antenna
     if dots == "a":
-        px(img, 20, Y(4), SHADE)
-        px(img, 22, Y(3), CORAL)
-        px(img, 24, Y(2), SHADE)
+        px(img, 22, Y(4), SHADE)
+        px(img, 23, Y(2), PINK)
+        px(img, 25, Y(1), SHADE)
     elif dots == "b":
-        px(img, 20, Y(4), CORAL)
-        px(img, 22, Y(3), SHADE)
-        px(img, 24, Y(2), CORAL)
+        px(img, 22, Y(4), PINK)
+        px(img, 23, Y(2), SHADE)
+        px(img, 25, Y(1), PINK)
 
     # zzz for powered-down naps
     if zzz != "none":
@@ -201,10 +201,10 @@ def draw_robot(
         px(img, 20 + ox, 3, GRAY)
         rect(img, 19 + ox, 4, 21 + ox, 4, GRAY)
 
-    # the "!" of surprise
+    # the "!" of surprise, between the antennas
     if bang:
-        rect(img, 18, Y(0), 19, Y(3), CORAL)
-        rect(img, 18, Y(5), 19, Y(5), CORAL)
+        rect(img, 12, Y(0), 13, Y(3), PINK)
+        rect(img, 12, Y(5), 13, Y(5), PINK)
 
     return img.resize((W * SCALE, H * SCALE), Image.Resampling.NEAREST)
 
@@ -214,14 +214,14 @@ def draw_robot(
 FRAMES: dict[str, dict[str, object]] = {
     "idle_a": {},
     "idle_b": {"eyes": "blink"},
-    "listen_a": {"eyes": "wide", "pods": "lit", "antenna": "bright"},
-    "listen_b": {"eyes": "wide", "pods": "dim", "antenna": "on"},
+    "listen_a": {"eyes": "wide", "antenna": "bright"},
+    "listen_b": {"eyes": "wide", "antenna": "on"},
     "think_a": {"eyes": "up", "dots": "a"},
     "think_b": {"eyes": "up", "dots": "b"},
     "speak_a": {"mouth": "open", "arms": "right_up", "antenna": "bright"},
     "speak_b": {"mouth": "small", "arms": "right_mid"},
     "jump": {"dy": -2, "feet": "tucked", "arms": "both_up", "mouth": "open"},
-    "squash": {"dy": 1, "eyes": "blink", "antenna": "bent"},
+    "squash": {"dy": 1, "eyes": "blink"},
     "cheer": {"arms": "both_up", "mouth": "open", "eyes": "wide", "antenna": "bright"},
     "sleep_a": {"eyes": "off", "antenna": "off", "powered": False, "zzz": "a"},
     "sleep_b": {"eyes": "off", "antenna": "off", "powered": False, "zzz": "b"},
