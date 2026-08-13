@@ -33,11 +33,13 @@ class SpeakingFloor:
         self.queued_audio = False
         self._quiet_until = 0.0
         self._cooldown_until = 0.0
+        self._speech_edge_until = 0.0
 
     # ------------------------------------------------------------ updaters
 
     def on_speech_started(self) -> None:
         self.streamer_speaking = True
+        self._speech_edge_until = 0.0  # the promised edge arrived
 
     def on_speech_stopped(self, *, quiet_s: float) -> None:
         """The streamer stopped; injections stay unsafe for quiet_s more.
@@ -47,7 +49,17 @@ class SpeakingFloor:
         make every turn wait for the worst case (plan section 2.8).
         """
         self.streamer_speaking = False
+        self._speech_edge_until = 0.0  # an edge is an edge, whichever came
         self._quiet_until = self._clock.monotonic() + quiet_s
+
+    def expect_speech_edge(self, grace_s: float) -> None:
+        """A provider-initiated cancel promises a speech edge one frame behind
+        (s2s sends done(cancelled) BEFORE speech_started). Hold the floor for
+        it, or a requeued reply redispatches into the gap between the two
+        frames and is instantly cancelled again — ledger #29's wasted
+        generation. Bounded: a shape that never sends the edge must not wedge
+        the gate."""
+        self._speech_edge_until = self._clock.monotonic() + grace_s
 
     def on_reply_active(self, active: bool) -> None:
         self.turn_pending = active
@@ -74,11 +86,17 @@ class SpeakingFloor:
             or self.queued_audio
             or now < self._quiet_until
             or now < self._cooldown_until
+            or now < self._speech_edge_until
         )
 
     def blocked_for(self) -> float:
         """Seconds until the time-based gates release, 0 when only state gates
         hold (those release on events, not on the clock)."""
         now = self._clock.monotonic()
-        wait = max(self._quiet_until - now, self._cooldown_until - now, 0.0)
+        wait = max(
+            self._quiet_until - now,
+            self._cooldown_until - now,
+            self._speech_edge_until - now,
+            0.0,
+        )
         return wait

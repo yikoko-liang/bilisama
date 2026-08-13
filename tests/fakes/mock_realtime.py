@@ -397,7 +397,7 @@ class MockRealtimeServer:
             item_id=f"item_user_{self._user_item_seq}",
         )
 
-    async def barge_in(self) -> None:
+    async def barge_in(self, *, gap_s: float = 0.0) -> None:
         """Simulate the streamer talking over the assistant.
 
         Note the order: response.done(cancelled) arrives *before* speech_started.
@@ -407,6 +407,14 @@ class MockRealtimeServer:
         speech_started event last (handlers/audio.py:140-147). Upstream's own
         README:185-186 and tests/openai_realtime/test_websocket_router.py:429-431
         describe the reverse order and are stale.
+
+        Args:
+            gap_s: Wire delay between the two frames. On the real server they
+                leave back-to-back and the gap the CLIENT sees comes from its
+                own task scheduling — nondeterministic, which is how ledger
+                #29 stayed a flake. A nonzero gap pins the worst interleaving
+                deterministically; stricter than reality is the safe way to
+                model it (same doctrine as the permanent slot trap above).
 
         A merely pending reply dies here too, and silently: the router cancels the
         generation when either in_response or response_pending was set
@@ -421,6 +429,8 @@ class MockRealtimeServer:
         if pending is not None and self._interrupt_response:
             self._close_reply(pending)
             pending.first_token.set()  # let its task observe the kill and exit
+        if gap_s > 0:
+            await asyncio.sleep(gap_s)
         # The streamer is talking again, so the trap is armed again: the same
         # event that cancels the reply starts a fresh input item and turn id
         # (handlers/audio.py:108-138), and an in-band injection sent now — the

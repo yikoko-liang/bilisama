@@ -49,6 +49,11 @@ __all__ = ["PlaybackClear", "Scheduler"]
 
 log = get_logger(__name__)
 
+# How long a provider-initiated cancel may promise its speech edge (the
+# done(cancelled)→speech_started frame gap is single-digit milliseconds on a
+# healthy link; 0.3s is the safety bound for a shape that never sends it).
+_SPEECH_EDGE_GRACE_S = 0.3
+
 
 class StreamGuard(Protocol):
     """What the scheduler needs from an output guard: OutputGuard fits."""
@@ -383,6 +388,11 @@ class Scheduler:
             # speech_started. Under panic the reason must say so, and a clear
             # already sent for this reply is not sent again (A10).
             if not active.cleared:
+                if not self._panicked:
+                    # The speech_started for this barge-in is one frame behind;
+                    # hold the floor for it or the requeue below redispatches
+                    # into the gap and is cancelled right back (ledger #29).
+                    self._floor.expect_speech_edge(_SPEECH_EDGE_GRACE_S)
                 self.controls.put_nowait(
                     PlaybackClear(reason="panic_mute" if self._panicked else "barge_in")
                 )

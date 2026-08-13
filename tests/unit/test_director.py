@@ -120,6 +120,23 @@ def test_each_flag_alone_blocks_and_all_clear_passes() -> None:
     assert not floor.is_blocked()
 
 
+def test_speech_edge_promise_blocks_until_the_edge_or_expiry() -> None:
+    """Ledger #29's gate: a promised speech edge holds the floor alone, the
+    edge's arrival releases it, and the promise is bounded for shapes that
+    never deliver one."""
+    clock = FakeClock()
+    floor = SpeakingFloor(clock)
+    floor.expect_speech_edge(0.3)
+    assert floor.is_blocked()
+    assert 0.29 < floor.blocked_for() <= 0.3, "the dispatch loop must know when to wake"
+    floor.on_speech_started()  # the edge arrives: latch gone, speaking holds
+    floor.on_speech_stopped(quiet_s=0.0)
+    assert not floor.is_blocked()
+    floor.expect_speech_edge(0.3)
+    clock._now += 0.31  # no edge ever came: the bound releases the gate
+    assert not floor.is_blocked()
+
+
 def test_quiet_window_takes_the_branch_value_not_a_max() -> None:
     """Section 2.8's correction: the wait is the CURRENT turn's grace. A short
     branch must release sooner than the long one would."""
@@ -190,6 +207,28 @@ async def test_barge_in_clears_playback_first_and_requeues_paid_work() -> None:
         spoken = [v for v in scheduler.verdicts if v.outcome is Outcome.SPOKEN]
         assert spoken and spoken[0].source == "super_chat", [str(v) for v in scheduler.verdicts]
         assert server.recorded.count("response.create") == 2, "the paid reply must speak again"
+
+
+async def test_requeue_waits_for_the_promised_speech_edge() -> None:
+    """Ledger #29, pinned deterministically: done(cancelled) and speech_started
+    are two frames, and a scheduling gap between them used to let the requeued
+    paid reply redispatch INTO the interruption — instantly cancelled again, one
+    generation wasted. The mock's gap_s forces the worst interleaving; exactly
+    two creates means the requeue waited for the promised speech edge."""
+    script = Script(delta_chunks=6, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        async with _running_scheduler(server, quiet_after_speech_s=0.05) as (scheduler, _):
+            scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True))
+            for _ in range(200):
+                if scheduler._active is not None:
+                    break
+                await asyncio.sleep(0.01)
+            await server.barge_in(gap_s=0.08)
+            await server.speech_stopped()
+            await _wait_verdicts(scheduler, 1, timeout=8.0)
+        spoken = [v for v in scheduler.verdicts if v.outcome is Outcome.SPOKEN]
+        assert spoken and spoken[0].source == "super_chat", [str(v) for v in scheduler.verdicts]
+        assert server.recorded.count("response.create") == 2, "redispatched into the frame gap"
 
 
 async def test_panic_mute_kills_even_protected_and_drains_the_queue() -> None:
