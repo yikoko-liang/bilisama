@@ -143,6 +143,23 @@ async def _pump_wav(client: _AudioIn, path: Path) -> None:
         await asyncio.sleep(_FRAME_MS / 1000)
 
 
+def _sane_terminal(saved: Any) -> None:
+    """Put the tty back the way we found it. Idempotent, never raises.
+
+    prompt_toolkit runs stdin in raw mode, where Ctrl-C is a KEY, not a signal.
+    If the prompt goes away without restoring (cancelled mid-read, or torn down
+    while the shutdown chain runs), every later Ctrl-C is just an echoed ^C and
+    the promised force-quit can never fire — the terminal, not the handler, was
+    what swallowed it.
+    """
+    if saved is None or not sys.stdin.isatty():
+        return
+    with contextlib.suppress(Exception):
+        import termios
+
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+
+
 def _close_audio_stream(stream: Any) -> None:
     """Discard-then-release a PortAudio stream. BLOCKING — run off-loop.
 
@@ -305,14 +322,33 @@ async def _consume(
 
 
 async def _consume_events(
-    events: AsyncIterator[link.LinkEvent], speaker: _Speaker | None, reply_wav: Path | None
+    events: AsyncIterator[link.LinkEvent],
+    speaker: _Speaker | None,
+    reply_wav: Path | None,
+    *,
+    stream_text: bool = True,
 ) -> None:
+    """Print what she says and play what she sends.
+
+    Args:
+        events: One view of the link's event stream.
+        speaker: Playback sink, None in WAV mode.
+        reply_wav: Where to save the reply audio, None to skip.
+        stream_text: Print reply text token by token. MUST be False while a
+            prompt_toolkit prompt owns the terminal: a line without its newline
+            has not scrolled yet, so the prompt's next repaint (`ESC[J`) erases
+            it — the reply vanished and left only the end marker behind, which
+            is exactly what a live session showed. Complete lines survive.
+    """
     collected: list[bytes] = []
+    said: list[str] = []
     async for event in events:
         if isinstance(event, link.UserTranscriptDone):
             print(f"你说：{event.text}")
         elif isinstance(event, link.ReplyTextDelta):
-            print(event.text, end="", flush=True)
+            said.append(event.text)
+            if stream_text:
+                print(event.text, end="", flush=True)
         elif isinstance(event, link.ReplyAudioDelta):
             collected.append(event.pcm)
             if speaker is not None:
@@ -321,7 +357,15 @@ async def _consume_events(
             if speaker is not None:
                 speaker.flush()  # the local half of playback.clear
         elif isinstance(event, link.ReplyDone):
-            print(f"\n—— 回复结束（{event.status}）——")
+            spoken = "".join(said)
+            said.clear()
+            marker = f"—— 回复结束（{event.status}）——"
+            if stream_text:
+                print(f"\n{marker}")
+            else:
+                # One write, whole lines only: nothing is left pending for the
+                # prompt's repaint to erase.
+                print(f"{spoken}\n{marker}" if spoken else marker)
             if reply_wav is not None and collected:
                 with wave.open(str(reply_wav), "wb") as w:
                     w.setnchannels(1)
@@ -565,6 +609,14 @@ async def run_director(args: argparse.Namespace) -> int:
     # Bound here, set for real once the console mode is known: relog() reads it
     # at call time, and a panel edit can arrive before that point.
     use_prompt = False
+    # Captured before anything can put the tty in raw mode, restored at the top
+    # of the shutdown chain (see _sane_terminal).
+    saved_tty: Any = None
+    if sys.stdin.isatty():
+        with contextlib.suppress(Exception):
+            import termios
+
+            saved_tty = termios.tcgetattr(sys.stdin.fileno())
 
     def relog() -> None:
         """(Re)install logging from the CURRENT settings.
@@ -603,9 +655,22 @@ async def run_director(args: argparse.Namespace) -> int:
         # (distill, socket farewells) looks like a hang.
         print("\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。", file=sys.stderr)
 
+    def arm_sigint() -> None:
+        """(Re)install the SIGINT handler. Call it whenever the prompt lets go.
+
+        prompt_toolkit REMOVES the loop's SIGINT handler when its session ends
+        (verified against the installed version) — it owns Ctrl-C as a key
+        while it runs, and takes ours with it on the way out. Nothing then
+        catches the second press, so the "再按一次 Ctrl-C 强退" promise died
+        exactly where it was needed: during the shutdown chain, with
+        distillation still on the wire.
+        """
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGINT, on_sigint)
+
     # Installed before the first await so a Ctrl-C during connect/setup exits
     # cleanly instead of unwinding with a traceback (C7).
-    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, on_sigint)
+    arm_sigint()
 
     # Memory persists across runs on purpose: streams_seen is the point.
     # Same data home the personas use, one directory up from them.
@@ -992,11 +1057,13 @@ async def run_director(args: argparse.Namespace) -> int:
 
                     webbrowser.open(ui_url)
 
-        # --pet: best-effort convenience spawn of the desktop shell. This is NOT
-        # supervision — stage 7 inverts the relationship (Electron launches P2).
-        # The shell finds the endpoint file on its own; all this saves is a second
-        # terminal. Missing electron never touches the voice loop.
-        if args.pet and ui_server is not None:
+        # The desktop shell comes up on its own whenever it is installed — this
+        # is the desktop-pet preview, and having to remember a flag for the pet
+        # was a surprise every single time. Best-effort, never supervision:
+        # stage 7 inverts the relationship (Electron launches P2), the shell
+        # finds the endpoint file by itself, and a missing or broken electron
+        # never touches the voice loop. --no-pet opts out.
+        if not args.no_pet and ui_server is not None:
             pet_dir = Path(__file__).resolve().parents[2] / "desktop" / "preview"
             electron = pet_dir / "node_modules" / ".bin" / "electron"
             if electron.is_file():
@@ -1013,14 +1080,12 @@ async def run_director(args: argparse.Namespace) -> int:
                     # must not touch the voice loop.
                     print(f"[桌宠] 壳拉不起来（{exc}）；手动 npm start 也行")
                 else:
-                    print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走）")
+                    print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走；不想要加 --no-pet）")
             else:
-                print(f"[桌宠] 壳还没装：cd {pet_dir} && npm install，之后 --pet 才有东西可拉")
-        elif args.pet and not args.no_ui:
-            # The user wanted a UI; the port bind above is what failed.
-            print("[桌宠] 界面服务器没起来（端口问题，见上面），这场壳没有可显示的东西")
-        elif args.pet:
-            print("[桌宠] --pet 需要界面服务器；--no-ui 下没有可显示的东西")
+                print(
+                    f"[桌宠] 桌面悬浮窗没装，这场只有浏览器界面。装一次就好："
+                    f"cd {pet_dir} && npm install"
+                )
 
         # A bottom-pinned input line when prompt_toolkit is installed: everything
         # the session prints (replies, verdicts, log lines) lands ABOVE the line
@@ -1048,14 +1113,17 @@ async def run_director(args: argparse.Namespace) -> int:
                     except KeyboardInterrupt:
                         # Raw mode turns Ctrl-C into a key press on the prompt, so
                         # the loop-level SIGINT handler never sees it — route it to
-                        # the same graceful stop. Same feedback as the handler:
-                        # once the prompt returns the terminal leaves raw mode, so
-                        # a second Ctrl-C reaches the real handler and escalates.
+                        # the same graceful stop.
                         stop.set()
                         print(
                             "\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。",
                             file=sys.stderr,
                         )
+                        # Leaving this session tears our SIGINT handler down with
+                        # it, and the escalation just promised above would have
+                        # nothing to land on. Put it back before returning.
+                        _sane_terminal(saved_tty)
+                        arm_sigint()
                         return
                     except EOFError:
                         return  # Ctrl-D: console closed; the rest keeps running
@@ -1141,7 +1209,9 @@ async def run_director(args: argparse.Namespace) -> int:
                 name="director:mic",
             ),
             asyncio.create_task(
-                _consume_events(speech.events(), speaker, None), name="director:play"
+                # stream_text off under the prompt: see _consume_events.
+                _consume_events(speech.events(), speaker, None, stream_text=not use_prompt),
+                name="director:play",
             ),
             asyncio.create_task(drain_controls(), name="director:controls"),
             asyncio.create_task(stdin_pump(), name="director:stdin"),
@@ -1179,6 +1249,11 @@ async def run_director(args: argparse.Namespace) -> int:
         # The prompt died with its task; unpatch stdout before the shutdown
         # chain prints, and point logging back at stderr.
         console_patch.close()
+        # Two things the prompt took with it, both needed for the rest of this
+        # chain to stay interruptible: the tty's cooked mode (raw mode turns
+        # Ctrl-C into an echoed ^C instead of a signal) and our SIGINT handler.
+        _sane_terminal(saved_tty)
+        arm_sigint()
         if use_prompt:
             use_prompt = False  # the patched stdout is gone; relog to stderr
             relog()
@@ -1362,9 +1437,16 @@ def main(argv: list[str] | None = None) -> int:
         help="界面起来后自动在浏览器打开（director 用）",
     )
     parser.add_argument(
+        "--no-pet",
+        action="store_true",
+        help="这场不要桌面悬浮窗（装了壳就默认拉起，只想要浏览器界面时加它）",
+    )
+    parser.add_argument(
+        # Kept so the muscle memory and the older runbook lines still work; the
+        # shell is the default now, so it has nothing left to turn on.
         "--pet",
         action="store_true",
-        help="顺手拉起桌面桌宠壳（要先 cd desktop/preview && npm install 装过一次）",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--skin",

@@ -151,16 +151,16 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 常用参数：
 
 ```bash
-.venv/bin/bilisama dev-talk --director --pet           # 一条命令：语音+界面+桌宠壳全起
+.venv/bin/bilisama dev-talk --director --no-pet        # 只要浏览器界面，不要悬浮窗
 .venv/bin/bilisama dev-talk --director --open          # 起来后自动开浏览器
-.venv/bin/bilisama dev-talk --director --no-ui         # 这场不要界面
+.venv/bin/bilisama dev-talk --director --no-ui         # 这场不要界面（也就没有桌宠）
 .venv/bin/bilisama dev-talk --director --skin kirby    # 本次换皮肤包（不改配置文件）
 .venv/bin/bilisama dev-talk --director --skin tofu     # 本次强制用内置豆腐（出厂就是它）
 ```
 
-`--pet` 要求先装过壳（一次性：`cd desktop/preview && npm install`）；没装会提示但
-不影响语音。退出 dev-talk 时壳一并关掉。它只是省一个终端——壳单独 `npm start`
-照样能用，先开后开都行。
+**桌面悬浮窗默认就会起**——装过壳（一次性：`cd desktop/preview && npm install`）就
+不用加任何参数；没装只打一行提示，不影响语音。退出 dev-talk 时壳一并关掉。它只是省
+一个终端——壳单独 `npm start` 照样能用，先开后开都行。不想要悬浮窗加 `--no-pet`。
 
 细节与边界：
 
