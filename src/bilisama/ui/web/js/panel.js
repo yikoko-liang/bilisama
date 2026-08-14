@@ -365,7 +365,18 @@ export function createPanel({ send }) {
       input.step = "any";
     }
     input.addEventListener("change", () => {
-      sendEdit(row.path, row.kind === "number" ? Number(input.value) : input.value, input);
+      if (row.kind !== "number") {
+        sendEdit(row.path, input.value, input);
+        return;
+      }
+      // Number("") is 0, and 0 passes a ge=0 bound — so a field cleared to be
+      // retyped would silently commit zero. An empty box is not an edit.
+      if (input.value.trim() === "") {
+        setControlValue(input, input.serverValue);
+        setConfigNote("数字不能留空，已还原", true);
+        return;
+      }
+      sendEdit(row.path, Number(input.value), input);
     });
     return input;
   };

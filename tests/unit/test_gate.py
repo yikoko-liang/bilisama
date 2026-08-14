@@ -124,7 +124,14 @@ class GateRun:
         return lines[-1] if lines else ""
 
 
-def _run_gate(tmp_path: Path, *, s2s_installed: bool, require: str | None = None) -> GateRun:
+def _run_gate(
+    tmp_path: Path,
+    *,
+    s2s_installed: bool,
+    require: str | None = None,
+    chromium_installed: bool = True,
+    require_ui: str | None = None,
+) -> GateRun:
     """Run the whole gate with `$PY` replaced by a recorder that always succeeds.
 
     Args:
@@ -133,14 +140,30 @@ def _run_gate(tmp_path: Path, *, s2s_installed: bool, require: str | None = None
         require: Value for BILISAMA_GATE_REQUIRE_INTEGRATION, the CI switch that
             turns a missing venv from a reported skip into a failure. None leaves
             the variable unset.
+        chromium_installed: Whether the browser probe should succeed. The UI tier
+            keys on the BROWSER, not the pip package, so the stub has to be able
+            to fail that one call while succeeding at everything else.
+        require_ui: Value for BILISAMA_GATE_REQUIRE_UI, the browser tier's
+            equivalent CI switch.
 
     Returns:
         Exit code, output, and every argument list the gate handed to `$PY`.
     """
     stub = tmp_path / "recording-python"
     log = tmp_path / "calls.log"
+    # Both the profile step and the browser probe run as a bare `$PY -` with a
+    # heredoc, so the stub tells them apart by what the heredoc says.
     stub.write_text(
-        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$GATE_STUB_LOG"\nexit 0\n', encoding="utf-8"
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$GATE_STUB_LOG"\n'
+        'if [ "$*" = "-" ]; then\n'
+        "  body=$(cat)\n"
+        '  case "$body" in\n'
+        '    *playwright*) exit "${GATE_STUB_PROBE_EXIT:-0}" ;;\n'
+        "  esac\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
     )
     stub.chmod(0o755)
 
@@ -155,10 +178,16 @@ def _run_gate(tmp_path: Path, *, s2s_installed: bool, require: str | None = None
         "PY": str(stub),
         "GATE_STUB_LOG": str(log),
         "BILISAMA_S2S_VENV": str(venv),
+        "GATE_STUB_PROBE_EXIT": "0" if chromium_installed else "1",
     }
+    # Both CI switches are scrubbed: whatever the host machine sets must not
+    # decide what these runs prove.
     env.pop("BILISAMA_GATE_REQUIRE_INTEGRATION", None)
+    env.pop("BILISAMA_GATE_REQUIRE_UI", None)
     if require is not None:
         env["BILISAMA_GATE_REQUIRE_INTEGRATION"] = require
+    if require_ui is not None:
+        env["BILISAMA_GATE_REQUIRE_UI"] = require_ui
 
     proc = subprocess.run(
         ["bash", str(_GATE)],
@@ -317,6 +346,62 @@ def test_the_gate_can_be_told_that_skipping_is_not_allowed(tmp_path: Path) -> No
     assert run.returncode != 0, "a missing venv passed the gate that was told to require it"
     assert "smoke_provider_b.sh install" in run.stderr, run.stderr
     assert "全部通过" not in run.stdout, "printed a success banner on the way out of a failure"
+
+
+def test_the_gate_runs_the_browser_tier_when_chromium_is_there(tmp_path: Path) -> None:
+    run = _run_gate(tmp_path, s2s_installed=True, chromium_installed=True)
+
+    assert run.returncode == 0, run.stderr
+    assert any(
+        "-m pytest tests/ui -m ui_browser" in call for call in run.calls
+    ), f"chromium was there and the browser tier still did not run: {run.calls}"
+    assert "界面层" in run.last_line and "没跑" not in run.last_line, run.last_line
+
+
+def test_the_gate_says_so_when_chromium_is_missing(tmp_path: Path) -> None:
+    """The pip package alone is not the tier.
+
+    With playwright installed but no browser, every test skips itself and pytest
+    still exits 0 — so a gate that keyed on the import would run nothing and
+    print a full pass. It has to key on the browser.
+    """
+    run = _run_gate(tmp_path, s2s_installed=True, chromium_installed=False)
+
+    assert run.returncode == 0, run.stderr
+    assert not any(
+        "ui_browser" in call for call in run.calls
+    ), f"ran the browser tier with no browser to run it in: {run.calls}"
+    assert "跳过" in run.stdout, "the skip was not reported at all"
+    assert "playwright install chromium" in run.stdout, "no way to act on the skip"
+    assert (
+        "没跑" in run.last_line
+    ), f"the closing line reads as a full pass over a tier that never ran: {run.last_line!r}"
+
+
+def test_the_gate_can_be_told_that_skipping_the_browser_tier_is_not_allowed(
+    tmp_path: Path,
+) -> None:
+    run = _run_gate(tmp_path, s2s_installed=True, chromium_installed=False, require_ui="1")
+
+    assert run.returncode != 0, "a missing browser passed the gate that was told to require it"
+    assert "playwright install chromium" in run.stderr, run.stderr
+    assert "全部通过" not in run.stdout, "printed a success banner on the way out of a failure"
+
+
+def test_requiring_the_browser_tier_can_be_switched_off_with_a_zero(tmp_path: Path) -> None:
+    run = _run_gate(tmp_path, s2s_installed=True, chromium_installed=False, require_ui="0")
+
+    assert run.returncode == 0, run.stderr
+    assert "跳过" in run.stdout
+
+
+def test_the_closing_line_names_both_missing_tiers(tmp_path: Path) -> None:
+    """The fourth corner of the honesty matrix: neither tier ran."""
+    run = _run_gate(tmp_path, s2s_installed=False, chromium_installed=False)
+
+    assert run.returncode == 0, run.stderr
+    assert "单元层全部通过" in run.last_line, run.last_line
+    assert "集成层与界面层没跑" in run.last_line, run.last_line
 
 
 def test_requiring_the_integration_tier_can_be_switched_off_with_a_zero(

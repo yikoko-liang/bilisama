@@ -388,10 +388,13 @@ class Scheduler:
             # speech_started. Under panic the reason must say so, and a clear
             # already sent for this reply is not sent again (A10).
             if not active.cleared:
-                if not self._panicked:
+                if not self._panicked and not self._floor.streamer_speaking:
                     # The speech_started for this barge-in is one frame behind;
                     # hold the floor for it or the requeue below redispatches
                     # into the gap and is cancelled right back (ledger #29).
+                    # Not when it ALREADY arrived (hosted shapes send it first):
+                    # the latch promises a future edge, and one armed after its
+                    # edge has nothing left to clear it but the timeout.
                     self._floor.expect_speech_edge(_SPEECH_EDGE_GRACE_S)
                 self.controls.put_nowait(
                     PlaybackClear(reason="panic_mute" if self._panicked else "barge_in")

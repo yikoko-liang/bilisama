@@ -19,7 +19,7 @@ from bilisama.config.enums import ProviderName
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
-from bilisama.realtime.providers import profile_for
+from bilisama.realtime.providers import compose_instructions, profile_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -125,18 +125,10 @@ class HostedLink:
         frame = self._codec.response_create(
             out_of_band=self._caps.out_of_band_exempt_from_slot,
             text_only=False,
-            instructions=self._compose(spec.instructions),
+            instructions=compose_instructions(self._context, spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
         return await self._client.request_reply(frame)
-
-    def _compose(self, turn: str | None) -> str | None:
-        """Persona plus the per-turn ask; see S2SLink._compose for the why."""
-        if not turn:
-            return None
-        if not self._context:
-            return turn
-        return f"{self._context}\n\n本轮要求：{turn}"
 
     async def cancel(self, handle: link.ReplyHandle) -> None:
         await self._client.cancel(handle)

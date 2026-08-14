@@ -169,12 +169,13 @@ class Assembly:
         # later: a switch flipped mid-window must silence the delivery too.
         if not self._speak_enabled(event.kind.value):
             return
-        if event.dedup_key and self._direct_ring.seen(event.dedup_key, self._clock.monotonic()):
+        now = self._clock.monotonic()
+        if event.dedup_key and self._direct_ring.contains(event.dedup_key, now):
             self.events_deduped += 1
             return
         intent = intent_for(
             event.redacted(),
-            now=self._clock.monotonic(),
+            now=now,
             max_tokens=self._max_tokens,
             protect_ms=self._protect_ms,
             gift_gold_high=self._gift_gold_high,
@@ -183,6 +184,13 @@ class Assembly:
         if intent is not None:
             self.intents_submitted += 1
             self._submit(intent)
+        # Marked only once the delivery is through. Marking on the ATTEMPT meant
+        # a raise from _submit left the key burned: the selector's retry (its
+        # deliver-then-commit contract exists for exactly that) came back to a
+        # ring that now said "already seen", the paid thank-you was dropped, and
+        # the books recorded it as delivered.
+        if event.dedup_key:
+            self._direct_ring.mark(event.dedup_key, now)
 
     def _promote_entry(self, event: LiveEvent) -> LiveEvent:
         """ENTRY → VIP_ENTER when memory knows this person spent money.

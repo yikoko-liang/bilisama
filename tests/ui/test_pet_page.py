@@ -26,7 +26,7 @@ import pytest
 from bilisama.clock import SystemClock
 from bilisama.config.schema import Settings
 from bilisama.obs.health import HealthRegistry
-from bilisama.ui.config_edit import ConfigEditError, apply_config_edit
+from bilisama.ui.config_edit import apply_panel_edits
 from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import UiServer, bind_ui_socket, create_ui_app
@@ -85,24 +85,21 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
     settings = harness_ref[0].settings if harness_ref else Settings()
     handlers = {event: recorder.handler(event) for event in ClientEvent}
     if harness_ref:
-        # The same glue dev-talk's on_panel_set runs, minus the log hook: apply
-        # the edit, ack (or refuse) into the feed, re-broadcast panel state.
+        # dev-talk's on_panel_set, minus its terminal print and reload hooks:
+        # the write itself goes through the SHARED apply_panel_edits, so the
+        # browser tests exercise production's channel instead of a lookalike
+        # that can drift from it (both shapes — config rows and the matrix).
         record_panel_set = handlers[ClientEvent.PANEL_SET]
 
         async def panel_set(data: dict[str, Any]) -> None:
             await record_panel_set(data)
-            edit = data.get("config")
-            if isinstance(edit, dict):
-                try:
-                    meta, applied = apply_config_edit(settings, edit.get("path"), edit.get("value"))
-                except ConfigEditError as exc:
-                    hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": str(exc)})
-                else:
-                    shown = "开" if applied is True else "关" if applied is False else str(applied)
-                    hub.broadcast(
-                        ServerEvent.EVENT_FEED,
-                        {"kind": "system", "text": f"配置已改：{meta.label} → {shown}"},
-                    )
+            apply_panel_edits(
+                settings,
+                data,
+                announce=lambda line: hub.broadcast(
+                    ServerEvent.EVENT_FEED, {"kind": "system", "text": line}
+                ),
+            )
             speak = settings.interaction.speak
             hub.broadcast(
                 ServerEvent.PANEL_STATE,

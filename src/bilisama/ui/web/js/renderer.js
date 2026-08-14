@@ -11,16 +11,20 @@ const BUILTIN = "tofu";
 
 export async function createRenderer(mount, avatar, hooks) {
   const wanted = avatar?.renderer === "sprite" && avatar.model_id ? avatar.model_id : BUILTIN;
+  // Asking for the built-in by name means the PACKAGED one: a user pack that
+  // happens to be called "tofu" may shadow a configured skin, but not the
+  // robot `--skin tofu` and the degrade chain both name explicitly.
+  const packagedOnly = wanted === BUILTIN;
   try {
-    return await mountSprite(mount, wanted, hooks);
+    return await mountSprite(mount, wanted, hooks, { packagedOnly });
   } catch (err) {
     // Missing pack, malformed manifest, oversized sheet: degrade, and say so
     // in the browser console (the panel's log tab shows server-side lines).
     console.warn(`皮肤包 ${wanted} 加载失败，退回内置形象：`, err);
   }
-  if (wanted !== BUILTIN) {
+  if (!packagedOnly) {
     try {
-      return await mountSprite(mount, BUILTIN, hooks);
+      return await mountSprite(mount, BUILTIN, hooks, { packagedOnly: true });
     } catch (err) {
       console.warn("豆腐皮肤也加载失败，退回 CSS 形象：", err);
     }

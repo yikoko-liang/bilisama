@@ -104,6 +104,29 @@ def test_dedup_key_falls_back_without_event_id() -> None:
     assert a.dedup_key != c.dedup_key
 
 
+def test_dedup_key_separates_idless_gifts_sent_in_the_same_second() -> None:
+    """A gift's text is always empty, so identity plus a one-second bucket made
+    a whole blind-box batch one key — SEND_GIFT_V2 can arrive with neither tid
+    nor rnd — and every gift after the first was dropped as a duplicate before
+    the aggregator saw it. Paid events must not dedup on a timing coincidence."""
+    v = Viewer(uid=7)
+
+    def gift_key(gift_id: int, num: int, value: float) -> str:
+        return LiveEvent(
+            kind=EventKind.GIFT,
+            viewer=v,
+            gift=Gift(gift_id=gift_id, name="小心心", num=num),
+            value_cny=value,
+            ts_ms=1500,
+        ).dedup_key
+
+    same = gift_key(1, 1, 0.1)
+    assert gift_key(1, 1, 0.1) == same, "同一份礼物重放仍要被去重"
+    assert gift_key(2, 1, 0.1) != same, "不同礼物"
+    assert gift_key(1, 5, 0.5) != same, "同礼物不同数量"
+    assert gift_key(1, 1, 30.0) != same, "同礼物不同金额"
+
+
 def _danmaku_key(*, text: str = "666", ts_ms: int = 1000) -> str:
     """dedup_key for one viewer's danmaku, so only the varied part can move it."""
     return LiveEvent(kind=EventKind.DANMAKU, viewer=Viewer(uid=7), text=text, ts_ms=ts_ms).dedup_key

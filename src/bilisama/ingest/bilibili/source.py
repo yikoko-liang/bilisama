@@ -222,14 +222,21 @@ def _guard_event(
     The toast and the legacy GUARD_BUY must mint byte-identical event ids and
     values — the 30s merge window only recognises the double-send because
     they do. One builder keeps them from drifting apart.
+
+    A masked buyer has uid 0 and start_time is only second-accurate, so
+    `guard:0:<second>` made every anonymous purchase in the same second one
+    event: the second ¥198 buyer was merged away unthanked. The tail folds in
+    what still differs between two such buyers, and it stays identical across
+    both wires because both read it from the same fields.
     """
+    tail = "" if uid else f":{viewer.name}:{viewer.guard_level}:{price}:{num}"
     return LiveEvent(
         kind=EventKind.GUARD_BUY,
         room_id=room_id,
         viewer=viewer,
         text=text,
         value_cny=cny_from_gold(price * num),
-        event_id=f"guard:{uid}:{start_time}",
+        event_id=f"guard:{uid}:{start_time}{tail}",
         ts_ms=int(start_time) * 1000,
         recv_at=recv_at,
         session_generation=generation,
@@ -621,10 +628,13 @@ class BilibiliEventSource:
 
     def _merged_guard(self, event: LiveEvent) -> bool:
         """True when this GUARD_BUY duplicates a recent one — the toast/legacy
-        double-send. Keyed on identity plus purchase time so masked buyers
-        (who all share the "anon" identity) never merge each other away."""
-        key = f"{event.viewer.identity}:{event.ts_ms}"
-        return self._guard_merge.seen(key, self._clock.monotonic())
+        double-send.
+
+        Keyed on the purchase id both wires mint identically (see _guard_event),
+        which is also what keeps two masked buyers in the same second — all
+        sharing the "anon" identity — from merging each other away.
+        """
+        return self._guard_merge.seen(event.event_id, self._clock.monotonic())
 
     def _build_session(self) -> aiohttp.ClientSession:
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_S))

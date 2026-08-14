@@ -12,6 +12,8 @@ import contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from bilisama.app import Assembly
 from bilisama.clock import FakeClock
 from bilisama.config.schema import GrowthSwitches, SpeakSwitches
@@ -63,6 +65,38 @@ async def test_speak_on_produces_an_intent(tmp_path: Path) -> None:
     await assembly.on_event(_event())
     assert len(intents) == 1
     assert intents[0].source == "danmaku"
+
+
+async def test_a_failed_paid_delivery_stays_retryable(tmp_path: Path) -> None:
+    """The direct ring marked the key on the ATTEMPT, so a raise from submit
+    burned it: the retry the selector's deliver-then-commit contract exists for
+    came back to a ring saying "already seen", and the paid thank-you was gone
+    while the books called it delivered."""
+    kit = build_assembly_kit(tmp_path, speak=SpeakSwitches(super_chat=True))
+    boom = True
+
+    def submit(intent: Intent) -> None:
+        if boom:
+            raise RuntimeError("调度器这一下没接住")
+        kit.intents.append(intent)
+
+    kit.assembly._submit = submit
+    sc = LiveEvent(
+        kind=EventKind.SUPER_CHAT,
+        viewer=Viewer(uid=9, name="阿强"),
+        text="加油",
+        value_cny=30.0,
+        event_id="sc-1",
+    )
+    with pytest.raises(RuntimeError):
+        await kit.assembly.on_event(sc)
+    assert kit.intents == []
+
+    boom = False
+    await kit.assembly.on_event(sc)  # the same SC, retried
+    assert len(kit.intents) == 1, "第一次投递失败后，付费事件必须还能重投"
+    await kit.assembly.on_event(sc)  # and a genuine replay is still deduped
+    assert len(kit.intents) == 1
 
 
 async def test_feed_only_kinds_never_reach_the_scheduler(tmp_path: Path) -> None:

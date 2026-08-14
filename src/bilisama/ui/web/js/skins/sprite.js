@@ -189,16 +189,20 @@ export function animationForVisual(visual) {
 
 // ------------------------------------------------------------ loading
 
-async function fetchManifest(id) {
+async function fetchManifest(id, packagedOnly = false) {
   // The user's imported packs (skins/ mount, only present when the directory
-  // exists) shadow the packaged ones (assets/skins/).
-  for (const base of [`skins/${id}/`, `assets/skins/${id}/`]) {
+  // exists) shadow the packaged ones (assets/skins/) — except when the caller
+  // asks for the BUILT-IN by name: "tofu" must mean OUR tofu, both as the
+  // configured skin and as the degrade target, or a user pack that took the
+  // name could shadow the one thing the fallback chain relies on.
+  const bases = packagedOnly ? [`assets/skins/${id}/`] : [`skins/${id}/`, `assets/skins/${id}/`];
+  for (const base of bases) {
     const response = await fetch(`${base}pet.json`).catch(() => null);
     if (response?.ok) {
       return { base, manifest: await response.json() };
     }
   }
-  throw new Error(`找不到皮肤包 ${id}（skins/ 与 assets/skins/ 都没有）`);
+  throw new Error(`找不到皮肤包 ${id}（${bases.join("、")} 都没有）`);
 }
 
 function loadImage(url) {
@@ -210,8 +214,8 @@ function loadImage(url) {
   });
 }
 
-export async function mountSprite(mount, id, { onPoke }) {
-  const { base, manifest } = await fetchManifest(id);
+export async function mountSprite(mount, id, { onPoke }, { packagedOnly = false } = {}) {
+  const { base, manifest } = await fetchManifest(id, packagedOnly);
   const geometry = spriteGeometry(manifest);
   if (!geometry) throw new Error("pet.json 的帧尺寸非法或超出上限");
   const animations = resolveAnimations(manifest, geometry.frameCount);

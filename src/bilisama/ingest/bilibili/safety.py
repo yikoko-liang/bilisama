@@ -62,6 +62,23 @@ class DedupRing:
         self._last_seen.move_to_end(key)
         return stamp is not None and now - stamp <= self._window_s
 
+    def contains(self, key: str, now: float) -> bool:
+        """Like `seen`, but records nothing.
+
+        For callers that must not burn the key until the work behind it
+        actually landed — a paid delivery that raises has to stay retryable.
+        Pair it with `mark`.
+        """
+        self._purge(now)
+        stamp = self._last_seen.get(key)
+        return stamp is not None and now - stamp <= self._window_s
+
+    def mark(self, key: str, now: float) -> None:
+        """Record `key` as seen. The commit half of `contains`."""
+        self._purge(now)
+        self._last_seen[key] = now
+        self._last_seen.move_to_end(key)
+
     def _purge(self, now: float) -> None:
         while self._last_seen:
             _, oldest = next(iter(self._last_seen.items()))

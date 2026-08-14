@@ -171,6 +171,49 @@ def test_full_queue_sheds_the_oldest_and_keeps_the_account() -> None:
     assert oldest_left is not None and oldest_left.viewer.uid == 102, "the two oldest were shed"
 
 
+def test_two_masked_guard_buyers_in_one_second_both_survive() -> None:
+    """Masking sets uid 0 and start_time is only second-accurate, so keying the
+    merge on uid+second made the second ¥198 purchase of that second look like
+    the toast/legacy double-send and vanish unthanked."""
+    source, _ = _source()
+    first = event_from_guard_buy(
+        web_models.GuardBuyMessage.from_command(
+            {
+                "uid": 0,
+                "username": "阿***",
+                "guard_level": 3,
+                "num": 1,
+                "price": 198000,
+                "gift_id": 10003,
+                "gift_name": "舰长",
+                "start_time": 1755000300,
+                "end_time": 1755000300,
+            }
+        ),
+        **_KW,
+    )
+    second = event_from_guard_buy(
+        web_models.GuardBuyMessage.from_command(
+            {
+                "uid": 0,
+                "username": "小***",  # a different masked buyer, same second
+                "guard_level": 3,
+                "num": 1,
+                "price": 198000,
+                "gift_id": 10003,
+                "gift_name": "舰长",
+                "start_time": 1755000300,
+                "end_time": 1755000300,
+            }
+        ),
+        **_KW,
+    )
+    assert first.event_id != second.event_id
+    source.offer(first)
+    source.offer(second)
+    assert len(source._paid) == 2, "两位打码买家在同一秒各买各的，不能互相吞掉"
+
+
 def test_guard_double_send_merges_within_the_window() -> None:
     source, clock = _source()
     toast = event_from_user_toast(web_models.UserToastV2Message.from_command(_toast_data()), **_KW)

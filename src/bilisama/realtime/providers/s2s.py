@@ -35,7 +35,7 @@ from bilisama.config.enums import ProviderName
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
-from bilisama.realtime.providers import profile_for
+from bilisama.realtime.providers import compose_instructions, profile_for
 
 __all__ = ["S2SLink"]
 
@@ -76,7 +76,7 @@ class S2SLink:
     async def set_context(self, instructions: str) -> None:
         # text_only pins the SESSION, which is what the implicit VAD turn obeys.
         # Kept locally too: per-response instructions REPLACE the session's on
-        # the wire, so request_reply must recompose (see _compose).
+        # the wire, so request_reply must recompose (see compose_instructions).
         self._context = instructions
         await self._client.send_command(
             self._codec.session_patch(instructions=instructions, text_only=self._text_replies)
@@ -116,31 +116,10 @@ class S2SLink:
         frame = self._codec.response_create(
             out_of_band=True,
             text_only=self._text_replies,
-            instructions=self._compose(spec.instructions),
+            instructions=compose_instructions(self._context, spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
         return await self._client.request_reply(frame)
-
-    def _compose(self, turn: str | None) -> str | None:
-        """Per-turn instructions on top of the persona, never instead of it.
-
-        The Realtime protocol makes response.instructions REPLACE the
-        session's for that response — upstream picks either/or
-        (base_openai_compatible_language_model.py:709-711). The scheduler
-        sends only the per-turn ask and assumes the persona stays; probed
-        live 2026-08-14, a session-level persona vanished from every
-        instruction-carrying reply until this recomposition. None stays
-        None: the server then falls back to the session instructions, which
-        are exactly the persona already.
-        """
-        if not turn:
-            # None and "" both mean "no per-turn ask": stay bare so the server
-            # falls back to the session instructions — an empty turn composed
-            # onto the persona would send a dangling "本轮要求：" tail.
-            return None
-        if not self._context:
-            return turn
-        return f"{self._context}\n\n本轮要求：{turn}"
 
     async def end_protection(self) -> None:
         """Re-arm barge-in after a protected reply. The scheduler calls this on

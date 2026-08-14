@@ -16,6 +16,7 @@ is actually read at call time — the panel never lies about an edit working.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import Any, Literal, get_args, get_origin
 
@@ -27,7 +28,13 @@ from bilisama.config._ui import Reload
 from bilisama.config.schema import Settings
 from bilisama.config.ui_meta import UI_META, FieldMeta
 
-__all__ = ["ConfigEditError", "apply_config_edit", "field_control"]
+__all__ = [
+    "ConfigEditError",
+    "apply_config_edit",
+    "apply_panel_edits",
+    "field_control",
+    "speak_paths",
+]
 
 _RELOAD_ZH = {
     Reload.RECONNECT: "重连语音后端后生效",
@@ -129,6 +136,60 @@ def apply_config_edit(settings: Settings, path: Any, value: Any) -> tuple[FieldM
     applied = getattr(patched, field)
     setattr(parent, field, applied)
     return meta, applied
+
+
+def speak_paths(settings: Settings) -> dict[str, str]:
+    """Speak-switch name → its config path, so the live matrix and the config
+    tab write through the SAME channel instead of two with different gates."""
+    speak = settings.interaction.speak
+    return {name: f"interaction.speak.{name}" for name in type(speak).model_fields}
+
+
+def apply_panel_edits(
+    settings: Settings,
+    data: Mapping[str, Any],
+    *,
+    announce: Callable[[str], None],
+) -> list[str]:
+    """Apply one panel.set payload's config writes and report each in Chinese.
+
+    The single place a panel edit lands, shared by dev-talk and the browser
+    tests so neither can drift from the other. Two shapes reach it: the config
+    tab's `{"config": {"path", "value"}}`, and the live tab's speak matrix
+    `{"speak": {...}}` — which is routed through the same validation rather
+    than a bare setattr, so both get the same refusals and the same receipt.
+
+    Args:
+        settings: The live Settings object consumers read at call time.
+        data: The panel.set payload.
+        announce: Called once per line for the operator (terminal, feed, both).
+
+    Returns:
+        The dotted paths that actually changed, for the caller's reload hooks.
+    """
+    applied_paths: list[str] = []
+    edits: list[tuple[Any, Any]] = []
+    speak_patch = data.get("speak")
+    if isinstance(speak_patch, dict):
+        known = speak_paths(settings)
+        for name, value in speak_patch.items():
+            if name in known:
+                edits.append((known[name], value))
+            else:
+                announce(f"未知开关 {name}，忽略")
+    edit = data.get("config")
+    if isinstance(edit, dict):
+        edits.append((edit.get("path"), edit.get("value")))
+    for path, value in edits:
+        try:
+            meta, applied = apply_config_edit(settings, path, value)
+        except ConfigEditError as exc:
+            announce(str(exc))
+            continue
+        shown = "开" if applied is True else "关" if applied is False else str(applied)
+        announce(f"配置已改：{meta.label} → {shown}（本场生效，重启还原）")
+        applied_paths.append(str(path))
+    return applied_paths
 
 
 def _reject_reason(meta: FieldMeta, info: FieldInfo) -> str:

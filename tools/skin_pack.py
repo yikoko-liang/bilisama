@@ -68,6 +68,10 @@ def _load_mapping(path: Path) -> dict[str, Any]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise MappingError(f"映射文件不是合法 JSON：{path}（{exc}）") from exc
+    if not isinstance(raw, dict):
+        # `[]`, `null` and `"x"` are all legal JSON, so the decoder is happy and
+        # the .get() below would raise AttributeError as a raw traceback.
+        raise MappingError(f"映射文件最外层要是一个对象：{path}（拿到 {type(raw).__name__}）")
     animations = raw.get("animations")
     if not isinstance(animations, dict) or not animations:
         raise MappingError("映射文件要有非空的 animations 对象")

@@ -21,7 +21,44 @@ from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
 from bilisama.realtime.capabilities import Capabilities
 
-__all__ = ["PROFILES", "ProviderProfile", "profile_for", "turn_type_problems"]
+__all__ = [
+    "PROFILES",
+    "ProviderProfile",
+    "compose_instructions",
+    "profile_for",
+    "turn_type_problems",
+]
+
+
+def compose_instructions(context: str, turn: str | None) -> str | None:
+    """Per-turn instructions on top of the persona, never instead of it.
+
+    The Realtime protocol makes response.instructions REPLACE the session's for
+    that response — upstream picks either/or
+    (base_openai_compatible_language_model.py:709-711). The scheduler sends
+    only the per-turn ask and assumes the persona stays; probed live
+    2026-08-14, a session-level persona vanished from every
+    instruction-carrying reply until this recomposition.
+
+    Shared by every adapter rather than copied into each: the semantics are the
+    protocol's, not one provider's, and a fix to the joint (or to the empty-turn
+    edge) must not land in one copy only.
+
+    Args:
+        context: The session-level persona, "" when none was pushed.
+        turn: This turn's ask, or None.
+
+    Returns:
+        The composed instructions, or None to stay bare — the server then falls
+        back to the session instructions, which are exactly the persona.
+    """
+    if not turn:
+        # None and "" both mean "no per-turn ask": staying bare beats sending a
+        # dangling "本轮要求：" tail.
+        return None
+    if not context:
+        return turn
+    return f"{context}\n\n本轮要求：{turn}"
 
 
 @dataclass(frozen=True, slots=True)

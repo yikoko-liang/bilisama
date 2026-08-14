@@ -63,6 +63,13 @@ _INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
 _OUTPUT_RATE = 24000  # and answer at 24 kHz (plan section 3.1 table)
 _FRAME_MS = 32
 
+# Live config paths whose consumer snapshots its value at setup and therefore
+# needs a re-poke after an edit. Out in the open on purpose: a field marked
+# Reload.LIVE must either be read at call time or be listed here, and a hook
+# hidden inside a closure is how "the panel says 配置已改 and nothing changes"
+# gets reintroduced.
+_RELOG_ON_EDIT = frozenset({"runtime.log_level", "runtime.log_viewer_content"})
+
 
 def _dashscope_url(model: str) -> str:
     base = os.environ.get("dashscope_url", "")  # noqa: SIM112  (path.sh 里的原名)
@@ -511,7 +518,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
-    from bilisama.ui.config_edit import ConfigEditError, apply_config_edit
+    from bilisama.ui.config_edit import apply_panel_edits
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
     from bilisama.ui.hub import UiHub, VoiceSignals
     from bilisama.ui.poke import PokeResponder
@@ -555,13 +562,26 @@ async def run_director(args: argparse.Namespace) -> int:
     # bind failure later just parks the hub unused (its staging is bounded).
     hub: UiHub | None = UiHub(clock) if not args.no_ui else None
     log_tee = (hub.log_handler,) if hub is not None else ()
-    # log_viewer_content rides along on every (re)setup — before this it was
-    # a config field nothing read, so the toml flag silently did nothing.
-    logging_setup(
-        level=settings.runtime.log_level,
-        log_viewer_content=settings.runtime.log_viewer_content,
-        extra_handlers=log_tee,
-    )
+    # Bound here, set for real once the console mode is known: relog() reads it
+    # at call time, and a panel edit can arrive before that point.
+    use_prompt = False
+
+    def relog() -> None:
+        """(Re)install logging from the CURRENT settings.
+
+        Both runtime.log_* fields are live-editable, and logging snapshots them
+        at setup — so every path that changes one calls this. The stream
+        follows the prompt window; log_viewer_content rides along, which before
+        this was a config field nothing read at all.
+        """
+        logging_setup(
+            level=settings.runtime.log_level,
+            log_viewer_content=settings.runtime.log_viewer_content,
+            stream=sys.stdout if use_prompt else None,
+            extra_handlers=log_tee,
+        )
+
+    relog()
     thresholds = derive(settings.interaction.chattiness)
 
     stop = asyncio.Event()
@@ -863,7 +883,6 @@ async def run_director(args: argparse.Namespace) -> int:
     endpoint_file: Path | None = None
     pet_proc: asyncio.subprocess.Process | None = None
     console_patch = contextlib.ExitStack()
-    use_prompt = False
     tasks: list[asyncio.Task[None]] = []
     try:
         # ------------------------------------------------------------ UI server
@@ -893,48 +912,18 @@ async def run_director(args: argparse.Namespace) -> int:
                     else:
                         scheduler.release_panic()
                         print("[面板] 恢复说话")
-                speak_patch = data.get("speak")
-                if isinstance(speak_patch, dict):
-                    speak = settings.interaction.speak
-                    for name, value in speak_patch.items():
-                        # model_fields is the whitelist; unknown keys only warn.
-                        if name in type(speak).model_fields:
-                            setattr(speak, name, bool(value))
-                        else:
-                            print(f"[面板] 未知开关 {name}，忽略")
-                edit = data.get("config")
-                if isinstance(edit, dict):
-                    # The per-field write channel (stage 5's, lit up early). The
-                    # gates live in apply_config_edit; here is only the ack, the
-                    # error line, and the one consumer that needs a re-poke.
-                    try:
-                        meta, applied = apply_config_edit(
-                            settings, edit.get("path"), edit.get("value")
-                        )
-                    except ConfigEditError as exc:
-                        print(f"[面板] {exc}")
-                        if hub is not None:
-                            hub.broadcast(
-                                ServerEvent.EVENT_FEED, {"kind": "system", "text": str(exc)}
-                            )
-                    else:
-                        shown = (
-                            "开" if applied is True else "关" if applied is False else str(applied)
-                        )
-                        line = f"配置已改：{meta.label} → {shown}（本场生效，重启还原）"
-                        print(f"[面板] {line}")
-                        if hub is not None:
-                            hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
-                        if edit.get("path") in ("runtime.log_level", "runtime.log_viewer_content"):
-                            # Logging snapshots its config at setup; re-run it so
-                            # the edit is live. Stream choice mirrors the prompt
-                            # window (use_prompt is bound late, at call time).
-                            logging_setup(
-                                level=settings.runtime.log_level,
-                                log_viewer_content=settings.runtime.log_viewer_content,
-                                stream=sys.stdout if use_prompt else None,
-                                extra_handlers=log_tee,
-                            )
+
+                def announce(line: str) -> None:
+                    print(f"[面板] {line}")
+                    if hub is not None:
+                        hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
+
+                # Both write shapes (config tab, speak matrix) go through the
+                # one validated channel; this closure only adds the receipt and
+                # the reload hooks below.
+                for path in apply_panel_edits(settings, data, announce=announce):
+                    if path in _RELOG_ON_EDIT:
+                        relog()
                 if hub is not None:
                     hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
 
@@ -1118,15 +1107,13 @@ async def run_director(args: argparse.Namespace) -> int:
             # re-targets onto the patched stdout for the window; the shutdown
             # chain restores it.
             console_patch.enter_context(patch_stdout(raw=True))
-            logging_setup(
-                level=settings.runtime.log_level,
-                log_viewer_content=settings.runtime.log_viewer_content,
-                stream=sys.stdout,
-                extra_handlers=log_tee,
-            )
+            relog()
 
         print(
-            f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
+            # connect_url, not args.url: on DashScope the dial goes to the
+            # wss endpoint while args.url still holds the s2s default, and a
+            # banner naming a host nobody dialled sends debugging the wrong way.
+            f"已连接 {provider.value}（{connect_url.split('?')[0]}），director 模式：\n"
             f"  人设 {settings.persona.id}（persona list 可看全部）  "
             f"话痨度 {settings.interaction.chattiness.value}"
             f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
@@ -1193,11 +1180,8 @@ async def run_director(args: argparse.Namespace) -> int:
         # chain prints, and point logging back at stderr.
         console_patch.close()
         if use_prompt:
-            logging_setup(
-                level=settings.runtime.log_level,
-                log_viewer_content=settings.runtime.log_viewer_content,
-                extra_handlers=log_tee,
-            )
+            use_prompt = False  # the patched stdout is gone; relog to stderr
+            relog()
         # The UI goes first: aclose() chases the browsers off their sockets so
         # uvicorn's graceful stop is not stuck waiting on an open WebSocket.
         if ui_server is not None:
@@ -1312,9 +1296,17 @@ async def run(args: argparse.Namespace) -> int:
             task.result()  # surface pump/consume failures instead of swallowing
         return 0
     finally:
-        await client.aclose()
+        # One try per resource, same rule as director mode's teardown chain:
+        # a raise from the socket goodbye must not skip the audio release.
+        try:
+            await client.aclose()
+        except Exception as exc:
+            print(f"[收尾] 语音连接没关上：{exc}", file=sys.stderr)
         if speaker is not None:
-            await asyncio.to_thread(speaker.close)
+            try:
+                await asyncio.to_thread(speaker.close)
+            except Exception as exc:
+                print(f"[收尾] 扬声器没关上：{exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

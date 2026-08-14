@@ -20,26 +20,34 @@ const bubble = createBubble(document.getElementById("bubble"));
 const state = { connected: false, voice: "idle" };
 let renderer = null;
 let rendererWanted = null; // the avatar config from hello, mounted lazily
-let mountGen = 0; // guards concurrent mounts: only the latest wins
+let mountChain = Promise.resolve(); // mounts run one at a time, never overlapped
 let everConnected = false;
 
 const send = (event, data) => socket.send(event, data);
 const panel = createPanel({ send });
 
-async function mountRenderer(avatar) {
-  if (panelOnly) return;
+// Every skin owns the same #pet-mount element and clears it — on mount AND on
+// destroy. Two mounts in flight would each wipe the other's canvas, whichever
+// order they finished in, leaving an invisible pet drawing into a detached
+// node. So they queue instead of racing, which also makes "destroy the old one
+// first" safe: nothing else can be halfway through a mount.
+function mountRenderer(avatar) {
+  if (panelOnly) return mountChain;
   rendererWanted = avatar;
-  const gen = ++mountGen;
-  const mounted = await createRenderer(document.getElementById("pet-mount"), avatar, {
+  mountChain = mountChain
+    .then(() => mountOne(avatar))
+    // A broken link in the chain would silently stop every later mount.
+    .catch((err) => console.warn("形象挂载失败：", err));
+  return mountChain;
+}
+
+async function mountOne(avatar) {
+  if (avatar !== rendererWanted) return; // superseded while it waited its turn
+  renderer?.destroy();
+  renderer = null;
+  renderer = await createRenderer(document.getElementById("pet-mount"), avatar, {
     onPoke: () => send("pet.poke"),
   });
-  if (gen !== mountGen) {
-    // A newer mount started while this one loaded; this result is stale.
-    mounted.destroy();
-    return;
-  }
-  renderer?.destroy();
-  renderer = mounted;
   renderer.setState(resolveVisual(state));
   fitToSkin();
 }

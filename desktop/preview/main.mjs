@@ -234,12 +234,15 @@ ipcMain.on("pet:fit", (event, w, h) => {
   const [ow, oh] = petWindow.getSize();
   if (ow === width && oh === height) return;
   const [x, y] = petWindow.getPosition();
-  // resizable:false blocks programmatic resizes on some platforms; lift the
-  // latch just for the setBounds and put it back.
-  petWindow.setResizable(true);
+  // Keep the grown window on screen: bottom-anchoring a taller skin drives the
+  // top edge up, and a pet parked near the top would push its bubble headroom
+  // (and eventually itself) off the display with no way back.
+  const { workArea } = screen.getDisplayNearestPoint({ x, y });
+  const clamp = (value, low, high) => Math.round(Math.min(Math.max(value, low), high));
+  petWindow.setResizable(true); // resizable:false blocks programmatic resizes
   petWindow.setBounds({
-    x: Math.round(x + (ow - width) / 2),
-    y: y + (oh - height),
+    x: clamp(x + (ow - width) / 2, workArea.x, workArea.x + workArea.width - width),
+    y: clamp(y + (oh - height), workArea.y, workArea.y + workArea.height - height),
     width,
     height,
   });

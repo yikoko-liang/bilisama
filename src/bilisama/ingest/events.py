@@ -162,10 +162,21 @@ class LiveEvent:
         Falls back to identity plus content plus a one-second bucket when the
         platform gives us no id, which is what stops a reconnect from replaying
         the same reaction.
+
+        Gifts carry their own discriminator in that fallback. Their text is
+        always empty, so identity plus a one-second bucket collapsed a whole
+        blind-box batch — SEND_GIFT_V2 can arrive with neither tid nor rnd
+        (tests/unit/test_bili_translate.py:202) — into one key, and every gift
+        after the first was dropped as a duplicate before the aggregator ever
+        saw it. Paid events must not be deduplicated by a coincidence of
+        timing.
         """
         if self.event_id:
             return f"{self.kind}:{self.event_id}"
-        return f"{self.kind}:{self.viewer.identity}:{self.text[:32]}:{self.ts_ms // 1000}"
+        mark = ""
+        if self.gift is not None:
+            mark = f":{self.gift.gift_id}:{self.gift.num}:{self.value_cny:.4f}"
+        return f"{self.kind}:{self.viewer.identity}:{self.text[:32]}{mark}:{self.ts_ms // 1000}"
 
     @property
     def is_paid(self) -> bool:
