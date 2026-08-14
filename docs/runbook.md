@@ -154,8 +154,8 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 .venv/bin/bilisama dev-talk --director --pet           # 一条命令：语音+界面+桌宠壳全起
 .venv/bin/bilisama dev-talk --director --open          # 起来后自动开浏览器
 .venv/bin/bilisama dev-talk --director --no-ui         # 这场不要界面
-.venv/bin/bilisama dev-talk --director --skin tofu     # 本次用内置豆腐机器人（不改配置）
-.venv/bin/bilisama dev-talk --director --skin kirby    # 本次用指定皮肤包
+.venv/bin/bilisama dev-talk --director --skin kirby    # 本次换皮肤包（不改配置文件）
+.venv/bin/bilisama dev-talk --director --skin tofu     # 本次强制用内置豆腐（出厂就是它）
 ```
 
 `--pet` 要求先装过壳（一次性：`cd desktop/preview && npm install`）；没装会提示但
@@ -168,10 +168,11 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
   `--provider dashscope --model qwen-audio-3.0-realtime-flash`。界面层只认归一化
   事件，不认 provider。两条路都真机验过（2026-08-14）：s2s 全套十项清单；
   DashScope 上 SC 注入后回复以 31 段流式文字进气泡、状态 idle→thinking→speaking。
-- 形象由 `[avatar]` 配置决定：`renderer = "tofu"` 是内置角色——像素机器人「豆腐」
-  （名字来自字体行话：缺字方块「□」就叫 tofu，Noto 的使命是消灭它，我们把它养活了）；
-  `"sprite"` 读皮肤包（`model_id` 填包名）。自己导入的皮肤包放
-  `~/.local/share/bilisama/skins/<包名>/`，与仓库内置的同名时你的优先。
+- 形象由 `[avatar]` 配置决定，**出厂是 `renderer = "tofu"`**——内置像素机器人「豆腐」
+  （名字来自字体行话：缺字方块「□」就叫 tofu，Noto 的使命是消灭它，我们把它养活了），
+  零素材、无版权包袱；`"sprite"` 读皮肤包（`model_id` 填包名，内部分支带了 kirby）。
+  自己导入的皮肤包放 `~/.local/share/bilisama/skins/<包名>/`，与仓库内置的同名时你的
+  优先——但 `--skin tofu` 和降级链只认打包的那份豆腐，用户包顶不掉它。
 - **自制皮肤包的硬性要求**：pet.json 的 animations 必须把 11 条标准轨道名全部写上
   （idle / running-right / running-left / waving / jumping / failed / waiting /
   running / review / working / attention）——渲染器按全量校验，缺一条整包被拒、
