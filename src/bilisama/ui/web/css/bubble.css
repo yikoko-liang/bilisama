@@ -9,7 +9,10 @@
   transform: translateX(-46%);
   max-width: min(280px, 80vw);
   min-width: 60px;
-  max-height: calc(1.55em * 6 + 20px);
+  /* Grows with the reply instead of capping at six lines and making the
+     streamer scroll up to read what she just said. The viewport is the only
+     real limit; past it the internal scroll takes over. */
+  max-height: min(58vh, calc(1.55em * 18 + 20px));
   overflow-y: auto;
   padding: 9px 12px;
   background: var(--panel);

@@ -53,9 +53,12 @@ async function mountOne(avatar) {
 }
 
 // The mount box follows the skin's natural proportions, and inside the shell
-// the WINDOW follows the mount: pet box + three bubble lines of headroom +
-// breathing room, bottom-anchored on the main side so the pet stays planted.
-// Numbers over measurement for the headroom: the bubble may not exist yet.
+// the WINDOW follows both the mount and the bubble: pet box + whatever the
+// bubble currently needs + breathing room, bottom-anchored on the main side so
+// the pet stays planted while the top edge moves.
+const BASE_HEADROOM = 118; // pet floor + the gap a bubble-less window keeps
+let lastFit = "";
+
 function fitToSkin() {
   const canvas = document.querySelector("#pet-mount canvas");
   const aspect =
@@ -64,8 +67,61 @@ function fitToSkin() {
   const fit = window.bilisamaShell?.fit;
   if (!fit) return;
   const rect = document.getElementById("pet-mount").getBoundingClientRect();
-  // 208 keeps three 13px bubble lines readable; 118 = bubble cap + gap + floor.
-  fit(Math.round(Math.max(rect.width + 56, 208)), Math.round(rect.height + 118));
+  const bubbleEl = document.getElementById("bubble");
+  const bubbleH = bubbleEl && !bubbleEl.hidden ? bubbleEl.getBoundingClientRect().height : 0;
+  // 208 keeps a 13px line readable; the bubble needs its own height plus the
+  // gap it floats above the pet by.
+  const width = Math.round(Math.max(rect.width + 56, 208));
+  const height = Math.round(rect.height + Math.max(BASE_HEADROOM, bubbleH + 40));
+  const key = `${width}x${height}`;
+  if (key === lastFit) return; // streaming text resizes by a pixel at a time
+  lastFit = key;
+  fit(width, height);
+}
+
+// Click-through everywhere the pet is not. The shell window is a rectangle
+// around a small character, and an invisible pane that still swallows clicks
+// is a pane the user can feel — this is the other half of "transparent".
+// Only the pet, its bubble and the corner icon take the mouse; the same
+// pointer tracking reveals the corner icon, which otherwise floats alone in
+// empty space and reads as a smudge on the desktop.
+if (!panelOnly && window.bilisamaShell?.setInteractive) {
+  const shell = window.bilisamaShell;
+  let interactive = true; // the window starts live: a page that never runs
+  // this code must not end up permanently click-through.
+  const hits = (el, x, y) => {
+    if (!el || el.hidden) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  };
+  const update = (x, y) => {
+    // Never let go mid-drag: the pointer routinely leaves the pet's box while
+    // the window is following it.
+    const dragging = document.querySelector(".pet-mount.dragging") !== null;
+    const over =
+      dragging ||
+      ["pet-mount", "bubble", "corner"].some((id) => hits(document.getElementById(id), x, y));
+    document.body.classList.toggle("pointer-inside", x >= 0 && y >= 0);
+    if (over === interactive) return;
+    interactive = over;
+    shell.setInteractive(over);
+  };
+  document.addEventListener("mousemove", (e) => update(e.clientX, e.clientY));
+  document.addEventListener("mouseleave", () => update(-1, -1));
+}
+
+// The bubble grows as she talks, so the window has to follow it live — a cap
+// that fits three lines is why long replies had to be scrolled by hand.
+if (!panelOnly && window.bilisamaShell && "ResizeObserver" in window) {
+  let queued = false;
+  new ResizeObserver(() => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      fitToSkin();
+    });
+  }).observe(document.getElementById("bubble"));
 }
 
 function applyVisual() {

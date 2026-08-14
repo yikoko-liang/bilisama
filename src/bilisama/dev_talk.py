@@ -63,6 +63,12 @@ _INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
 _OUTPUT_RATE = 24000  # and answer at 24 kHz (plan section 3.1 table)
 _FRAME_MS = 32
 
+# Where a reply may be broken into a printable line while it is still arriving.
+# s2s hands us one fragment per LLM chunk (roughly a sentence); DashScope
+# streams tokens, so the cap keeps a punctuation-free run from waiting forever.
+_SENTENCE_END = "。！？…；\n.!?"
+_LINE_SOFT_CAP = 32
+
 # Live config paths whose consumer snapshots its value at setup and therefore
 # needs a re-poke after an edit. Out in the open on purpose: a field marked
 # Reload.LIVE must either be read at call time or be listed here, and a hook
@@ -334,14 +340,34 @@ async def _consume_events(
         events: One view of the link's event stream.
         speaker: Playback sink, None in WAV mode.
         reply_wav: Where to save the reply audio, None to skip.
-        stream_text: Print reply text token by token. MUST be False while a
-            prompt_toolkit prompt owns the terminal: a line without its newline
-            has not scrolled yet, so the prompt's next repaint (`ESC[J`) erases
-            it — the reply vanished and left only the end marker behind, which
-            is exactly what a live session showed. Complete lines survive.
+        stream_text: Print reply text character by character. MUST be False
+            while a prompt_toolkit prompt owns the terminal: a line without its
+            newline has not scrolled yet, so the prompt's next repaint
+            (`ESC[J`) erases it — the reply vanished and left only the end
+            marker behind. Under the prompt the text still arrives live, but
+            one finished sentence at a time (see _SENTENCE_END): whole lines
+            survive the repaint, and waiting for the WHOLE reply put the
+            terminal visibly behind the browser bubble.
     """
     collected: list[bytes] = []
     said: list[str] = []
+    buffered: list[str] = []  # printed a sentence at a time when not streaming
+
+    def flush_sentences(*, final: bool = False) -> None:
+        text = "".join(buffered)
+        if not final:
+            cut = max((text.rfind(mark) for mark in _SENTENCE_END), default=-1)
+            if cut < 0 and len(text) < _LINE_SOFT_CAP:
+                return
+            if cut < 0:
+                cut = len(text) - 1  # no punctuation in a long run: break anyway
+            text, rest = text[: cut + 1], text[cut + 1 :]
+            buffered[:] = [rest]
+        else:
+            buffered.clear()
+        if text:
+            print(text)
+
     async for event in events:
         if isinstance(event, link.UserTranscriptDone):
             print(f"你说：{event.text}")
@@ -349,6 +375,9 @@ async def _consume_events(
             said.append(event.text)
             if stream_text:
                 print(event.text, end="", flush=True)
+            else:
+                buffered.append(event.text)
+                flush_sentences()
         elif isinstance(event, link.ReplyAudioDelta):
             collected.append(event.pcm)
             if speaker is not None:
@@ -357,15 +386,13 @@ async def _consume_events(
             if speaker is not None:
                 speaker.flush()  # the local half of playback.clear
         elif isinstance(event, link.ReplyDone):
-            spoken = "".join(said)
             said.clear()
             marker = f"—— 回复结束（{event.status}）——"
             if stream_text:
                 print(f"\n{marker}")
             else:
-                # One write, whole lines only: nothing is left pending for the
-                # prompt's repaint to erase.
-                print(f"{spoken}\n{marker}" if spoken else marker)
+                flush_sentences(final=True)  # whatever the last sentence left
+                print(marker)
             if reply_wav is not None and collected:
                 with wave.open(str(reply_wav), "wb") as w:
                     w.setnchannels(1)

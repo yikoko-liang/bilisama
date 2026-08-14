@@ -28,9 +28,10 @@ body.shell .bubble {
   bottom: calc(var(--pet-size) * var(--pet-aspect, 1.18) + 20px);
   max-width: calc(100vw - 24px);
   font-size: 13px;
-  /* three lines: headroom above the pet is sized by the shell's fit() call,
-     and a bubble the window cannot contain is worse than a scrolling one */
-  max-height: calc(1.5em * 3 + 16px);
+  /* The WINDOW grows to fit the bubble (main.js re-fits on every size change),
+     so this cap is only the point past which even a taller window would be
+     silly — three lines used to hide most of a normal reply. */
+  max-height: calc(1.5em * 12 + 16px);
   line-height: 1.5;
 }
 
@@ -48,6 +49,19 @@ body.shell .bubble {
 
 body.shell .pet-mount {
   cursor: grab;
+}
+
+/* On the desktop the icon has no panel to belong to: at rest it is one grey
+   glyph floating in nothing, which reads as a smudge rather than a control.
+   It appears when the pointer enters the window and goes away with it. */
+body.shell .corner {
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.shell.pointer-inside .corner {
+  opacity: 0.45;
+  pointer-events: auto;
 }
 
 body.shell .pet-mount.dragging {

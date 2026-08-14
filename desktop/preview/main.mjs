@@ -224,6 +224,16 @@ ipcMain.on("pet:open-panel", (event) => {
   if (fromPet(event)) openPanelWindow();
 });
 
+// The window is a rectangle; the pet is not. Everywhere else it was an
+// invisible always-on-top pane that still ate clicks meant for whatever sits
+// underneath — you could not see it, but you could feel it. The page hit-tests
+// the pointer and flips this; `forward: true` keeps mousemove coming so it can
+// tell when the pointer returns.
+ipcMain.on("pet:interactive", (event, interactive) => {
+  if (!fromPet(event)) return;
+  petWindow.setIgnoreMouseEvents(!interactive, { forward: true });
+});
+
 // The page measures the mounted skin and asks the window to hug it: the less
 // invisible window there is around the pet, the less "a window" it feels like.
 // Bottom-center anchored so a size change never lifts the pet off its spot.
