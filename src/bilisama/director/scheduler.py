@@ -132,6 +132,11 @@ class Scheduler:
         self._active: _Active | None = None
         self._dispatching = False
         self._panicked = False
+        # Set between LinkDown and LinkUp. Work that arrives in that window is
+        # skipped with a verdict, not held: danmaku expires in 20 seconds
+        # anyway, and a reply that lands four minutes after its trigger reads
+        # worse than no reply (user's call, 2026-08-17).
+        self._link_down = False
         self._wake = asyncio.Event()
         self.controls: asyncio.Queue[PlaybackClear] = asyncio.Queue()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -141,6 +146,17 @@ class Scheduler:
     def submit(self, intent: Intent) -> None:
         """Queue an intent. Duplicates (same dedup_key while queued or active)
         are skipped with a verdict rather than silently dropped."""
+        if self._link_down:
+            self._verdict_sink(
+                Verdict(
+                    intent_id=intent.dedup_key or intent.source,
+                    source=intent.source,
+                    outcome=Outcome.SKIPPED,
+                    phase=Phase.SELECTED,
+                    reason=SkipReason.LINK_DOWN,
+                )
+            )
+            return
         if self._panicked:
             self._verdict_sink(
                 Verdict(
@@ -184,9 +200,7 @@ class Scheduler:
         """Kill everything, protected included — the one switch allowed to."""
         self._panicked = True
         self.controls.put_nowait(PlaybackClear(reason="panic_mute"))
-        while self._heap:
-            entry = heapq.heappop(self._heap)
-            self._drop_queued(entry.intent, SkipReason.PANIC_MUTE)
+        self._drain_queue(SkipReason.PANIC_MUTE)
         active = self._active
         if active is not None:
             active.cleared = True
@@ -244,11 +258,17 @@ class Scheduler:
                 if self._active is None or event.handle is not self._active.handle:
                     self._floor.on_implicit(False)
                 self._on_done(event)
-            elif isinstance(event, link.LinkError) and event.code == "connection_lost":
+            elif isinstance(event, link.LinkDown):
                 # The transport already settled every record (FAILED dones are
-                # on their way); release the implicit hold so the floor cannot
-                # stay shut forever on a link that no longer exists.
-                self._floor.on_implicit(False)
+                # on their way). Reset every flag this link was feeding, or the
+                # floor stays shut forever, and drain the queue: holding work
+                # for a link that may be gone for good just produces stale
+                # replies later.
+                self._link_down = True
+                self._floor.on_link_lost()
+                self._drain_queue(SkipReason.LINK_DOWN)
+            elif isinstance(event, link.LinkUp):
+                self._link_down = False
             self._wake.set()
 
     async def _dispatch_loop(self) -> None:
@@ -273,6 +293,8 @@ class Scheduler:
 
     def _next_dispatchable(self) -> Intent | None:
         if self._panicked or self._active is not None or self._dispatching:
+            return None
+        if self._link_down:
             return None
         while self._heap:
             entry = self._heap[0]
@@ -306,6 +328,13 @@ class Scheduler:
                 "scheduler.dispatch_failed", source=intent.source, error_text=str(exc)[:200]
             )
             self._free_key(intent)
+            if intent.requeue_on_interrupt:
+                # Paid work does not evaporate because one send failed — the
+                # audience watched them pay. Same rule as barge-in (section
+                # 4.2): back in the queue, and the key was freed above so the
+                # resubmission is not eaten as a duplicate.
+                self._requeue(intent)
+                return
             self._verdict_sink(
                 Verdict(
                     intent_id=intent.dedup_key or intent.source,
@@ -406,7 +435,17 @@ class Scheduler:
             else:
                 self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, reason=reason)
         else:
-            self._settle_active(Outcome.FAILED, Phase.GENERATING)
+            # A reply that died mid-generation (the link dropped, the server
+            # failed it): L1 still holds whatever already streamed, so ask it
+            # to stop the way every other death does — otherwise a dead
+            # session's half sentence plays to the end.
+            if not active.cleared:
+                self.controls.put_nowait(PlaybackClear(reason="link_failed"))
+                active.cleared = True
+            if active.intent.requeue_on_interrupt and not self._panicked:
+                self._settle_active(Outcome.FAILED, Phase.GENERATING, requeue=True)
+            else:
+                self._settle_active(Outcome.FAILED, Phase.GENERATING)
 
     async def _barge_in(self) -> None:
         """The streamer opened their mouth while a reply is still booked.
@@ -475,6 +514,38 @@ class Scheduler:
         else:
             self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, reason=SkipReason.PREEMPTED)
 
+    def _drain_queue(self, reason: SkipReason) -> None:
+        """Empty the heap, giving every waiting intent a verdict.
+
+        Silence here would leave intents that never end anywhere, which is the
+        one thing section 4.12 forbids.
+        """
+        while self._heap:
+            entry = heapq.heappop(self._heap)
+            self._drop_queued(entry.intent, reason)
+
+    def _requeue(self, intent: Intent) -> None:
+        """Put one intent back at the end of its priority band.
+
+        A fresh Intent rather than the original so nothing downstream can hold
+        a stale reference; the dedup key must already be freed by the caller,
+        or submit() eats this as a duplicate.
+        """
+        self.submit(
+            Intent(
+                source=intent.source,
+                priority=intent.priority,
+                injection=intent.injection,
+                trusted=intent.trusted,
+                event=intent.event,
+                dedup_key=intent.dedup_key,
+                created_at=intent.created_at,
+                expires_at=intent.expires_at,
+                requeue_on_interrupt=intent.requeue_on_interrupt,
+            )
+        )
+        self._wake.set()
+
     def _settle_active(
         self,
         outcome: Outcome,
@@ -495,19 +566,7 @@ class Scheduler:
             # Paid messages must not vanish silently (section 4.2): back into
             # the queue they go, same priority, new place in line. The dedup
             # key was freed above, so the resubmission is not eaten (A15).
-            requeued = Intent(
-                source=intent.source,
-                priority=intent.priority,
-                injection=intent.injection,
-                trusted=intent.trusted,
-                event=intent.event,
-                dedup_key=intent.dedup_key,
-                created_at=intent.created_at,
-                expires_at=intent.expires_at,
-                requeue_on_interrupt=intent.requeue_on_interrupt,
-            )
-            self.submit(requeued)
-            self._wake.set()
+            self._requeue(intent)
             return
         self._verdict_sink(
             Verdict(

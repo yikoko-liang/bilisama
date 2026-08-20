@@ -12,9 +12,10 @@ not pin the session to text.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
-from bilisama.clock import Clock
+from bilisama.clock import Clock, SystemClock
 from bilisama.config.enums import ProviderName
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
@@ -41,7 +42,17 @@ class HostedLink:
         watchdog_s: float = 25.0,
         headers: dict[str, str] | None = None,
         turn: HostedTurnConfig | None = None,
+        auto_reconnect: bool = True,
+        reconnect_backoff_s: float = 1.0,
+        session_cap_min: int = 0,
+        rotate_margin_min: float = 3.0,
     ) -> None:
+        """Args:
+        session_cap_min: How long this endpoint lets one connection live.
+            DashScope 120, OpenAI 60 (plan section 3.1); 0 disables rotation.
+            We rotate `rotate_margin_min` early so the swap happens on our
+            clock rather than mid-sentence on theirs.
+        """
         profile = profile_for(provider)
         self._client = RealtimeClient(
             url,
@@ -50,17 +61,56 @@ class HostedLink:
             clock=clock,
             watchdog_s=watchdog_s,
             headers=headers,
+            auto_reconnect=auto_reconnect,
+            reconnect_backoff_s=reconnect_backoff_s,
         )
         self._codec = profile.codec
         self._caps = profile.caps
         self._turn = turn
         self._context = ""
+        self._clock: Clock = clock or SystemClock()
+        self._session_cap_s = max(0.0, (session_cap_min - rotate_margin_min) * 60.0)
+        self._rotation: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
+        """Open the socket, bootstrap the session, restore what we knew.
+
+        The bootstrap frame carries modalities and turn detection; the context
+        replay carries the persona. Both are per-connection state that a
+        reconnect starts without, and no layer above this one re-sends them:
+        Assembly pushes only on change (app.py refresh_context).
+        """
+        self._client.on_resume = self._resume_session
         await self._client.connect()
+        await self._resume_session()
+        self._arm_rotation()
+
+    def _arm_rotation(self) -> None:
+        """Restart the countdown. Every fresh socket gets a full lifetime."""
+        if self._session_cap_s <= 0:
+            return
+        if self._rotation is not None:
+            self._rotation.cancel()
+        self._rotation = asyncio.create_task(self._rotate_when_due(), name="hosted:rotate")
+
+    async def _rotate_when_due(self) -> None:
+        await self._clock.sleep(self._session_cap_s)
+        await self._client.rotate("session_cap")
+
+    async def _resume_session(self) -> None:
+        """Everything a fresh socket needs before it behaves like the old one.
+
+        Called on the first connect and again after every reconnect, which is
+        why it has to be idempotent: a session.update carrying the same values
+        twice is free, and losing either half is not.
+        """
         frame = self._bootstrap_frame()
         if frame is not None:
             await self._client.send_command(frame)
+        if self._context:
+            await self.set_context(self._context)
+        # A reconnect (ours or theirs) starts the clock over.
+        self._arm_rotation()
 
     def _bootstrap_frame(self) -> dict[str, Any] | None:
         """The session bootstrap a hosted endpoint needs before audio flows.
@@ -92,6 +142,8 @@ class HostedLink:
         return {"type": dia.ClientEvent.SESSION_UPDATE.value, "session": session}
 
     async def aclose(self) -> None:
+        if self._rotation is not None:
+            self._rotation.cancel()
         await self._client.aclose()
 
     async def set_context(self, instructions: str) -> None:

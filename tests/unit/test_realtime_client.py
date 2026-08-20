@@ -378,9 +378,9 @@ async def test_connection_loss_settles_records_and_says_so() -> None:
             assert done.status is link.ReplyStatus.FAILED
             assert done.handle is handle
             assert handle.stale
-            error = await _next_event(events, link.LinkError)
-            assert isinstance(error, link.LinkError)
-            assert error.code == "connection_lost"
+            down = await _next_event(events, link.LinkDown)
+            assert isinstance(down, link.LinkDown)
+            assert down.reason.startswith("connection_closed")
         finally:
             await linkobj.aclose()
 

@@ -402,6 +402,11 @@ async def _consume_events(
                 print(f"回复音频已存：{reply_wav}")
                 return
             collected.clear()
+        elif isinstance(event, link.LinkDown):
+            tail = "，正在自动重连…" if event.retrying else "，已放弃重连。"
+            print(f"[链路] 断了（{event.reason}）{tail}", file=sys.stderr)
+        elif isinstance(event, link.LinkUp):
+            print(f"[链路] 已恢复（第 {event.attempts} 次尝试成功），人设已重新推送。")
         elif isinstance(event, link.LinkError):
             print(f"[错误] {event.code}: {event.detail}", file=sys.stderr)
 

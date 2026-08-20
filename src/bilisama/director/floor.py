@@ -67,6 +67,21 @@ class SpeakingFloor:
     def on_implicit(self, active: bool) -> None:
         self.implicit_active = active
 
+    def on_link_lost(self) -> None:
+        """Drop every flag this link's own events were feeding.
+
+        streamer_speaking is the dangerous one: only on_speech_stopped clears
+        it, and a socket that dies mid-utterance means that event never
+        arrives. The gate would then stay shut forever — reconnect succeeds,
+        the queue fills, and nothing is ever said (reproduced against the fake
+        server before this existed). The same reasoning covers the implicit
+        hold and any queued audio: both describe a session that is gone.
+        """
+        self.streamer_speaking = False
+        self.implicit_active = False
+        self.turn_pending = False
+        self.queued_audio = False
+
     def on_playback(self, queued: bool) -> None:
         self.queued_audio = queued
 

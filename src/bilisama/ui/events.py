@@ -86,5 +86,20 @@ def link_frames(event: link.LinkEvent) -> Iterator[tuple[ServerEvent, dict[str, 
     elif isinstance(event, link.UserTranscriptDone):
         yield ServerEvent.TRANSCRIPT_FINAL, {"text": event.text}
         yield ServerEvent.EVENT_FEED, {"kind": "transcript", "text": event.text}
+    elif isinstance(event, link.LinkDown):
+        # The panel shows this to a streamer mid-stream: say what happened and
+        # whether anything is being done about it, not the close code.
+        detail = "正在自动重连" if event.retrying else "已放弃重连，需要手动重启"
+        yield ServerEvent.EVENT_FEED, {
+            "kind": "error",
+            "code": "link_down",
+            "detail": f"语音连接断了，{detail}",
+        }
+    elif isinstance(event, link.LinkUp):
+        yield ServerEvent.EVENT_FEED, {
+            "kind": "system",
+            "code": "link_up",
+            "detail": "语音连接已恢复",
+        }
     elif isinstance(event, link.LinkError):
         yield ServerEvent.EVENT_FEED, {"kind": "error", "code": event.code, "detail": event.detail}

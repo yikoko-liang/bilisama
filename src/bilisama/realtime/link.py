@@ -19,8 +19,10 @@ from enum import StrEnum
 from typing import Protocol
 
 __all__ = [
+    "LinkDown",
     "LinkError",
     "LinkEvent",
+    "LinkUp",
     "ReplyAudioDelta",
     "ReplyDone",
     "ReplyHandle",
@@ -127,6 +129,35 @@ class UserTranscriptDone:
 
 
 @dataclass(frozen=True, slots=True)
+class LinkDown:
+    """The transport is gone. Nothing can be sent until LinkUp arrives.
+
+    Distinct from LinkError on purpose: an error is one thing that failed, a
+    down link is a STATE that persists, and L3 decides very different things
+    about the two. Every reply in flight has already been settled FAILED by
+    the time this lands.
+    """
+
+    reason: str
+    """Why it dropped, in wire terms — a close code, or a transport message."""
+
+    retrying: bool = True
+    """False means the client has given up; nothing more is coming."""
+
+
+@dataclass(frozen=True, slots=True)
+class LinkUp:
+    """The transport is back AND the session has been restored.
+
+    Emitted after the adapter has replayed its bootstrap and context, so a
+    consumer seeing this can send immediately.
+    """
+
+    attempts: int = 1
+    """How many tries it took, for the log and the health card."""
+
+
+@dataclass(frozen=True, slots=True)
 class LinkError:
     code: str
     detail: str
@@ -142,6 +173,8 @@ LinkEvent = (
     | ToolCall
     | UserTranscriptDelta
     | UserTranscriptDone
+    | LinkDown
+    | LinkUp
     | LinkError
 )
 

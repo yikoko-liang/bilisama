@@ -50,6 +50,7 @@ class S2SLink:
         clock: Clock | None = None,
         watchdog_s: float = 25.0,
         text_replies: bool = True,
+        auto_reconnect: bool = True,
     ) -> None:
         """Args:
         text_replies: True (the shipping path) pins the session and every
@@ -61,14 +62,35 @@ class S2SLink:
         """
         profile = profile_for(ProviderName.S2S)
         self._client = RealtimeClient(
-            url, caps=profile.caps, codec=profile.codec, clock=clock, watchdog_s=watchdog_s
+            url,
+            caps=profile.caps,
+            codec=profile.codec,
+            clock=clock,
+            watchdog_s=watchdog_s,
+            auto_reconnect=auto_reconnect,
         )
         self._codec = profile.codec
         self._text_replies = text_replies
         self._context = ""
 
     async def connect(self) -> None:
+        """Open the socket and restore whatever this link already knew.
+
+        Reconnecting is not a fresh start: the session we come back to has no
+        instructions at all, and nothing upstream will notice. Assembly only
+        pushes when the assembled text CHANGED (app.py refresh_context), so a
+        reconnect between two identical pushes leaves the assistant running
+        with no persona until the clock line ticks — up to a full granularity
+        window. Replaying here keeps that invisible to L3.
+        """
+        self._client.on_resume = self._resume_session
         await self._client.connect()
+        await self._resume_session()
+
+    async def _resume_session(self) -> None:
+        """Replay the session instructions onto a fresh socket. Idempotent."""
+        if self._context:
+            await self.set_context(self._context)
 
     async def aclose(self) -> None:
         await self._client.aclose()
