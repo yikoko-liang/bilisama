@@ -89,6 +89,13 @@ class HostedConfig(BaseModel):
     endpoint: str = Field("")
     model: str = Field("")
     api_key_ref: str = Field("")
+    # Which voice the provider speaks in. Empty means "whatever the server
+    # picks", and that default is not a neutral choice: on DashScope it is
+    # longanqian, measured at 343 Hz against the 180-260 Hz of an ordinary
+    # adult female voice. It reads as shrill, and until this field existed
+    # there was no way to say otherwise. Names are the provider's own; ask for
+    # a wrong one and the server answers with the list it accepts.
+    voice: str = Field("")
     turn: HostedTurnConfig = Field(default_factory=HostedTurnConfig)
 
 

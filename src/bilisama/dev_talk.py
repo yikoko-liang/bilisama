@@ -90,7 +90,7 @@ def _dashscope_url(model: str) -> str:
     return f"wss://{host}/api-ws/v1/realtime?model={model}"
 
 
-def _session_frame(provider: ProviderName) -> dict[str, Any] | None:
+def _session_frame(provider: ProviderName, voice: str = "") -> dict[str, Any] | None:
     """The audio session setup, in the dialect the provider actually speaks.
 
     s2s gets nothing: its VAD runs unconditionally, and its session.update
@@ -101,15 +101,15 @@ def _session_frame(provider: ProviderName) -> dict[str, Any] | None:
     can trip on this.
     """
     if provider is ProviderName.DASHSCOPE:
-        return {
-            "type": "session.update",
-            "session": {
-                "modalities": ["text", "audio"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "turn_detection": {"type": "server_vad"},
-            },
+        session: dict[str, Any] = {
+            "modalities": ["text", "audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "turn_detection": {"type": "server_vad"},
         }
+        if voice:
+            session["voice"] = voice
+        return {"type": "session.update", "session": session}
     return None
 
 
@@ -817,6 +817,7 @@ async def run_director(args: argparse.Namespace) -> int:
             ProviderName.DASHSCOPE,
             headers={"Authorization": f"Bearer {key}"},
             turn=settings.speech.dashscope.turn,
+            voice=args.voice or settings.speech.dashscope.voice,
         )
     else:
         raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
@@ -1447,7 +1448,7 @@ async def run(args: argparse.Namespace) -> int:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
     speaker: _Speaker | None = None
     try:
-        session_frame = _session_frame(provider)
+        session_frame = _session_frame(provider, args.voice)
         if session_frame is not None:
             await client.send_command(session_frame)
         reply_wav: Path | None = None
@@ -1489,6 +1490,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", default="ws://127.0.0.1:8765/v1/realtime", help="s2s 服务地址")
     parser.add_argument(
         "--model", default="qwen-audio-3.0-realtime-flash", help="DashScope 的 realtime 模型名"
+    )
+    parser.add_argument(
+        "--voice",
+        default="",
+        help="换音色，覆盖 [speech.dashscope] voice。留空用服务端默认（偏尖）；"
+        "名字写错时服务端会把可用清单报回来",
     )
     parser.add_argument(
         "--wav", type=Path, default=None, help="不用麦克风，喂一段 16kHz 单声道 WAV"

@@ -42,12 +42,17 @@ class HostedLink:
         watchdog_s: float = 25.0,
         headers: dict[str, str] | None = None,
         turn: HostedTurnConfig | None = None,
+        voice: str = "",
         auto_reconnect: bool = True,
         reconnect_backoff_s: float = 1.0,
         session_cap_min: int = 0,
         rotate_margin_min: float = 3.0,
     ) -> None:
         """Args:
+        voice: Which voice the provider speaks in. Empty leaves the choice to
+            the server, whose pick is not neutral — DashScope's is longanqian
+            at 343 Hz, high enough to read as shrill. Names are the
+            provider's; a wrong one draws a refusal listing the valid ones.
         session_cap_min: How long this endpoint lets one connection live.
             DashScope 120, OpenAI 60 (plan section 3.1); 0 disables rotation.
             We rotate `rotate_margin_min` early so the swap happens on our
@@ -67,6 +72,7 @@ class HostedLink:
         self._codec = profile.codec
         self._caps = profile.caps
         self._turn = turn
+        self._voice = voice
         self._context = ""
         self._clock: Clock = clock or SystemClock()
         self._session_cap_s = max(0.0, (session_cap_min - rotate_margin_min) * 60.0)
@@ -120,25 +126,31 @@ class HostedLink:
         (probed live 2026-08-10). Formats use the flat beta keys; the GA
         dialect nests them and runs server_vad by default, so a link built
         without turn config sends nothing at all.
+
+        The voice rides along here rather than in set_context, because it is
+        per-connection state like the rest of this frame: a rotated or
+        reconnected socket goes back to the server's default without it.
         """
-        if self._turn is None:
+        session: dict[str, Any] = {}
+        if self._turn is not None:
+            # Field set follows the type: threshold/silence_duration_ms belong
+            # to server_vad only — semantic_vad and smart_turn endpoints can
+            # reject them outright (C9), killing the session on frame one.
+            turn_detection: dict[str, Any] = {"type": self._turn.type}
+            if self._turn.type == "server_vad":
+                turn_detection["threshold"] = self._turn.threshold
+                turn_detection["silence_duration_ms"] = self._turn.silence_duration_ms
+            session[self._codec.modalities_key] = ["text", "audio"]
+            session["turn_detection"] = turn_detection
+            if not self._codec.nested_audio_format:
+                session["input_audio_format"] = "pcm16"
+                session["output_audio_format"] = "pcm16"
+        if self._voice:
+            session["voice"] = self._voice
+        if not session:
             return None
-        # Field set follows the type: threshold/silence_duration_ms belong to
-        # server_vad only — semantic_vad and smart_turn endpoints can reject
-        # them outright (C9), which would kill the session on frame one.
-        turn_detection: dict[str, Any] = {"type": self._turn.type}
-        if self._turn.type == "server_vad":
-            turn_detection["threshold"] = self._turn.threshold
-            turn_detection["silence_duration_ms"] = self._turn.silence_duration_ms
-        session: dict[str, Any] = {
-            self._codec.modalities_key: ["text", "audio"],
-            "turn_detection": turn_detection,
-        }
         if self._codec.needs_session_type:
             session["type"] = "realtime"
-        if not self._codec.nested_audio_format:
-            session["input_audio_format"] = "pcm16"
-            session["output_audio_format"] = "pcm16"
         return {"type": dia.ClientEvent.SESSION_UPDATE.value, "session": session}
 
     async def aclose(self) -> None:

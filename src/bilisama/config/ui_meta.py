@@ -475,6 +475,16 @@ UI_META: dict[str, FieldMeta] = {
         order=2,
         wizard_step=2,
     ),
+    "speech.dashscope.voice": FieldMeta(
+        label="音色",
+        hint="留空用服务端默认，那个默认偏尖（实测 343Hz）。名字写错时报错会列出可用音色",
+        provider_scoped="dashscope",
+        audience=Audience.STREAMER,
+        reload=Reload.RECONNECT,
+        group="托管语音服务",
+        order=4,
+        wizard_step=2,
+    ),
     "speech.dashscope.turn": FieldMeta(
         label="DashScope 判停", provider_scoped="dashscope", group="判停"
     ),
@@ -527,6 +537,15 @@ UI_META: dict[str, FieldMeta] = {
         group="托管语音服务",
         order=1,
         wizard_step=2,
+    ),
+    "speech.openai_ga.voice": FieldMeta(
+        label="音色",
+        hint="留空用服务端默认",
+        provider_scoped="openai_ga",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="托管语音服务",
+        order=4,
     ),
     "speech.openai_ga.model": FieldMeta(
         label="模型 id",
@@ -780,8 +799,12 @@ UI_META: dict[str, FieldMeta] = {
         order=1,
         wizard_step=3,
     ),
+    # Operator, not streamer: the streamer tier is capped at twenty controls,
+    # and between "她听起来是谁" and "快一点慢一点" the first one wins the slot.
+    # Speed also has no consumer yet — the TTS chain it belongs to is stage 4,
+    # while speech.dashscope.voice governs the voice shipping today.
     "custom_tts.speed": FieldMeta(
-        label="语速", audience=Audience.STREAMER, reload=Reload.RESTART, group="声音", order=3
+        label="语速", audience=Audience.OPERATOR, reload=Reload.RESTART, group="声音", order=3
     ),
     "custom_tts.voice": FieldMeta(
         label="音色",

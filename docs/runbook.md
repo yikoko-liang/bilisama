@@ -107,7 +107,24 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 .venv/bin/bilisama dev-talk --director --provider dashscope --model qwen-audio-3.0-realtime-flash
 .venv/bin/bilisama dev-talk --director --persona hanako     # 临时换人设，不改配置
 .venv/bin/bilisama dev-talk --director --show-context       # 每次上下文推送打全文
+.venv/bin/bilisama dev-talk --director --voice longanlufeng # 临时换音色试听，不改配置
 ```
+
+**换音色（DashScope）**：不指定的话服务端给 `longanqian`，实测基频 343Hz——比常见成年
+女声（180~260Hz）高一截，听着发尖。配置里 `[speech.dashscope] voice` 定死，命令行
+`--voice` 临时覆盖。名字写错服务端会把可用清单直接报回来，不用查文档。同一句话在
+15 个音色下的实测基频（数字越小越低沉）：
+
+| 音色 | 基频 | 音色 | 基频 |
+|---|---|---|---|
+| longanlufeng | 150Hz | longanfengyue | 286Hz |
+| loongjohn | 174Hz | longhuohuo_v3.6 | 296Hz |
+| longpaopao_v3.6 | 235Hz | longanhuan_v3.6 | 304Hz |
+| **longanlingxin（现在的出厂值）** | **242Hz** | longjielidou_v3.6 | 308Hz |
+| longchuanshu_v3.6 | 242Hz | longanyuanfei | 320Hz |
+| loongmary | 282Hz | loongeva_v3.6 | 333Hz |
+| longanlingxi | 289Hz | **longanqian（服务端默认）** | **343Hz** |
+| | | longanxiaoxin | 393Hz |
 
 director 档里的动作：
 

@@ -50,6 +50,10 @@ smart_turn_cpu_count = 2
 endpoint = ""
 model = ""
 api_key_ref = "dashscope"
+# 留空的话服务端给 longanqian，实测基频 343Hz，比常见成年女声（180~260Hz）高一截，
+# 听着发尖。这里挑的 longanlingxin 是 242Hz。想换随时用 dev-talk 的 --voice 试听，
+# 名字写错服务端会把可用清单报回来。
+voice = "longanlingxin"
 
 [speech.side]                           # 主动话题、记忆蒸馏、事实抽取都用它，挑便宜的
 base_url = ""

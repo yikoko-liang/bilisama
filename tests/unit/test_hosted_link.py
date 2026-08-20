@@ -185,3 +185,56 @@ async def test_s2s_audio_mode_leaves_the_session_unpinned_and_replies_carry_pcm(
             ), "the session must not be pinned to text in audio mode"
         finally:
             await s2s.aclose()
+
+
+async def test_the_voice_rides_the_bootstrap() -> None:
+    """Asking for a voice is the only way to avoid the server's own pick.
+
+    DashScope defaults to longanqian, measured at 343 Hz against the 180-260 Hz
+    of an ordinary adult female voice — high enough that the first person to
+    hear it called it shrill. Nothing above this layer can override it, so the
+    name has to survive the trip to the wire.
+    """
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, script=Script()) as server:
+        hosted = HostedLink(
+            server.url,
+            ProviderName.DASHSCOPE,
+            turn=HostedTurnConfig(),
+            voice="longanlingxin",
+        )
+        await hosted.connect()
+        try:
+            for _ in range(50):
+                if server.recorded.count("session.update"):
+                    break
+                await asyncio.sleep(0.01)
+            frames = [e for e in server.recorded.events if e.get("type") == "session.update"]
+            assert frames, "no bootstrap reached the server"
+            assert frames[0]["session"]["voice"] == "longanlingxin"
+        finally:
+            await hosted.aclose()
+
+
+async def test_a_voice_alone_is_worth_a_bootstrap() -> None:
+    """GA sends no turn config, but a named voice still has to get through.
+
+    The frame used to exist only to carry turn detection, so it returned early
+    when there was none — which would have dropped the voice on exactly the
+    dialect that needs no other setup.
+    """
+    async with MockRealtimeServer(caps=caps_mod.OPENAI_GA, script=Script()) as server:
+        hosted = HostedLink(server.url, ProviderName.OPENAI_GA, voice="marin")
+        await hosted.connect()
+        try:
+            for _ in range(50):
+                if server.recorded.count("session.update"):
+                    break
+                await asyncio.sleep(0.01)
+            frames = [e for e in server.recorded.events if e.get("type") == "session.update"]
+            assert frames, "a voice-only bootstrap never left"
+            session = frames[0]["session"]
+            assert session["voice"] == "marin"
+            assert session["type"] == "realtime", "GA rejects a session without it"
+            assert "turn_detection" not in session, "we never configured one"
+        finally:
+            await hosted.aclose()
