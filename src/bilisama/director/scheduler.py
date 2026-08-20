@@ -209,6 +209,15 @@ class Scheduler:
         # yet; the post-dispatch recheck honours the flag the moment it lands.
         self._wake.set()
 
+    def notify(self) -> None:
+        """Re-examine the queue: something a gate depends on has changed.
+
+        The dispatch loop sleeps on state gates until an event wakes it, and
+        playback finishing is not an event the link ever sends — whoever owns
+        the speaker has to say so.
+        """
+        self._wake.set()
+
     def release_panic(self) -> None:
         self._panicked = False
         self._wake.set()

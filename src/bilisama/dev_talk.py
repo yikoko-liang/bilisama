@@ -66,6 +66,11 @@ _FRAME_MS = 32
 # Where a reply may be broken into a printable line while it is still arriving.
 # s2s hands us one fragment per LLM chunk (roughly a sentence); DashScope
 # streams tokens, so the cap keeps a punctuation-free run from waiting forever.
+# How far playback may fall behind before the speaker skips forward. Ten
+# seconds is roughly two replies: enough that a burst plays out intact, far
+# short of the minutes of drift measured before the floor gate was fed.
+_MAX_BACKLOG_BYTES = 10 * 2 * _OUTPUT_RATE
+
 _SENTENCE_END = "。！？…；\n.!?"
 _LINE_SOFT_CAP = 32
 
@@ -259,6 +264,7 @@ class _Speaker:
         import threading
 
         self._buffer = bytearray()
+        self._dropped_s = 0.0
         self._lock = threading.Lock()
         try:
             import sounddevice
@@ -297,8 +303,34 @@ class _Speaker:
         self._stream = stream
 
     def play(self, pcm: bytes) -> None:
+        if self._stream is None:
+            # Muted run (no sounddevice, or the device refused to start).
+            # Buffering here would be worse than useless: nothing drains it,
+            # so `busy` would latch True and the playback gate would hold the
+            # floor shut for the rest of the stream.
+            return
         with self._lock:
             self._buffer.extend(pcm)
+            over = len(self._buffer) - _MAX_BACKLOG_BYTES
+            if over > 0:
+                # Skip forward rather than fall further behind. A co-host that
+                # is a minute late is worse than one that dropped a sentence:
+                # the audience hears an answer to a comment nobody remembers.
+                # Only reachable when the floor gate is bypassed; loud on
+                # purpose, because silent drift is what this replaces.
+                del self._buffer[:over]
+                self._dropped_s += over / 2.0 / _OUTPUT_RATE
+
+    @property
+    def backlog_s(self) -> float:
+        """Seconds of audio waiting to be heard."""
+        with self._lock:
+            return len(self._buffer) / 2.0 / _OUTPUT_RATE
+
+    @property
+    def dropped_s(self) -> float:
+        """Seconds skipped to stay current. Nonzero means the gate leaked."""
+        return self._dropped_s
 
     def flush(self) -> None:
         with self._lock:
@@ -1188,6 +1220,33 @@ async def run_director(args: argparse.Namespace) -> int:
                         return  # stdin closed; keep the rest running
                     await handle_line(line)
 
+        async def report_playback() -> None:
+            """Tell the floor whether the audience is still listening.
+
+            This is the producer plan section 4.3 assumes for queued_audio and
+            that nothing had ever supplied. Without it the scheduler dispatches
+            the next reply the moment the SERVER finishes generating, while the
+            speaker is still far from playing the last one out: measured against
+            the real endpoint, fourteen back-to-back replies built 106 seconds of
+            unplayed audio in 48 seconds of wall clock and never recovered. What
+            the listener gets is answers to danmaku from two minutes ago.
+
+            A poll rather than a callback because the buffer drains on
+            PortAudio's thread, and hopping threads to announce silence would
+            cost more than looking. 100 ms is well inside one audio block.
+            """
+            last = False
+            while True:
+                busy = speaker.busy
+                if busy != last:
+                    floor.on_playback(busy)
+                    last = busy
+                    if not busy:
+                        # State gates release on events, and playback finishing
+                        # is not one the link ever sends.
+                        scheduler.notify()
+                await asyncio.sleep(0.1)
+
         async def drain_controls() -> None:
             while True:
                 clear = await scheduler.controls.get()
@@ -1248,6 +1307,7 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(drain_controls(), name="director:controls"),
             asyncio.create_task(stdin_pump(), name="director:stdin"),
             asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
+            asyncio.create_task(report_playback(), name="director:playback"),
         ]
         if hub is not None:
             live_hub = hub

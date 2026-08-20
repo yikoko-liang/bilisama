@@ -175,3 +175,49 @@ def test_error_classes_decide_whether_retrying_can_help() -> None:
     # Unknown close codes stay retryable: an unexplained drop is far more
     # often a network blip than a refusal, and a wrong FATAL means silence.
     assert classify_error(policy) is ErrorClass.RETRYABLE
+
+
+# ------------------------------------------------------------ playback backlog
+
+
+def test_the_speaker_never_falls_more_than_the_cap_behind() -> None:
+    """Measured failure: replies are dispatched when the SERVER finishes
+    generating, which is seconds before the audience finishes hearing the
+    previous one. Fourteen back-to-back replies against the real endpoint
+    built 106 seconds of unplayed audio in 48 seconds of wall clock.
+
+    The floor gate is the real fix; this ceiling is the backstop for whenever
+    the gate is bypassed. Falling behind by minutes must not be reachable.
+    """
+    from bilisama.dev_talk import _MAX_BACKLOG_BYTES, _OUTPUT_RATE, _Speaker
+
+    speaker = _Speaker.__new__(_Speaker)  # no PortAudio device in a unit test
+    speaker._buffer = bytearray()
+    speaker._dropped_s = 0.0
+    speaker._lock = __import__("threading").Lock()
+    speaker._stream = object()  # pretend a device is attached
+
+    one_second = b"\x00\x00" * _OUTPUT_RATE
+    for _ in range(60):
+        speaker.play(one_second)
+
+    cap_s = _MAX_BACKLOG_BYTES / 2 / _OUTPUT_RATE
+    assert speaker.backlog_s <= cap_s, f"backlog ran to {speaker.backlog_s:.0f}s"
+    assert speaker.dropped_s > 0, "skipping forward must be visible, not silent"
+
+
+def test_a_muted_run_does_not_latch_the_playback_gate() -> None:
+    """With no output device nothing drains the buffer, so buffering at all
+    would leave `busy` True forever — and the new gate would then hold the
+    floor shut for the rest of the stream. Worse than having no speaker."""
+    from bilisama.dev_talk import _OUTPUT_RATE, _Speaker
+
+    speaker = _Speaker.__new__(_Speaker)
+    speaker._buffer = bytearray()
+    speaker._dropped_s = 0.0
+    speaker._lock = __import__("threading").Lock()
+    speaker._stream = None
+
+    speaker.play(b"\x00\x00" * _OUTPUT_RATE)
+    assert not speaker.busy
+    assert speaker.backlog_s == 0.0
