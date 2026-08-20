@@ -653,6 +653,7 @@ class BilibiliEventSource:
         danmaku_total = self._counts.get(EventKind.DANMAKU.value, 0)
         return {
             "connected": self._connected,
+            "logged_in": bool(self._sessdata),
             "room_id": self._real_room_id,
             "popularity": self._popularity,
             "counts": dict(self._counts),

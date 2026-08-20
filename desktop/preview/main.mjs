@@ -8,13 +8,14 @@
 // and airi's stage-tamagotchi: frame:false + transparent + alwaysOnTop
 // 'floating' + skipTaskbar + backgroundThrottling:false.
 
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, ipcMain, screen } from "electron";
+import { app, BrowserWindow, ipcMain, screen, shell } from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -136,6 +137,7 @@ function openPanelWindow() {
       sandbox: true,
       // Health polling and the log stream keep running while covered.
       backgroundThrottling: false,
+      preload: path.join(__dirname, "preload.cjs"),
     },
   });
   panelWindow.loadURL(`${currentUrl}#panel`);
@@ -143,6 +145,29 @@ function openPanelWindow() {
     panelWindow = null;
   });
   harden(panelWindow);
+}
+
+async function openMockInBrowser() {
+  if (!currentUrl) return;
+  const url = new URL("live-mock", currentUrl).href;
+  if (process.platform === "darwin") {
+    try {
+      await new Promise((resolve, reject) => {
+        execFile("/usr/bin/open", ["-a", "Google Chrome", url], (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+      return;
+    } catch (error) {
+      console.warn("Could not open Google Chrome; falling back to the default browser.", error);
+    }
+  }
+  try {
+    await shell.openExternal(url);
+  } catch (error) {
+    console.error("Could not open the live mock page in a browser.", error);
+  }
 }
 
 function harden(win) {
@@ -160,9 +185,6 @@ function harden(win) {
   // port could redirect this frameless always-on-top window — which holds the
   // preload's IPC bridge — anywhere it liked.
   win.webContents.on("will-redirect", sameOrigin);
-  win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
-    callback(false); // the shell needs no mic, camera or anything else
-  });
 }
 
 function originOf(url) {
@@ -222,6 +244,14 @@ ipcMain.on("pet:drag-end", (event) => {
 
 ipcMain.on("pet:open-panel", (event) => {
   if (fromPet(event)) openPanelWindow();
+});
+
+ipcMain.on("shell:open-live-mock", (event) => {
+  const sender = event.sender;
+  const allowed = [petWindow, panelWindow].some(
+    (win) => win && !win.isDestroyed() && sender === win.webContents,
+  );
+  if (allowed) void openMockInBrowser();
 });
 
 // The window is a rectangle; the pet is not. Everywhere else it was an

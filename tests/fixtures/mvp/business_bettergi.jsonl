@@ -1,0 +1,10 @@
+# BetterGI：开源游戏自动化、计算机视觉、脚本和技术演示。
+{"at_s": 0.0, "kind": "danmaku", "room_id": 991002, "text": "BetterGI 是读内存还是只看画面", "viewer": {"uid": 20201, "name": "安全性关心者", "user_level": 5}, "event_id": "bgi-dm-1", "ts_ms": 1000}
+{"at_s": 2.0, "kind": "danmaku", "room_id": 991002, "text": "云原神能用吗，分辨率需要固定吗", "viewer": {"uid": 20202, "name": "云游戏用户", "user_level": 3}, "event_id": "bgi-dm-2", "ts_ms": 3000}
+{"at_s": 4.0, "kind": "danmaku", "room_id": 991002, "text": "会不会封号，能保证百分百安全吗", "viewer": {"uid": 20203, "name": "风险追问", "user_level": 4}, "event_id": "bgi-dm-3", "ts_ms": 5000}
+{"at_s": 8.0, "kind": "danmaku", "room_id": 991002, "text": "OCR 预热失败应该先看日志里的哪一段", "viewer": {"uid": 20204, "name": "报错用户", "user_level": 6}, "event_id": "bgi-dm-4", "ts_ms": 9000}
+{"at_s": 12.0, "kind": "gift", "room_id": 991002, "viewer": {"uid": 20205, "name": "锄地用户"}, "gift": {"gift_id": 21, "name": "牛哇牛哇", "num": 1, "coin_type": "gold", "total_coin": 3000, "combo_id": "bgi-gift-1", "combo_count": 1, "combo_end": true}, "event_id": "bgi-gift-1", "ts_ms": 13000}
+{"at_s": 18.0, "kind": "danmaku", "room_id": 991002, "text": "脚本执行到传送点卡住了，是视觉识别还是路线数据的问题", "viewer": {"uid": 20206, "name": "脚本作者", "user_level": 5}, "event_id": "bgi-dm-5", "ts_ms": 19000}
+{"at_s": 25.0, "kind": "super_chat", "room_id": 991002, "text": "能解释一下窗口捕获、目标检测和模拟输入三层怎么协作吗？", "value_cny": 30.0, "viewer": {"uid": 20207, "name": "开源开发者"}, "event_id": "bgi-sc-1", "ts_ms": 26000}
+{"at_s": 40.0, "kind": "danmaku", "room_id": 991002, "text": "别讲原理了，直接说管理员权限能解决所有问题", "viewer": {"uid": 20208, "name": "过度简化者", "user_level": 2}, "event_id": "bgi-dm-6", "ts_ms": 41000}
+{"at_s": 75.0, "kind": "danmaku", "room_id": 991002, "text": "刚来，今天演示的是哪个功能和哪个版本", "viewer": {"uid": 20209, "name": "迟到观众", "user_level": 4}, "event_id": "bgi-dm-7", "ts_ms": 76000}

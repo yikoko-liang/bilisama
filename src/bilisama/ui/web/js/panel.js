@@ -1,5 +1,5 @@
-// The control panel: live (health + speak switches + inject), chat timeline,
-// log stream, read-only config. It consumes event.feed / log.line /
+// The control panel: live, chat timeline, log stream, runnable test sets and
+// config. It consumes event.feed / log.line /
 // panel.state frames routed from main.js and pulls /health and /config over
 // plain fetch — health only while someone is actually looking.
 
@@ -53,6 +53,13 @@ export function createPanel({ send }) {
   const pauseBtn = document.getElementById("log-pause");
   const injectForm = document.getElementById("inject");
   const injectInput = document.getElementById("inject-input");
+  const liveMockOpen = document.getElementById("live-mock-open");
+  const testSetSwitch = document.getElementById("test-set-switch");
+  const testDescription = document.getElementById("test-description");
+  const testCandidate = document.getElementById("test-candidate");
+  const testCount = document.getElementById("test-count");
+  const testStop = document.getElementById("test-stop");
+  const testCases = document.getElementById("test-cases");
 
   const panelOnly = document.body.classList.contains("panel-only");
   let isOpen = panelOnly;
@@ -178,6 +185,14 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ live tab
 
+  liveMockOpen.addEventListener("click", () => {
+    if (window.bilisamaShell?.openLiveMock) {
+      window.bilisamaShell.openLiveMock();
+      return;
+    }
+    location.href = new URL("live-mock", location.href).href;
+  });
+
   panicBtn.addEventListener("click", () => {
     send("panel.set", { panic_mute: !panicked });
   });
@@ -292,6 +307,187 @@ export function createPanel({ send }) {
     pauseBtn.textContent = logPaused ? "继续滚动" : "暂停滚动";
     if (!logPaused) loglinesEl.scrollTop = loglinesEl.scrollHeight;
   });
+
+  // ------------------------------------------------------------ test console
+
+  let testSets = [];
+  let activeTestSet = "functional";
+  let activeCandidate = "";
+  let testState = { status: "idle", case_id: "" };
+  const testJudgments = new Map();
+
+  const isTestRunning = () => ["running", "event"].includes(testState.status);
+
+  const applyTestState = () => {
+    const running = isTestRunning();
+    testStop.disabled = !running;
+    for (const card of testCases.querySelectorAll(".test-card")) {
+      const selected = card.dataset.caseId === testState.case_id;
+      card.classList.toggle("running", selected && running);
+      card.classList.toggle("failed", selected && testState.status === "failed");
+      const run = card.querySelector(".test-run");
+      run.disabled = running;
+      run.textContent = selected && running ? "运行中…" : "运行";
+      const status = card.querySelector(".test-status");
+      if (!selected) {
+        status.textContent = "";
+        continue;
+      }
+      if (testState.status === "running") status.textContent = "已启动，等待第一条事件";
+      else if (testState.status === "event") {
+        status.textContent = `已注入 ${testState.index ?? 0}/${testState.total ?? 0}：${testState.text ?? ""}`;
+      } else if (testState.status === "completed") status.textContent = testState.text ?? "事件已注入";
+      else if (testState.status === "stopped") status.textContent = "已停止";
+      else if (testState.status === "failed") status.textContent = testState.text ?? "运行失败";
+      const judge = card.querySelector(".test-judge");
+      judge.hidden = testState.status !== "completed";
+    }
+  };
+
+  const setJudgment = (caseId, value) => {
+    testJudgments.set(caseId, value);
+    const card = testCases.querySelector(`[data-case-id="${CSS.escape(caseId)}"]`);
+    if (!card) return;
+    card.dataset.judgment = value;
+    const result = card.querySelector(".test-result");
+    result.textContent = value === "pass" ? "本轮：通过" : "本轮：失败";
+  };
+
+  const renderTestCases = () => {
+    const set = testSets.find((item) => item.id === activeTestSet);
+    testCases.textContent = "";
+    if (!set) {
+      testDescription.textContent = "测试集没有载入，请看终端启动错误。";
+      testCount.textContent = "0 条";
+      testCases.appendChild(el("p", "empty", "没有可运行的测试"));
+      return;
+    }
+    testDescription.textContent = set.description;
+    const candidates = [...new Map(
+      set.cases.filter((item) => item.candidate_id).map((item) => [item.candidate_id, item.candidate_name]),
+    )];
+    if (candidates.length && !candidates.some(([id]) => id === activeCandidate)) {
+      activeCandidate = candidates[0][0];
+    }
+    testCandidate.hidden = candidates.length === 0;
+    testCandidate.textContent = "";
+    if (candidates.length) {
+      const all = el("option", "", "全部主播");
+      all.value = "";
+      testCandidate.appendChild(all);
+      for (const [id, name] of candidates) {
+        const option = el("option", "", name);
+        option.value = id;
+        testCandidate.appendChild(option);
+      }
+      testCandidate.value = activeCandidate;
+    }
+    const visible = set.cases.filter(
+      (item) => !activeCandidate || item.candidate_id === activeCandidate,
+    );
+    testCount.textContent = `${visible.length} 条`;
+    for (const item of visible) {
+      const card = el("article", "test-card");
+      card.dataset.caseId = item.id;
+      const head = el("div", "test-card-head");
+      const titleWrap = el("div");
+      titleWrap.appendChild(el("h4", "test-title", item.title));
+      const meta = el("div", "test-meta");
+      meta.appendChild(el("span", "test-tag", item.group));
+      if (item.candidate_name) meta.appendChild(el("span", "test-tag candidate", item.candidate_name));
+      meta.appendChild(el("span", "test-duration", `${item.duration_s}s`));
+      titleWrap.appendChild(meta);
+      head.appendChild(titleWrap);
+      const run = el("button", "test-run", "运行");
+      run.type = "button";
+      run.addEventListener("click", () => {
+        if (!send("test.run", { case_id: item.id })) {
+          testState = { status: "failed", case_id: item.id, text: "连接断开，测试没有启动" };
+          applyTestState();
+        }
+      });
+      head.appendChild(run);
+      card.appendChild(head);
+
+      card.appendChild(el("h5", "test-label", "你要做"));
+      card.appendChild(el("p", "test-copy", item.operator));
+      if (item.focus?.length) {
+        card.appendChild(el("h5", "test-label", "重点观察"));
+        const focus = el("ul", "test-expected");
+        for (const line of item.focus) focus.appendChild(el("li", "", line));
+        card.appendChild(focus);
+      }
+      const eventCount = item.event_count ?? item.events.length;
+      card.appendChild(el("h5", "test-label", `会注入（共 ${eventCount} 个事件/动作）`));
+      const events = el("div", "test-events");
+      if (!item.events.length) events.appendChild(el("span", "test-no-event", "无直播事件，只测麦克风或定时行为"));
+      for (const event of item.events) {
+        events.appendChild(el("span", "test-event", `${event.at_s}s  ${event.summary}`));
+      }
+      card.appendChild(events);
+      card.appendChild(el("h5", "test-label", "通过标准"));
+      const expected = el("ul", "test-expected");
+      for (const line of item.expected) expected.appendChild(el("li", "", line));
+      card.appendChild(expected);
+      if (item.reference) {
+        card.appendChild(el("h5", "test-label", "N.E.K.O 对照"));
+        card.appendChild(el("p", "test-reference", item.reference));
+      }
+      card.appendChild(el("p", "test-status"));
+
+      const judge = el("div", "test-judge");
+      judge.hidden = true;
+      judge.appendChild(el("span", "test-judge-label", "人工判断"));
+      const pass = el("button", "test-pass", "通过");
+      pass.type = "button";
+      pass.addEventListener("click", () => setJudgment(item.id, "pass"));
+      const fail = el("button", "test-fail", "失败");
+      fail.type = "button";
+      fail.addEventListener("click", () => setJudgment(item.id, "fail"));
+      judge.appendChild(pass);
+      judge.appendChild(fail);
+      judge.appendChild(el("span", "test-result"));
+      card.appendChild(judge);
+      const existing = testJudgments.get(item.id);
+      if (existing) {
+        card.dataset.judgment = existing;
+        card.querySelector(".test-result").textContent = existing === "pass" ? "本轮：通过" : "本轮：失败";
+      }
+      testCases.appendChild(card);
+    }
+    applyTestState();
+  };
+
+  const renderTestSets = () => {
+    testSetSwitch.textContent = "";
+    for (const set of testSets) {
+      const button = el("button", "test-set" + (set.id === activeTestSet ? " active" : ""), set.title);
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(set.id === activeTestSet));
+      button.addEventListener("click", () => {
+        activeTestSet = set.id;
+        activeCandidate = "";
+        renderTestSets();
+        renderTestCases();
+      });
+      testSetSwitch.appendChild(button);
+    }
+  };
+
+  const loadTestCatalog = (catalog, initialState) => {
+    testSets = catalog?.sets ?? [];
+    if (!testSets.some((item) => item.id === activeTestSet)) activeTestSet = testSets[0]?.id ?? "";
+    testState = initialState ?? { status: "idle", case_id: "" };
+    renderTestSets();
+    renderTestCases();
+  };
+
+  testCandidate.addEventListener("change", () => {
+    activeCandidate = testCandidate.value;
+    renderTestCases();
+  });
+  testStop.addEventListener("click", () => send("test.stop", {}));
 
   // ------------------------------------------------------------ config tab
 
@@ -508,7 +704,12 @@ export function createPanel({ send }) {
 
   return {
     handleFrame(event, data) {
-      if (event === "event.feed") feedEntry(data);
+      if (event === "event.feed") {
+        if (data.kind === "test") {
+          testState = data;
+          applyTestState();
+        } else feedEntry(data);
+      }
       else if (event === "log.line") logEntry(data.line ?? "");
       else if (event === "panel.state") {
         panicked = Boolean(data.panicked);
@@ -522,6 +723,7 @@ export function createPanel({ send }) {
     setHello(data) {
       nameEl.textContent = data.persona?.name ?? "BiliSama";
       if (data.panel) this.handleFrame("panel.state", data.panel);
+      loadTestCatalog(data.tests, data.test_state);
     },
     setVisual(visual) {
       stateEl.dataset.visual = visual;
@@ -537,6 +739,8 @@ export function createPanel({ send }) {
       // dev-talk is back on the toml's values, so refetch instead of trusting
       // what is on screen.
       configLoaded = false;
+      testState = { status: "idle", case_id: "" };
+      applyTestState();
       if (isOpen) loadConfig(true);
     },
   };

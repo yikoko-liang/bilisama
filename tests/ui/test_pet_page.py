@@ -61,6 +61,72 @@ class Harness:
             "room_connected": False,
             "avatar": self.avatar,
             "panel": {"panicked": False, "speak": {"danmaku": True, "gift": False}},
+            "tests": {
+                "sets": [
+                    {
+                        "id": "functional",
+                        "title": "功能验收",
+                        "description": "逐项验证当前功能",
+                        "cases": [
+                            {
+                                "id": "func.sample",
+                                "group": "弹幕",
+                                "title": "普通弹幕回复",
+                                "operator": "点击运行后观察回复",
+                                "expected": ["只回复一次"],
+                                "duration_s": 3,
+                                "candidate_id": "",
+                                "candidate_name": "",
+                                "events": [
+                                    {
+                                        "at_s": 0,
+                                        "kind": "danmaku",
+                                        "summary": "阿强 · 弹幕：今天聊什么",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "id": "business",
+                        "title": "业务测试",
+                        "description": "按主播场景验证",
+                        "cases": [
+                            {
+                                "id": "biz.sample",
+                                "group": "实操",
+                                "title": "排错空档",
+                                "operator": "模拟主播排错",
+                                "focus": ["调度和 UI"],
+                                "expected": ["不瞎猜原因"],
+                                "reference": "N.E.K.O 选择窗口",
+                                "duration_s": 5,
+                                "candidate_id": "tudou",
+                                "candidate_name": "AI代码侠土豆",
+                                "events": [],
+                            }
+                        ],
+                    },
+                ]
+            },
+            "test_state": {"status": "idle", "case_id": ""},
+            "live_mock": {
+                "enabled": True,
+                "status": "idle",
+                "error": "",
+                "room_id": 0,
+                "real_room_id": 0,
+                "can_start": False,
+                "running": False,
+                "checks": {
+                    "backend": {"ok": True, "label": "伴播后端", "detail": "已连接"},
+                    "screen": {"ok": False, "label": "共享画面", "detail": "尚未选择"},
+                    "audio": {"ok": False, "label": "共享音轨", "detail": "尚未选择"},
+                    "room": {"ok": False, "label": "真实直播间流", "detail": "尚未检测"},
+                },
+                "events_forwarded": 0,
+                "audio_frames": 0,
+            },
         }
 
 
@@ -287,6 +353,124 @@ async def test_pet_click_sends_a_poke(page: Page, harness: Harness) -> None:
             break
         await asyncio.sleep(0.05)
     assert any(event is ClientEvent.PET_POKE for event, _ in harness.calls)
+
+
+async def test_test_console_runs_one_case_and_records_manual_judgment(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('米娅')")
+    await page.click("#corner")
+    await page.click("[data-tab='tests']")
+    await _wait(page, "document.querySelectorAll('#test-cases .test-card').length === 1")
+    assert "普通弹幕回复" in (await page.text_content("#test-cases"))  # type: ignore[operator]
+
+    await page.click(".test-run")
+    for _ in range(100):
+        if (ClientEvent.TEST_RUN, {"case_id": "func.sample"}) in harness.calls:
+            break
+        await asyncio.sleep(0.05)
+    assert (ClientEvent.TEST_RUN, {"case_id": "func.sample"}) in harness.calls
+
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED,
+        {"kind": "test", "status": "event", "case_id": "func.sample", "index": 1, "total": 1},
+    )
+    await _wait(page, "document.querySelector('.test-run').disabled")
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED,
+        {
+            "kind": "test",
+            "status": "completed",
+            "case_id": "func.sample",
+            "text": "事件已注入，请按预期人工判断",
+        },
+    )
+    await _wait(page, "!document.querySelector('.test-judge').hidden")
+    await page.click(".test-pass")
+    await _wait(page, "document.querySelector('.test-result').textContent.includes('通过')")
+
+
+async def test_business_set_can_filter_by_candidate(page: Page) -> None:
+    await _wait(page, "document.title.includes('米娅')")
+    await page.click("#corner")
+    await page.click("[data-tab='tests']")
+    await page.click("#test-set-switch .test-set:nth-child(2)")
+    await _wait(page, "!document.getElementById('test-candidate').hidden")
+    assert await page.input_value("#test-candidate") == "tudou"
+    assert "AI代码侠土豆" in await page.locator("#test-candidate").inner_text()
+    assert "调度和 UI" in (await page.text_content("#test-cases"))  # type: ignore[operator]
+    assert "N.E.K.O 选择窗口" in (await page.text_content("#test-cases"))  # type: ignore[operator]
+
+
+async def test_live_mock_page_unlocks_start_only_after_preflight(
+    page: Page, harness: Harness
+) -> None:
+    await page.add_init_script("""
+        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", {
+          configurable: true,
+          value: async () => {
+            const canvas = document.createElement("canvas");
+            canvas.width = 320; canvas.height = 180;
+            canvas.getContext("2d").fillRect(0, 0, 320, 180);
+            const video = canvas.captureStream(15).getVideoTracks()[0];
+            const ctx = new AudioContext();
+            const dest = ctx.createMediaStreamDestination();
+            const oscillator = ctx.createOscillator();
+            const gain = ctx.createGain();
+            gain.gain.value = 0.01;
+            oscillator.connect(gain).connect(dest);
+            oscillator.start();
+            window.__uiMockCapture = {ctx, oscillator};
+            return new MediaStream([video, dest.stream.getAudioTracks()[0]]);
+          },
+        });
+        """)
+    await page.goto(harness.url + "live-mock")
+    await _wait(page, "document.title.includes('直播 Mock')")
+    assert await page.is_disabled("#start-button")
+    await page.click("#share-button")
+    await _wait(
+        page,
+        "(/音轨有声音|音轨已收到/).test(document.getElementById('audio-state').textContent)"
+        " && !document.getElementById('share-stop').disabled",
+    )
+    await page.get_by_label("普通弹幕", exact=True).click()
+    for _ in range(100):
+        if (ClientEvent.PANEL_SET, {"speak": {"danmaku": False}}) in harness.calls:
+            break
+        await asyncio.sleep(0.05)
+    assert (ClientEvent.PANEL_SET, {"speak": {"danmaku": False}}) in harness.calls
+    checks = {
+        name: {"ok": True, "label": label, "detail": "通过"}
+        for name, label in {
+            "backend": "伴播后端",
+            "screen": "共享画面",
+            "audio": "共享音轨",
+            "room": "真实直播间流",
+        }.items()
+    }
+    harness.hub.broadcast(
+        ServerEvent.LIVE_MOCK_STATE,
+        {
+            "enabled": True,
+            "status": "ready",
+            "error": "",
+            "room_id": 123,
+            "real_room_id": 456,
+            "can_start": True,
+            "running": False,
+            "checks": checks,
+            "events_forwarded": 0,
+            "audio_frames": 0,
+        },
+    )
+    await _wait(page, "!document.getElementById('start-button').disabled")
+    await page.click("#start-button")
+    for _ in range(100):
+        if (ClientEvent.LIVE_MOCK_START, {}) in harness.calls:
+            break
+        await asyncio.sleep(0.05)
+    assert (ClientEvent.LIVE_MOCK_START, {}) in harness.calls
 
 
 async def test_config_tab_offers_editors_for_live_and_badges_for_frozen(

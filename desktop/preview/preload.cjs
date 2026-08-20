@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("bilisamaShell", {
   dragMove: (x, y) => ipcRenderer.send("pet:drag-move", x, y),
   dragEnd: () => ipcRenderer.send("pet:drag-end"),
   openPanel: () => ipcRenderer.send("pet:open-panel"),
+  openLiveMock: () => ipcRenderer.send("shell:open-live-mock"),
   // The page asks the window to hug the mounted skin (bottom-anchored).
   fit: (w, h) => ipcRenderer.send("pet:fit", w, h),
   // ...and to stop swallowing clicks everywhere the pet is not.

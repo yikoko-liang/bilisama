@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>直播 Mock · BiliSama</title>
+  <link rel="stylesheet" href="assets/css/tokens.css">
+  <link rel="stylesheet" href="assets/css/theme.css">
+  <link rel="stylesheet" href="assets/css/theme-dark.css" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="assets/css/live-mock.css">
+</head>
+<body>
+  <main class="mock-shell">
+    <header class="mock-header">
+      <div>
+        <a class="back" href="./">BiliSama</a>
+        <h1>直播 Mock</h1>
+        <p>共享标签页音频替代麦克风，直播互动来自真实 B 站房间。</p>
+      </div>
+      <span id="connection-pill" class="status-pill" data-state="offline">后端连接中</span>
+    </header>
+
+    <section class="flow" aria-label="启动步骤">
+      <div class="flow-step active"><span>1</span>共享浏览器</div>
+      <div class="flow-line"></div>
+      <div class="flow-step"><span>2</span>检测状态</div>
+      <div class="flow-line"></div>
+      <div class="flow-step"><span>3</span>开始 Mock</div>
+    </section>
+
+    <div class="mock-grid">
+      <section class="workspace card">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">语音输入</p>
+            <h2>共享浏览器标签页</h2>
+          </div>
+          <button id="share-button" class="secondary" type="button">选择共享源</button>
+        </div>
+        <div class="preview-wrap" data-empty="true">
+          <video id="share-preview" autoplay muted playsinline></video>
+          <div id="preview-empty" class="preview-empty">
+            <span class="preview-icon">▣</span>
+            <strong>还没有共享画面</strong>
+            <p>推荐用 Chrome 打开本页，选择播放直播的标签页，并勾选“共享标签页音频”。</p>
+          </div>
+          <div class="meter" aria-label="共享音轨电平">
+            <span id="meter-fill"></span>
+          </div>
+        </div>
+        <div class="source-meta">
+          <span id="source-name">未选择共享源</span>
+          <span id="audio-state">等待音轨</span>
+          <button id="share-stop" class="text-button" type="button" disabled>停止共享</button>
+        </div>
+
+        <div class="room-config">
+          <label for="room-id">
+            <span>B 站房间号</span>
+            <small>支持短号，检测后显示真实房间号</small>
+          </label>
+          <div class="room-input-row">
+            <input id="room-id" inputmode="numeric" pattern="[0-9]*" min="1"
+                   placeholder="例如 123456" aria-label="B站房间号">
+            <button id="check-button" class="primary" type="button">检测状态</button>
+          </div>
+          <fieldset class="event-switches">
+            <legend>参与伴播的真实事件</legend>
+            <label><input type="checkbox" data-speak="danmaku">普通弹幕</label>
+            <label><input type="checkbox" data-speak="gift">礼物</label>
+            <label><input type="checkbox" data-speak="super_chat">SC</label>
+            <label><input type="checkbox" data-speak="guard_buy">上舰</label>
+            <label><input type="checkbox" data-speak="vip_enter">VIP 进房</label>
+            <label><input type="checkbox" data-speak="entry">批量欢迎</label>
+          </fieldset>
+          <p class="event-note">关闭只是不让该事件触发说话，事件仍会进入记忆与监控。</p>
+          <p id="form-error" class="form-error" role="alert"></p>
+        </div>
+      </section>
+
+      <aside class="preflight card">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">启动门禁</p>
+            <h2>状态检测</h2>
+          </div>
+          <span id="preflight-summary" class="mini-pill">0 / 4</span>
+        </div>
+        <div id="checks" class="checks" aria-live="polite">
+          <div class="check-row" data-check="backend"><i></i><div><strong>伴播后端</strong><p>等待连接</p></div></div>
+          <div class="check-row" data-check="screen"><i></i><div><strong>共享画面</strong><p>尚未选择</p></div></div>
+          <div class="check-row" data-check="audio"><i></i><div><strong>共享音轨</strong><p>尚未选择</p></div></div>
+          <div class="check-row" data-check="room"><i></i><div><strong>真实直播间流</strong><p>尚未检测</p></div></div>
+        </div>
+        <div class="start-box">
+          <button id="start-button" class="start" type="button" disabled>开始直播 Mock</button>
+          <button id="stop-button" class="stop" type="button" disabled>停止 Mock</button>
+          <p id="start-hint">四项全部通过后才能开始。</p>
+        </div>
+      </aside>
+
+      <section class="monitor card">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">实时验证</p>
+            <h2>直播事件与伴播输出</h2>
+          </div>
+          <div class="metrics">
+            <span><b id="event-count">0</b> 事件</span>
+            <span><b id="audio-count">0</b> 音频帧</span>
+          </div>
+        </div>
+        <div id="monitor-feed" class="monitor-feed" aria-live="polite">
+          <p class="monitor-empty">开始后，这里会显示真实直播事件、语音转写和伴播回复。</p>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script type="module" src="assets/js/live-mock.js"></script>
+</body>
+</html>

@@ -634,6 +634,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.ui.config_edit import apply_panel_edits
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
     from bilisama.ui.hub import UiHub, VoiceSignals
+    from bilisama.ui.live_mock import AudioInputSwitch, LiveMockController, RoomSource
     from bilisama.ui.poke import PokeResponder
     from bilisama.ui.server import (
         UiServer,
@@ -642,6 +643,7 @@ async def run_director(args: argparse.Namespace) -> int:
         default_endpoint_path,
         write_endpoint_file,
     )
+    from bilisama.ui.test_runner import MockTestRunner, load_test_catalog
 
     provider = ProviderName(args.provider)
     config_path: Path = args.config or DEFAULT_CONFIG
@@ -824,6 +826,7 @@ async def run_director(args: argparse.Namespace) -> int:
     speech = _Fanout(inner)
     await _connect_or_exit(speech, provider, connect_url)
     speech.start()
+    audio_input = AudioInputSwitch(speech.push_audio)
 
     from bilisama.director.output_guard import load_guard
 
@@ -945,11 +948,11 @@ async def run_director(args: argparse.Namespace) -> int:
     # kills regular-viewer memory, so say it out loud.
     bili_source = None
     room_id = args.room if args.room is not None else settings.room.room_id
+    sessdata = secrets.resolve(settings.room.credential_ref) or ""
     if room_id:
         from bilisama.ingest.bilibili import BilibiliEventSource
 
         # One truth: the config reference (shipped default env:BILI_SESSDATA).
-        sessdata = secrets.resolve(settings.room.credential_ref) or ""
         bili_source = BilibiliEventSource(
             room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
         )
@@ -960,6 +963,40 @@ async def run_director(args: argparse.Namespace) -> int:
                 f"[弹幕] 连接房间 {room_id}（匿名：观众全部打码，认不出常客——"
                 "path.sh 加 export BILI_SESSDATA=... 后重跑）"
             )
+
+    from bilisama.ingest.bilibili import BilibiliEventSource
+
+    def live_room_source(target_room_id: int) -> RoomSource:
+        return BilibiliEventSource(
+            target_room_id,
+            clock,
+            sessdata=sessdata,
+            on_sc_delete=scheduler.revoke,
+        )
+
+    def publish_live_mock_state(data: dict[str, Any]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.LIVE_MOCK_STATE, data)
+
+    def publish_live_mock_event(data: dict[str, object]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.LIVE_MOCK_EVENT, data)
+
+    fixed_room_reason = (
+        f"启动参数已经固定连接房间 {room_id}。要在界面换房间，请不传 --room，"
+        "并把 bilisama.toml 的 room_id 设为 0 后重启。"
+        if room_id
+        else ""
+    )
+    live_mock = LiveMockController(
+        source_factory=live_room_source,
+        event_sink=assembly.on_event,
+        audio=audio_input,
+        publish_state=publish_live_mock_state,
+        publish_event=publish_live_mock_event,
+        enabled=not bool(room_id),
+        disabled_reason=fixed_room_reason,
+    )
 
     # The same probes stage 5's UI server will mount; until then the exit
     # snapshot is their one reader (D3).
@@ -972,10 +1009,24 @@ async def run_director(args: argparse.Namespace) -> int:
     lag_monitor = LoopLagMonitor()
     registry.register("loop", lag_monitor.status)
     registry.register("selector", selector.status)
+    registry.register("live_mock", live_mock.state)
     if bili_source is not None:
         registry.register("bilibili", bili_source.status)
 
     console = QueueSource("console")
+    mock_source = QueueSource("ui-tests", maxsize=512)
+    try:
+        test_catalog = load_test_catalog(config_path.parent / "testsets")
+    except ValueError as exc:
+        raise SystemExit(f"测试台加载失败：{exc}") from exc
+
+    def publish_test_status(data: dict[str, object]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.EVENT_FEED, data)
+
+    test_runner = MockTestRunner(
+        test_catalog, mock_source, clock, publish_test_status, revoke=scheduler.revoke
+    )
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
@@ -1067,6 +1118,53 @@ async def run_director(args: argparse.Namespace) -> int:
                 if isinstance(text, str):
                     await handle_line(text)
 
+            async def on_test_run(data: dict[str, Any]) -> None:
+                case_id = data.get("case_id")
+                if not isinstance(case_id, str) or not case_id:
+                    publish_test_status(
+                        {"kind": "test", "status": "failed", "text": "测试用例 id 不能为空"}
+                    )
+                    return
+                try:
+                    await test_runner.start(case_id)
+                except ValueError as exc:
+                    publish_test_status(
+                        {
+                            "kind": "test",
+                            "status": "failed",
+                            "case_id": case_id,
+                            "text": str(exc),
+                        }
+                    )
+
+            async def on_test_stop(_data: dict[str, Any]) -> None:
+                await test_runner.stop()
+
+            async def on_live_mock_check(data: dict[str, Any]) -> None:
+                raw_room_id = data.get("room_id")
+                capture = data.get("capture")
+                room = (
+                    raw_room_id
+                    if isinstance(raw_room_id, int) and not isinstance(raw_room_id, bool)
+                    else 0
+                )
+                await live_mock.check(
+                    room_id=room,
+                    capture=capture if isinstance(capture, dict) else {},
+                )
+
+            async def on_live_mock_start(_data: dict[str, Any]) -> None:
+                await live_mock.start()
+
+            async def on_live_mock_stop(_data: dict[str, Any]) -> None:
+                await live_mock.stop()
+
+            async def on_live_mock_capture_stop(_data: dict[str, Any]) -> None:
+                await live_mock.capture_stopped()
+
+            async def on_audio_chunk(data: dict[str, Any]) -> None:
+                await live_mock.push_audio(data)
+
             def hello() -> dict[str, Any]:
                 return {
                     "protocol": 1,
@@ -1081,6 +1179,9 @@ async def run_director(args: argparse.Namespace) -> int:
                         "model_id": settings.avatar.model_id,
                     },
                     "panel": panel_state(),
+                    "tests": test_catalog.public(),
+                    "test_state": test_runner.state(),
+                    "live_mock": live_mock.state(),
                 }
 
             try:
@@ -1107,6 +1208,13 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.PET_POKE: on_poke,
                         ClientEvent.PANEL_SET: on_panel_set,
                         ClientEvent.CONSOLE_LINE: on_console_line,
+                        ClientEvent.TEST_RUN: on_test_run,
+                        ClientEvent.TEST_STOP: on_test_stop,
+                        ClientEvent.LIVE_MOCK_CHECK: on_live_mock_check,
+                        ClientEvent.LIVE_MOCK_START: on_live_mock_start,
+                        ClientEvent.LIVE_MOCK_STOP: on_live_mock_stop,
+                        ClientEvent.LIVE_MOCK_CAPTURE_STOP: on_live_mock_capture_stop,
+                        ClientEvent.AUDIO_CHUNK: on_audio_chunk,
                     },
                     hello=hello,
                     # <data home>/bilisama/skins — user-imported packs, shadowing
@@ -1122,6 +1230,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     print(f"[界面] 端点文件写不了（{exc}）；壳这场要用 BILISAMA_UI_URL={ui_url}")
                     endpoint_file = None
                 hub.broadcast(ServerEvent.PANEL_STATE, panel_state())  # seed the sticky state
+                hub.broadcast(ServerEvent.LIVE_MOCK_STATE, live_mock.state())
                 if args.open:
                     import webbrowser
 
@@ -1298,11 +1407,13 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
             asyncio.create_task(proactive.run(), name="director:proactive"),
             asyncio.create_task(
-                assembly.run([console] + ([bili_source] if bili_source is not None else [])),
+                assembly.run(
+                    [console, mock_source] + ([bili_source] if bili_source is not None else [])
+                ),
                 name="director:assembly",
             ),
             asyncio.create_task(
-                _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
+                _pump_mic(audio_input, args.input_device, speaker, args.mute_while_speaking),
                 name="director:mic",
             ),
             asyncio.create_task(
@@ -1341,6 +1452,8 @@ async def run_director(args: argparse.Namespace) -> int:
             ]
         await stop.wait()
     finally:
+        await test_runner.stop()
+        await live_mock.aclose()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

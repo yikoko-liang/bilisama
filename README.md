@@ -42,7 +42,12 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 两条路的 `--director` 都会把人设、记忆、调度整套立起来；去掉它就只测语音链路本身。
 终端打字模拟弹幕、`/sc` 模拟付费消息这些玩法，runbook 里有完整清单。
 
-`--director` 还自带一个桌宠网页界面（形象、说话气泡、面板），启动横幅里有地址，
+`--director` 还自带一个桌宠网页界面（形象、说话气泡、面板），启动横幅里有地址。
+面板的「测试」页内置功能验收，以及六位候选主播各 6 段业务小直播；弹幕洪峰、进房潮、
+礼物连击、SC 撤回和跨场回访都放进对应主播的真实场景里。两套用例都能逐条运行 mock 事件。
+「现场」页还能在 Chrome 中打开独立的「直播 Mock」界面：共享带音频的浏览器标签页、
+输入真实 B 站房间号，四项状态检测通过后，用播放器音轨替代麦克风，同时接入真实直播事件
+做效果验证。
 加 `--open` 自动开浏览器；桌面悬浮窗形态在 `desktop/preview/`。用法见 runbook
 「桌宠预览」一节。
 
@@ -60,6 +65,7 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/runbook.md](docs/runbook.md) | 操作手册：起服务器、dev-talk、测试、常见坑 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |
+| [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：功能、六位候选业务沙箱、边界/压力测试与放行门槛 |
 | [NOTICE](NOTICE) / [LICENSE](LICENSE) | 六个上游项目的署名；Apache-2.0 |
 | [config/bilisama.toml](config/bilisama.toml) | 唯一配置真相源，注释即文档 |
 | [.env.example](.env.example) | 所有环境变量的清单与说明；真值写进本地的 `path.sh`，永不入库 |

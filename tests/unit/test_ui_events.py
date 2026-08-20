@@ -27,11 +27,24 @@ def test_server_vocabulary_is_pinned() -> None:
         "playback.clear",
         "log.line",
         "panel.state",
+        "live_mock.state",
+        "live_mock.event",
     ]
 
 
 def test_client_vocabulary_is_pinned() -> None:
-    assert [event.value for event in ClientEvent] == ["pet.poke", "panel.set", "console.line"]
+    assert [event.value for event in ClientEvent] == [
+        "pet.poke",
+        "panel.set",
+        "console.line",
+        "test.run",
+        "test.stop",
+        "live_mock.check",
+        "live_mock.start",
+        "live_mock.stop",
+        "live_mock.capture_stop",
+        "audio.chunk",
+    ]
 
 
 # ------------------------------------------------------------ frame

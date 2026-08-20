@@ -38,6 +38,8 @@ class ServerEvent(StrEnum):
     PLAYBACK_CLEAR = "playback.clear"
     LOG_LINE = "log.line"
     PANEL_STATE = "panel.state"
+    LIVE_MOCK_STATE = "live_mock.state"
+    LIVE_MOCK_EVENT = "live_mock.event"
 
 
 class ClientEvent(StrEnum):
@@ -46,6 +48,13 @@ class ClientEvent(StrEnum):
     PET_POKE = "pet.poke"
     PANEL_SET = "panel.set"
     CONSOLE_LINE = "console.line"
+    TEST_RUN = "test.run"
+    TEST_STOP = "test.stop"
+    LIVE_MOCK_CHECK = "live_mock.check"
+    LIVE_MOCK_START = "live_mock.start"
+    LIVE_MOCK_STOP = "live_mock.stop"
+    LIVE_MOCK_CAPTURE_STOP = "live_mock.capture_stop"
+    AUDIO_CHUNK = "audio.chunk"
 
 
 def frame(event: ServerEvent, data: Mapping[str, Any]) -> str:

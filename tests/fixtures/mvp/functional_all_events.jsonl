@@ -1,0 +1,15 @@
+# MVP 功能覆盖：事件模型的十种类型。真实语音仍由麦克风输入；本文件只负责直播行为。
+{"at_s": 0.0, "kind": "room_state", "room_id": 990001, "text": "live", "event_id": "fae-room-1", "ts_ms": 1000}
+{"at_s": 1.0, "kind": "entry", "room_id": 990001, "viewer": {"uid": 10101, "name": "新观众甲"}, "event_id": "fae-entry-1", "ts_ms": 2000}
+{"at_s": 2.0, "kind": "entry", "room_id": 990001, "viewer": {"uid": 10102, "name": "新观众乙"}, "event_id": "fae-entry-2", "ts_ms": 3000}
+{"at_s": 3.0, "kind": "entry", "room_id": 990001, "viewer": {"uid": 10103, "name": "新观众丙"}, "event_id": "fae-entry-3", "ts_ms": 4000}
+{"at_s": 4.0, "kind": "entry", "room_id": 990001, "viewer": {"uid": 10104, "name": "新观众丁"}, "event_id": "fae-entry-4", "ts_ms": 5000}
+{"at_s": 5.0, "kind": "entry", "room_id": 990001, "viewer": {"uid": 10105, "name": "新观众戊"}, "event_id": "fae-entry-5", "ts_ms": 6000}
+{"at_s": 6.0, "kind": "vip_enter", "room_id": 990001, "viewer": {"uid": 10106, "name": "老舰长", "guard_level": 3}, "event_id": "fae-vip-1", "ts_ms": 7000}
+{"at_s": 7.0, "kind": "follow", "room_id": 990001, "viewer": {"uid": 10107, "name": "刚关注的观众"}, "event_id": "fae-follow-1", "ts_ms": 8000}
+{"at_s": 8.0, "kind": "like", "room_id": 990001, "viewer": {"uid": 10108, "name": "点赞观众"}, "event_id": "fae-like-1", "ts_ms": 9000}
+{"at_s": 9.0, "kind": "share", "room_id": 990001, "viewer": {"uid": 10109, "name": "分享观众"}, "event_id": "fae-share-1", "ts_ms": 10000}
+{"at_s": 10.0, "kind": "danmaku", "room_id": 990001, "text": "这个功能怎么用？", "viewer": {"uid": 10110, "name": "提问观众", "user_level": 5}, "event_id": "fae-dm-1", "ts_ms": 11000}
+{"at_s": 11.0, "kind": "gift", "room_id": 990001, "viewer": {"uid": 10111, "name": "送礼观众"}, "gift": {"gift_id": 1, "name": "小花花", "num": 1, "coin_type": "gold", "total_coin": 2000, "combo_id": "fae-combo-1", "combo_count": 1, "combo_end": true}, "event_id": "fae-gift-1", "ts_ms": 12000}
+{"at_s": 12.0, "kind": "guard_buy", "room_id": 990001, "viewer": {"uid": 10112, "name": "新舰长", "guard_level": 3}, "value_cny": 138.0, "event_id": "fae-guard-1", "ts_ms": 13000}
+{"at_s": 13.0, "kind": "super_chat", "room_id": 990001, "text": "能总结一下刚才的方案吗？", "value_cny": 30.0, "viewer": {"uid": 10113, "name": "醒目留言观众"}, "event_id": "fae-sc-1", "ts_ms": 14000}

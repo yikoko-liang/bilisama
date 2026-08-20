@@ -208,7 +208,9 @@ def create_ui_app(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         response = await call_next(request)
-        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; img-src 'self' data:; media-src 'self' blob:"
+        )
         # The token lives in the path; never leak it through a Referer header.
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -217,6 +219,10 @@ def create_ui_app(
     @app.get(prefix + "/")
     async def index() -> FileResponse:
         return FileResponse(root / "index.html")
+
+    @app.get(prefix + "/live-mock")
+    async def live_mock() -> FileResponse:
+        return FileResponse(root / "live-mock.html")
 
     @app.get(prefix + "/config")
     async def config() -> JSONResponse:

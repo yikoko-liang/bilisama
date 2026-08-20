@@ -53,11 +53,20 @@
               aria-selected="false" aria-controls="tab-chat">对话</button>
       <button class="tab" id="tab-btn-logs" data-tab="logs" role="tab"
               aria-selected="false" aria-controls="tab-logs">日志</button>
+      <button class="tab" id="tab-btn-tests" data-tab="tests" role="tab"
+              aria-selected="false" aria-controls="tab-tests">测试</button>
       <button class="tab" id="tab-btn-config" data-tab="config" role="tab"
               aria-selected="false" aria-controls="tab-config">配置</button>
     </nav>
 
     <section id="tab-live" class="tab-page active" role="tabpanel" aria-labelledby="tab-btn-live">
+      <div class="live-mock-launch">
+        <div>
+          <strong>直播 Mock</strong>
+          <p>共享浏览器音轨，接入真实直播间事件，检测通过后开始验证。</p>
+        </div>
+        <button id="live-mock-open" type="button">打开</button>
+      </div>
       <h4 class="sect">健康</h4>
       <div id="health" class="cards"><p class="empty">面板打开时每 5 秒刷新</p></div>
       <h4 class="sect">谁能让她开口</h4>
@@ -85,6 +94,18 @@
         <button id="log-pause" type="button" data-paused="false">暂停滚动</button>
       </div>
       <div id="loglines" class="loglines"></div>
+    </section>
+
+    <section id="tab-tests" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-tests">
+      <div id="test-set-switch" class="test-set-switch" role="tablist"
+           aria-label="测试集"></div>
+      <p id="test-description" class="test-description">测试集载入中…</p>
+      <div class="test-tools">
+        <select id="test-candidate" aria-label="主播过滤" hidden></select>
+        <span id="test-count" class="test-count"></span>
+        <button id="test-stop" class="test-stop" type="button" disabled>停止当前</button>
+      </div>
+      <div id="test-cases" class="test-cases"><p class="empty">测试集载入中…</p></div>
     </section>
 
     <section id="tab-config" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-config">

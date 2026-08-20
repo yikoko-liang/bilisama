@@ -85,6 +85,11 @@ def test_index_and_assets_are_served_under_the_token() -> None:
     assert "<html" in page.text
     asset = client.get(f"/{_TOKEN}/assets/js/main.js")
     assert asset.status_code == 200
+    live_mock = client.get(f"/{_TOKEN}/live-mock")
+    assert live_mock.status_code == 200
+    assert "直播 Mock" in live_mock.text
+    for control in ("share-button", "room-id", "check-button", "start-button"):
+        assert f'id="{control}"' in live_mock.text
 
 
 def test_security_headers_ride_on_every_response() -> None:
