@@ -318,6 +318,11 @@ class _Speaker:
                 # the audience hears an answer to a comment nobody remembers.
                 # Only reachable when the floor gate is bypassed; loud on
                 # purpose, because silent drift is what this replaces.
+                # Whole samples only. Dropping an odd byte count shifts every
+                # later sample by one byte, and 16-bit audio read half a
+                # sample out of phase is not quiet damage — it is white noise
+                # at full scale for the rest of the run.
+                over -= over % 2
                 del self._buffer[:over]
                 self._dropped_s += over / 2.0 / _OUTPUT_RATE
 

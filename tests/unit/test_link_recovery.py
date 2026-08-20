@@ -221,3 +221,38 @@ def test_a_muted_run_does_not_latch_the_playback_gate() -> None:
     speaker.play(b"\x00\x00" * _OUTPUT_RATE)
     assert not speaker.busy
     assert speaker.backlog_s == 0.0
+
+
+def test_dropping_backlog_keeps_sample_alignment() -> None:
+    """An odd-byte drop is not a small glitch.
+
+    16-bit audio read half a sample out of phase is full-scale white noise for
+    the rest of the run. A trailing half sample is harmless — the next chunk
+    completes it — but the skip-forward must remove whole samples, so what
+    survives is still a run of the original ones.
+    """
+    import struct
+
+    from bilisama.dev_talk import _MAX_BACKLOG_BYTES, _Speaker
+
+    speaker = _Speaker.__new__(_Speaker)
+    speaker._buffer = bytearray()
+    speaker._dropped_s = 0.0
+    speaker._lock = __import__("threading").Lock()
+    speaker._stream = object()
+
+    # A ramp, so a one-byte phase shift is unmistakable in the decoded values.
+    total = _MAX_BACKLOG_BYTES // 2 + 1000
+    ramp = [i % 3000 for i in range(total)]
+    speaker.play(struct.pack(f"<{total}h", *ramp))
+    # And an odd-length chunk on top: the server should never send one, but a
+    # split base64 frame would, and the drop maths must not care.
+    speaker.play(b"\x01" * 7)
+
+    left = bytes(speaker._buffer)
+    got = struct.unpack(f"<{len(left) // 2}h", left[: len(left) // 2 * 2])
+    # Every surviving sample must still be a ramp value at its right place:
+    # a byte-shifted read produces values nothing like the original series.
+    assert got[0] in ramp, f"first surviving sample {got[0]} is not a real sample"
+    head = ramp.index(got[0])
+    assert list(got[:50]) == ramp[head : head + 50], "samples are out of phase"
