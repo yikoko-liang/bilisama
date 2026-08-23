@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from bilisama.persona import growth as g
+from bilisama.persona import loader
 from bilisama.persona.loader import PersonaAnchors, PersonaStore
 from bilisama.persona.prompt import (
     LIVE_RULES,
@@ -269,3 +270,60 @@ def test_no_shipped_template_leaks_a_raw_placeholder(persona_id: str) -> None:
     assert "{{" not in anchors.personality
     prompt = store.proactive_prompt(Path("/nonexistent-global.md"), template_variables(cfg))
     assert "{{" not in prompt
+
+
+def test_no_posix_only_module_is_imported_at_module_scope() -> None:
+    """Ledger #44: `import fcntl` at the top of loader.py meant that
+    `import bilisama.persona` raised on Windows before one line ran — and
+    dev-talk reaches persona on every start, so the whole app died there.
+    The plan promises a signed Windows installer, so this must not come back.
+
+    Read rather than run: this box is not Windows. The regression being
+    guarded is exactly "someone puts the import back at module scope", which
+    the source answers and a run here never could. dev_talk.py already gets
+    this right with termios — import inside the function, guarded.
+    """
+    import ast
+
+    tree = ast.parse(Path(loader.__file__).read_text(encoding="utf-8"))
+    top_level: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_level.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top_level.add(node.module.split(".")[0])
+
+    posix_only = {"fcntl", "termios", "pwd", "grp", "resource", "tty"}
+    offenders = sorted(top_level & posix_only)
+    assert not offenders, f"这些是 POSIX 独有的，模块顶层 import 会让 Windows 直接挂：{offenders}"
+
+
+def test_the_growth_lock_actually_excludes_a_second_holder(tmp_path: Path) -> None:
+    """Guard the dispatch, not just the import.
+
+    The point of moving fcntl behind a helper is that Windows keeps a real
+    lock instead of losing one. Losing it is silent: `persona review` and the
+    end-of-stream distillation would read-modify-write the same growth file
+    and each resurrect what the other removed. So assert the lock holds — a
+    helper that quietly yields would pass the import test and fail here.
+    """
+    import threading
+
+    lock_file = tmp_path / ".growth.lock"
+    entered = threading.Event()
+    second_got_in = threading.Event()
+
+    def second_holder() -> None:
+        with lock_file.open("w") as handle, loader._exclusive(handle):
+            second_got_in.set()
+
+    with lock_file.open("w") as first, loader._exclusive(first):
+        entered.set()
+        worker = threading.Thread(target=second_holder, daemon=True)
+        worker.start()
+        # flock is per-open-file-description, so a second open in another
+        # thread contends exactly as another process would.
+        assert not second_got_in.wait(timeout=0.3), "第二个持有者不该在锁没放开时进来"
+
+    worker.join(timeout=2.0)
+    assert second_got_in.is_set(), "锁放开后第二个持有者仍然进不来"

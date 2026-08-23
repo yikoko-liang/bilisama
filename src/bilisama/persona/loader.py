@@ -16,13 +16,13 @@ ship without them on purpose.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import IO, TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -73,6 +73,51 @@ def template_variables(cfg: PersonaConfig) -> dict[str, str]:
         "userName": cfg.streamer_name,
         "agentName": cfg.display_name or cfg.id,
     }
+
+
+@contextlib.contextmanager
+def _exclusive(handle: IO[str]) -> Iterator[None]:
+    """Hold an exclusive lock on an open file, on whichever platform.
+
+    fcntl is POSIX-only, and importing it at module scope made
+    `import bilisama.persona` raise on Windows before a single line ran —
+    while the plan promises a signed Windows installer, and dev-talk reaches
+    persona on every start (backlog item 44).
+
+    Windows has the same capability under another name, so this dispatches
+    rather than dropping the lock. Dropping it would be the worse bug: without
+    it, `persona review` and the end-of-stream distillation read-modify-write
+    the same growth files and silently resurrect what the other just changed,
+    which is the entire reason the lock exists.
+
+    The Windows branch is UNVERIFIED — no Windows box has run it. Its
+    semantics differ from flock's in one way worth knowing: msvcrt.locking
+    with LK_LOCK retries for about ten seconds and then raises OSError rather
+    than waiting forever, so a badly-timed collision surfaces as an error
+    instead of a hang.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        # Byte-range lock, so give it a byte to hold: "w" just truncated this.
+        handle.write(" ")
+        handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,12 +242,8 @@ class PersonaStore:
         """
         self._data_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._data_dir / ".growth.lock"
-        with lock_path.open("w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+        with lock_path.open("w") as handle, _exclusive(handle):
+            yield
 
     # ------------------------------------------------------------ proactive
 

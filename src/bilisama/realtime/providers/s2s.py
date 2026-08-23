@@ -32,12 +32,15 @@ from typing import Any
 
 from bilisama.clock import Clock
 from bilisama.config.enums import ProviderName
+from bilisama.obs.logging import get_logger
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.providers import compose_instructions, profile_for
 
 __all__ = ["S2SLink"]
+
+log = get_logger(__name__)
 
 
 class S2SLink:
@@ -132,6 +135,14 @@ class S2SLink:
         with it. write_history is not the adapter's to honour beyond this:
         out-of-band replies never write back (base_openai_compatible_language_
         model.py:645), so L3 mirrors what was said into its own memory.
+
+        Protection is disarmed and re-armed here rather than left to the
+        caller, because a failure between the two sends is unrecoverable from
+        outside: the scheduler only re-arms from ReplyDone or the protection
+        cap, and both hang off an active reply that a failed send never
+        created. The session would sit at interrupt_response=false for the
+        rest of the stream — the streamer opens their mouth and nothing
+        happens, for hours, over one lost frame (backlog item 46).
         """
         if spec.protected:
             await self._client.send_command(self._interrupt_patch(False))
@@ -141,7 +152,18 @@ class S2SLink:
             instructions=compose_instructions(self._context, spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
-        return await self._client.request_reply(frame)
+        try:
+            return await self._client.request_reply(frame)
+        except Exception:
+            if spec.protected:
+                # Best effort, and loud if it fails: the original error is the
+                # one worth raising, but a session left mute to barge-in is
+                # worth a line of its own.
+                try:
+                    await self.end_protection()
+                except Exception as rearm:
+                    log.error("s2s.rearm_failed", error_text=str(rearm)[:200])
+            raise
 
     async def end_protection(self) -> None:
         """Re-arm barge-in after a protected reply. The scheduler calls this on

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 import pytest
 
@@ -439,6 +440,53 @@ async def test_protected_reply_wraps_itself_in_interrupt_patches() -> None:
             if e.get("type") == "session.update" and "turn_detection" in (e.get("session") or {})
         ]
         assert patches == [False, True]
+
+
+async def test_a_failed_protected_send_re_arms_barge_in() -> None:
+    """Ledger #46: whoever disarms barge-in owns re-arming it.
+
+    A protected reply disarms the provider's barge-in and then asks for the
+    reply. If that second send fails, nothing upstream can put it back: the
+    scheduler only re-arms from ReplyDone or the protection cap, and both hang
+    off an active reply that was never created. The session then sits at
+    interrupt_response=false for the rest of the stream — the streamer opens
+    their mouth and nothing happens, for hours, over one failed frame.
+    """
+    async with MockRealtimeServer(caps=caps_mod.S2S) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            # Kill the socket between the two sends: the patch is already on
+            # the wire, the response.create cannot be.
+            sent: list[dict[str, Any]] = []
+            original = linkobj._client.send_command
+
+            async def fail_after_the_patch(frame: dict[str, Any]) -> None:
+                sent.append(frame)
+                await original(frame)
+
+            linkobj._client.send_command = fail_after_the_patch  # type: ignore[method-assign]
+
+            async def refuse(frame: dict[str, Any]) -> link.ReplyHandle:
+                raise ConnectionError("送不出去")
+
+            linkobj._client.request_reply = refuse  # type: ignore[method-assign]
+
+            with pytest.raises(ConnectionError):
+                await linkobj.request_reply(link.ReplySpec(instructions="谢 SC", protected=True))
+
+            patches = [
+                (f.get("session") or {}).get("turn_detection", {}).get("interrupt_response")
+                for f in sent
+                if f.get("type") == "session.update"
+                and "turn_detection" in (f.get("session") or {})
+            ]
+            assert patches == [
+                False,
+                True,
+            ], f"打断被关掉后没有重新打开，这一场主播再也插不进话：{patches}"
+        finally:
+            await linkobj.aclose()
 
 
 # ------------------------------------------------------------ the handshake
