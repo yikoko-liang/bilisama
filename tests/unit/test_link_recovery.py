@@ -15,10 +15,16 @@ Three behaviours, each with the failure it exists to prevent:
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import pytest
 
 from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import HostedTurnConfig
+from bilisama.dev_talk import _FRAME_MS, _UPLINK_PATIENCE_S, _uplink, _watch
 from bilisama.director.floor import SpeakingFloor
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
@@ -256,3 +262,124 @@ def test_dropping_backlog_keeps_sample_alignment() -> None:
     assert got[0] in ramp, f"first surviving sample {got[0]} is not a real sample"
     head = ramp.index(got[0])
     assert list(got[:50]) == ramp[head : head + 50], "samples are out of phase"
+
+
+@contextmanager
+def _capture_errors(into: list[str]) -> Iterator[None]:
+    """Collect what the dev-talk logger reports, without touching handlers
+    the gate's own logging setup installed."""
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            fields = getattr(record, "fields", {})
+            into.append(f"{record.getMessage()} {fields}")
+
+    logger = logging.getLogger("bilisama.dev_talk")
+    sink = _Sink()
+    logger.addHandler(sink)
+    try:
+        yield
+    finally:
+        logger.removeHandler(sink)
+
+
+class _FlakyLink:
+    """A push_audio that fails while the socket is gone, then comes back."""
+
+    def __init__(self, failures: int) -> None:
+        self.sent: list[bytes] = []
+        self._left = failures
+
+    async def push_audio(self, pcm: bytes) -> None:
+        if self._left > 0:
+            self._left -= 1
+            # Exactly what the client raises with no socket (client.py:270).
+            raise ConnectionError("还没连接")
+        self.sent.append(pcm)
+
+
+async def test_the_uplink_survives_an_outage_instead_of_dying_silently() -> None:
+    """A dropped link must not end the microphone for the rest of the session.
+
+    Nobody awaits this loop — it is one of run_director's create_task list —
+    so an exception in it costs the uplink without a word. That became the
+    worst kind of failure once the client learned to reconnect: the socket
+    returns, the persona replays, the panel goes green, and the streamer's
+    voice never arrives again. It looks exactly like a successful recovery.
+    """
+    queue: asyncio.Queue[bytes] = asyncio.Queue()
+    link_ = _FlakyLink(failures=3)
+    blocks = [bytes([i]) * 4 for i in range(5)]
+    for block in blocks:
+        queue.put_nowait(block)
+
+    task = asyncio.create_task(_uplink(link_, queue, speaker=None, mute=False, silence=b""))
+    try:
+        for _ in range(200):
+            if queue.empty() and len(link_.sent) == 2:
+                break
+            await asyncio.sleep(0)
+        assert not task.done(), "上行任务在断线时死掉了，链路回来也不会自愈"
+        # The three blocks sent while down are gone — there was no socket to
+        # take them. The two after are what the provider actually hears.
+        assert link_.sent == blocks[3:]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_a_background_task_that_dies_says_so() -> None:
+    """Eleven of these run unwatched; today any of them can end in silence."""
+    records: list[str] = []
+
+    async def boom() -> None:
+        raise RuntimeError("炸了")
+
+    task = _watch(asyncio.create_task(boom(), name="director:测试"))
+    with _capture_errors(records):
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+    assert any(
+        "dev_talk.task_died" in line and "director:测试" in line and "炸了" in line
+        for line in records
+    ), records
+
+
+async def test_watching_a_cancelled_task_stays_quiet() -> None:
+    """Shutdown cancels all eleven; that is not a fault worth reporting."""
+    records: list[str] = []
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    task = _watch(asyncio.create_task(forever(), name="director:收尾"))
+    with _capture_errors(records):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+    assert records == []
+
+
+async def test_an_uplink_that_never_recovers_gives_up() -> None:
+    """Surviving an outage must not become pretending to be alive.
+
+    Wire mode ends the session on this task's exception; swallowing forever
+    would leave a process that looks connected and hears nothing.
+    """
+    queue: asyncio.Queue[bytes] = asyncio.Queue()
+    link_ = _FlakyLink(failures=10**9)
+    task = asyncio.create_task(_uplink(link_, queue, speaker=None, mute=False, silence=b""))
+    try:
+        # One block past the patience window, fed as fast as the loop drains.
+        for _ in range(int(_UPLINK_PATIENCE_S * 1000 / _FRAME_MS) + 2):
+            queue.put_nowait(b"\x00\x00")
+        for _ in range(50_000):
+            if task.done():
+                break
+            await asyncio.sleep(0)
+        assert task.done(), "上行永远吞下去了，链路死了也看不出来"
+        with pytest.raises(ConnectionError):
+            task.result()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

@@ -40,6 +40,7 @@ import websockets
 
 from bilisama.config.enums import ProviderName
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
+from bilisama.obs.logging import get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
 from bilisama.realtime.providers import profile_for
@@ -59,6 +60,8 @@ class _Connects(Protocol):
     async def connect(self) -> None: ...
 
 
+log = get_logger(__name__)
+
 _INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
 _OUTPUT_RATE = 24000  # and answer at 24 kHz (plan section 3.1 table)
 _FRAME_MS = 32
@@ -71,6 +74,13 @@ _FRAME_MS = 32
 # short of the minutes of drift measured before the floor gate was fed.
 _MAX_BACKLOG_BYTES = 10 * 2 * _OUTPUT_RATE
 
+# How long the uplink keeps forwarding into a dead socket before giving up.
+# Has to outlast the client's whole reconnect budget — six tries with backoff
+# capped at 30s (client.py:375) — or we would quit on an outage it was about
+# to recover from. Blocks arrive one per _FRAME_MS, so counting them counts
+# time closely enough for a patience threshold.
+_UPLINK_PATIENCE_S = 300.0
+
 _SENTENCE_END = "。！？…；\n.!?"
 _LINE_SOFT_CAP = 32
 
@@ -80,6 +90,30 @@ _LINE_SOFT_CAP = 32
 # hidden inside a closure is how "the panel says 配置已改 and nothing changes"
 # gets reintroduced.
 _RELOG_ON_EDIT = frozenset({"runtime.log_level", "runtime.log_viewer_content"})
+
+
+def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
+    """Make a background task's death audible.
+
+    run_director starts eleven of these and then waits on a stop event, so
+    nothing ever retrieves their results. A task that raises therefore just
+    stops existing: the scheduler quits dispatching, or the mic stops
+    forwarding, and the console says nothing at all. CPython only mentions it
+    at GC time, as "Task exception was never retrieved", long after the
+    session it broke.
+
+    Cancellation is not a fault — shutdown cancels all eleven on purpose.
+    """
+
+    def done(finished: asyncio.Task[None]) -> None:
+        if finished.cancelled():
+            return
+        exc = finished.exception()
+        if exc is not None:
+            log.exception("dev_talk.task_died", task=finished.get_name(), error_text=str(exc))
+
+    task.add_done_callback(done)
+    return task
 
 
 def _dashscope_url(model: str) -> str:
@@ -187,6 +221,56 @@ def _close_audio_stream(stream: Any) -> None:
         stream.close()
 
 
+async def _uplink(
+    client: _AudioIn,
+    queue: asyncio.Queue[bytes],
+    speaker: _Speaker | None,
+    mute: bool,
+    silence: bytes,
+) -> None:
+    """Forward mic blocks forever, including across a link outage.
+
+    Split out of _pump_mic so it can be tested without a sound card, but the
+    reason it exists is the try below. push_audio raises while the socket is
+    gone (client.py:270), nobody awaits this loop, and an exception in it ends
+    the uplink for the rest of the session in complete silence. That turned
+    into the worst kind of failure the day the client learned to reconnect:
+    the socket returns, the persona replays, the panel goes green, and the
+    streamer's voice never arrives again. A send that fails while the link is
+    down costs one block, not the session.
+
+    Dropping those blocks is right, not a compromise — there is no socket to
+    take them, and the reopened session starts its audio clock from scratch,
+    so rule 7's "never stop the stream" has nothing to protect here.
+
+    Patience is bounded, though. A link that never returns must still end the
+    session: wire mode reports the failure and exits (its asyncio.wait watches
+    this task), and swallowing forever would replace that with a process that
+    looks alive and hears nothing. So after _UPLINK_PATIENCE_S of unbroken
+    failure the error goes back up.
+    """
+    lost = 0
+    limit = int(_UPLINK_PATIENCE_S * 1000 / _FRAME_MS)
+    while True:
+        block = await queue.get()
+        if mute and speaker is not None and speaker.busy:
+            # Echo shield for open speakers: the mic goes silent while the
+            # reply plays. Costs barge-in during playback — headphones keep
+            # it. Silence rather than nothing: stopping the append stream
+            # freezes the provider's audio clock (plan section 3.3 rule 7).
+            block = silence
+        try:
+            await client.push_audio(block)
+        except (ConnectionError, websockets.WebSocketException):
+            lost += 1
+            if lost > limit:
+                raise
+            continue
+        if lost:
+            log.warning("dev_talk.uplink_resumed", lost_blocks=lost)
+            lost = 0
+
+
 async def _pump_mic(
     client: _AudioIn, device: int | None, speaker: _Speaker | None, mute: bool
 ) -> None:
@@ -226,15 +310,7 @@ async def _pump_mic(
         # then — left unreleased it becomes the blocking atexit stall this
         # module fixes everywhere else.
         stream.start()
-        while True:
-            block = await queue.get()
-            if mute and speaker is not None and speaker.busy:
-                # Echo shield for open speakers: the mic goes silent while the
-                # reply plays. Costs barge-in during playback — headphones keep
-                # it. Silence rather than nothing: stopping the append stream
-                # freezes the provider's audio clock (plan section 3.3 rule 7).
-                block = silence
-            await client.push_audio(block)
+        await _uplink(client, queue, speaker, mute, silence)
     finally:
         # NOT `with stream:` — its __exit__ closes on the loop, which is the
         # freeze described on _close_audio_stream. The release runs on a worker
@@ -1294,6 +1370,9 @@ async def run_director(args: argparse.Namespace) -> int:
             print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
 
         await assembly.refresh_context()
+        # _watch on every one: this list is started and then left alone while
+        # the main flow waits on `stop`, so without it a task that raises just
+        # vanishes. See _watch.
         tasks = [
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
             asyncio.create_task(proactive.run(), name="director:proactive"),
@@ -1315,6 +1394,8 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
             asyncio.create_task(report_playback(), name="director:playback"),
         ]
+        for task in tasks:
+            _watch(task)
         if hub is not None:
             live_hub = hub
 
@@ -1336,8 +1417,8 @@ async def run_director(args: argparse.Namespace) -> int:
                         live_hub.broadcast(name, data)
 
             tasks += [
-                asyncio.create_task(ui_feed(), name="director:ui-feed"),
-                asyncio.create_task(live_hub.run(read_signals), name="director:ui-state"),
+                _watch(asyncio.create_task(ui_feed(), name="director:ui-feed")),
+                _watch(asyncio.create_task(live_hub.run(read_signals), name="director:ui-state")),
             ]
         await stop.wait()
     finally:
