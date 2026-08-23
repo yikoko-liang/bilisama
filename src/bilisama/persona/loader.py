@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Literal
 
+from bilisama.obs.logging import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -40,6 +42,8 @@ __all__ = [
 
 AnchorName = Literal["identity", "personality"]
 GrowthLayer = Literal["relationship", "voice"]
+
+log = get_logger(__name__)
 
 _GROWTH_HEADERS: dict[GrowthLayer, str] = {
     "relationship": "# 共同经历",
@@ -111,7 +115,16 @@ def _exclusive(handle: IO[str]) -> Iterator[None]:
     else:
         import fcntl
 
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Someone else holds it. Waiting is right — that is the point —
+            # but this call is synchronous and the end-of-stream distillation
+            # awaits it, so the wait stalls the whole event loop: microphone,
+            # scheduler and panel together. Say so before going quiet, or the
+            # freeze has no explanation anywhere.
+            log.warning("persona.growth_lock_contended")
+            fcntl.flock(handle, fcntl.LOCK_EX)
         try:
             yield
         finally:

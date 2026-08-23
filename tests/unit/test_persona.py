@@ -327,3 +327,55 @@ def test_the_growth_lock_actually_excludes_a_second_holder(tmp_path: Path) -> No
 
     worker.join(timeout=2.0)
     assert second_got_in.is_set(), "锁放开后第二个持有者仍然进不来"
+
+
+def test_a_contended_growth_lock_says_so_before_it_waits(tmp_path: Path) -> None:
+    """A wait nobody can see is a freeze nobody can explain.
+
+    _growth_lock is synchronous, and the end-of-stream distillation awaits it,
+    so blocking here stalls the whole event loop — microphone, scheduler and
+    panel together. That is still the right thing to do; going quiet about it
+    is not.
+    """
+    import logging
+    import threading
+
+    heard: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            heard.append(record.getMessage())
+
+    sink = _Sink()
+    logging.getLogger("bilisama.persona.loader").addHandler(sink)
+    lock_file = tmp_path / ".growth.lock"
+    released = threading.Event()
+
+    def hold() -> None:
+        with lock_file.open("a") as handle, loader._exclusive(handle):
+            released.wait(timeout=2.0)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    try:
+        # Give the holder time to take it, then contend.
+        for _ in range(200):
+            if lock_file.exists():
+                break
+            threading.Event().wait(0.005)
+        threading.Event().wait(0.05)
+
+        def contend() -> None:
+            with lock_file.open("a") as handle, loader._exclusive(handle):
+                pass
+
+        waiter = threading.Thread(target=contend, daemon=True)
+        waiter.start()
+        threading.Event().wait(0.2)
+        assert any("growth_lock_contended" in line for line in heard), heard
+        released.set()
+        waiter.join(timeout=2.0)
+    finally:
+        released.set()
+        holder.join(timeout=2.0)
+        logging.getLogger("bilisama.persona.loader").removeHandler(sink)
