@@ -205,10 +205,14 @@ def _sane_terminal(saved: Any) -> None:
     """
     if saved is None or not sys.stdin.isatty():
         return
-    with contextlib.suppress(Exception):
-        import termios
+    # Windows has no termios, and no cooked mode to put back. Testing the
+    # platform rather than suppressing an ImportError is what lets
+    # `mypy --platform win32` read this branch at all.
+    if sys.platform != "win32":
+        with contextlib.suppress(Exception):
+            import termios
 
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
 
 
 def _close_audio_stream(stream: Any) -> None:
@@ -762,7 +766,7 @@ async def run_director(args: argparse.Namespace) -> int:
     # Captured before anything can put the tty in raw mode, restored at the top
     # of the shutdown chain (see _sane_terminal).
     saved_tty: Any = None
-    if sys.stdin.isatty():
+    if sys.stdin.isatty() and sys.platform != "win32":
         with contextlib.suppress(Exception):
             import termios
 

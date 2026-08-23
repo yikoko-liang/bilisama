@@ -31,6 +31,15 @@ step "mypy（全量，不只 src）"
 # comment on pyproject.toml:69-78.
 $PY -m mypy
 
+step "mypy（假装 Windows）"
+# Platform-gated branches are invisible to the run above: on this machine
+# `if sys.platform == "win32"` is dead code, so a typo'd msvcrt call with the
+# wrong argument type passed clean (measured 2026-08-24). Re-reading the tree
+# as Windows is what checks the branches no CI here can execute. Cheap —
+# a second parse, no test run — and it is the only cover the Windows path has
+# until someone runs it on Windows.
+$PY -m mypy --platform win32
+
 step "单元测试"
 # pyproject 的 addopts 把 integration / provider_a / manual 三个标记摘掉了，
 # 所以这一步只跑单元层。integration 那层在下面单独跑。

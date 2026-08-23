@@ -442,51 +442,100 @@ async def test_protected_reply_wraps_itself_in_interrupt_patches() -> None:
         assert patches == [False, True]
 
 
-async def test_a_failed_protected_send_re_arms_barge_in() -> None:
-    """Ledger #46: whoever disarms barge-in owns re-arming it.
+async def test_a_failed_protected_send_re_arms_barge_in_when_the_socket_lives() -> None:
+    """Ledger #46, the recoverable half: a refusal on a healthy socket.
 
-    A protected reply disarms the provider's barge-in and then asks for the
-    reply. If that second send fails, nothing upstream can put it back: the
-    scheduler only re-arms from ReplyDone or the protection cap, and both hang
-    off an active reply that was never created. The session then sits at
-    interrupt_response=false for the rest of the stream — the streamer opens
-    their mouth and nothing happens, for hours, over one failed frame.
+    Whoever disarms barge-in owns re-arming it, including on the way out
+    through an exception — otherwise the session sits at
+    interrupt_response=false for the rest of the stream and the streamer
+    cannot get a word in.
     """
     async with MockRealtimeServer(caps=caps_mod.S2S) as server:
         linkobj = S2SLink(server.url)
         await linkobj.connect()
         try:
-            # Kill the socket between the two sends: the patch is already on
-            # the wire, the response.create cannot be.
             sent: list[dict[str, Any]] = []
-            original = linkobj._client.send_command
+            original = linkobj._client._send_raw
 
-            async def fail_after_the_patch(frame: dict[str, Any]) -> None:
+            async def record(frame: dict[str, Any]) -> None:
                 sent.append(frame)
                 await original(frame)
 
-            linkobj._client.send_command = fail_after_the_patch  # type: ignore[method-assign]
+            linkobj._client._send_raw = record  # type: ignore[method-assign]
 
             async def refuse(frame: dict[str, Any]) -> link.ReplyHandle:
-                raise ConnectionError("送不出去")
+                raise RuntimeError("服务端拒了这条")
 
             linkobj._client.request_reply = refuse  # type: ignore[method-assign]
 
-            with pytest.raises(ConnectionError):
+            with pytest.raises(RuntimeError):
                 await linkobj.request_reply(link.ReplySpec(instructions="谢 SC", protected=True))
-
-            patches = [
-                (f.get("session") or {}).get("turn_detection", {}).get("interrupt_response")
-                for f in sent
-                if f.get("type") == "session.update"
-                and "turn_detection" in (f.get("session") or {})
-            ]
-            assert patches == [
-                False,
-                True,
-            ], f"打断被关掉后没有重新打开，这一场主播再也插不进话：{patches}"
+            assert _interrupt_flags(sent) == [False, True], "socket 还活着，打断该当场开回来"
         finally:
             await linkobj.aclose()
+
+
+async def test_a_dead_socket_re_arms_barge_in_on_the_next_one() -> None:
+    """Ledger #46, the half the first fix could not reach.
+
+    request_reply raises from exactly one place — _send_raw — and
+    end_protection reaches the wire through that same _send_raw. So the only
+    condition that triggers an on-the-spot re-arm is the condition under which
+    the re-arm cannot be sent. Re-arming immediately is right when the socket
+    survives and useless precisely when it does not, which is the case the
+    ledger described: one lost frame, and the streamer cannot interrupt for
+    the rest of the stream.
+
+    So the disarm is remembered. Whatever the server does with the old
+    session's state, the socket that replaces it is told explicitly.
+    """
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.S2S) as server:
+        linkobj = S2SLink(server.url, clock=clock, auto_reconnect=True)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            calls = {"n": 0}
+            original = linkobj._client._send_raw
+
+            async def die_after_the_patch(frame: dict[str, Any]) -> None:
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise ConnectionError("写不出去了")
+                await original(frame)
+
+            linkobj._client._send_raw = die_after_the_patch  # type: ignore[method-assign]
+
+            with pytest.raises(ConnectionError):
+                await linkobj.request_reply(link.ReplySpec(instructions="谢 SC", protected=True))
+            linkobj._client._send_raw = original  # type: ignore[method-assign]
+
+            await server.drop_connection()
+            down = await _next_event(events, link.LinkDown)
+            assert isinstance(down, link.LinkDown)
+            await clock.advance(1.5)
+            up = await _next_event(events, link.LinkUp)
+            assert isinstance(up, link.LinkUp)
+
+            # The session's final barge-in state is what matters, and the
+            # server reads frames on its own schedule, so ask the whole
+            # transcript rather than a slice of it.
+            flags = _interrupt_flags(server.recorded.events)
+            assert (
+                flags and flags[-1] is True
+            ), f"会话最后停在关闭打断上，这一场主播插不进话：{flags}"
+        finally:
+            await linkobj.aclose()
+
+
+def _interrupt_flags(frames: list[dict[str, Any]]) -> list[bool]:
+    """The interrupt_response values that actually reached the wire, in order."""
+    return [
+        (f.get("session") or {})["turn_detection"]["interrupt_response"]
+        for f in frames
+        if f.get("type") == "session.update"
+        and "interrupt_response" in (f.get("session") or {}).get("turn_detection", {})
+    ]
 
 
 # ------------------------------------------------------------ the handshake

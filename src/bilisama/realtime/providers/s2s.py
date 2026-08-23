@@ -75,6 +75,10 @@ class S2SLink:
         self._codec = profile.codec
         self._text_replies = text_replies
         self._context = ""
+        # Barge-in is a session-level flag we turn OFF for protected replies.
+        # Remembering that we did is the only way to put it back when the send
+        # that should have done so never made it — see request_reply.
+        self._barge_in_disarmed = False
 
     async def connect(self) -> None:
         """Open the socket and restore whatever this link already knew.
@@ -91,9 +95,18 @@ class S2SLink:
         await self._resume_session()
 
     async def _resume_session(self) -> None:
-        """Replay the session instructions onto a fresh socket. Idempotent."""
+        """Replay what a fresh socket does not know. Idempotent.
+
+        Barge-in rides along with the instructions. If a protected reply
+        disarmed it and the re-arm never reached the wire, this is the first
+        moment it can: whether the server carries the old session's flag
+        across a reconnect is unverified (our own mock does), so the new
+        socket is told rather than trusted.
+        """
         if self._context:
             await self.set_context(self._context)
+        if self._barge_in_disarmed:
+            await self.end_protection()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -146,6 +159,7 @@ class S2SLink:
         """
         if spec.protected:
             await self._client.send_command(self._interrupt_patch(False))
+            self._barge_in_disarmed = True
         frame = self._codec.response_create(
             out_of_band=True,
             text_only=self._text_replies,
@@ -155,20 +169,34 @@ class S2SLink:
         try:
             return await self._client.request_reply(frame)
         except Exception:
+            # Exception, not BaseException, and deliberately: CancelledError
+            # sits outside it, and the only thing that cancels a dispatch is
+            # shutdown cancelling the scheduler loop it runs inside
+            # (scheduler.py:301). The socket closes on the way out, so a
+            # session left disarmed there does not outlive anything. Re-arming
+            # from a cancelled context would mean awaiting a send that is
+            # already being cancelled.
             if spec.protected:
-                # Best effort, and loud if it fails: the original error is the
-                # one worth raising, but a session left mute to barge-in is
-                # worth a line of its own.
+                # On the spot when the socket allows it. It usually will not:
+                # request_reply raises from _send_raw, and this reaches the
+                # wire through that same _send_raw, so the condition that
+                # brings us here is mostly the condition that stops us
+                # sending. The flag set above is what actually covers that
+                # case — _resume_session re-arms on the socket that replaces
+                # this one.
                 try:
                     await self.end_protection()
                 except Exception as rearm:
-                    log.error("s2s.rearm_failed", error_text=str(rearm)[:200])
+                    log.warning("s2s.rearm_deferred", error_text=str(rearm)[:200])
             raise
 
     async def end_protection(self) -> None:
         """Re-arm barge-in after a protected reply. The scheduler calls this on
         ReplyDone, and a stage-2 hard cap makes sure it cannot be forgotten."""
         await self._client.send_command(self._interrupt_patch(True))
+        # Only after the frame is away: a raise here must leave the debt
+        # standing so the next socket pays it.
+        self._barge_in_disarmed = False
 
     async def cancel(self, handle: link.ReplyHandle) -> None:
         await self._client.cancel(handle)

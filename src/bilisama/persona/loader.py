@@ -90,34 +90,32 @@ def _exclusive(handle: IO[str]) -> Iterator[None]:
     the same growth files and silently resurrect what the other just changed,
     which is the entire reason the lock exists.
 
-    The Windows branch is UNVERIFIED — no Windows box has run it. Its
-    semantics differ from flock's in one way worth knowing: msvcrt.locking
-    with LK_LOCK retries for about ten seconds and then raises OSError rather
-    than waiting forever, so a badly-timed collision surfaces as an error
-    instead of a hang.
+    The Windows branch is UNVERIFIED — no Windows box has run it. Two things
+    about it are worth knowing. It locks a byte range rather than the file,
+    and that range may sit past the end of a zero-length file, so nothing
+    needs writing first — writing first would in fact break it, because
+    Windows byte-range locks are MANDATORY, and the second holder's write
+    would hit the first holder's lock and raise before LK_LOCK ever got to
+    retry. And LK_LOCK retries for about ten seconds before raising OSError
+    rather than waiting forever, so a long collision surfaces as an error
+    where flock would simply wait.
     """
     if sys.platform == "win32":
         import msvcrt
 
-        # Byte-range lock, so give it a byte to hold: "w" just truncated this.
-        handle.write(" ")
-        handle.flush()
-        handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield
         finally:
-            handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        return
+    else:
+        import fcntl
 
-    import fcntl
-
-    fcntl.flock(handle, fcntl.LOCK_EX)
-    try:
-        yield
-    finally:
-        fcntl.flock(handle, fcntl.LOCK_UN)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +240,10 @@ class PersonaStore:
         """
         self._data_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._data_dir / ".growth.lock"
-        with lock_path.open("w") as handle, _exclusive(handle):
+        # "a", not "w": the lock file's contents are never read, and on
+        # Windows the truncation "w" performs is itself a write against a
+        # range the other holder may have locked.
+        with lock_path.open("a") as handle, _exclusive(handle):
             yield
 
     # ------------------------------------------------------------ proactive
