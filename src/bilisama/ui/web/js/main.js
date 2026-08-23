@@ -163,7 +163,11 @@ const handlers = {
     // voice that keeps talking is worse than either alone.
     audio?.clear();
   },
-  "audio.owner": (data) => panel.handleFrame("audio.owner", data),
+  "audio.owner": (data) => {
+    panel.handleFrame("audio.owner", data);
+    // Devices free again — a window that stood aside can take them.
+    if (!data.owner) audio?.retry();
+  },
   "event.feed": (data) => panel.handleFrame("event.feed", data),
   "log.line": (data) => panel.handleFrame("log.line", data),
   "panel.state": (data) => panel.handleFrame("panel.state", data),

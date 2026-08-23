@@ -61,7 +61,7 @@ class AudioBroker:
     running, which is what every session did before this existed.
     """
 
-    __slots__ = ("_announce", "_local", "_owner", "_send")
+    __slots__ = ("_announce", "_close", "_local", "_owner", "_send")
 
     def __init__(
         self,
@@ -79,6 +79,7 @@ class AudioBroker:
         self._announce = announce
         self._owner: AudioOwner | None = None
         self._send: Callable[[bytes], None] | None = None
+        self._close: Callable[[], None] | None = None
 
     @property
     def owner(self) -> AudioOwner | None:
@@ -89,12 +90,22 @@ class AudioBroker:
         """True when the sounddevice pair is the one being heard."""
         return self._owner is None
 
-    async def claim(self, who: AudioOwner, *, send: Callable[[bytes], None]) -> bool:
+    async def claim(
+        self,
+        who: AudioOwner,
+        *,
+        send: Callable[[bytes], None],
+        close: Callable[[], None] | None = None,
+    ) -> bool:
         """Hand the devices to a page, if it outranks whoever has them.
 
         Args:
             who: shell or browser; a shell displaces a tab, never the reverse.
             send: How to push downlink PCM to this client.
+            close: How to hang up on this client when something stronger takes
+                the devices. Without it a displaced tab keeps a live capture
+                running on a socket that will never be fed again, and its panel
+                goes on claiming to hold devices it lost.
 
         Returns:
             True if the caller now owns the devices. False means someone
@@ -104,8 +115,13 @@ class AudioBroker:
             log.info("audio.claim_refused", who=who, holder=self._owner)
             return False
         first = self._owner is None
+        displaced = self._close if not first else None
         self._owner = who
         self._send = send
+        self._close = close
+        if displaced is not None:
+            log.info("audio.displaced", by=who)
+            displaced()
         if first and self._local is not None:
             # Only on the way in from nobody: a shell taking over from a tab
             # must not restart devices that are already parked.
@@ -120,6 +136,7 @@ class AudioBroker:
             return
         self._owner = None
         self._send = None
+        self._close = None
         if self._local is not None:
             await self._local.resume()
         log.info("audio.released", who=who)

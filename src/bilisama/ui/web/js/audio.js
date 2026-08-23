@@ -59,10 +59,11 @@ export function createAudio({ onOwner }) {
       stopCapture();
       onOwner(null);
       if (closed) return;
-      if (event.code === 4409) {
-        // Another client holds the devices — the shell, almost always, with
-        // this being a developer's tab. Retrying would be a hot loop against a
-        // door that is not going to open.
+      if (event.code === 4409 || event.code === 1001) {
+        // Someone stronger has the devices (4409 at the door, 1001 when we
+        // were displaced holding them). Either way the answer will not change
+        // by asking again, and the control socket's audio.owner broadcast is
+        // what tells the panel what happened.
         return;
       }
       const delay = Math.min(8000, 500 * 2 ** attempt) * (0.7 + Math.random() * 0.6);
@@ -171,6 +172,20 @@ export function createAudio({ onOwner }) {
   open();
 
   return {
+    /** Ask again after standing aside; ignored while already connected.
+     *
+     * A displaced window stops knocking, which is right while something
+     * stronger holds the devices and wrong the moment it lets go — otherwise
+     * closing the shell leaves every open page silent until reloaded, with
+     * nothing on screen to explain it. The control socket's audio.owner
+     * broadcast is the cue.
+     */
+    retry() {
+      if (closed) return;
+      if (socket && socket.readyState <= WebSocket.OPEN) return;
+      attempt = 0;
+      open();
+    },
     /** Stop everything scheduled and report how much of it was heard. */
     clear() {
       const heard = Math.round(playedMs);

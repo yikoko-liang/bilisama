@@ -596,9 +596,19 @@ export function createPanel({ send }) {
     },
     handleFrame(event, data) {
       if (event === "audio.owner") {
-        // Broadcast to everyone: a window that did NOT get the devices needs
-        // to say why rather than look broken.
-        if (!audio) this.setAudioOwner(null);
+        // Broadcast to everyone, because a window that did NOT get the devices
+        // has to say why rather than look broken. Ours is the only one that
+        // can be holding them, so anything else means we are watching.
+        const mine = window.bilisamaShell ? "shell" : "browser";
+        if (!data.owner) {
+          this.setAudioOwner(null);
+        } else if (data.owner !== mine) {
+          audioOwnerEl.textContent =
+            data.owner === "shell"
+              ? "麦克风和扬声器在桌宠窗口，这里只看不听。"
+              : "麦克风和扬声器在另一个页面，这里只看不听。";
+          stopLevelMeter();
+        }
         return;
       }
       if (event === "event.feed") feedEntry(data);

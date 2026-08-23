@@ -169,3 +169,27 @@ def test_a_late_receipt_after_a_barge_in_cannot_wedge_the_gate() -> None:
     assert tally.outstanding == 0
     tally.started()
     assert gate[-1] is True, "下一句还得能正常关门"
+
+
+async def test_a_displaced_client_is_hung_up_on() -> None:
+    """Losing the devices has to reach the client that lost them.
+
+    Left connected, a displaced tab keeps a live capture running on a socket
+    nobody will ever read again — the microphone light stays on, the panel goes
+    on claiming to hold devices it does not, and the OS sees two captures where
+    the point of the handover was to have one.
+    """
+    hung_up: list[str] = []
+    broker = AudioBroker()
+    await broker.claim("browser", send=lambda _pcm: None, close=lambda: hung_up.append("browser"))
+    assert hung_up == []
+    await broker.claim("shell", send=lambda _pcm: None, close=lambda: hung_up.append("shell"))
+    assert hung_up == ["browser"], "壳拿走设备时没有通知被顶掉的那个"
+
+
+async def test_the_first_claimant_is_not_hung_up_on() -> None:
+    """Nobody held them before, so there is nobody to tell."""
+    hung_up: list[str] = []
+    broker = AudioBroker()
+    await broker.claim("shell", send=lambda _pcm: None, close=lambda: hung_up.append("shell"))
+    assert hung_up == []

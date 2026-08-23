@@ -301,7 +301,10 @@ def create_ui_app(
                 if not outbound.full():
                     outbound.put_nowait(pcm)
 
-            if not await broker.claim(who, send=send):
+            # None through the queue is the pump's hang-up sentinel; reused
+            # here so a displaced client is told to let go of its microphone
+            # rather than left capturing into a socket nobody reads.
+            if not await broker.claim(who, send=send, close=lambda: outbound.put_nowait(None)):
                 # Someone stronger has the devices. Say so and hang up rather
                 # than sit on a socket nobody feeds.
                 await ws.close(code=4409)
