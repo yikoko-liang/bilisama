@@ -60,6 +60,8 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/runbook.md](docs/runbook.md) | 操作手册：起服务器、dev-talk、测试、常见坑 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |
+| [docs/live2d-licensing.md](docs/live2d-licensing.md) | Live2D 对外发布前必须先办完的五件事，以及现在走到哪 |
+| [docs/plan-diff-2026-08-17.html](docs/plan-diff-2026-08-17.html) | 2026-08-17 那轮计划改动的 diff 视图 |
 | [NOTICE](NOTICE) / [LICENSE](LICENSE) | 六个上游项目的署名；Apache-2.0 |
 | [config/bilisama.toml](config/bilisama.toml) | 唯一配置真相源，注释即文档 |
 | [.env.example](.env.example) | 所有环境变量的清单与说明；真值写进本地的 `path.sh`，永不入库 |

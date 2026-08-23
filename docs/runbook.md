@@ -290,8 +290,10 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/mia/pinned.m
 dev-talk 挂上 `--room` 就连真直播间，一边语音对话一边收真弹幕：
 
 ```bash
-.venv/bin/bilisama dev-talk --mic --director --room <房间号>
+.venv/bin/bilisama dev-talk --director --room <房间号>
 ```
+
+麦克风是默认的，不用专门开；喂录音才要加 `--wav`。
 
 默认（normal 档）就是互动模式：按窗口挑弹幕回应，SC / 礼物 / 上舰即时答谢。
 只想观察不想让它开口，把 `bilisama.toml` 的 `active_profile` 改成 `"chat"` 再跑
