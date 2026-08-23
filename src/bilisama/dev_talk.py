@@ -43,7 +43,7 @@ from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.obs.logging import get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
-from bilisama.realtime.providers import profile_for
+from bilisama.realtime.providers import profile_for, resolve_endpoint
 
 
 class _AudioIn(Protocol):
@@ -116,12 +116,18 @@ def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
     return task
 
 
-def _dashscope_url(model: str) -> str:
-    base = os.environ.get("dashscope_url", "")  # noqa: SIM112  (path.sh 里的原名)
-    if not base:
-        raise SystemExit("缺环境变量 dashscope_url。先 source path.sh 再跑。")
-    host = base.replace("https://", "").split("/")[0]
-    return f"wss://{host}/api-ws/v1/realtime?model={model}"
+def _with_model(url: str, model: str) -> str:
+    """Name the model in the query string, the way hosted endpoints expect.
+
+    Deciding WHICH model, and which address, moved to resolve_endpoint — this
+    only joins the two. Idempotent because an address may arrive already
+    finished: someone can paste a complete URL into config or --url, and
+    stapling a second ?model= on would make it unroutable.
+    """
+    if not model or "model=" in url:
+        return url
+    joiner = "&" if "?" in url else "?"
+    return f"{url}{joiner}model={model}"
 
 
 def _session_frame(provider: ProviderName, voice: str = "") -> dict[str, Any] | None:
@@ -719,7 +725,6 @@ async def run_director(args: argparse.Namespace) -> int:
         write_endpoint_file,
     )
 
-    provider = ProviderName(args.provider)
     config_path: Path = args.config or DEFAULT_CONFIG
     if not config_path.is_file():
         # load() treats a missing path as "all defaults", which silently ignores
@@ -867,13 +872,22 @@ async def run_director(args: argparse.Namespace) -> int:
     else:
         print(f"[侧路] {side_desc}")
 
+    # Command line, then config, then environment — the order the key and the
+    # voice already follow. Until this call the flags' own defaults decided,
+    # so [speech] never got a vote.
+    endpoint = resolve_endpoint(
+        settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
+    )
+    provider = endpoint.provider
+    print(f"[语音] {provider.value} @ {endpoint.url.split('?')[0]}（来自{endpoint.source}）")
+
     inner: link.SpeechLink
-    connect_url: str = args.url
+    connect_url: str = endpoint.url
     if provider is ProviderName.S2S:
         # Audio replies, not the shipping default: this stands against the
         # zero-patch official pipeline whose own TTS does the speaking. A
         # text-pinned session would mute every reply until stage 4 exists.
-        inner = S2SLink(args.url, text_replies=False)
+        inner = S2SLink(connect_url, text_replies=False)
     elif provider is ProviderName.DASHSCOPE:
         from bilisama.realtime.providers.hosted import HostedLink
 
@@ -887,7 +901,7 @@ async def run_director(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
-        connect_url = _dashscope_url(args.model)
+        connect_url = _with_model(connect_url, endpoint.model)
         inner = HostedLink(
             connect_url,
             ProviderName.DASHSCOPE,
@@ -1510,17 +1524,35 @@ async def run_director(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
-    provider = ProviderName(args.provider)
+    from bilisama import secrets
+    from bilisama.cli import DEFAULT_CONFIG
+    from bilisama.config import load
+
+    # The bare link is the only way to test a hosted endpoint with your own
+    # voice (see the module docstring), so it reads the config too — otherwise
+    # "config decides where we dial" would only be half true. strict=False:
+    # this path must survive a machine with no config file at all, which is
+    # exactly the packaged case.
+    settings = load(args.config or DEFAULT_CONFIG, strict=False)
+    endpoint = resolve_endpoint(
+        settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
+    )
+    provider = endpoint.provider
     profile = profile_for(provider)
     headers: dict[str, str] = {}
+    url = endpoint.url
     if provider is ProviderName.DASHSCOPE:
-        key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
+        # Same order the key already used in director mode: config reference
+        # first, path.sh second. The two entry points disagreed until now.
+        env_key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
+        key = secrets.resolve(settings.speech.dashscope.api_key_ref) or env_key
         if not key:
-            raise SystemExit("缺环境变量 ali_api_key。先 source path.sh 再跑。")
-        url = _dashscope_url(args.model)
+            raise SystemExit(
+                "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
+            )
+        url = _with_model(url, endpoint.model)
         headers = {"Authorization": f"Bearer {key}"}
-    else:
-        url = args.url
+    print(f"[语音] {provider.value} @ {url.split('?')[0]}（来自{endpoint.source}）")
 
     client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
     await _connect_or_exit(client, provider, url)
@@ -1567,11 +1599,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="bilisama dev-talk", description="拿真人声音测我们自己的语音链路"
     )
-    parser.add_argument("--provider", choices=["s2s", "dashscope"], default="s2s")
-    parser.add_argument("--url", default="ws://127.0.0.1:8765/v1/realtime", help="s2s 服务地址")
+    # default=None on all three, deliberately: a flag that always carries a
+    # value can never lose to the config, which is how [speech] ended up
+    # decorative. None is the sentinel for "not given" — the same trick
+    # --voice already uses with "". Not argparse.SUPPRESS: that removes the
+    # attribute entirely and every hand-built Namespace in the tests breaks.
     parser.add_argument(
-        "--model", default="qwen-audio-3.0-realtime-flash", help="DashScope 的 realtime 模型名"
+        "--provider", choices=["s2s", "dashscope"], default=None, help="不给就读配置"
     )
+    parser.add_argument("--url", default=None, help="语音服务地址；不给就读配置")
+    parser.add_argument("--model", default=None, help="托管服务的模型名；不给就读配置")
     parser.add_argument(
         "--voice",
         default="",

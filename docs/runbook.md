@@ -22,7 +22,7 @@
 前两行就够；跑本地引擎才需要给它配一个对话模型：
 
 ```bash
-# 云端语音服务（dev-talk --provider dashscope 用这两行）
+# 云端语音服务（地址是兜底，见下面「连哪儿由谁说了算」）
 export dashscope_url=...    # 阿里 MaaS 实例地址
 export ali_api_key=...      # 它的 key
 
@@ -37,6 +37,24 @@ export openai_compatible_url=...
 ```
 
 同一份变量在 `.env.example` 里也列了一份，两边保持一致。
+
+### 连哪儿由谁说了算
+
+**命令行 > 配置 > 环境变量**，三层，先给的赢。密钥和音色本来就是这个顺序，
+2026-08-24 把 provider、地址、模型名也接了进来——在那之前 `[speech]` 那几个字段
+是摆设，命令行的默认值永远压着它们。
+
+启动时会打一行 `[语音] dashscope @ 地址（来自配置）`，告诉你这次是哪一层赢的。
+连不上的时候先看这一行，别急着改配置。
+
+| 想干什么 | 怎么做 |
+|---|---|
+| 固定用某个后端 | 改 `bilisama.toml` 的 `[speech] provider`，别每次敲 `--provider` |
+| 临时试另一个地址 | `--url`，不改配置 |
+| 开发机图省事 | `source path.sh`，`dashscope_url` 仍然兜底 |
+
+`[speech.dashscope] endpoint` 出厂是空的——那是租户专属地址，不适合入库。
+开发机靠 `path.sh` 兜着；将来打包出去的版本要靠首次向导填。
 
 ## 起本地语音服务器（原装三段管线：识别 → 对话 → 合成）
 
