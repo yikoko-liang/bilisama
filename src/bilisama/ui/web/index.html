@@ -60,6 +60,23 @@
     <section id="tab-live" class="tab-page active" role="tabpanel" aria-labelledby="tab-btn-live">
       <h4 class="sect">健康</h4>
       <div id="health" class="cards"><p class="empty">面板打开时每 5 秒刷新</p></div>
+      <h4 class="sect">声音</h4>
+      <div id="audio" class="audio">
+        <p id="audio-owner" class="audio-owner">正在接管麦克风…</p>
+        <label class="audio-row">
+          <span>麦克风</span>
+          <select id="audio-in" aria-label="麦克风设备"><option>读取中…</option></select>
+        </label>
+        <label class="audio-row">
+          <span>扬声器</span>
+          <select id="audio-out" aria-label="扬声器设备"><option>读取中…</option></select>
+        </label>
+        <div class="audio-row">
+          <span>输入电平</span>
+          <div class="level" aria-hidden="true"><i id="audio-level"></i></div>
+          <button id="audio-test" type="button">试音</button>
+        </div>
+      </div>
       <h4 class="sect">谁能让她开口</h4>
       <div id="speak-matrix" class="matrix"></div>
       <h4 class="sect">事件注入</h4>

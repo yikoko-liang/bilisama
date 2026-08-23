@@ -466,3 +466,58 @@ input.cfg-edit:focus {
   color: var(--ink-dim);
   cursor: pointer;
 }
+
+/* ------------------------------------------------------------------ audio */
+
+.audio {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.audio-owner {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.audio-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+}
+
+.audio-row > span {
+  flex: 0 0 52px;
+  color: var(--ink-dim);
+}
+
+.audio-row select {
+  flex: 1 1 auto;
+  min-width: 0; /* a long device name must not push the row wider than the panel */
+}
+
+/* Peak, not RMS: this exists to answer "is it hearing me at all", and a peak
+   moves visibly on a single word where an average barely twitches. */
+.level {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-edge);
+  overflow: hidden;
+}
+
+.level i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 60ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .level i {
+    transition: none;
+  }
+}

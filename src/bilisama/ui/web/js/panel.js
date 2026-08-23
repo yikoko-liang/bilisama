@@ -47,6 +47,13 @@ export function createPanel({ send }) {
   const panicBtn = document.getElementById("p-panic");
   const healthEl = document.getElementById("health");
   const matrixEl = document.getElementById("speak-matrix");
+  const audioOwnerEl = document.getElementById("audio-owner");
+  const audioInEl = document.getElementById("audio-in");
+  const audioOutEl = document.getElementById("audio-out");
+  const audioLevelEl = document.getElementById("audio-level");
+  const audioTestEl = document.getElementById("audio-test");
+  let audio = null; // set by main.js once the audio socket exists
+  let levelTimer = null;
   const timelineEl = document.getElementById("timeline");
   const loglinesEl = document.getElementById("loglines");
   const levelSel = document.getElementById("log-level");
@@ -506,8 +513,94 @@ export function createPanel({ send }) {
     loadConfig();
   }
 
+  // ------------------------------------------------------------ audio
+
+  // Device names arrive empty until the microphone is granted, so this runs
+  // after a claim rather than on load — a list of "（未命名设备）" helps nobody.
+  async function loadDevices() {
+    if (!audio || !audioInEl) return;
+    let devices = [];
+    try {
+      devices = await audio.devices();
+    } catch (err) {
+      console.warn("读不到音频设备：", err);
+      return;
+    }
+    const fill = (select, kind) => {
+      const previous = select.value;
+      select.replaceChildren();
+      const auto = el("option", null, "跟随系统");
+      auto.value = "";
+      select.append(auto);
+      for (const device of devices.filter((one) => one.kind === kind)) {
+        const option = el("option", null, device.label);
+        option.value = device.id;
+        select.append(option);
+      }
+      select.value = previous; // survives a re-enumeration after a hot-plug
+    };
+    fill(audioInEl, "audioinput");
+    fill(audioOutEl, "audiooutput");
+  }
+
+  audioInEl?.addEventListener("change", () => audio?.useInput(audioInEl.value));
+  audioOutEl?.addEventListener("change", async () => {
+    const moved = await audio?.useOutput(audioOutEl.value);
+    if (moved === false) {
+      audioOwnerEl.textContent = "这个浏览器不支持切换扬声器，用系统默认。";
+      audioOutEl.value = "";
+    }
+  });
+  audioTestEl?.addEventListener("click", () => audio?.test());
+
+  function startLevelMeter() {
+    if (levelTimer || !audioLevelEl) return;
+    // 20 Hz: fast enough to look live, slow enough to cost nothing. It stops
+    // with the claim, so a panel-only window never runs it at all.
+    levelTimer = setInterval(() => {
+      const level = audio?.level() ?? 0;
+      audioLevelEl.style.width = `${Math.round(Math.min(1, level) * 100)}%`;
+    }, 50);
+  }
+
+  function stopLevelMeter() {
+    clearInterval(levelTimer);
+    levelTimer = null;
+    if (audioLevelEl) audioLevelEl.style.width = "0%";
+  }
+
   return {
+    /** Hand over the audio module; only the window that owns devices has one. */
+    attachAudio(instance) {
+      audio = instance;
+    },
+    setAudioOwner(owner, error) {
+      if (!audioOwnerEl) return;
+      if (error) {
+        audioOwnerEl.textContent = `拿不到麦克风：${error}`;
+        stopLevelMeter();
+        return;
+      }
+      if (!owner) {
+        // Either nothing is connected yet, or a stronger client took over.
+        audioOwnerEl.textContent = "声音走本机，这个窗口只看不听。";
+        stopLevelMeter();
+        return;
+      }
+      audioOwnerEl.textContent =
+        owner === "shell"
+          ? "麦克风和扬声器都在这里，回声消除已开。"
+          : "麦克风和扬声器都在这个页面，回声消除已开。";
+      loadDevices();
+      startLevelMeter();
+    },
     handleFrame(event, data) {
+      if (event === "audio.owner") {
+        // Broadcast to everyone: a window that did NOT get the devices needs
+        // to say why rather than look broken.
+        if (!audio) this.setAudioOwner(null);
+        return;
+      }
       if (event === "event.feed") feedEntry(data);
       else if (event === "log.line") logEntry(data.line ?? "");
       else if (event === "panel.state") {

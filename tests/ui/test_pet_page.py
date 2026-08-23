@@ -26,6 +26,7 @@ import pytest
 from bilisama.clock import SystemClock
 from bilisama.config.schema import Settings
 from bilisama.obs.health import HealthRegistry
+from bilisama.ui.audio import AudioBroker
 from bilisama.ui.config_edit import apply_panel_edits
 from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
@@ -51,6 +52,8 @@ class Harness:
     avatar: dict[str, str]
     server: UiServer
     settings: Settings = field(default_factory=Settings)
+    broker: AudioBroker | None = None
+    uplink: list[bytes] = field(default_factory=list)
     _sock_port: int = 0
 
     def hello(self) -> dict[str, Any]:
@@ -110,6 +113,12 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
             )
 
         handlers[ClientEvent.PANEL_SET] = panel_set
+    broker = AudioBroker()
+    uplink: list[bytes] = []
+
+    async def on_audio(chunk: bytes) -> None:
+        uplink.append(chunk)
+
     app = create_ui_app(
         hub=hub,
         registry=registry,
@@ -118,6 +127,8 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
         origin=origin,
         handlers=handlers,
         hello=harness_ref[0].hello if harness_ref else dict,
+        broker=broker,
+        on_audio=on_audio,
     )
     server = UiServer(app, sock)
     if harness_ref:
@@ -126,6 +137,8 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
         harness_ref[0].url = f"{origin}/{_TOKEN}/"
         harness_ref[0].origin = origin
         harness_ref[0].calls = recorder.calls
+        harness_ref[0].broker = broker
+        harness_ref[0].uplink = uplink
     server.start()
     return server
 
@@ -159,7 +172,19 @@ async def harness() -> AsyncIterator[Harness]:
 async def browser() -> AsyncIterator[Browser]:
     async with async_playwright() as pw:
         try:
-            launched = await pw.chromium.launch()
+            launched = await pw.chromium.launch(
+                args=[
+                    # A synthetic microphone, granted without a prompt: headless
+                    # chromium has no capture device, and without one the audio
+                    # tests would assert against a getUserMedia that always
+                    # rejects — green for the wrong reason.
+                    "--use-fake-device-for-media-stream",
+                    "--use-fake-ui-for-media-stream",
+                    # Autoplay policy parks an AudioContext until a gesture,
+                    # and nothing here clicks before she first speaks.
+                    "--autoplay-policy=no-user-gesture-required",
+                ]
+            )
         except Exception:
             pytest.skip("chromium 未装：.venv/bin/python -m playwright install chromium")
         yield launched
@@ -445,3 +470,125 @@ async def test_missing_pack_degrades_to_tofu_with_a_warning(
         assert warned, "the degrade path must announce itself in the console"
     finally:
         await context.close()
+
+
+# ------------------------------------------------------------ audio in the page
+
+
+@pytest.fixture
+async def audio_page(browser: Browser, harness: Harness) -> AsyncIterator[Page]:
+    """A page with a fake microphone, granted without a prompt.
+
+    --use-fake-device-for-media-stream gives getUserMedia a synthetic tone, so
+    capture genuinely runs: the worklet resamples, the socket carries frames,
+    and the assertions are about real bytes rather than a mock's say-so.
+    """
+    context = await browser.new_context(
+        bypass_csp=True,
+        permissions=["microphone"],
+    )
+    opened = await context.new_page()
+    await opened.goto(harness.url)
+    yield opened
+    await context.close()
+
+
+@pytest.mark.ui_browser
+async def test_the_page_takes_the_devices_and_the_microphone_reaches_the_server(
+    audio_page: Page, harness: Harness
+) -> None:
+    """The whole point of the move, end to end.
+
+    Echo cancellation is why audio lives here now, and it only works on audio
+    the browser itself both captures and renders — so if capture does not
+    genuinely run in the page, nothing else in this slice matters.
+    """
+    for _ in range(300):
+        if harness.broker is not None and harness.broker.owner is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert harness.broker is not None
+    assert harness.broker.owner == "browser", "页面没拿到设备"
+
+    for _ in range(400):
+        if harness.uplink:
+            break
+        await asyncio.sleep(0.02)
+    assert harness.uplink, "麦克风没有把帧送上来"
+    # 20ms of 16 kHz mono s16 — the frame size section 3.2 asks for. A frame of
+    # another length means the worklet resampled to the wrong rate, which is
+    # the failure that makes the streamer sound slow to the server.
+    assert len(harness.uplink[0]) == 640, len(harness.uplink[0])
+
+
+@pytest.mark.ui_browser
+async def test_reply_audio_plays_and_reports_itself_segment_by_segment(
+    audio_page: Page, harness: Harness
+) -> None:
+    """The receipts that feed the floor gate (ledger #41)."""
+    for _ in range(300):
+        if harness.broker is not None and harness.broker.owner is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert harness.broker is not None
+    assert harness.broker.owner is not None, "页面还没拿到设备就开始播，这条断言先说话"
+
+    # Half a second of 24 kHz silence, in two segments.
+    chunk = b"\x00\x00" * 12000
+    harness.broker.play(chunk)
+    harness.broker.play(chunk)
+
+    for _ in range(400):
+        started = [c for c in harness.calls if c[0] == ClientEvent.PLAYBACK_STARTED]
+        if len(started) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    started = [c for c in harness.calls if c[0] == ClientEvent.PLAYBACK_STARTED]
+    assert len(started) >= 2, f"两段音频只报了 {len(started)} 次开始"
+
+
+@pytest.mark.ui_browser
+async def test_a_barge_in_stops_playback_and_says_how_much_was_heard(
+    audio_page: Page, harness: Harness
+) -> None:
+    for _ in range(300):
+        if harness.broker is not None and harness.broker.owner is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert harness.broker is not None
+    assert harness.broker.owner is not None, "页面还没拿到设备"
+    harness.broker.play(b"\x00\x00" * 48000)  # two seconds
+
+    for _ in range(400):
+        if any(c[0] == ClientEvent.PLAYBACK_STARTED for c in harness.calls):
+            break
+        await asyncio.sleep(0.02)
+    harness.hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": "test"})
+
+    for _ in range(400):
+        cancelled = [c for c in harness.calls if c[0] == ClientEvent.PLAYBACK_CANCELLED]
+        if cancelled:
+            break
+        await asyncio.sleep(0.02)
+    cancelled = [c for c in harness.calls if c[0] == ClientEvent.PLAYBACK_CANCELLED]
+    assert cancelled, "打断之后没有回执"
+    assert "played_ms" in cancelled[0][1], cancelled[0][1]
+
+
+@pytest.mark.ui_browser
+async def test_the_panel_names_the_devices_once_the_microphone_is_granted(
+    audio_page: Page, harness: Harness
+) -> None:
+    """Device labels stay blank until permission lands, which is why the panel
+    enumerates after a claim rather than on load — a list of 「未命名设备」
+    helps nobody pick a microphone."""
+    await audio_page.click("#corner")
+    owner = audio_page.locator("#audio-owner")
+    await owner.wait_for(state="visible")
+    for _ in range(400):
+        if "回声消除已开" in (await owner.inner_text()):
+            break
+        await asyncio.sleep(0.02)
+    assert "回声消除已开" in (await owner.inner_text())
+    options = await audio_page.locator("#audio-in option").count()
+    assert options >= 1, "麦克风下拉是空的"

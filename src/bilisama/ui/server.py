@@ -310,9 +310,24 @@ def create_ui_app(
             try:
                 pump = asyncio.create_task(_pump_audio(ws, outbound), name="ui:audio-out")
                 while True:
-                    chunk = await ws.receive_bytes()
-                    if on_audio is not None:
-                        await on_audio(chunk)
+                    # Both kinds on one socket: PCM up, and the playback
+                    # receipts that describe the PCM coming down. They used to
+                    # go out on the control socket, which is a different
+                    # connection opening on its own schedule — when the audio
+                    # arrived first, every playback.started was dropped and the
+                    # floor gate never learned she was speaking. Receipts ride
+                    # with the audio they are about.
+                    message = await ws.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        break
+                    payload = message.get("bytes")
+                    if payload is not None:
+                        if on_audio is not None:
+                            await on_audio(payload)
+                        continue
+                    text = message.get("text")
+                    if text is not None:
+                        await _dispatch(text, handlers)
             except WebSocketDisconnect:
                 pass
             finally:

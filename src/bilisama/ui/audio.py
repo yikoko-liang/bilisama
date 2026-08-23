@@ -26,14 +26,12 @@ that it is watching rather than left looking broken.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Protocol
+from collections.abc import Callable
+from typing import Literal, Protocol
 
 from bilisama.obs.logging import get_logger
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-__all__ = ["AudioBroker", "AudioOwner", "LocalAudio"]
+__all__ = ["AudioBroker", "AudioOwner", "LocalAudio", "PlaybackTally"]
 
 log = get_logger(__name__)
 
@@ -140,3 +138,62 @@ class AudioBroker:
     def _notify(self) -> None:
         if self._announce is not None:
             self._announce(self._owner)
+
+
+class PlaybackTally:
+    """How many segments the page still has to play, and the gate that reads it.
+
+    Backlog item 41 exists for this class. The receipts are per SEGMENT: one
+    reply is scheduled as many buffers, and between any two of them there is an
+    instant where the previous has ended and the next has not started. Treating
+    that instant as "finished speaking" opens the floor mid-sentence and lets
+    the scheduler dispatch over her — which is precisely how the 106 seconds of
+    unplayed audio accumulated the first time, just arriving from a different
+    direction.
+
+    So the gate follows a COUNT, not the last event. It closes on the first
+    segment and opens only when the last one is done.
+    """
+
+    __slots__ = ("_notify", "_on_playback", "_outstanding")
+
+    def __init__(
+        self,
+        *,
+        on_playback: Callable[[bool], None],
+        notify: Callable[[], None],
+    ) -> None:
+        """Args:
+        on_playback: SpeakingFloor.on_playback — the gate itself, unchanged
+            product code that only wanted a producer.
+        notify: Scheduler.notify. State gates release on events, and playback
+            finishing is not one the link ever sends.
+        """
+        self._on_playback = on_playback
+        self._notify = notify
+        self._outstanding = 0
+
+    @property
+    def outstanding(self) -> int:
+        return self._outstanding
+
+    def started(self) -> None:
+        self._outstanding += 1
+        if self._outstanding == 1:
+            self._on_playback(True)
+
+    def ended(self) -> None:
+        # Clamped: a receipt for a segment that was already cancelled would
+        # otherwise drive the count negative and wedge the gate shut.
+        self._outstanding = max(0, self._outstanding - 1)
+        if self._outstanding == 0:
+            self._on_playback(False)
+            self._notify()
+
+    def cancelled(self) -> None:
+        """A barge-in took everything scheduled. Nothing is outstanding now."""
+        if self._outstanding == 0:
+            return
+        self._outstanding = 0
+        self._on_playback(False)
+        self._notify()

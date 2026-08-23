@@ -9,6 +9,7 @@ import { resolveVisual } from "./presentation.js";
 import { createRenderer } from "./renderer.js";
 import { createBubble } from "./bubble.js";
 import { createPanel } from "./panel.js";
+import { createAudio } from "./audio.js";
 
 const panelOnly = location.hash === "#panel";
 if (panelOnly) document.body.classList.add("panel-only");
@@ -157,7 +158,12 @@ const handlers = {
   },
   "playback.clear": () => {
     bubble.shatter();
+    // Stop what is already scheduled, and report how much of it was heard.
+    // The bubble and the sound have to go together — a shattered bubble over a
+    // voice that keeps talking is worse than either alone.
+    audio?.clear();
   },
+  "audio.owner": (data) => panel.handleFrame("audio.owner", data),
   "event.feed": (data) => panel.handleFrame("event.feed", data),
   "log.line": (data) => panel.handleFrame("log.line", data),
   "panel.state": (data) => panel.handleFrame("panel.state", data),
@@ -166,6 +172,14 @@ const handlers = {
     // extra for it today.
   },
 };
+
+// The panel window carries no pet and no devices: two claims from one shell
+// would have them fighting over the same microphone.
+const audio = panelOnly
+  ? null
+  : createAudio({ onOwner: (owner, error) => panel.setAudioOwner(owner, error) });
+
+panel.attachAudio(audio);
 
 const socket = connect({
   onFrame: (event, data) => handlers[event]?.(data),

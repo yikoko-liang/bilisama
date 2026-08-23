@@ -351,7 +351,14 @@ class _Speaker:
 
         self._buffer = bytearray()
         self._dropped_s = 0.0
+        self._device = device
         self._lock = threading.Lock()
+        self._stream: Any = None
+        self._open()
+
+    def _open(self) -> None:
+        """Take the output device. Leaves _stream None if it cannot be had."""
+        device = self._device
         try:
             import sounddevice
         except ImportError:
@@ -387,6 +394,25 @@ class _Speaker:
             print(f"[音频] 扬声器起不来（{exc}），这场没有声音输出。", file=sys.stderr)
             return
         self._stream = stream
+
+    def suspend(self) -> None:
+        """Give the output device up while a page holds it. BLOCKING.
+
+        Not close(): that one is final and idempotent for the shutdown chain.
+        This keeps the device remembered so resume() can take it back, and
+        drops whatever was queued — those samples belong to the moment that
+        just ended, and playing them on the way back would be the backlog all
+        over again.
+        """
+        self.flush()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            _close_audio_stream(stream)
+
+    def resume(self) -> None:
+        """Take the device back after a page let go. BLOCKING."""
+        if self._stream is None:
+            self._open()
 
     def play(self, pcm: bytes) -> None:
         if self._stream is None:
@@ -717,6 +743,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
+    from bilisama.ui.audio import AudioBroker, PlaybackTally
     from bilisama.ui.config_edit import apply_panel_edits
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
     from bilisama.ui.hub import UiHub, VoiceSignals
@@ -1073,6 +1100,38 @@ async def run_director(args: argparse.Namespace) -> int:
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
+    class _LocalPair:
+        """The sounddevice ends, parked while a page holds the devices.
+
+        Both halves go off the loop: taking and releasing a PortAudio stream
+        blocks, and doing either here would freeze the loop that has to keep
+        the page's socket alive — the hazard _close_audio_stream exists for.
+        The microphone task is cancelled rather than muted, so the OS
+        indicator goes out and the page's capture is the only one on the
+        device.
+        """
+
+        def __init__(self) -> None:
+            self.mic: asyncio.Task[None] | None = None
+            self.start_mic: Any = None
+
+        async def suspend(self) -> None:
+            task, self.mic = self.mic, None
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await asyncio.to_thread(speaker.suspend)
+
+        async def resume(self) -> None:
+            await asyncio.to_thread(speaker.resume)
+            if self.start_mic is not None and self.mic is None:
+                self.mic = self.start_mic()
+
+    local_pair = _LocalPair()
+    # Set once the UI server exists; None means the sounddevice pair is the
+    # only audio there is, which is every run without a page open.
+    broker: AudioBroker | None = None
+
     _USAGE = "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额"
     _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
 
@@ -1120,6 +1179,26 @@ async def run_director(args: argparse.Namespace) -> int:
             poke = PokeResponder(
                 clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
             )
+            live_hub_for_audio = hub
+            broker = AudioBroker(
+                local=local_pair,
+                announce=lambda owner: live_hub_for_audio.broadcast(
+                    ServerEvent.AUDIO_OWNER, {"owner": owner}
+                ),
+            )
+            # The gate SpeakingFloor has always had and nothing ever fed with
+            # real receipts. Counting segments rather than watching the last
+            # one is the whole point — see PlaybackTally (ledger #41).
+            tally = PlaybackTally(on_playback=floor.on_playback, notify=scheduler.notify)
+
+            async def on_playback_started(_data: dict[str, Any]) -> None:
+                tally.started()
+
+            async def on_playback_ended(_data: dict[str, Any]) -> None:
+                tally.ended()
+
+            async def on_playback_cancelled(_data: dict[str, Any]) -> None:
+                tally.cancelled()
 
             def panel_state() -> dict[str, Any]:
                 speak = settings.interaction.speak
@@ -1201,7 +1280,12 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.PET_POKE: on_poke,
                         ClientEvent.PANEL_SET: on_panel_set,
                         ClientEvent.CONSOLE_LINE: on_console_line,
+                        ClientEvent.PLAYBACK_STARTED: on_playback_started,
+                        ClientEvent.PLAYBACK_ENDED: on_playback_ended,
+                        ClientEvent.PLAYBACK_CANCELLED: on_playback_cancelled,
                     },
+                    broker=broker,
+                    on_audio=speech.push_audio,
                     hello=hello,
                     # <data home>/bilisama/skins — user-imported packs, shadowing
                     # the packaged ones. Endpoint file and skins share the roof.
@@ -1337,6 +1421,16 @@ async def run_director(args: argparse.Namespace) -> int:
             """
             last = False
             while True:
+                if broker is not None and not broker.local_is_live:
+                    # A page holds the devices, so PlaybackTally is feeding the
+                    # gate and this poll must keep its hands off it. Without
+                    # this the handover itself opens the floor: suspending the
+                    # speaker takes `busy` from true to false at the exact
+                    # moment the page starts playing, and the gate would read
+                    # that as her having finished.
+                    last = False
+                    await asyncio.sleep(0.1)
+                    continue
                 busy = speaker.busy
                 if busy != last:
                     floor.on_playback(busy)
@@ -1387,6 +1481,22 @@ async def run_director(args: argparse.Namespace) -> int:
         if not args.mute_while_speaking:
             print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
 
+        def start_mic() -> asyncio.Task[None]:
+            # Records itself, because the broker swaps this task out and back
+            # while the list below keeps whichever one it was handed first.
+            # The shutdown chain cancels both, so a restarted microphone cannot
+            # outlive the session.
+            task = _watch(
+                asyncio.create_task(
+                    _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
+                    name="director:mic",
+                )
+            )
+            local_pair.mic = task
+            return task
+
+        local_pair.start_mic = start_mic
+
         await assembly.refresh_context()
         # _watch on every one: this list is started and then left alone while
         # the main flow waits on `stop`, so without it a task that raises just
@@ -1398,10 +1508,7 @@ async def run_director(args: argparse.Namespace) -> int:
                 assembly.run([console] + ([bili_source] if bili_source is not None else [])),
                 name="director:assembly",
             ),
-            asyncio.create_task(
-                _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
-                name="director:mic",
-            ),
+            local_pair.start_mic(),
             asyncio.create_task(
                 # stream_text off under the prompt: see _consume_events.
                 _consume_events(speech.events(), speaker, None, stream_text=not use_prompt),
@@ -1411,6 +1518,10 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(stdin_pump(), name="director:stdin"),
             asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
             asyncio.create_task(report_playback(), name="director:playback"),
+            # report_playback stays: it is the producer for the local half.
+            # While a page holds the devices the speaker has no stream, `busy`
+            # is False, and the gate is fed by PlaybackTally instead — the two
+            # producers never overlap because the devices only have one owner.
         ]
         for task in tasks:
             _watch(task)
@@ -1427,10 +1538,23 @@ async def run_director(args: argparse.Namespace) -> int:
                     audio_busy=speaker.busy,
                 )
 
+            live_broker = broker
+            assert live_broker is not None  # built in this branch, two lines up
+
             async def ui_feed() -> None:
-                # The fanout's third view (scheduler and director:play hold the
-                # other two); link_frames drops PCM before it can reach a browser.
+                """The fanout's third view; the other two are the scheduler and
+                director:play.
+
+                Two wires leave here. Words and state go through link_frames
+                onto the control socket. PCM goes to whoever holds the devices
+                — nowhere at all when that is nobody, which is exactly right:
+                the local speaker is already playing it in that case, and
+                sending it twice is how you get an echo of your own making.
+                """
                 async for ev in speech.events():
+                    if isinstance(ev, link.ReplyAudioDelta):
+                        live_broker.play(ev.pcm)
+                        continue
                     for name, data in link_frames(ev):
                         live_hub.broadcast(name, data)
 
@@ -1440,6 +1564,11 @@ async def run_director(args: argparse.Namespace) -> int:
             ]
         await stop.wait()
     finally:
+        # local_pair.mic separately: the broker may have replaced the microphone
+        # task after this list was built, and the replacement is not in it.
+        current_mic = local_pair.mic
+        if current_mic is not None and current_mic not in tasks:
+            tasks.append(current_mic)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

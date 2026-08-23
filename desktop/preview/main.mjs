@@ -160,8 +160,16 @@ function harden(win) {
   // port could redirect this frameless always-on-top window — which holds the
   // preload's IPC bridge — anywhere it liked.
   win.webContents.on("will-redirect", sameOrigin);
-  win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => {
-    callback(false); // the shell needs no mic, camera or anything else
+  // The microphone, and nothing else, and only for our own page. The shell is
+  // where audio lives now — that is what buys echo cancellation, and without
+  // it the streamer is back to headphones. Everything else stays refused, and
+  // so does the microphone from any other origin: this window follows a URL
+  // read off disk, so "our origin" is a check worth making rather than
+  // assuming.
+  win.webContents.session.setPermissionRequestHandler((wc, permission, callback) => {
+    const wanted = currentUrl ? originOf(currentUrl) : null;
+    const asking = originOf(wc.getURL());
+    callback(permission === "media" && wanted !== null && asking === wanted);
   });
 }
 
