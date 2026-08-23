@@ -27,11 +27,19 @@ def test_server_vocabulary_is_pinned() -> None:
         "playback.clear",
         "log.line",
         "panel.state",
+        "audio.owner",
     ]
 
 
 def test_client_vocabulary_is_pinned() -> None:
-    assert [event.value for event in ClientEvent] == ["pet.poke", "panel.set", "console.line"]
+    assert [event.value for event in ClientEvent] == [
+        "pet.poke",
+        "panel.set",
+        "console.line",
+        "playback.started",
+        "playback.ended",
+        "playback.cancelled",
+    ]
 
 
 # ------------------------------------------------------------ frame

@@ -25,6 +25,7 @@ from starlette.websockets import WebSocketDisconnect
 from bilisama.clock import FakeClock
 from bilisama.config.schema import Settings
 from bilisama.obs.health import HealthRegistry
+from bilisama.ui.audio import AudioBroker
 from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import (
@@ -302,3 +303,86 @@ async def test_bind_ui_socket_reports_a_taken_port() -> None:
             bind_ui_socket(port)
     finally:
         holder.close()
+
+
+# ------------------------------------------------------------ the audio socket
+
+
+def _audio_app(broker: AudioBroker) -> tuple[TestClient, list[bytes]]:
+    """An app with the audio socket mounted, plus what the mic sent upstream."""
+    heard: list[bytes] = []
+
+    async def on_audio(chunk: bytes) -> None:
+        heard.append(chunk)
+
+    app = create_ui_app(
+        hub=UiHub(FakeClock()),
+        registry=HealthRegistry(),
+        settings=_settings(),
+        token=_TOKEN,
+        origin=_ORIGIN,
+        handlers={},
+        hello=lambda: {},
+        broker=broker,
+        on_audio=on_audio,
+    )
+    return TestClient(app), heard
+
+
+def test_no_broker_means_no_audio_socket() -> None:
+    """Every run before this one had no audio socket; that shape still works."""
+    client, _hub, _calls = _build()
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect(f"/{_TOKEN}/audio"),
+    ):
+        pass
+
+
+def test_the_microphone_reaches_the_link_and_the_reply_comes_back() -> None:
+    broker = AudioBroker()
+    client, heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        ws.send_bytes(b"\x01\x02\x03\x04")
+        broker.play(b"\xaa\xbb")
+        assert ws.receive_bytes() == b"\xaa\xbb"
+    assert heard == [b"\x01\x02\x03\x04"]
+
+
+def test_hanging_up_gives_the_devices_back() -> None:
+    """A closed tab must not leave the local pair parked forever."""
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell"):
+        assert broker.owner == "shell"
+    assert broker.owner is None
+
+
+def test_a_second_claimant_is_turned_away_rather_than_left_hanging() -> None:
+    """Two capture streams would fight over the device, so the weaker one is
+    closed outright — a socket nobody feeds looks like a bug to the page."""
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell"):
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(f"/{_TOKEN}/audio") as loser,
+        ):
+            # Accepted and then closed with a code, rather than refused at the
+            # handshake: the page has to tell "someone else has the devices"
+            # apart from "your origin is wrong", and only a close code says
+            # which.
+            loser.receive_bytes()
+        assert refused.value.code == 4409
+
+
+def test_the_audio_socket_refuses_a_foreign_origin() -> None:
+    """Same fence as the control socket: this one carries a live microphone."""
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with (
+        pytest.raises(WebSocketDisconnect) as refused,
+        client.websocket_connect(f"/{_TOKEN}/audio", headers={"origin": "http://evil.example"}),
+    ):
+        pass
+    assert refused.value.code == 4403

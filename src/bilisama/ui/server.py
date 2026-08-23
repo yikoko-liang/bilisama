@@ -38,6 +38,7 @@ from bilisama.config.ui_meta import UI_META
 from bilisama.obs.health import HealthRegistry
 from bilisama.obs.health import create_app as create_health_app
 from bilisama.obs.logging import get_logger
+from bilisama.ui.audio import AudioBroker, AudioOwner
 from bilisama.ui.config_edit import field_control
 from bilisama.ui.events import ClientEvent, ServerEvent, frame
 from bilisama.ui.hub import UiHub
@@ -57,6 +58,12 @@ log = get_logger("bilisama.ui.server")
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
 
 _WEB_ROOT = Path(__file__).parent / "web"
+
+# Downlink chunks the socket may hold. Roughly two seconds of 24 kHz mono at
+# the sizes providers actually send — enough to ride out a scheduling hiccup,
+# far short of the minutes of drift this project measured when nothing bounded
+# the queue at all.
+_AUDIO_QUEUE = 64
 
 
 # ------------------------------------------------------------ socket & files
@@ -178,6 +185,8 @@ def create_ui_app(
     hello: Callable[[], Mapping[str, Any]],
     web_root: Path | None = None,
     user_skins_root: Path | None = None,
+    broker: AudioBroker | None = None,
+    on_audio: Callable[[bytes], Awaitable[None]] | None = None,
 ) -> FastAPI:
     """Assemble the app: page, WebSocket, config, static assets, health.
 
@@ -195,6 +204,11 @@ def create_ui_app(
         user_skins_root: `<data home>/bilisama/skins`, mounted only when it
             exists. User-imported packs there shadow the packaged ones because
             the page tries this mount first.
+        broker: Decides which client holds the devices. None leaves the audio
+            socket unmounted, which is the shape every run had before it
+            existed — audio stays in sounddevice.
+        on_audio: Where uplink microphone frames go, normally the link's
+            push_audio.
     """
     root = web_root or _WEB_ROOT
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
@@ -257,6 +271,57 @@ def create_ui_app(
                     await sender
 
     # Static mounts come after the routes so /, /ws and /config win; the
+    if broker is not None:
+
+        @app.websocket(prefix + "/audio")
+        async def audio_endpoint(ws: WebSocket) -> None:
+            """The microphone and speaker, for whichever client wins them.
+
+            Separate from /ws on purpose: that one broadcasts and drops the
+            oldest frame under pressure, which would starve the panel behind
+            48 KB/s of PCM and reorder samples besides. This one is point to
+            point and binary.
+            """
+            client_origin = ws.headers.get("origin")
+            if client_origin is not None and client_origin not in allowed_origins:
+                log.warning("ui.audio_origin_refused", origin=client_origin)
+                await ws.close(code=4403)
+                return
+            await ws.accept()
+            # The shell's preload declares itself; a plain tab cannot, which is
+            # exactly the distinction we want to rank on.
+            who: AudioOwner = "shell" if ws.query_params.get("role") == "shell" else "browser"
+            outbound: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_AUDIO_QUEUE)
+
+            def send(pcm: bytes) -> None:
+                # Drop the NEWEST under pressure, the opposite of the control
+                # hub. A late sample is worse than a missing one: keeping it
+                # would push everything behind it further out of time, which
+                # is the backlog this project already measured once.
+                if not outbound.full():
+                    outbound.put_nowait(pcm)
+
+            if not await broker.claim(who, send=send):
+                # Someone stronger has the devices. Say so and hang up rather
+                # than sit on a socket nobody feeds.
+                await ws.close(code=4409)
+                return
+            pump: asyncio.Task[None] | None = None
+            try:
+                pump = asyncio.create_task(_pump_audio(ws, outbound), name="ui:audio-out")
+                while True:
+                    chunk = await ws.receive_bytes()
+                    if on_audio is not None:
+                        await on_audio(chunk)
+            except WebSocketDisconnect:
+                pass
+            finally:
+                await broker.release(who)
+                if pump is not None:
+                    pump.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await pump
+
     # health app mounts last because its prefix is the bare token and a mount
     # swallows everything under itself.
     app.mount(prefix + "/assets", StaticFiles(directory=root), name="assets")
@@ -264,6 +329,16 @@ def create_ui_app(
         app.mount(prefix + "/skins", StaticFiles(directory=user_skins_root), name="skins")
     app.mount(prefix, create_health_app(registry), name="health")
     return app
+
+
+async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | None]) -> None:
+    """Move downlink PCM onto the wire until the socket goes away."""
+    while True:
+        chunk = await queue.get()
+        if chunk is None:
+            await ws.close(code=1001)
+            return
+        await ws.send_bytes(chunk)
 
 
 async def _pump(ws: WebSocket, queue: asyncio.Queue[str | None]) -> None:

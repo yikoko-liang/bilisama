@@ -1,9 +1,12 @@
 """The UI wire vocabulary: the first real slice of plan section 6.3.
 
 One WebSocket, JSON text frames, shape {"event": ..., "data": {...}}. Audio
-never crosses this wire — the preview keeps playback and the microphone in the
-dev-talk process, and stage 5 adds audio.* as new vocabulary rather than by
-changing anything here.
+never crosses THIS wire: PCM runs at about 48 KB/s, and this queue broadcasts
+to every client and drops the oldest frame when it fills — policies that are
+right for state and wrong for samples. Audio has its own socket, point to
+point with whichever client owns the devices (see ui/audio.py). What crosses
+here are the words about audio: who owns it, and what the browser has
+finished playing.
 
 Names are an append-only contract (same discipline as SkipReason): the panel,
 the pet page and later the generated .d.ts all key on them, so a rename is a
@@ -38,6 +41,9 @@ class ServerEvent(StrEnum):
     PLAYBACK_CLEAR = "playback.clear"
     LOG_LINE = "log.line"
     PANEL_STATE = "panel.state"
+    # Who holds the microphone and speaker. Broadcast, because the clients that
+    # did NOT get them need to say so rather than look broken.
+    AUDIO_OWNER = "audio.owner"
 
 
 class ClientEvent(StrEnum):
@@ -46,6 +52,17 @@ class ClientEvent(StrEnum):
     PET_POKE = "pet.poke"
     PANEL_SET = "panel.set"
     CONSOLE_LINE = "console.line"
+    # Section 6.3's playback receipts, arriving for real at last. Per SEGMENT,
+    # not per reply: one reply plays as several scheduled buffers, and between
+    # two of them there is always an instant where the previous has ended and
+    # the next has not started. Reading that instant as "finished speaking" is
+    # how the backlog comes back (ledger #41), so the gate counts outstanding
+    # segments instead.
+    PLAYBACK_STARTED = "playback.started"
+    PLAYBACK_ENDED = "playback.ended"
+    # Answer to playback.clear. played_ms is the number stage 5 needs to trim a
+    # remembered reply down to what the audience actually heard.
+    PLAYBACK_CANCELLED = "playback.cancelled"
 
 
 def frame(event: ServerEvent, data: Mapping[str, Any]) -> str:
