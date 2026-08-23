@@ -38,6 +38,9 @@ log = get_logger(__name__)
 
 _TICK_S = 1.0
 _TOPIC_TTL_S = 30.0  # a topic that waited half a minute is stale, drop it
+
+# See the item_text comment below.
+_DEAD_AIR_ITEM = "[本场] 这会儿没人说话"
 _CANDIDATE_MAX_TOKENS = 80
 
 
@@ -138,7 +141,21 @@ class ProactiveTopicLoop:
                         ),
                         max_tokens=self._max_tokens,
                     ),
-                    item_text=None,
+                    # Something has to reach the conversation: DashScope
+                    # refuses a response.create when it holds no user message,
+                    # out-of-band included (probed live 2026-08-24), so a
+                    # topic that injected nothing could never open a fresh
+                    # session there — backlog item 56. Plan section 4.5 always
+                    # said every proactive opening enters as a synthesized
+                    # user item plus response.create; this was the exception.
+                    #
+                    # A bracket prefix rather than the <bilisama_live_events>
+                    # wrapper: that tag means "audience data, not the
+                    # streamer" (persona/prompt.py:28) and this is neither.
+                    # The prefix matches the [弹幕] / [进房] lines she already
+                    # reads as context, so it does not sound like something to
+                    # say back.
+                    item_text=_DEAD_AIR_ITEM,
                 ),
                 trusted=True,
                 dedup_key=f"proactive:{int(now)}",

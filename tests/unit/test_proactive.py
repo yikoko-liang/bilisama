@@ -91,7 +91,13 @@ async def test_dead_air_produces_exactly_one_topic() -> None:
         intent = intents[0]
         assert intent.priority is Priority.PROACTIVE
         assert intent.trusted is True
-        assert intent.injection.item_text is None
+        # Ledger #56: this used to assert item_text is None, which pinned the
+        # bug as expected behaviour. DashScope refuses a response.create on a
+        # conversation with no user message — probed live 2026-08-24,
+        # out-of-band included — so a topic that injects nothing could never
+        # open a fresh session there. Plan section 4.5 always said every
+        # proactive opening enters as a synthesized user item.
+        assert intent.injection.item_text, "主动话题什么都不写，DashScope 上开场必被拒"
         assert "新键盘" in (intent.injection.reply.instructions or "")
         assert intent.expires_at is not None, "a stale topic must die in the queue"
 

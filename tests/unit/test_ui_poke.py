@@ -26,7 +26,10 @@ def test_poke_files_a_trusted_lowest_priority_quip() -> None:
     assert intent.source == "ui.poke"
     assert intent.priority is Priority.PROACTIVE
     assert intent.trusted is True
-    assert intent.injection.item_text is None  # nothing enters model history
+    # It used to be None — "nothing enters model history" — and that was
+    # exactly the bug: DashScope will not answer a conversation holding no user
+    # message. See the dedicated test below (ledger #56).
+    assert intent.injection.item_text == "戳了戳你"
     assert intent.injection.reply.max_tokens == 40  # quip cap beats the panel budget
     assert intent.created_at == 100.0
     assert intent.expires_at == 108.0  # a poke answered late is worse than none
@@ -61,3 +64,24 @@ def test_rapid_double_click_submits_once() -> None:
     responder2, submitted2 = _build(FakeClock(start=500.0))
     responder2.poke()
     assert submitted[0].dedup_key != submitted2[0].dedup_key
+
+
+def test_a_poke_writes_something_into_the_conversation() -> None:
+    """Ledger #56: an injection with no item cannot be answered on DashScope.
+
+    Probed live 2026-08-24, all four combinations: that endpoint refuses
+    `response.create` on a conversation holding no user message, and going
+    out-of-band does not exempt it. Poke and the proactive topic were the only
+    two intents that injected nothing, so on the shipping provider both died
+    at the first click of a fresh session — "Cannot create response:
+    conversation has no messages or no user message."
+
+    Plan section 4.5 already says every proactive opening enters as a
+    synthesized role:"user" item plus response.create. These two were the
+    exception, not the rule.
+    """
+    clock = FakeClock()
+    filed: list[Intent] = []
+    PokeResponder(clock, submit=filed.append, max_tokens=120).poke()
+    assert filed, "戳了一下却什么都没提交"
+    assert filed[0].injection.item_text, "戳一戳没往会话里写任何东西，DashScope 上会被拒"

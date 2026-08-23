@@ -17,11 +17,15 @@ from typing import Any
 import pytest
 import websockets
 
+from bilisama.config.enums import ProviderName
 from bilisama.config.schema import TurnConfig
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
+from bilisama.realtime import link
+from bilisama.realtime.providers.hosted import HostedLink
 from tests.fakes import mock_realtime as mock_module
 from tests.fakes.mock_realtime import _INPUT_BYTES_PER_MS, Fault, MockRealtimeServer, Script
+from tests.unit.test_realtime_client import _next_event
 
 
 async def _recv_until(ws: Any, wire_type: str, *, timeout: float = 2.0) -> dict[str, Any]:
@@ -1446,3 +1450,37 @@ async def test_speech_events_carry_the_audio_clock_and_item_id() -> None:
         second = await _recv_until(ws, "input_audio_buffer.speech_started")
         assert second["item_id"] != started["item_id"]
         assert second["audio_start_ms"] == 800
+
+
+async def test_a_create_on_an_empty_conversation_can_be_refused() -> None:
+    """Ledger #56: the shape that cost poke and the first proactive topic.
+
+    DashScope answers a response.create only once the conversation holds a
+    user message, and conversation="none" does not exempt it — probed live
+    2026-08-24, all four combinations. The fake used to answer happily, so no
+    test could see the two intents that injected nothing. Off by default,
+    because only that endpoint has been measured.
+    """
+    async with MockRealtimeServer(
+        caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=Script(requires_user_message=True)
+    ) as server:
+        linkobj = HostedLink(server.url, ProviderName.DASHSCOPE)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            await linkobj.request_reply(link.ReplySpec(instructions="打个招呼"))
+            # The refusal arrives as a frame, not an exception: the client
+            # surfaces it as LinkError and settles the reply failed — the two
+            # lines the streamer saw on screen.
+            failed = await _next_event(events, link.ReplyDone)
+            assert isinstance(failed, link.ReplyDone)
+            assert failed.status != "completed", failed.status
+
+            # With something in the conversation it goes through, which is what
+            # poke and the topic loop now do.
+            await linkobj.add_context_item("戳了戳你")
+            await linkobj.request_reply(link.ReplySpec(instructions="打个招呼"))
+            done = await _next_event(linkobj.events(), link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+        finally:
+            await linkobj.aclose()

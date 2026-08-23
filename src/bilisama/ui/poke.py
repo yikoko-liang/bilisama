@@ -24,6 +24,19 @@ _MAX_TOKENS_CAP = 40
 
 _INSTRUCTIONS = "主播戳了戳你，简短俏皮地回应一下，一句话。"
 
+# What lands in the conversation. It has to be there at all: DashScope refuses
+# a response.create on a conversation holding no user message, out-of-band
+# included (probed live 2026-08-24), so a poke that injected nothing died at
+# the first click of a fresh session — backlog item 56. Plan section 4.5 said
+# so from the start: every proactive opening enters as a synthesized user item
+# plus response.create.
+#
+# No <bilisama_live_events> wrapper, deliberately. That tag means "audience
+# data, not the streamer" (persona/prompt.py:28), and this IS the streamer.
+# Written the way a person pokes rather than as a stage direction, because
+# parenthetical narration is the shape that gets read aloud.
+_ITEM = "戳了戳你"
+
 
 class PokeResponder:
     """Turns pet clicks into at most one intent per cooldown window."""
@@ -67,7 +80,8 @@ class PokeResponder:
                 source="ui.poke",
                 priority=Priority.PROACTIVE,
                 injection=Injection(
-                    reply=ReplySpec(instructions=_INSTRUCTIONS, max_tokens=self._max_tokens)
+                    reply=ReplySpec(instructions=_INSTRUCTIONS, max_tokens=self._max_tokens),
+                    item_text=_ITEM,
                 ),
                 trusted=True,
                 dedup_key=f"ui.poke:{now}",

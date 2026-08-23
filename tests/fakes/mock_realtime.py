@@ -134,6 +134,17 @@ class Script:
 
     faults: set[Fault] = field(default_factory=set)
     reply_text: str = "好的，我看到了。"
+    # Refuse a response.create while the conversation holds no user message.
+    # DashScope does this — probed live 2026-08-24, all four combinations, and
+    # conversation="none" does NOT exempt it. It cost poke and the first
+    # proactive topic of every fresh session on the shipping provider, and no
+    # test saw it because the fake answered happily (ledger #56).
+    #
+    # Off by default because only that endpoint has been measured: s2s takes an
+    # out-of-band create on an empty conversation, which is why the same poke
+    # worked there. A fake stricter than the server it models is its own kind
+    # of lie.
+    requires_user_message: bool = False
     delta_chunks: int = 3
     # Gap between deltas, so a test can slip an interruption in mid-reply.
     delta_interval_s: float = 0.0
@@ -249,6 +260,9 @@ class MockRealtimeServer:
         self._current_response_id: str | None = None
         self._next_response_id = 0
         self._deferred: list[dict[str, Any]] = []
+        # Whether anything has been written into the conversation. Only
+        # consulted when the script asks for it; see Script.requires_user_message.
+        self._seen_user_item = False
         self._speculative_open = False
         self._interrupt_response = True  # rule 6: session.update can turn the axe off
         self._appended_since_stop_ms: int | None = None
@@ -632,6 +646,7 @@ class MockRealtimeServer:
         profile because a fake that acks promptly is the one that certifies a
         broken client.
         """
+        self._seen_user_item = True
         if self._generating():
             self._deferred.append(event)
             return
@@ -639,6 +654,15 @@ class MockRealtimeServer:
 
     async def _on_response_create(self, event: dict[str, Any]) -> None:
         out_of_band = (event.get("response") or {}).get("conversation") == "none"
+
+        if self.script.requires_user_message and not self._seen_user_item:
+            # Verbatim from the endpoint, because the wording is what a
+            # developer will search for when they hit it.
+            await self._error(
+                "invalid_request_error",
+                "Cannot create response: conversation has no messages or no user message.",
+            )
+            return
         holds_slot = not (out_of_band and self.caps.out_of_band_exempt_from_slot)
 
         if self.caps.single_response_slot and holds_slot and self._slot_holder() is not None:
