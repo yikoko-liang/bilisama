@@ -28,6 +28,9 @@ def test_server_vocabulary_is_pinned() -> None:
         "log.line",
         "panel.state",
         "audio.owner",
+        "audio.command",
+        "audio.devices",
+        "audio.level",
     ]
 
 
@@ -39,6 +42,8 @@ def test_client_vocabulary_is_pinned() -> None:
         "playback.started",
         "playback.ended",
         "playback.cancelled",
+        "audio.ask",
+        "audio.report",
     ]
 
 

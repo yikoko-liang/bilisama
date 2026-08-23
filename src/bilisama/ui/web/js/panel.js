@@ -52,7 +52,11 @@ export function createPanel({ send }) {
   const audioOutEl = document.getElementById("audio-out");
   const audioLevelEl = document.getElementById("audio-level");
   const audioTestEl = document.getElementById("audio-test");
-  let audio = null; // set by main.js once the audio socket exists
+  // No reference to the audio module here on purpose: inside the shell it
+  // lives in the other window, and a panel that could sometimes call it
+  // directly would work in a browser tab and quietly do nothing in the shell.
+  // Everything goes over the wire, which is the same path in both.
+  let ask = null;
   let levelTimer = null;
   const timelineEl = document.getElementById("timeline");
   const loglinesEl = document.getElementById("loglines");
@@ -515,17 +519,18 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ audio
 
-  // Device names arrive empty until the microphone is granted, so this runs
-  // after a claim rather than on load — a list of "（未命名设备）" helps nobody.
-  async function loadDevices() {
-    if (!audio || !audioInEl) return;
-    let devices = [];
-    try {
-      devices = await audio.devices();
-    } catch (err) {
-      console.warn("读不到音频设备：", err);
-      return;
-    }
+  // Device names arrive empty until the microphone is granted, so the panel
+  // asks after a claim rather than on load — a list of 「未命名设备」 helps
+  // nobody. It asks over the wire in every case: inside the shell the devices
+  // are in the pet window and the settings are here, and a direct call would
+  // work in a browser tab and silently do nothing in the shell. Which is
+  // exactly how this shipped the first time: 「读取中…」 forever.
+  function request(what, extra = {}) {
+    ask?.({ what, ...extra });
+  }
+
+  function renderDevices(devices) {
+    if (!audioInEl) return;
     const fill = (select, kind) => {
       const previous = select.value;
       select.replaceChildren();
@@ -543,24 +548,15 @@ export function createPanel({ send }) {
     fill(audioOutEl, "audiooutput");
   }
 
-  audioInEl?.addEventListener("change", () => audio?.useInput(audioInEl.value));
-  audioOutEl?.addEventListener("change", async () => {
-    const moved = await audio?.useOutput(audioOutEl.value);
-    if (moved === false) {
-      audioOwnerEl.textContent = "这个浏览器不支持切换扬声器，用系统默认。";
-      audioOutEl.value = "";
-    }
-  });
-  audioTestEl?.addEventListener("click", () => audio?.test());
+  audioInEl?.addEventListener("change", () => request("use_input", { id: audioInEl.value }));
+  audioOutEl?.addEventListener("change", () => request("use_output", { id: audioOutEl.value }));
+  audioTestEl?.addEventListener("click", () => request("test"));
 
   function startLevelMeter() {
     if (levelTimer || !audioLevelEl) return;
-    // 20 Hz: fast enough to look live, slow enough to cost nothing. It stops
-    // with the claim, so a panel-only window never runs it at all.
-    levelTimer = setInterval(() => {
-      const level = audio?.level() ?? 0;
-      audioLevelEl.style.width = `${Math.round(Math.min(1, level) * 100)}%`;
-    }, 50);
+    // 10 Hz over the wire: fast enough to read as live, and small enough that
+    // it costs nothing next to the voice-state poll already running.
+    levelTimer = setInterval(() => request("level"), 100);
   }
 
   function stopLevelMeter() {
@@ -570,9 +566,9 @@ export function createPanel({ send }) {
   }
 
   return {
-    /** Hand over the audio module; only the window that owns devices has one. */
-    attachAudio(instance) {
-      audio = instance;
+    /** How to reach whichever window holds the devices. */
+    setAsk(fn) {
+      ask = fn;
     },
     setAudioOwner(owner, error) {
       if (!audioOwnerEl) return;
@@ -582,32 +578,34 @@ export function createPanel({ send }) {
         return;
       }
       if (!owner) {
-        // Either nothing is connected yet, or a stronger client took over.
-        audioOwnerEl.textContent = "声音走本机，这个窗口只看不听。";
+        audioOwnerEl.textContent = "还没有窗口接管声音，走的是本机播放。";
         stopLevelMeter();
         return;
       }
-      audioOwnerEl.textContent =
-        owner === "shell"
-          ? "麦克风和扬声器都在这里，回声消除已开。"
-          : "麦克风和扬声器都在这个页面，回声消除已开。";
-      loadDevices();
+      audioOwnerEl.textContent = "麦克风和扬声器已接管，回声消除已开。";
+      request("devices");
       startLevelMeter();
     },
     handleFrame(event, data) {
       if (event === "audio.owner") {
-        // Broadcast to everyone, because a window that did NOT get the devices
-        // has to say why rather than look broken. Ours is the only one that
-        // can be holding them, so anything else means we are watching.
-        const mine = window.bilisamaShell ? "shell" : "browser";
-        if (!data.owner) {
-          this.setAudioOwner(null);
-        } else if (data.owner !== mine) {
-          audioOwnerEl.textContent =
-            data.owner === "shell"
-              ? "麦克风和扬声器在桌宠窗口，这里只看不听。"
-              : "麦克风和扬声器在另一个页面，这里只看不听。";
-          stopLevelMeter();
+        // Broadcast to everyone. A panel window never holds the devices itself
+        // — inside the shell they are in the pet window — so it reports on the
+        // holder rather than on itself, and drives it over the wire.
+        this.setAudioOwner(data.owner ?? null);
+        return;
+      }
+      if (event === "audio.devices") {
+        renderDevices(data.devices ?? []);
+        if (data.moved === false) {
+          audioOwnerEl.textContent = "这个浏览器不支持切换扬声器，用系统默认。";
+          audioOutEl.value = "";
+        }
+        return;
+      }
+      if (event === "audio.level") {
+        if (audioLevelEl) {
+          const level = Math.min(1, Number(data.level) || 0);
+          audioLevelEl.style.width = `${Math.round(level * 100)}%`;
         }
         return;
       }

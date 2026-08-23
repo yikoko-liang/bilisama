@@ -65,6 +65,10 @@ _WEB_ROOT = Path(__file__).parent / "web"
 # the queue at all.
 _AUDIO_QUEUE = 64
 
+# What a barge-in sends down the audio socket, behind everything already
+# queued. Same word the control socket uses, so there is one name for one idea.
+_CLEAR_MARKER = json.dumps({"event": "playback.clear", "data": {}})
+
 
 # ------------------------------------------------------------ socket & files
 
@@ -272,6 +276,48 @@ def create_ui_app(
 
     # Static mounts come after the routes so /, /ws and /config win; the
     if broker is not None:
+        # Wired here rather than by each caller, because both halves are pure
+        # plumbing with no product decision in them — and a caller that forgets
+        # gets a panel stuck on 「读取中…」 with nothing to explain it.
+        broker.announce_through(
+            lambda owner: hub.broadcast(ServerEvent.AUDIO_OWNER, {"owner": owner})
+        )
+        relay: dict[ClientEvent, Handler] = {}
+
+        async def _ask(data: dict[str, Any]) -> None:
+            # The panel and the devices are two different shell windows, so a
+            # request crosses the server to reach the holder. The server has no
+            # opinion about either; it repeats what it heard.
+            hub.broadcast(ServerEvent.AUDIO_COMMAND, data)
+
+        async def _report(data: dict[str, Any]) -> None:
+            kind = str(data.get("kind") or "")
+            if kind == "devices":
+                hub.broadcast(ServerEvent.AUDIO_DEVICES, data)
+            elif kind == "level":
+                hub.broadcast(ServerEvent.AUDIO_LEVEL, data)
+
+        relay[ClientEvent.AUDIO_ASK] = _ask
+        relay[ClientEvent.AUDIO_REPORT] = _report
+
+        def _chain(first: Handler, second: Handler) -> Handler:
+            async def both(data: dict[str, Any]) -> None:
+                await first(data)
+                await second(data)
+
+            return both
+
+        # Chained, not overridden either way. The relay is plumbing the caller
+        # should not have to know about, and a caller that does register these
+        # — the browser tests record every client event — still deserves to see
+        # them. Whichever one wins outright, something quietly stops working.
+        handlers = {
+            **handlers,
+            **{
+                event: (_chain(action, handlers[event]) if event in handlers else action)
+                for event, action in relay.items()
+            },
+        }
 
         @app.websocket(prefix + "/audio")
         async def audio_endpoint(ws: WebSocket) -> None:
@@ -291,7 +337,7 @@ def create_ui_app(
             # The shell's preload declares itself; a plain tab cannot, which is
             # exactly the distinction we want to rank on.
             who: AudioOwner = "shell" if ws.query_params.get("role") == "shell" else "browser"
-            outbound: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_AUDIO_QUEUE)
+            outbound: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=_AUDIO_QUEUE)
 
             def send(pcm: bytes) -> None:
                 # Drop the NEWEST under pressure, the opposite of the control
@@ -304,7 +350,18 @@ def create_ui_app(
             # None through the queue is the pump's hang-up sentinel; reused
             # here so a displaced client is told to let go of its microphone
             # rather than left capturing into a socket nobody reads.
-            if not await broker.claim(who, send=send, close=lambda: outbound.put_nowait(None)):
+            def flush() -> None:
+                # Everything still queued belongs to the utterance that was
+                # just interrupted. The marker goes on afterwards, so by the
+                # time the page reads it, it has seen every stale sample and
+                # can drop the lot in one go.
+                while not outbound.empty():
+                    outbound.get_nowait()
+                outbound.put_nowait(_CLEAR_MARKER)
+
+            if not await broker.claim(
+                who, send=send, close=lambda: outbound.put_nowait(None), flush=flush
+            ):
                 # Someone stronger has the devices. Say so and hang up rather
                 # than sit on a socket nobody feeds.
                 await ws.close(code=4409)
@@ -349,13 +406,21 @@ def create_ui_app(
     return app
 
 
-async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | None]) -> None:
-    """Move downlink PCM onto the wire until the socket goes away."""
+async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | str | None]) -> None:
+    """Move downlink PCM onto the wire until the socket goes away.
+
+    Text rides the same queue as the samples so that a stop is ordered behind
+    every sample it is meant to stop — the whole reason barge-in cannot be left
+    to the control socket.
+    """
     while True:
         chunk = await queue.get()
         if chunk is None:
             await ws.close(code=1001)
             return
+        if isinstance(chunk, str):
+            await ws.send_text(chunk)
+            continue
         await ws.send_bytes(chunk)
 
 

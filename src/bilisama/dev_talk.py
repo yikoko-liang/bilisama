@@ -1179,13 +1179,9 @@ async def run_director(args: argparse.Namespace) -> int:
             poke = PokeResponder(
                 clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
             )
-            live_hub_for_audio = hub
-            broker = AudioBroker(
-                local=local_pair,
-                announce=lambda owner: live_hub_for_audio.broadcast(
-                    ServerEvent.AUDIO_OWNER, {"owner": owner}
-                ),
-            )
+            # create_ui_app wires the announcement and the panel relay; the
+            # only thing this end owns is which devices get parked.
+            broker = AudioBroker(local=local_pair)
             # The gate SpeakingFloor has always had and nothing ever fed with
             # real receipts. Counting segments rather than watching the last
             # one is the whole point — see PlaybackTally (ledger #41).
@@ -1446,6 +1442,11 @@ async def run_director(args: argparse.Namespace) -> int:
                 clear = await scheduler.controls.get()
                 if speaker is not None:
                     speaker.flush()
+                if broker is not None:
+                    # The page's half of the same flush. Its audio sits in a
+                    # queue and a schedule this call cannot reach otherwise, so
+                    # without it the voice runs on past the text.
+                    broker.flush()
                 print(f"[打断] playback.clear（{clear.reason}）")
                 if hub is not None:
                     # The bubble shatters on this; the queue stays single-consumer
@@ -1555,6 +1556,12 @@ async def run_director(args: argparse.Namespace) -> int:
                     if isinstance(ev, link.ReplyAudioDelta):
                         live_broker.play(ev.pcm)
                         continue
+                    if isinstance(ev, link.SpeechStarted):
+                        # The same instant the local speaker flushes on
+                        # (_consume_events). Waiting for the scheduler's
+                        # playback.clear to come round would add a whole
+                        # dispatch hop to how long she talks over the streamer.
+                        live_broker.flush()
                     for name, data in link_frames(ev):
                         live_hub.broadcast(name, data)
 

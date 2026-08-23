@@ -44,6 +44,14 @@ class ServerEvent(StrEnum):
     # Who holds the microphone and speaker. Broadcast, because the clients that
     # did NOT get them need to say so rather than look broken.
     AUDIO_OWNER = "audio.owner"
+    # Device settings live in the panel; the devices themselves live in
+    # whichever window holds them, and inside the shell those are two separate
+    # windows that cannot reach each other. So the panel asks over the wire and
+    # the holder answers over the wire. In a plain browser tab both ends are the
+    # same page and the round trip is simply free.
+    AUDIO_COMMAND = "audio.command"
+    AUDIO_DEVICES = "audio.devices"
+    AUDIO_LEVEL = "audio.level"
 
 
 class ClientEvent(StrEnum):
@@ -63,6 +71,10 @@ class ClientEvent(StrEnum):
     # Answer to playback.clear. played_ms is the number stage 5 needs to trim a
     # remembered reply down to what the audience actually heard.
     PLAYBACK_CANCELLED = "playback.cancelled"
+    # The panel's half of the exchange above: a request from any window, and
+    # the holder's answers. The server only relays.
+    AUDIO_ASK = "audio.ask"
+    AUDIO_REPORT = "audio.report"
 
 
 def frame(event: ServerEvent, data: Mapping[str, Any]) -> str:

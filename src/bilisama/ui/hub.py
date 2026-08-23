@@ -30,7 +30,10 @@ from bilisama.ui.events import ServerEvent, frame
 __all__ = ["UiHub", "VoiceSignals", "resolve_voice_state"]
 
 # Sticky events: only the latest frame matters, and every client must have it.
-_STICKY = (ServerEvent.VOICE_STATE, ServerEvent.PANEL_STATE)
+# audio.owner earns its place the hard way — the audio socket routinely opens
+# before the control socket has attached, so the claim broadcast fires into an
+# empty room and the panel waits forever on an answer already given.
+_STICKY = (ServerEvent.VOICE_STATE, ServerEvent.PANEL_STATE, ServerEvent.AUDIO_OWNER)
 
 
 @dataclass(frozen=True, slots=True)

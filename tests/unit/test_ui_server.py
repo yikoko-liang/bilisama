@@ -386,3 +386,33 @@ def test_the_audio_socket_refuses_a_foreign_origin() -> None:
     ):
         pass
     assert refused.value.code == 4403
+
+
+def test_a_barge_in_drops_queued_audio_and_stops_the_page_in_order() -> None:
+    """The half the control socket cannot do.
+
+    playback.clear travels on the control socket, which is a different
+    connection: audio the server had already queued arrives after the page has
+    cleared and starts playing again. What the streamer hears is the text
+    stopping while the voice carries on for a beat — reported from a live
+    session. The stop has to ride the same wire as the samples it stops, behind
+    every one of them.
+    """
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        broker.play(b"\x11" * 8)
+        broker.play(b"\x22" * 8)
+        broker.flush()
+        broker.play(b"\x33" * 8)  # the next utterance, after the interruption
+
+        # Whatever the queue still held is gone; what survives is the marker
+        # and everything after it.
+        seen: list[object] = []
+        for _ in range(4):
+            message = ws.receive()
+            seen.append(message.get("text") or message.get("bytes"))
+            if len(seen) >= 2:
+                break
+        assert seen[0] == json.dumps({"event": "playback.clear", "data": {}}), seen
+        assert seen[1] == b"\x33" * 8, seen

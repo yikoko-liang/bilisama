@@ -61,7 +61,7 @@ class AudioBroker:
     running, which is what every session did before this existed.
     """
 
-    __slots__ = ("_announce", "_close", "_local", "_owner", "_send")
+    __slots__ = ("_announce", "_close", "_flush", "_local", "_owner", "_send")
 
     def __init__(
         self,
@@ -80,6 +80,7 @@ class AudioBroker:
         self._owner: AudioOwner | None = None
         self._send: Callable[[bytes], None] | None = None
         self._close: Callable[[], None] | None = None
+        self._flush: Callable[[], None] | None = None
 
     @property
     def owner(self) -> AudioOwner | None:
@@ -96,6 +97,7 @@ class AudioBroker:
         *,
         send: Callable[[bytes], None],
         close: Callable[[], None] | None = None,
+        flush: Callable[[], None] | None = None,
     ) -> bool:
         """Hand the devices to a page, if it outranks whoever has them.
 
@@ -106,6 +108,8 @@ class AudioBroker:
                 the devices. Without it a displaced tab keeps a live capture
                 running on a socket that will never be fed again, and its panel
                 goes on claiming to hold devices it lost.
+            flush: How to drop everything queued for this client and tell it to
+                stop playing. See flush().
 
         Returns:
             True if the caller now owns the devices. False means someone
@@ -119,6 +123,7 @@ class AudioBroker:
         self._owner = who
         self._send = send
         self._close = close
+        self._flush = flush
         if displaced is not None:
             log.info("audio.displaced", by=who)
             displaced()
@@ -137,10 +142,27 @@ class AudioBroker:
         self._owner = None
         self._send = None
         self._close = None
+        self._flush = None
         if self._local is not None:
             await self._local.resume()
         log.info("audio.released", who=who)
         self._notify()
+
+    def flush(self) -> None:
+        """Barge-in: drop what is queued and tell the page to stop.
+
+        The control socket already carries playback.clear, and on its own that
+        is not enough — it is a DIFFERENT connection, so audio the server had
+        already queued arrives after the page has cleared and gets scheduled
+        all over again. What the streamer hears is the text stopping while the
+        voice carries on for a beat, which is exactly what a barge-in must not
+        feel like.
+
+        So the stop travels with the audio: everything queued goes, and the
+        marker behind it is ordered after every sample already in flight.
+        """
+        if self._flush is not None:
+            self._flush()
 
     def play(self, pcm: bytes) -> None:
         """Send one downlink chunk to the owner, or drop it.
@@ -151,6 +173,15 @@ class AudioBroker:
         """
         if self._send is not None:
             self._send(pcm)
+
+    def announce_through(self, announce: Callable[[AudioOwner | None], None]) -> None:
+        """Say who holds the devices this way from now on.
+
+        Set by create_ui_app rather than by whoever built the broker: the hub
+        it broadcasts on is the app's, and a caller that wires one but not the
+        other leaves every panel waiting on an answer that never comes.
+        """
+        self._announce = announce
 
     def _notify(self) -> None:
         if self._announce is not None:

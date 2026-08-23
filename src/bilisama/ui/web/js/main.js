@@ -26,6 +26,10 @@ let everConnected = false;
 
 const send = (event, data) => socket.send(event, data);
 const panel = createPanel({ send });
+// The panel asks over the wire rather than reaching for a module that may
+// live in another window: inside the shell, settings and devices are two
+// separate windows.
+panel.setAsk((payload) => send("audio.ask", payload));
 
 // Every skin owns the same #pet-mount element and clears it — on mount AND on
 // destroy. Two mounts in flight would each wipe the other's canvas, whichever
@@ -168,6 +172,11 @@ const handlers = {
     // Devices free again — a window that stood aside can take them.
     if (!data.owner) audio?.retry();
   },
+  // Only the window holding the devices can answer these; every other window
+  // ignores them, which is what `audio` being null means.
+  "audio.command": (data) => audio?.command(data, (report) => send("audio.report", report)),
+  "audio.devices": (data) => panel.handleFrame("audio.devices", data),
+  "audio.level": (data) => panel.handleFrame("audio.level", data),
   "event.feed": (data) => panel.handleFrame("event.feed", data),
   "log.line": (data) => panel.handleFrame("log.line", data),
   "panel.state": (data) => panel.handleFrame("panel.state", data),
@@ -181,9 +190,14 @@ const handlers = {
 // would have them fighting over the same microphone.
 const audio = panelOnly
   ? null
-  : createAudio({ onOwner: (owner, error) => panel.setAudioOwner(owner, error) });
-
-panel.attachAudio(audio);
+  : createAudio({
+      // Only the failure is local knowledge — "this window could not get a
+      // microphone" is something no broadcast can say for us. Who holds the
+      // devices comes back from the server, so both windows agree.
+      onOwner: (owner, error) => {
+        if (error) panel.setAudioOwner(owner, error);
+      },
+    });
 
 const socket = connect({
   onFrame: (event, data) => handlers[event]?.(data),

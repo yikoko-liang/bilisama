@@ -54,7 +54,23 @@ export function createAudio({ onOwner }) {
       onOwner(role);
       startCapture();
     };
-    socket.onmessage = (message) => schedule(new Int16Array(message.data));
+    socket.onmessage = (message) => {
+      if (typeof message.data === "string") {
+        // A stop, ordered behind every sample it is meant to stop. The control
+        // socket says the same thing, but that is a different connection —
+        // audio the server had already queued would arrive after that clear
+        // and start playing again, which is the beat of voice the streamer
+        // heard carrying on after the text had stopped.
+        try {
+          if (JSON.parse(message.data).event === "playback.clear") stopEverything();
+        } catch {
+          // Not ours; a socket that only ever carries our own frames should
+          // still not die on one it cannot read.
+        }
+        return;
+      }
+      schedule(new Int16Array(message.data));
+    };
     socket.onclose = (event) => {
       stopCapture();
       onOwner(null);
@@ -130,6 +146,22 @@ export function createAudio({ onOwner }) {
     stream = null;
   }
 
+  function stopEverything() {
+    const heard = Math.round(playedMs);
+    live.forEach((source) => {
+      source.onended = null; // no ended receipts for what nobody heard
+      try {
+        source.stop();
+      } catch {
+        // Already finished between the barge-in and this loop.
+      }
+    });
+    live = [];
+    nextStart = 0;
+    playedMs = 0;
+    report("playback.cancelled", { played_ms: heard });
+  }
+
   function schedule(samples) {
     if (!samples.length) return;
     context = context ?? new AudioContext();
@@ -172,6 +204,34 @@ export function createAudio({ onOwner }) {
   open();
 
   return {
+    /** Answer one panel request. Only the device holder ever gets here.
+     *
+     * The panel cannot call these directly: inside the shell it is a separate
+     * window from the one with the microphone, so the request comes over the
+     * wire and the answer goes back the same way.
+     */
+    async command(request, reply) {
+      const what = request?.what;
+      if (what === "devices") {
+        let list = [];
+        try {
+          list = await this.devices();
+        } catch (err) {
+          console.warn("读不到音频设备：", err);
+        }
+        reply({ kind: "devices", devices: list });
+        return;
+      }
+      if (what === "use_input") return this.useInput(request.id);
+      if (what === "use_output") {
+        const moved = await this.useOutput(request.id);
+        reply({ kind: "devices", moved, devices: await this.devices() });
+        return;
+      }
+      if (what === "test") return this.test();
+      if (what === "level") reply({ kind: "level", level: this.level() });
+      return undefined;
+    },
     /** Ask again after standing aside; ignored while already connected.
      *
      * A displaced window stops knocking, which is right while something
@@ -187,21 +247,7 @@ export function createAudio({ onOwner }) {
       open();
     },
     /** Stop everything scheduled and report how much of it was heard. */
-    clear() {
-      const heard = Math.round(playedMs);
-      live.forEach((source) => {
-        source.onended = null; // no ended receipts for what nobody heard
-        try {
-          source.stop();
-        } catch {
-          // Already finished between the barge-in and this loop.
-        }
-      });
-      live = [];
-      nextStart = 0;
-      playedMs = 0;
-      report("playback.cancelled", { played_ms: heard });
-    },
+    clear: stopEverything,
     /** 0..1 input loudness right now, or 0 when there is no microphone. */
     level() {
       if (!analyser) return 0;
