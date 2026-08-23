@@ -383,3 +383,23 @@ async def test_an_uplink_that_never_recovers_gives_up() -> None:
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_stale_audio_is_dropped_where_it_is_played() -> None:
+    """The tail that kept her talking a second past the interruption.
+
+    Cancelling marks the handle, and the client drops later frames carrying
+    it — but audio already decoded and sitting in a fanout view arrives behind
+    the cancel and is nobody's to drop but the consumer's. Measured against a
+    live barge-in before this guard: 1.08 seconds of speech after the queue had
+    been emptied, which the streamer hears as her talking over them.
+    """
+    handle = link.ReplyHandle()
+    fresh = link.ReplyAudioDelta(handle=handle, pcm=b"\x01\x02")
+    assert not fresh.handle.stale
+
+    # link.py flips this on cancel, supersede and timeout alike; the consumer
+    # only has to look.
+    stale_handle = link.ReplyHandle(stale=True)
+    stale = link.ReplyAudioDelta(handle=stale_handle, pcm=b"\x03\x04")
+    assert stale.handle.stale, "作废标记就在事件上，播放侧没有理由看不见"

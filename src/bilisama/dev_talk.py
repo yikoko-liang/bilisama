@@ -528,6 +528,10 @@ async def _consume_events(
                 buffered.append(event.text)
                 flush_sentences()
         elif isinstance(event, link.ReplyAudioDelta):
+            if event.handle.stale:
+                # Same tail the browser path drops: flush() empties what was
+                # buffered, and this is what arrives after it.
+                continue
             collected.append(event.pcm)
             if speaker is not None:
                 speaker.play(event.pcm)
@@ -1554,6 +1558,14 @@ async def run_director(args: argparse.Namespace) -> int:
                 """
                 async for ev in speech.events():
                     if isinstance(ev, link.ReplyAudioDelta):
+                        if ev.handle.stale:
+                            # Cancelling marks the handle, but audio already
+                            # decoded and sitting in this fanout view keeps
+                            # arriving behind it. Measured against a live
+                            # interruption: 1.08 more seconds after the queue
+                            # had been emptied, which is a whole second of her
+                            # talking over the streamer.
+                            continue
                         live_broker.play(ev.pcm)
                         continue
                     if isinstance(ev, link.SpeechStarted):
