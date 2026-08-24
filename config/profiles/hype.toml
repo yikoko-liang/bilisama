@@ -1,8 +1,11 @@
 # 大场面：进房欢迎全开、话痨度高（L4）
+#
+# follow / like / share 三个开关这里不拨：L3 没给这三类事件优先级映射
+# （intents.py:118 写着 entry/follow/like/share 只进事件流不发声），
+# 拨到 true 一个字也不会多说，留着只会让人以为出厂开了关注答谢。
 
 [interaction]
 chattiness = "high"
 
 [interaction.speak]
 entry = true
-follow = true

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from bilisama.ingest.events import EventKind, LiveEvent, Medal, is_vip_entry
+from bilisama.ingest.sources import Source
 from tests.fakes.replay import (
     FIXTURE_DIR,
     ReplaySource,
@@ -295,6 +296,33 @@ async def test_stop_before_start_does_not_pre_arm_the_flag() -> None:
         await source.start(sink)
 
     assert len(seen) == len(_replay("quiet_stream.jsonl"))
+
+
+def test_replay_source_is_a_source_the_assembly_could_register() -> None:
+    """Plan §10.2: the replay source shares one ABC with the live feed.
+
+    That was true and unpinned — nothing said it, so widening Source.start or
+    renaming stop() would have left the replay side green until an assembly tried
+    to register it. Both halves are here on purpose and neither is redundant: the
+    annotation is what mypy --strict checks, and it is the half that sees a
+    changed *signature*; isinstance is what a runtime_checkable Protocol can
+    actually answer, and it only sees whether the members exist
+    (src/bilisama/ingest/sources.py:30-46).
+    """
+    source: Source = ReplaySource(path=fixture("quiet_stream.jsonl"), speed=0)
+    assert isinstance(source, Source)
+
+
+def test_a_missing_member_is_not_a_source() -> None:
+    """The control. A runtime_checkable Protocol answers a narrow question, and
+    a test that never sees it answer "no" is not testing anything."""
+
+    class HalfASource:
+        name = "half"
+
+        async def start(self, emit: object) -> None: ...
+
+    assert not isinstance(HalfASource(), Source), "stop() is missing and it passed anyway"
 
 
 async def test_a_zero_speed_replay_still_yields_between_events() -> None:

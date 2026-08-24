@@ -167,10 +167,10 @@
   <h1>BiliSama · 分层架构与调用链路</h1>
   <p class="sub">B 站直播 AI 伴播——能边听边说，判断得出主播一句话说完了没，说话时随时可以被打断；有人设、有记忆，弹幕分轻重缓急地回。四个进程、四个功能域，调用方向 L4 → L3 → L2。</p>
   <div class="chips">
-    <span class="chip"><span class="dot" style="background:var(--good)"></span>阶段 0–3 已完成</span>
-    <span class="chip"><b>936</b> 单元 + <b>24</b> 集成 + <b>15</b> 界面测试全绿</span>
+    <span class="chip"><span class="dot" style="background:var(--good)"></span>阶段 0–3、6 已完成</span>
+    <span class="chip" title="重数一遍：pytest --collect-only -q ／ -m integration ／ tests/ui -m ui_browser"><b>1060</b> 单元 + <b>24</b> 集成 + <b>34</b> 界面测试全绿<small>（1a41e34 上数的）</small></span>
     <span class="chip">真机验证：本地 s2s ＋ DashScope 云端</span>
-    <span class="chip">下一站：阶段 4 TTS 与形象</span>
+    <span class="chip">未开工：阶段 4 自研 TTS · 阶段 5 的 Live2D</span>
   </div>
   <div class="legend">
     <span class="key"><span class="swatch" style="background:var(--c-front)"></span>P1 前端（开发期由 dev-talk 顶替）</span>
@@ -194,15 +194,15 @@
         <p class="meta">Electron ＋ Live2D（阶段 5）。开发期由 <b>dev-talk</b> 顶替，桌宠预览已先行落地：</p>
         <div class="layer front">
           <h4>dev-talk --director</h4>
-          <p>麦克风采集 · 扬声器播放 · 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· <code>--room</code> 连真直播间 · 收到打断信号立刻静音</p>
+          <p>麦克风采集 · 扬声器播放（都是兜底路径：页面接管设备后归浏览器）· 底部 <code>弹幕&gt;</code> 输入行模拟观众（/sc、/gift）· <code>--room</code> 连真直播间 · 收到打断信号立刻静音</p>
         </div>
         <div class="layer front">
           <h4>桌宠预览<small>阶段 5 前置切片</small></h4>
-          <p>网页形象（内置像素机器人「豆腐」/ 精灵图皮肤包）· 说话气泡 · 面板（现场 / 对话 / 日志 / 配置）· 戳一戳 · <code>--pet</code> 拉起透明悬浮壳（desktop/preview）</p>
+          <p>网页形象（内置像素机器人「豆腐」/ 精灵图皮肤包）· 说话气泡 · 面板（现场 / 对话 / 日志 / 配置）· 戳一戳 · 透明悬浮壳随 dev-talk 自动拉起（desktop/preview，<code>--no-pet</code> 关掉）· 麦克风与播放在页面里，走 Chromium 的回声消除 · playback 回执</p>
         </div>
         <div class="layer front" style="border-style:dashed">
           <h4 style="color:var(--ink-3)">Electron 正式版<small>待建</small></h4>
-          <p>Live2D 舞台 · 口型 · 音频进浏览器 · playback 回执 · supervisor</p>
+          <p>Live2D 舞台 · 口型 · supervisor</p>
         </div>
       </div>
     </div>
@@ -445,6 +445,7 @@
 <!-- ================================================================ -->
 <section>
   <h2><span class="no">五</span>模型清单与阶段路线</h2>
+  <p class="lede">阶段号是计划里的编号，不是施工顺序：6 提前插队做完了，5 除 Live2D 之外也交付了，4 反而还没动。看状态列，别按编号推进度。</p>
   <div class="cols2">
     <div>
       <table>
@@ -468,8 +469,8 @@
           <tr><td>1</td><td>L2 语音链路 · 兼容两种协议写法</td><td><span class="st done">完成</span></td></tr>
           <tr><td>2</td><td>L3 骨架 · 调度 · 说话权 · 兜底</td><td><span class="st done">完成</span></td></tr>
           <tr><td>3</td><td>人设记忆 · 后台提炼 · 主动话题 · 总装配</td><td><span class="st done">完成</span></td></tr>
-          <tr><td>4</td><td>TTS 与形象（tagparser / chunker / mux）</td><td><span class="st next">下一站</span></td></tr>
-          <tr><td>5</td><td>Electron ＋ Live2D 桌面端</td><td><span class="st done">前置切片已交付</span>（桌宠预览：界面服务器＋协议＋形象＋悬浮壳；Live2D 与音频进浏览器待建）</td></tr>
+          <tr><td>4</td><td>TTS 与形象（tagparser / chunker / mux）</td><td><span class="st wait">未开始</span>（<code>src/bilisama/tts/</code> 还是空包）</td></tr>
+          <tr><td>5</td><td>Electron ＋ Live2D 桌面端</td><td><span class="st done">大部分已交付</span>（界面服务器＋协议＋形象＋悬浮壳＋音频进浏览器；只剩 Live2D）</td></tr>
           <tr><td>6</td><td>弹幕接入（blivedm · 打分 · 熔断）· 提前施工</td><td><span class="st done">完成</span></td></tr>
           <tr><td>7</td><td>打包签名 · 一键化交付</td><td><span class="st wait">未开始</span></td></tr>
           <tr><td>8</td><td>真直播间逐级联调</td><td><span class="st wait">未开始</span></td></tr>
@@ -480,7 +481,7 @@
 </section>
 
 <footer>
-  <span>BiliSama 架构展示 · 2026-08-13 · 依据实现代码与计划文档 §2–§4 生成</span>
+  <span>BiliSama 架构展示 · 2026-08-25 核对 · 依据实现代码与计划文档 §2–§4 生成</span>
   <span>数据口径：全部自动化测试通过 ＋ 本地与云端真机验证 ＋ 真直播间弹幕演练</span>
 </footer>
 

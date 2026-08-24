@@ -17,11 +17,16 @@ trap 'rm -rf "$WORK"' EXIT
 
 step() { printf '\033[36m▸ %s\033[0m\n' "$*"; }
 
+# scripts/ is on both lines because it used to be on neither, under a mypy step
+# labelled "全量，不只 src" that did not include it either. mypy takes its own
+# list from [tool.mypy] files, which now names scripts as well, so that a bare
+# `mypy` still checks what the gate checks — tests/unit/test_gate.py holds all
+# three spellings to the same set of trees.
 step "black"
-$PY -m black --check src tests tools
+$PY -m black --check src tests tools scripts
 
 step "ruff"
-$PY -m ruff check src tests tools
+$PY -m ruff check src tests tools scripts
 
 step "mypy（全量，不只 src）"
 # No file arguments on purpose: the set comes from [tool.mypy] files in
@@ -158,12 +163,42 @@ else
   printf '  要跑：uv pip install playwright && %s -m playwright install chromium\n' "$PY"
 fi
 
-if [ "$integration_ran" = yes ] && [ "$ui_ran" = yes ]; then
-  printf '\033[32m全部通过（含集成层与界面层）\033[0m\n'
-elif [ "$integration_ran" = yes ]; then
-  printf '\033[32m通过\033[0m\033[33m，界面层没跑（见上）\033[0m\n'
-elif [ "$ui_ran" = yes ]; then
-  printf '\033[32m通过\033[0m\033[33m，集成层没跑（见上）\033[0m\n'
+# The JavaScript tier: eslint over the page modules, the Electron shell and the
+# shell's test harness (ledger #52). Same contract as the two tiers above — it
+# needs `npm install` at the repo root, so it cannot run unconditionally, and a
+# skip is said out loud instead of passing quietly. Until this step existed, the
+# only cover the ~2700 shipped lines of JS had was the browser tier, which skips
+# whole on a machine without chromium and never loads desktop/preview at all.
+#
+# Keyed on the installed binary rather than on `npx`, for the same reason the s2s
+# tier keys on the venv: npx exists on every machine with node and would fetch
+# eslint from the network mid-gate.
+ESLINT="${BILISAMA_ESLINT:-node_modules/.bin/eslint}"
+js_ran=no
+if [ -x "$ESLINT" ]; then
+  step "JavaScript 检查（eslint）"
+  "$ESLINT" .
+  js_ran=yes
+elif [ "${BILISAMA_GATE_REQUIRE_JS:-0}" != 0 ]; then
+  printf '\033[31m✗ JavaScript 检查跑不了：%s 不存在\033[0m\n' "$ESLINT" >&2
+  printf '  这台机器要求必须跑。先装：npm install\n' >&2
+  exit 1
 else
-  printf '\033[32m单元层全部通过\033[0m\033[33m，集成层与界面层没跑（见上）\033[0m\n'
+  printf '\033[33m▸ JavaScript 检查：跳过 —— %s 不存在\033[0m\n' "$ESLINT"
+  printf '  这一层查页面、Electron 壳和壳的测试桩里的未定义名、没用到的变量，本机这次没验过。\n'
+  printf '  要跑：npm install\n'
+fi
+
+# One line naming every tier that did not run, instead of one branch per
+# combination: three optional tiers is eight branches, and the fourth would be
+# sixteen. What the line must never do is read as a full pass over a tier that
+# never ran.
+skipped=""
+[ "$integration_ran" = yes ] || skipped="${skipped}集成层、"
+[ "$ui_ran" = yes ] || skipped="${skipped}界面层、"
+[ "$js_ran" = yes ] || skipped="${skipped}JavaScript 层、"
+if [ -z "$skipped" ]; then
+  printf '\033[32m全部通过（含集成层、界面层与 JavaScript 层）\033[0m\n'
+else
+  printf '\033[32m单元层全部通过\033[0m\033[33m，%s没跑（见上）\033[0m\n' "${skipped%、}"
 fi

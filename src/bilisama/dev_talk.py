@@ -33,7 +33,7 @@ import threading
 import traceback
 import wave
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, urlencode
@@ -42,7 +42,8 @@ import websockets
 
 from bilisama.config.enums import ProviderName
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
-from bilisama.obs.logging import get_logger
+from bilisama.obs.health import LinkHealth
+from bilisama.obs.logging import bind, get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
 from bilisama.realtime.providers import profile_for, resolve_endpoint
@@ -558,6 +559,7 @@ async def _consume_events(
     reply_wav: Path | None,
     *,
     stream_text: bool = True,
+    link_health: LinkHealth | None = None,
 ) -> None:
     """Print what she says and play what she sends.
 
@@ -565,6 +567,9 @@ async def _consume_events(
         events: One view of the link's event stream.
         speaker: Playback sink, None in WAV mode.
         reply_wav: Where to save the reply audio, None to skip.
+        link_health: Health probe to keep current, None to skip. This coroutine
+            already reads every link event, and those events are the only place
+            "is the provider connected" exists (plan §4.12).
         stream_text: Print reply text character by character. MUST be False
             while a prompt_toolkit prompt owns the terminal: a line without its
             newline has not scrolled yet, so the prompt's next repaint
@@ -593,6 +598,30 @@ async def _consume_events(
     transcribes: bool | None = None
     awaiting = False
     held: list[str] = []
+    # One correlation id per turn (plan §4.12). `bind` had no caller anywhere in
+    # src until this one, so turn_id reached zero log lines and the log could be
+    # grouped by event name and by nothing else. Held open across iterations
+    # rather than around a block, because a turn IS several iterations.
+    turn = contextlib.ExitStack()
+    turn_id = ""
+    turn_seq = itertools.count(1)
+
+    def open_turn() -> None:
+        nonlocal turn_id
+        if turn_id:
+            return
+        turn_id = f"t{next(turn_seq)}-{os.getpid():x}"
+        turn.enter_context(bind(turn_id=turn_id))
+
+    def close_turn(status: str) -> None:
+        nonlocal turn_id
+        if not turn_id:
+            return
+        # Inside the binding, so the one line that summarises a turn carries the
+        # id that ties the rest of it together.
+        log.info("dev_talk.turn_done", status=status, reply_chars=sum(len(s) for s in said))
+        turn.close()
+        turn_id = ""
 
     def say(text: str, *, end: str = "\n") -> None:
         if awaiting:
@@ -622,66 +651,85 @@ async def _consume_events(
         if text:
             say(text)
 
-    async for event in events:
-        if isinstance(event, link.UserTranscriptDone):
-            transcribes = True
-            # Out from under the hold first, so this line lands ahead of the
-            # reply it explains rather than joining the queue behind it.
-            awaiting = False
-            print(f"你说：{event.text}")
-            release()
-        elif isinstance(event, link.ReplyTextDelta):
-            said.append(event.text)
-            if stream_text:
-                say(event.text, end="")
-            else:
-                buffered.append(event.text)
-                flush_sentences()
-        elif isinstance(event, link.ReplyAudioDelta):
-            if event.handle.stale:
-                # Same tail the browser path drops: flush() empties what was
-                # buffered, and this is what arrives after it.
-                continue
-            collected.append(event.pcm)
-            if speaker is not None:
-                speaker.play(event.pcm)
-        elif isinstance(event, link.SpeechStopped):
-            awaiting = transcribes is not False
-        elif isinstance(event, link.SpeechStarted):
-            # A new turn starting settles the last one either way: whatever it
-            # was holding belongs on screen now, transcript or no transcript.
-            release()
-            if speaker is not None:
-                speaker.flush()  # the local half of playback.clear
-        elif isinstance(event, link.ReplyDone):
-            said.clear()
-            marker = f"—— 回复结束（{event.status}）——"
-            if stream_text:
-                say(f"\n{marker}")
-            else:
-                flush_sentences(final=True)  # whatever the last sentence left
-                say(marker)
-            # The transcript lost the race for good; nothing else will release.
-            if transcribes is None:
-                transcribes = False  # asked once, answered: never wait again
-            release()
-            if reply_wav is not None and collected:
-                with wave.open(str(reply_wav), "wb") as w:
-                    w.setnchannels(1)
-                    w.setsampwidth(2)
-                    w.setframerate(_OUTPUT_RATE)
-                    w.writeframes(b"".join(collected))
-                print(f"回复音频已存：{reply_wav}")
-                return
-            collected.clear()
-        elif isinstance(event, link.LinkDown):
-            release()  # a dropped link owes the reader whatever it was holding
-            tail = "，正在自动重连…" if event.retrying else "，已放弃重连。"
-            print(f"[链路] 断了（{event.reason}）{tail}", file=sys.stderr)
-        elif isinstance(event, link.LinkUp):
-            print(f"[链路] 已恢复（第 {event.attempts} 次尝试成功），人设已重新推送。")
-        elif isinstance(event, link.LinkError):
-            print(f"[错误] {event.code}: {event.detail}", file=sys.stderr)
+    try:
+        async for event in events:
+            if isinstance(event, link.UserTranscriptDone):
+                transcribes = True
+                # Out from under the hold first, so this line lands ahead of the
+                # reply it explains rather than joining the queue behind it.
+                awaiting = False
+                open_turn()
+                print(f"你说：{event.text}")
+                release()
+            elif isinstance(event, link.ReplyTextDelta):
+                open_turn()  # a proactive reply starts a turn with no speech before it
+                said.append(event.text)
+                if stream_text:
+                    say(event.text, end="")
+                else:
+                    buffered.append(event.text)
+                    flush_sentences()
+            elif isinstance(event, link.ReplyAudioDelta):
+                if event.handle.stale:
+                    # Same tail the browser path drops: flush() empties what was
+                    # buffered, and this is what arrives after it.
+                    continue
+                open_turn()
+                collected.append(event.pcm)
+                if speaker is not None:
+                    speaker.play(event.pcm)
+            elif isinstance(event, link.SpeechStopped):
+                awaiting = transcribes is not False
+            elif isinstance(event, link.SpeechStarted):
+                # A new turn starting settles the last one either way: whatever it
+                # was holding belongs on screen now, transcript or no transcript.
+                release()
+                open_turn()
+                if speaker is not None:
+                    speaker.flush()  # the local half of playback.clear
+            elif isinstance(event, link.ReplyDone):
+                marker = f"—— 回复结束（{event.status}）——"
+                if stream_text:
+                    say(f"\n{marker}")
+                else:
+                    flush_sentences(final=True)  # whatever the last sentence left
+                    say(marker)
+                # The transcript lost the race for good; nothing else will release.
+                if transcribes is None:
+                    transcribes = False  # asked once, answered: never wait again
+                release()
+                # Before said.clear(), which is what the summary counts.
+                open_turn()
+                close_turn(event.status)
+                said.clear()
+                if reply_wav is not None and collected:
+                    with wave.open(str(reply_wav), "wb") as w:
+                        w.setnchannels(1)
+                        w.setsampwidth(2)
+                        w.setframerate(_OUTPUT_RATE)
+                        w.writeframes(b"".join(collected))
+                    print(f"回复音频已存：{reply_wav}")
+                    return
+                collected.clear()
+            elif isinstance(event, link.LinkDown):
+                release()  # a dropped link owes the reader whatever it was holding
+                if link_health is not None:
+                    link_health.mark_down(event.reason, retrying=event.retrying)
+                tail = "，正在自动重连…" if event.retrying else "，已放弃重连。"
+                print(f"[链路] 断了（{event.reason}）{tail}", file=sys.stderr)
+            elif isinstance(event, link.LinkUp):
+                if link_health is not None:
+                    link_health.mark_up(attempts=event.attempts)
+                print(f"[链路] 已恢复（第 {event.attempts} 次尝试成功），人设已重新推送。")
+            elif isinstance(event, link.LinkError):
+                if link_health is not None:
+                    link_health.mark_error(event.code, event.detail)
+                print(f"[错误] {event.code}: {event.detail}", file=sys.stderr)
+    finally:
+        # A cancelled consumer must not leave the contextvar set: whatever logs
+        # next on this task would inherit a turn that is over, which reads as
+        # evidence rather than as a leftover.
+        turn.close()
 
 
 class _Fanout:
@@ -836,6 +884,102 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     )
 
 
+class _Busy(Protocol):
+    """Anything that knows whether sound is coming out of it."""
+
+    @property
+    def busy(self) -> bool: ...
+
+
+def _audio_busy(speaker: _Busy, page: _Busy) -> bool:
+    """Whether sound is being made, wherever it is coming out.
+
+    Two producers, never both live: the local sounddevice speaker answers for a
+    run with no page, and PlaybackTally answers while a page holds the devices
+    — where the local speaker has no stream at all and reads False for the
+    whole reply (ui/audio.py PlaybackTally.busy, ui/hub.py VoiceSignals).
+    Asking only the local one is what left the pet showing 「空闲」 from the
+    moment she started talking.
+    """
+    return speaker.busy or page.busy
+
+
+class _Credentialed(Protocol):
+    """The two questions a connected danmaku source can answer about its login."""
+
+    @property
+    def logged_in(self) -> bool: ...
+
+    @property
+    def credential_stale(self) -> bool: ...
+
+
+async def _watch_credential(source: _Credentialed, *, poll_s: float = 1.0) -> None:
+    """Correct the startup banner once the platform has answered.
+
+    The 「登录态」 line goes out before the connection exists, so all it can see
+    is that a credential string resolved. An expired SESSDATA still gets a
+    successful init_room with uid 0 (ingest/bilibili/source.py `_resolved_uid`),
+    and every viewer arrives masked — which reads as the memory层 being broken,
+    not as a login that quietly expired.
+
+    The source logs this too; this is the console's copy, because the banner it
+    corrects was read on the console.
+
+    Args:
+        source: The live danmaku source.
+        poll_s: How often to re-ask while the answer is still unknown.
+    """
+    while not (source.logged_in or source.credential_stale):
+        await asyncio.sleep(poll_s)
+    if source.credential_stale:
+        print(
+            "[弹幕] 更正：SESSDATA 已失效，这一场连的其实是匿名——观众全部打码，认不出常客。\n"
+            "        重新登录 B 站取一份新的 SESSDATA，写进 path.sh 的 BILI_SESSDATA 后重开。"
+        )
+
+
+class _Panics(Protocol):
+    """The Scheduler's two panic controls, and nothing else."""
+
+    def panic_mute(self) -> None: ...
+
+    def release_panic(self) -> None: ...
+
+
+# Whole lines, not prefixes: the console is a danmaku box first, and a prefix
+# match would swallow 「/mute now」 as if it had been understood.
+_PANIC_COMMANDS = {"/mute": True, "/闭麦": True, "/unmute": False, "/开麦": False}
+
+
+def _panic_command(text: str) -> bool | None:
+    """Whether a typed line is the panic switch.
+
+    Args:
+        text: One console line as typed.
+
+    Returns:
+        True to mute, False to release, None if this is not a command at all.
+    """
+    return _PANIC_COMMANDS.get(text.strip().lower())
+
+
+def _apply_panic(mute: bool, panics: _Panics, say: Callable[[str], None]) -> None:
+    """Flip the panic switch and announce it (backlog #47).
+
+    The web panel had the only trigger, so `--no-ui` — or a taken port, which
+    parks the hub silently — left the one 「出事了一键闭嘴」 mechanism with no
+    way to reach it. `say` gets the same sentence the panel prints, so the
+    terminal and the page read alike.
+    """
+    if mute:
+        panics.panic_mute()
+        say("紧急闭麦（终端）")
+    else:
+        panics.release_panic()
+        say("恢复说话（终端）")
+
+
 async def run_director(args: argparse.Namespace) -> int:
     """The whole stage-3 assembly behind the mic, before Electron exists.
 
@@ -847,11 +991,13 @@ async def run_director(args: argparse.Namespace) -> int:
     """
     from secrets import token_hex
 
+    from pydantic import ValidationError
+
     from bilisama import secrets
     from bilisama.app import Assembly
-    from bilisama.cli import DEFAULT_CONFIG
+    from bilisama.cli import DEFAULT_CONFIG, report_problems, report_validation
     from bilisama.clock import SystemClock
-    from bilisama.config import check, derive, load
+    from bilisama.config import ConfigError, check, derive, load
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
     from bilisama.director.intent import Intent
@@ -861,7 +1007,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.memory.store import MemoryStore
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
-    from bilisama.obs.outcome import Outcome, Verdict
+    from bilisama.obs.outcome import Outcome, OutcomeWindow, Verdict
     from bilisama.persona.loader import PersonaStore, default_data_dir, template_variables
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.realtime.providers import turn_type_problems
@@ -895,7 +1041,19 @@ async def run_director(args: argparse.Namespace) -> int:
             overrides["avatar"] = {"renderer": "tofu", "model_id": ""}
         else:
             overrides["avatar"] = {"renderer": "sprite", "model_id": args.skin}
-    settings = load(config_path, overrides=overrides or None, strict=False)
+    try:
+        settings = load(config_path, overrides=overrides or None, strict=False)
+    except ConfigError as exc:
+        # A broken TOML, or a file a newer build wrote. strict=False does not
+        # cover either — the file cannot be read at all — and letting it out of
+        # here means a traceback where a sentence belongs (§7.6).
+        print("配置读不了：", file=sys.stderr)
+        report_problems(exc.problems, stream=sys.stderr)
+        raise SystemExit(2) from exc
+    except ValidationError as exc:
+        print("配置读不了：", file=sys.stderr)
+        report_validation(exc, stream=sys.stderr)
+        raise SystemExit(2) from exc
     # strict=False keeps a half-configured dev box usable, but the problems
     # still get said out loud instead of silently shaping behaviour (D6).
     for problem in check(settings, config_dir=config_path.parent):
@@ -1046,7 +1204,13 @@ async def run_director(args: argparse.Namespace) -> int:
 
         # The registry knows which turn types this endpoint really honours;
         # refusing here beats a session.update that gets silently ignored (D14).
-        for problem in turn_type_problems(provider, settings.speech.dashscope.turn.type):
+        # model, not just provider: semantic_vad exists on qwen3.5-omni and is
+        # refused by qwen-audio-3.0-realtime-flash, which is the factory default
+        # (providers/__init__.py). Checking the provider alone said yes to a
+        # combination the endpoint rejects.
+        for problem in turn_type_problems(
+            provider, settings.speech.dashscope.turn.type, model=endpoint.model
+        ):
             raise SystemExit(f"{problem.message} {problem.fix}")
         env_key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
         key = secrets.resolve(settings.speech.dashscope.api_key_ref) or env_key
@@ -1061,6 +1225,7 @@ async def run_director(args: argparse.Namespace) -> int:
             headers={"Authorization": f"Bearer {key}"},
             turn=settings.speech.dashscope.turn,
             voice=args.voice or settings.speech.dashscope.voice,
+            session_cap_min=settings.speech.dashscope.session_cap_min,
         )
     else:
         raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
@@ -1102,7 +1267,12 @@ async def run_director(args: argparse.Namespace) -> int:
     else:
         quiet_s = settings.speech.dashscope.turn.silence_duration_ms / 1000 + 0.3
 
+    # The window health reports from (plan §4.12). Fed here rather than inside
+    # the scheduler: this is already the one place every Verdict passes through.
+    outcomes = OutcomeWindow()
+
     def verdict_sink(verdict: Verdict) -> None:
+        outcomes.note(verdict)
         if verdict.outcome is not Outcome.SPOKEN:
             print(f"[调度] {verdict.source} → {verdict}")
         if hub is not None:
@@ -1216,6 +1386,14 @@ async def run_director(args: argparse.Namespace) -> int:
     registry.register("assembly", assembly.status)
     registry.register("proactive", proactive.status)
     registry.register("scheduler", scheduler.status)
+    # The two §4.12 asks for that nothing answered: is the provider connected,
+    # and what happened to the last N attempts to speak. Connected already —
+    # _connect_or_exit is above and exits on failure — and kept current from the
+    # playback consumer, which reads every link event anyway.
+    link_health = LinkHealth(clock, provider=provider.value)
+    link_health.mark_up(attempts=1)
+    registry.register("link", link_health.status)
+    registry.register("outcomes", outcomes.status)
     # The runtime half of the blocking-call defence (plan section 16.8 item
     # 25): a synchronous stall anywhere shows up as loop.lag with a number.
     lag_monitor = LoopLagMonitor()
@@ -1281,12 +1459,30 @@ async def run_director(args: argparse.Namespace) -> int:
     # only audio there is, which is every run without a page open.
     broker: AudioBroker | None = None
 
-    _USAGE = "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额"
+    _USAGE = (
+        "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额；"
+        "/mute 紧急闭麦，/unmute 恢复"
+    )
     _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
+
+    def _no_panel() -> None:
+        """Nothing to keep in step when there is no page (--no-ui, or a taken
+        port), which is exactly the run the terminal switch exists for."""
+
+    # Reassigned once the panel exists. Named rather than late-bound through the
+    # UI branch's own closures: handle_line is defined before that branch, and a
+    # NameError there would take the console down with it.
+    sync_panel: Callable[[], None] = _no_panel
 
     async def handle_line(line: str) -> None:
         if not line.strip():
             return  # a bare Enter injects nothing and lectures nobody
+        panic = _panic_command(line)
+        if panic is not None:
+            # Backlog #47: this is the only entrance without a browser.
+            _apply_panic(panic, scheduler, lambda said: print(f"[闭麦] {said}"))
+            sync_panel()  # the page's red button must not disagree with the terminal
+            return
         event = _parse_console_event(line, next(seq))
         if event is None:
             print(_USAGE)
@@ -1378,6 +1574,14 @@ async def run_director(args: argparse.Namespace) -> int:
                         name: bool(getattr(speak, name)) for name in type(speak).model_fields
                     },
                 }
+
+            def push_panel_state() -> None:
+                """Re-send the sticky state after something OTHER than the page
+                changed it — /mute typed in the terminal, for one."""
+                if hub is not None:
+                    hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
+
+            sync_panel = push_panel_state
 
             async def on_poke(_data: dict[str, Any]) -> None:
                 poke.poke()  # False = cooldown; the page animates either way
@@ -1686,7 +1890,13 @@ async def run_director(args: argparse.Namespace) -> int:
             local_pair.start_mic(),
             asyncio.create_task(
                 # stream_text off under the prompt: see _consume_events.
-                _consume_events(speech.events(), speaker, None, stream_text=not use_prompt),
+                _consume_events(
+                    speech.events(),
+                    speaker,
+                    None,
+                    stream_text=not use_prompt,
+                    link_health=link_health,
+                ),
                 name="director:play",
             ),
             asyncio.create_task(drain_controls(), name="director:controls"),
@@ -1698,6 +1908,12 @@ async def run_director(args: argparse.Namespace) -> int:
             # is False, and the gate is fed by PlaybackTally instead — the two
             # producers never overlap because the devices only have one owner.
         ]
+        if bili_source is not None:
+            # The 「登录态」 line above went out before the connection existed.
+            # This one is allowed to be right (see _watch_credential).
+            tasks.append(
+                asyncio.create_task(_watch_credential(bili_source), name="director:credential")
+            )
         for task in tasks:
             _watch(task)
         if hub is not None:
@@ -1710,7 +1926,10 @@ async def run_director(args: argparse.Namespace) -> int:
                     dispatching=bool(status.get("dispatching")),
                     active=status.get("active_source") is not None,
                     implicit=floor.implicit_active,
-                    audio_busy=speaker.busy,
+                    # Both ends: the page is the one playing whenever it holds
+                    # the devices, and the local speaker reads False all through
+                    # her reply in that case. See _audio_busy.
+                    audio_busy=_audio_busy(speaker, tally),
                 )
 
             live_broker = broker
@@ -1928,7 +2147,14 @@ async def run(args: argparse.Namespace) -> int:
                 print(f"[收尾] 扬声器没关上：{exc}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Every dev-talk flag, in one callable.
+
+    Split out of `main` so a test can drive `run_director` through the REAL
+    flags instead of a hand-built Namespace: the hand-built one silently
+    diverges the day a flag is added, and this file's one end-to-end test is
+    exactly where that would go unnoticed.
+    """
     parser = argparse.ArgumentParser(
         prog="bilisama dev-talk", description="拿真人声音测我们自己的语音链路"
     )
@@ -2008,7 +2234,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="本次运行的形象：皮肤包目录名（如 kirby），或 tofu 用内置豆腐机器人；不改配置文件",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     if args.director:
         try:
             return asyncio.run(run_director(args))

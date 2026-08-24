@@ -42,7 +42,10 @@ function mountRenderer(avatar) {
   mountChain = mountChain
     .then(() => mountOne(avatar))
     // A broken link in the chain would silently stop every later mount.
-    .catch((err) => console.warn("形象挂载失败：", err));
+    .catch((err) => {
+      console.warn("形象挂载失败：", err);
+      panel.notice(`形象挂载失败，桌宠这一场可能是空的：${err}`);
+    });
   return mountChain;
 }
 
@@ -52,6 +55,13 @@ async function mountOne(avatar) {
   renderer = null;
   renderer = await createRenderer(document.getElementById("pet-mount"), avatar, {
     onPoke: () => send("pet.poke"),
+    // A degrade the streamer can read. Inside the shell this lands in THIS
+    // window's log tab, which the shell never opens — the panel window is a
+    // separate one with no way to hear it. Only what hello carries reaches
+    // both (see panel.js's setHello); a skin that failed to load is knowledge
+    // this window has alone, and relaying it would need a wire event the
+    // server does not have.
+    onNotice: (text) => panel.notice(text),
   });
   renderer.setState(resolveVisual(state));
   fitToSkin();

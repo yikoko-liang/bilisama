@@ -85,6 +85,22 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
     origin = f"http://127.0.0.1:{real_port}"
     registry = HealthRegistry()
     registry.register("assembly", lambda: {"events_seen": 1})
+    # The selector's real shape (ingest/bilibili/selector.py:181-189), field for
+    # field: seven of them, with the three that matter most to a streamer
+    # mid-stream sitting at the end. A card that shows only the first few is a
+    # card that hides the breaker exactly when it trips.
+    registry.register(
+        "selector",
+        lambda: {
+            "offered": 12,
+            "delivered": 3,
+            "skips": {"cooldown": 2},
+            "window_open": False,
+            "breaker_open": True,
+            "breaker_reason": "上游连续报错",
+            "combos_suppressed": 4,
+        },
+    )
     settings = harness_ref[0].settings if harness_ref else Settings()
     handlers = {event: recorder.handler(event) for event in ClientEvent}
     if harness_ref:
@@ -470,6 +486,129 @@ async def test_missing_pack_degrades_to_tofu_with_a_warning(
         assert warned, "the degrade path must announce itself in the console"
     finally:
         await context.close()
+
+
+async def test_a_missing_pack_leaves_a_line_where_the_streamer_can_read_it(
+    browser: Browser, harness: Harness
+) -> None:
+    """The console is not a place a streamer can look.
+
+    There are no devtools in the shell, so a skin that failed to load used to
+    surface as 「换了皮肤怎么还是豆腐」 and nothing else. §15.12 asked for a
+    line in the log area; this is that line.
+    """
+    harness.avatar = {"renderer": "sprite", "model_id": "no-such-skin"}
+    context = await browser.new_context(bypass_csp=True)
+    degraded_page = await context.new_page()
+    try:
+        await degraded_page.goto(harness.url)
+        await _wait(degraded_page, "document.querySelector('#pet-mount canvas') !== null")
+        await _wait(degraded_page, "document.querySelectorAll('#loglines .logline').length > 0")
+        text = await degraded_page.locator("#loglines").inner_text()
+        assert "no-such-skin" in text, f"日志区没提是哪个皮肤包没加载上：{text}"
+        assert "退回内置形象" in text, f"日志区没说降级到了哪儿：{text}"
+        # The log tab is not the one the panel opens on; a line there with
+        # nothing pointing at it is only marginally better than the console.
+        alert = await degraded_page.locator("#tab-btn-logs").get_attribute("data-alert")
+        assert alert == "1", "日志标签没有未读标记，这行等于还是没人看得见"
+    finally:
+        await context.close()
+
+
+async def test_a_renderer_this_build_cannot_mount_says_so_instead_of_degrading_quietly(
+    browser: Browser, harness: Harness
+) -> None:
+    """live2d is a legal config value (config/schema.py:324) with no
+    implementation on this side — stage 5's work, still behind §6.4's licensing
+    gate. Until then the page mounts the built-in instead, which is right; doing
+    it without a word is not. The streamer edits the config, the pet looks
+    identical, and nothing anywhere says the setting did not take.
+    """
+    harness.avatar = {"renderer": "live2d", "model_id": "mia"}
+    context = await browser.new_context(bypass_csp=True)
+    page = await context.new_page()
+    try:
+        await page.goto(harness.url)
+        # Still a pet on screen: saying so must not cost the fallback.
+        await _wait(page, "document.querySelector('#pet-mount canvas') !== null")
+        await _wait(page, "document.querySelectorAll('#loglines .logline').length > 0")
+        text = await page.locator("#loglines").inner_text()
+        assert "live2d" in text, f"日志区没说是哪个渲染器没生效：{text}"
+        assert "renderer" in text, f"日志区没告诉主播该去改哪个配置项：{text}"
+    finally:
+        await context.close()
+
+
+async def test_the_panel_window_hears_about_it_too(browser: Browser, harness: Harness) -> None:
+    """Inside the shell the panel is a separate window that mounts no pet at
+    all, so a notice raised by the mount would never reach it. The one thing
+    both windows do get is hello — which is where the configured renderer
+    comes from — so this notice is driven from there."""
+    harness.avatar = {"renderer": "live2d", "model_id": "mia"}
+    context = await browser.new_context(bypass_csp=True)
+    panel_window = await context.new_page()
+    try:
+        await panel_window.goto(f"{harness.url}#panel")
+        await _wait(panel_window, "document.body.classList.contains('panel-only')")
+        await _wait(panel_window, "document.querySelectorAll('#loglines .logline').length > 0")
+        text = await panel_window.locator("#loglines").inner_text()
+        assert "live2d" in text, f"面板窗口不知道配置里的渲染器没生效：{text}"
+    finally:
+        await context.close()
+
+
+async def test_a_skin_pack_configured_without_a_name_says_so_too(
+    browser: Browser, harness: Harness
+) -> None:
+    """The same silence, one field over: renderer=sprite with an empty
+    model_id. config validate does not catch the pair, and the mount reads it
+    as 「no pack asked for」 — which is the built-in, arrived at without a
+    word."""
+    harness.avatar = {"renderer": "sprite", "model_id": ""}
+    context = await browser.new_context(bypass_csp=True)
+    page = await context.new_page()
+    try:
+        await page.goto(harness.url)
+        await _wait(page, "document.querySelectorAll('#loglines .logline').length > 0")
+        text = await page.locator("#loglines").inner_text()
+        assert "model_id" in text, f"日志区没说是哪个字段空着：{text}"
+    finally:
+        await context.close()
+
+
+async def test_one_notice_does_not_pile_up_across_reconnects(page: Page, harness: Harness) -> None:
+    """hello arrives on every attach, and the panel wipes its rows on
+    reconnect. A notice that re-added itself per hello without the wipe would
+    grow a stack of identical lines; one that never re-added itself would
+    vanish at the first reconnect."""
+    harness.avatar = {"renderer": "live2d", "model_id": "mia"}
+    await page.reload()
+    await _wait(page, "document.querySelectorAll('#loglines .logline').length > 0")
+    harness.hub.broadcast(ServerEvent.HELLO, harness.hello())
+    harness.hub.broadcast(ServerEvent.HELLO, harness.hello())
+    await asyncio.sleep(0.3)
+    count: int = await page.evaluate("document.querySelectorAll('#loglines .logline').length")
+    assert count == 1, f"同一条提示重复了 {count} 次"
+
+
+# ------------------------------------------------------------ health card
+
+
+async def test_the_health_card_shows_the_breaker_not_just_the_first_four_fields(
+    page: Page, harness: Harness
+) -> None:
+    """The selector reports seven fields and the card showed four.
+
+    breaker_open / breaker_reason / combos_suppressed sit at the end of
+    selector.status(), so the three the streamer most needs mid-stream — 熔断了
+    没有 —— were the three that could never appear.
+    """
+    await page.click("#corner")
+    await _wait(page, "document.querySelectorAll('#health .card').length >= 2")
+    text = await page.locator("#health").inner_text()
+    assert "breaker_open" in text, f"熔断状态在健康卡上看不见：{text}"
+    assert "breaker_reason" in text, f"熔断原因在健康卡上看不见：{text}"
+    assert "combos_suppressed" in text, f"连击压制数在健康卡上看不见：{text}"
 
 
 # ------------------------------------------------------------ audio in the page

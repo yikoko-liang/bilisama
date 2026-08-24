@@ -4,6 +4,7 @@
 // plain fetch — health only while someone is actually looking.
 
 import { VISUAL_LABEL } from "./presentation.js";
+import { unsupportedRenderer } from "./renderer.js";
 
 const FEED_CAP = 200;
 const LOG_CAP = 500;
@@ -65,6 +66,7 @@ export function createPanel({ send }) {
   let localMicError = null;
   const timelineEl = document.getElementById("timeline");
   const loglinesEl = document.getElementById("loglines");
+  const logsTab = document.getElementById("tab-btn-logs");
   const levelSel = document.getElementById("log-level");
   const pauseBtn = document.getElementById("log-pause");
   const injectForm = document.getElementById("inject");
@@ -93,8 +95,11 @@ export function createPanel({ send }) {
         const card = el("div", "card" + (data && data.error ? " err" : ""));
         card.appendChild(el("div", "card-name", name));
         const kv = el("div", "kv");
+        // Every field, not the first few: the selector reports seven and its
+        // last three are breaker_open / breaker_reason / combos_suppressed
+        // (ingest/bilibili/selector.py:181-189) — the ones a streamer needs
+        // mid-stream. A cut-off card hid the breaker exactly when it tripped.
         kv.textContent = Object.entries(data ?? {})
-          .slice(0, 4)
           .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? JSON.stringify(v) : v}`)
           .join(" ");
         card.appendChild(kv);
@@ -177,6 +182,7 @@ export function createPanel({ send }) {
     for (const page of panel.querySelectorAll(".tab-page")) page.classList.remove("active");
     tab.classList.add("active");
     tab.setAttribute("aria-selected", "true");
+    if (tab === logsTab) tab.removeAttribute("data-alert"); // read; stop nagging
     const page = document.getElementById(`tab-${tab.dataset.tab}`);
     page.classList.add("active");
     // scrollTop written while display:none is a no-op; land at the bottom
@@ -278,6 +284,14 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ logs tab
 
+  const pushLog = (node, rank) => {
+    node.dataset.rank = String(rank);
+    node.hidden = rank < (LOG_RANK[levelSel.value] ?? 1);
+    loglinesEl.appendChild(node);
+    while (loglinesEl.children.length > LOG_CAP) loglinesEl.firstChild.remove();
+    if (!logPaused) loglinesEl.scrollTop = loglinesEl.scrollHeight;
+  };
+
   const logEntry = (line) => {
     let record;
     try {
@@ -285,18 +299,33 @@ export function createPanel({ send }) {
     } catch {
       record = { level: "info", event: line };
     }
-    const rank = LOG_RANK[record.level] ?? 1;
     const node = el("div", `logline ${record.level ?? "info"}`);
-    node.dataset.rank = String(rank);
     const rest = Object.entries(record)
       .filter(([k]) => !["ts", "level", "event", "logger"].includes(k))
       .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
       .join(" ");
     node.textContent = `${clock(record.ts ?? "")} ${record.level ?? ""} ${record.event ?? ""} ${rest}`;
-    node.hidden = rank < (LOG_RANK[levelSel.value] ?? 1);
-    loglinesEl.appendChild(node);
-    while (loglinesEl.children.length > LOG_CAP) loglinesEl.firstChild.remove();
-    if (!logPaused) loglinesEl.scrollTop = loglinesEl.scrollHeight;
+    pushLog(node, LOG_RANK[record.level] ?? 1);
+  };
+
+  // Lines this page writes about itself. The server's log stream cannot carry
+  // them: a skin that failed to load, or a renderer this build has no
+  // implementation for, is knowledge that exists only in the browser. They
+  // used to go to console.warn, which inside the shell means nowhere at all —
+  // there are no devtools on a frameless always-on-top window, so a degrade
+  // read as 「换了皮肤怎么还是豆腐」 (§15.12 asked for a line in the log area).
+  const noticed = new Set(); // hello repeats on every attach; the fact does not
+  const notice = (text) => {
+    if (!text || noticed.has(text)) return;
+    noticed.add(text);
+    const node = el("div", "logline warning");
+    // Local wall clock, matching the server lines' HH:MM:SS beside it —
+    // toISOString would print UTC and read as an hours-old line.
+    node.textContent = `${new Date().toTimeString().slice(0, 8)} warning ${text}`;
+    pushLog(node, LOG_RANK.warning);
+    // The panel does not open on the log tab, and a line nobody is pointed at
+    // is barely better than the console it came from.
+    logsTab?.setAttribute("data-alert", "1");
   };
 
   levelSel.addEventListener("change", () => {
@@ -689,8 +718,14 @@ export function createPanel({ send }) {
         applySpeakToConfig(data.speak);
       }
     },
+    /** One line about this page, in the place the streamer can read. */
+    notice,
     setHello(data) {
       nameEl.textContent = data.persona?.name ?? "BiliSama";
+      // Driven from hello rather than from the mount, because the panel window
+      // inside the shell mounts no pet at all and would otherwise never hear
+      // that the configured renderer did not take.
+      notice(unsupportedRenderer(data.avatar));
       if (data.panel) this.handleFrame("panel.state", data.panel);
     },
     setVisual(visual) {
@@ -703,6 +738,9 @@ export function createPanel({ send }) {
       timelineEl.textContent = "";
       timelineEl.appendChild(el("p", "empty", "还没有对话"));
       loglinesEl.textContent = "";
+      // The local lines went with them, so they are news again — otherwise a
+      // reconnect silently retires the one notice explaining a dead skin.
+      noticed.clear();
       // The config values came from the session that just ended — a restarted
       // dev-talk is back on the toml's values, so refetch instead of trusting
       // what is on screen.

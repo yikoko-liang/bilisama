@@ -47,7 +47,7 @@ from bilisama.obs.logging import get_logger
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.capabilities import Capabilities
-from bilisama.realtime.errors import ErrorClass, classify_error, describe
+from bilisama.realtime.errors import ErrorClass, classify_error, close_code, describe
 
 __all__ = ["RealtimeClient", "ReplyRecord", "SessionRefused"]
 
@@ -335,7 +335,10 @@ class RealtimeClient:
         except asyncio.CancelledError:
             return  # aclose(): a deliberate teardown needs no failure theatre
         except websockets.ConnectionClosed as exc:
-            reason = f"connection_closed:{exc.code}"
+            # close_code, not exc.code: the streamer's report reads
+            # "connection_closed:1008", so the number stays — but it comes off
+            # the attribute websockets still supports (errors.close_code).
+            reason = f"connection_closed:{close_code(exc)}"
             cause = exc
         # The link died underneath us. Silence here used to freeze the whole
         # consumer stack (C4/A9): the active reply never settles, the floor
@@ -530,10 +533,20 @@ class RealtimeClient:
         # unbooked let an explicit create race straight into a rejection (C1).
         self._slot_free.clear()
         # Serialisation means the next created after our create is USUALLY
-        # ours. An implicit created can interleave and steal the pairing —
-        # the wire carries nothing to match on, so this stays FIFO; the floor
-        # holding injections during speech (stage-3 fix) shrinks the overlap
-        # window to near zero. Residual risk recorded in the backlog.
+        # ours. An implicit created can interleave and steal the pairing, so
+        # this stays FIFO; the floor holding injections during speech (stage-3
+        # fix) shrinks the overlap window to near zero. Residual risk recorded
+        # in the backlog (item 23) — it misattributes events, never the slot.
+        #
+        # The protocol does define a discriminator we could use one day:
+        # response.conversation_id is null for a conversation="none" reply and
+        # an id for a VAD-triggered one (openai/types/beta/realtime/
+        # realtime_response.py:19-27), so an implicit created would be
+        # recognisable on the s2s path, where every create of ours is
+        # out-of-band. It is not wired here because no live endpoint has been
+        # checked for it, and a server that fills the field in for out-of-band
+        # replies too would leave our record unpaired until the 25 s watchdog —
+        # trading a rare misattribution for a routine stall. Probe first.
         if self._awaiting_created:
             record = self._awaiting_created.pop(0)
         else:  # a created we never asked for — book it so its frames land somewhere

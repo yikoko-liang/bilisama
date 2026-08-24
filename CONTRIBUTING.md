@@ -9,42 +9,67 @@
 scripts/gate.sh
 ```
 
-它跑 `black --check`、`ruff`、`mypy`（全量，含 `tests` 和 `tools`）、单元测试、
-CLI 冒烟、profile 覆盖层断言，最后是需要 speech-to-speech 的集成层。
+今天是九步：
 
-CLI 冒烟和 profile 覆盖层不是凑数：拆 `config` 包那次，`validate.py` 少了一个运行时
+| # | 步骤 | 说明 |
+|---|---|---|
+| 1 | `black --check` | `src tests tools` |
+| 2 | `ruff` | 同上 |
+| 3 | `mypy`（全量，strict） | 不带文件参数，扫哪些目录由 `pyproject.toml:112` 的 `files = ["src", "tests", "tools"]` 说了算——命令行再写一遍就是两份定义 |
+| 4 | `mypy --platform win32` | 假装 Windows 再读一遍 |
+| 5 | 单元测试 | `pytest`，addopts 已摘掉 integration / provider_a / manual / ui_browser |
+| 6 | CLI 冒烟 | `config validate` / `show` / `chattiness` / `render-s2s` |
+| 7 | profile 覆盖层 | 三档 profile 各渲染一次，断言覆盖真的生效 |
+| 8 | 集成层（s2s 补丁） | 装了 s2s venv 才跑，见下 |
+| 9 | 界面层（浏览器驱动） | 装了 playwright + chromium 才跑，见下 |
+
+第 4 步不是凑数：本机上 `if sys.platform == "win32"` 整段是死代码，一个参数类型写错
+的 msvcrt 调用照样过（2026-08-24 实测）。它是 Windows 分支目前唯一的覆盖。
+
+CLI 冒烟和 profile 覆盖层也不是凑数：拆 `config` 包那次，`validate.py` 少了一个运行时
 import，52 个单元测试全绿——因为当时**没有一个测试构造过 `Settings`**。是 CLI 冒烟
 抓到的。在覆盖缺口补上之前，这一层不能省。
 
-### 集成层：装了就自动跑
+### 两个可选层：装了就自动跑
 
-集成层管的是 s2s 补丁的自检，要一个单独的 venv（约 385 MiB），所以门禁没法无条件跑
-它。规矩不是「一定要跑」，而是「不跑就得说出来」：venv 在，门禁自己就把这一层跑了；
-不在，它会打一条显眼的跳过提示，并且**不会**在最后声称全部通过。
+第 8 步管 s2s 补丁的自检，要一个单独的 venv（约 385 MiB）；第 9 步开真 chromium 驱动
+真页面，要一次性下个浏览器。两样都装不了无条件跑，所以规矩不是「一定要跑」，而是
+「不跑就得说出来」：装了，门禁自己就把那一层跑了；没装，它打一条显眼的跳过提示，
+并且**不会**在最后声称全部通过。
 
-装一次就够，之后 `scripts/gate.sh` 就覆盖了这一层：
+装一次就够，之后 `scripts/gate.sh` 就覆盖了这两层：
 
 ```bash
-scripts/smoke_provider_b.sh install
+scripts/smoke_provider_b.sh install                                   # 集成层
+uv pip install playwright && .venv/bin/python -m playwright install chromium   # 界面层
 ```
 
-默认装到 `~/.local/share/bilisama/engines/s2s`；换地方用 `BILISAMA_S2S_VENV`，
-门禁按同一个变量找。想在门禁之外单独跑这批，原来的命令照旧：
+s2s 默认装到 `~/.local/share/bilisama/engines/s2s`；换地方用 `BILISAMA_S2S_VENV`，
+门禁按同一个变量找。想在门禁之外单独跑，原来的命令照旧：
 
 ```bash
 .venv/bin/python -m pytest -m integration
+.venv/bin/python -m pytest tests/ui -m ui_browser
 ```
 
-门禁最后一行说的是这次到底跑了哪几层，别扫一眼绿色就走：
+门禁最后一行说的是这次到底跑了哪几层，别扫一眼绿色就走。四种可能，一字不差
+（`tests/unit/test_gate.py` 拿桩解释器把门禁整条跑一遍，钉的就是这几行）：
 
 | 最后一行 | 意思 |
 |---|---|
-| `全部通过（含集成层）` | 两层都跑了 |
-| `单元层全部通过，集成层没跑（见上）` | 没装 s2s，那一层这次没验过 |
+| `全部通过（含集成层与界面层）` | 九步都跑了 |
+| `通过，集成层没跑（见上）` | 没装 s2s |
+| `通过，界面层没跑（见上）` | 没装 playwright 或 chromium |
+| `单元层全部通过，集成层与界面层没跑（见上）` | 两样都没装，这次只验了前七步 |
 
 CI 上「没装所以跳过」不是个能接受的答案，所以那边要设
-`BILISAMA_GATE_REQUIRE_INTEGRATION=1`：venv 找不到就直接判门禁失败，而不是跳过。
-它比的是 `0`，所以设成 `0` 就是明确关掉，本机不想被拦的时候用。
+`BILISAMA_GATE_REQUIRE_INTEGRATION=1` 和 `BILISAMA_GATE_REQUIRE_UI=1`：对应的东西
+找不到就直接判门禁失败，而不是跳过。两个都是拿 `0` 做比较，所以设成 `0` 就是明确
+关掉，本机不想被拦的时候用。
+
+界面层这一步探的是**浏览器**而不是 pip 包：playwright 装了但 chromium 没下时，
+每条测试都自己跳过、pytest 退 0，只看 import 会让最后一行认领一个什么都没跑的层
+（`gate.sh:129-146`）。
 
 ## 语言：代码用英文，给人看的用中文
 
@@ -111,19 +136,34 @@ dev-talk 早期那次阻塞音频写就是这类事故——一个调用，三�
 ## 界面改动的验收：自动化层 + 人工残卷
 
 桌宠前端的行为验收大头已经自动化：`tests/ui/` 用 Playwright（**Python 绑定，
-不引 node 测试栈**）开真 chromium 驱动真页面，测试协程直接扮演 hub 播帧。
-覆盖：hello 装配、状态驱动、气泡全生命周期（含碎裂后新回复回归）、面板页签与
-aria、panic 按钮、戳一戳消息、重连不重复、暗色跟随、减弱动态冻结帧、皮肤降级。
-门禁的「界面测试」一步会跑它；没装浏览器会大声说跳过（一次性安装：
+不引 node 测试栈**）开真 chromium 驱动真页面，测试协程直接扮演 hub 播帧。覆盖分两个
+文件（条数会随新增测试变，别在这里记数字，`pytest tests/ui -m ui_browser` 数一遍就有）：
+
+- `test_pet_page.py`：hello 装配、状态驱动、气泡全生命周期（含碎裂后新回复
+  回归）、面板页签与 aria、panic 按钮、戳一戳消息、配置页可改与徽章、重连不重复、
+  暗色跟随、减弱动态冻结帧、眨眼真的在动、皮肤降级，以及音频的页面半边：页面拿设备、
+  分段播放与回执、打断报已听秒数、面板列出设备名、麦克风被拒、拔掉选中的麦克风退回
+  系统默认、电平条只在面板开着时轮询、被更强的窗口接管后不再自责。
+- `test_audio_page.py`：音频 socket 掉线只重连一次且麦克风存活、被拒的标签页
+  放开麦克风、让位的标签页在持有者离开后接管、连切两次麦克风只留一条采集链、每段各报
+  一次 started/ended、打断停声、打断掉的不报 ended、切扬声器/切麦克风失败会说出来并
+  重发清单、采集确实请求了浏览器做回声消除。
+
+浏览器用 `--use-fake-device-for-media-stream` 的假设备，所以这一层验的是**协议和交接
+逻辑**，不是声音本身。门禁第 9 步跑它；没装浏览器会大声说跳过（一次性安装：
 `uv pip install playwright && .venv/bin/python -m playwright install chromium`）。
 
-自动化测不了的，改完界面起 `dev-talk --director` 人工过这四项：
+自动化测不了的，改完界面起 `dev-talk --director` 人工过这五项：
 
 1. 观感与手感：动画节奏、配色、比例——机器只会判对错，不会判好看。
 2. 戳一戳的语音半边：闸门空闲时她隔一会儿真的回一句（要真语音后端）。
 3. Electron 壳的窗口物理：透明悬浮、拖拽、面板独立窗、**点击穿透**（形象和气泡以外
    的地方要能点到底下的窗口）（装了壳就随 dev-talk 自动起）。
 4. 真断连：杀掉 dev-talk，豆腐熄灯打瞌睡（灰眼＋zzz）；重启后壳自动重挂。
+5. 真设备的交接（假设备测不到的那一半）：面板「声音」那一节切麦克风、切扬声器、
+   点试音，听到的确实变了；壳和浏览器标签页同时开着时只有壳出声、标签页写着
+   「只看不听」，关掉壳标签页自己把设备拿回去；外放不戴耳机说一句能插进她的话，
+   健康卡的 `echo` 读「没听见她自己」。
 
 ## 已知缺陷
 
@@ -134,4 +174,8 @@ aria、panic 按钮、戳一戳消息、重连不重复、暗色跟随、减弱�
 `derive()` 那一处就是这么漏了半年：断言拿 `derive()` 跟 `derive()` 比，函数完全忽略
 参数也照样全绿。
 
-代码里只剩一处 `KNOWN BROKEN`（`clock.py`），它自己写明了为什么没有对应的待办条目。
+代码里现在一处 `KNOWN BROKEN` 都没有（2026-08-25 全仓 grep 过，`_vendor/` 下的上游
+代码不算）。已知问题一律写成注释里的 `backlog item N`，指向计划 §16.8 的那一条——
+比如 `realtime/providers/hosted.py` 的 `end_protection` 空实现指着第 19 条
+（1a41e34 上在 :200-202；这类行号会漂，按符号名找）。
+写这类注释就带上编号，别再发明新标记。

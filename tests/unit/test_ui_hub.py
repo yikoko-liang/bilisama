@@ -20,6 +20,7 @@ import pytest
 
 from bilisama.clock import FakeClock
 from bilisama.obs.logging import get_logger, setup
+from bilisama.ui.audio import PlaybackTally
 from bilisama.ui.events import ServerEvent
 from bilisama.ui.hub import UiHub, VoiceSignals, resolve_voice_state
 
@@ -71,6 +72,22 @@ def _drain(queue: asyncio.Queue[str | None]) -> list[str]:
 )
 def test_resolve_voice_state(signals: VoiceSignals, expected: str) -> None:
     assert resolve_voice_state(signals) == expected
+
+
+def test_a_page_playing_her_reply_shows_as_speaking_not_as_thinking() -> None:
+    """壳拿走设备之后，「说话中」得靠页面的段落计数才亮得起来。
+
+    audio_busy 一直被当成「本机扬声器在响」来喂。页面接管以后本机那只扬声器没有
+    流，整段发声期间它都是 False：生成期显示「思考中」，服务端一说完 active_source
+    就清空，状态立刻掉到「空闲」——而页面这时候才刚开始播（清单第 26 条）。
+    PlaybackTally 数的正是页面报上来的段落，它就是这一侧的证人。
+    """
+    tally = PlaybackTally(on_playback=lambda _queued: None, notify=lambda: None)
+    tally.started()  # 页面开始播第一段
+    # 服务端早就生成完了：dispatching/active 都已落回 False。
+    assert resolve_voice_state(VoiceSignals(False, False, False, False, tally.busy)) == "speaking"
+    tally.ended()
+    assert resolve_voice_state(VoiceSignals(False, False, False, False, tally.busy)) == "idle"
 
 
 # ------------------------------------------------------------ delivery

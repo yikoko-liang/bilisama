@@ -14,10 +14,14 @@ through its LinkEvents.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
+import websockets
+from websockets.asyncio.server import ServerConnection, serve
 
 from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
@@ -558,3 +562,69 @@ async def test_a_refused_handshake_names_the_servers_reason() -> None:
             await linkobj.aclose()
         assert "session_limit_reached" in str(excinfo.value)
         assert "session slots are in use" in str(excinfo.value)
+
+
+@asynccontextmanager
+async def _greeting_server(greeting: str) -> AsyncIterator[str]:
+    """A socket that says one thing and then listens.
+
+    MockRealtimeServer cannot play this part: it always opens with a
+    well-formed session.created, which is exactly the assumption under test.
+    """
+
+    async def handle(conn: ServerConnection) -> None:
+        await conn.send(greeting)
+        with contextlib.suppress(websockets.ConnectionClosed):
+            async for _ in conn:
+                pass
+
+    server = await serve(handle, "127.0.0.1", 0)
+    port = next(iter(server.sockets)).getsockname()[1]
+    try:
+        yield f"ws://127.0.0.1:{port}/v1/realtime"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("greeting", "why"),
+    [
+        ("hello", "一个纯文本问候，根本不是 JSON"),
+        ("[1, 2, 3]", "合法 JSON，但是数组不是对象"),
+        ("null", "合法 JSON 的 null"),
+    ],
+    ids=["plain-text", "json-array", "json-null"],
+)
+async def test_a_socket_that_is_not_realtime_at_all_is_refused_in_chinese(
+    greeting: str, why: str
+) -> None:
+    """Wrong port, an echo server, a dev server's hot-reload socket: none of
+    them greet with a JSON object. Without the guard the streamer gets a
+    JSONDecodeError traceback (or normalize()'s AttributeError on a list)
+    instead of a sentence naming what answered.
+    """
+    async with _greeting_server(greeting) as url:
+        linkobj = S2SLink(url)
+        try:
+            with pytest.raises(ConnectionError) as excinfo:
+                await linkobj.connect()
+        finally:
+            await linkobj.aclose()
+        assert "not_realtime" in str(excinfo.value), why
+        # The greeting itself rides along: it is the only clue to what is
+        # listening on that port.
+        assert greeting[:20] in str(excinfo.value), why
+
+
+async def test_a_refused_handshake_leaks_no_socket() -> None:
+    """A caller that catches and retries must not stack up half-open sockets:
+    connect() closes before it raises."""
+    async with _greeting_server("hello") as url:
+        linkobj = S2SLink(url)
+        try:
+            with pytest.raises(ConnectionError):
+                await linkobj.connect()
+            assert linkobj._client._ws is None
+        finally:
+            await linkobj.aclose()

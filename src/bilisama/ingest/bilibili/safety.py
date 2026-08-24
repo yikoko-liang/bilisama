@@ -1,9 +1,28 @@
 """Ingest-side safety pieces: dedup, per-viewer cooldown, breaker, combo merge.
 
 Four small components, wired between the raw event stream and the selector
-(stage 6 B4). Numeric defaults are N.E.K.O's production-tuned values (plan
-section 5.3); only the per-viewer cooldown is a config knob
-(`[interaction.danmaku] per_uid_cooldown_s`), the rest are constants here.
+(stage 6 B4). The dedup window, the per-viewer cooldown and the combo timers
+are N.E.K.O's production-tuned values (plan section 5.3); only the per-viewer
+cooldown is a config knob (`[interaction.danmaku] per_uid_cooldown_s`), the
+rest are constants here.
+
+The breaker's numbers are not from that list, and three of section 5.3's
+constants have no home in this tree at all. Spelled out because the sentence
+above used to cover the whole module, which invited the opposite reading
+(ledger item 39, unrecorded anywhere until this note):
+
+- BREAKER_THRESHOLD 3 / BREAKER_WINDOW_S 60 is our own. Section 5.3's "two
+  output failures" counts output attempts; this breaker counts failures our
+  own code caught on the way in — mapping bugs, handler exceptions — a
+  different book with a different base rate (see CircuitBreaker below).
+- The 1.5s cooldown between gift responses: not landed. Gift pacing today is
+  whatever the combo aggregator's merging leaves behind.
+- queue_limit 5: not landed. The scheduler's heap is unbounded
+  (director/scheduler.py) and `SkipReason.QUEUE_FULL` is declared but emitted
+  by nobody.
+
+All three belong to the scheduler's output side rather than to this module,
+so landing them is a director-layer change, not an ingest one.
 
 All four are synchronous and take `now` — the injected clock's monotonic
 seconds — as an argument. They never sleep and never look at a wall clock,

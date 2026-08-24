@@ -277,6 +277,22 @@ class PlaybackTally:
     def outstanding(self) -> int:
         return self._outstanding
 
+    @property
+    def busy(self) -> bool:
+        """True while the page still has sound to make.
+
+        The floor gate is not the only consumer of this count: the pet's
+        「说话中」 state needs the same fact and cannot get it from the local
+        speaker. While a page holds the devices dev-talk's sounddevice speaker
+        has no stream at all — play() returns immediately and `busy` stays
+        False for the whole time she is talking — so a voice-state arbiter fed
+        by the speaker alone shows 「思考中」 during generation and drops to
+        「空闲」 the moment the server finishes, which is when the page is only
+        just starting to play. The receipts counted here are the witness on
+        this side; see VoiceSignals.audio_busy (ui/hub.py:51).
+        """
+        return self._outstanding > 0
+
     def started(self) -> None:
         self._outstanding += 1
         if self._outstanding == 1:
@@ -386,6 +402,13 @@ class EchoProbe:
                 # so the sound is back on the local sounddevice pair, where
                 # there is no echo cancellation at all. Saying 「没听见她自己」
                 # here would be the most misleading moment to say it.
+                #
+                # That reading is only sound because the uplink never goes
+                # quiet while a client holds the audio socket: a page whose
+                # capture died keeps feeding silence from the server side
+                # (_fill_uplink_silence, ui/server.py), which lands here as
+                # 「她还没开口」. The witness for THAT fault is the
+                # ui.uplink_silence_filled log line, not this card.
                 return {"ok": True, "state": "麦克风这一路没数据，判断不了"}
             return {"ok": True, "state": "她还没开口，没什么可判断的"}
         wording = {

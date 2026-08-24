@@ -31,6 +31,14 @@ class Priority(IntEnum):
     BIG_GIFT = 70
     GUARD_BUY = 65
     VIP_ENTER = 50
+    # Nothing produces this rung yet: the background lane needs the runner from
+    # section 4.11 (a tool call comes back long after the turn it belongs to,
+    # and the result is offered as its own intent), and that has not been
+    # built. The switch that gates it exists anyway — interaction.speak.
+    # background_result, config/bilisama.toml:106, off by default — as does
+    # SkipReason.RESULT_EXPIRED, which is what would retire a result that came
+    # back too late. Both stay unwired until the runner lands; keep the rung so
+    # the priority ladder does not have to be renumbered then.
     BACKGROUND_RESULT = 40
     DANMAKU = 30
     PROACTIVE = 10

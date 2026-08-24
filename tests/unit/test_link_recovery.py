@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 import pytest
+import websockets
+from websockets.frames import Close
 
 from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
@@ -30,7 +33,7 @@ from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
-from bilisama.realtime.errors import ErrorClass, classify_error
+from bilisama.realtime.errors import ErrorClass, classify_error, describe
 from bilisama.realtime.providers.hosted import HostedLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
 from tests.unit.test_realtime_client import _next_event
@@ -314,8 +317,6 @@ def test_a_drop_mid_utterance_does_not_wedge_the_floor() -> None:
 
 def test_error_classes_decide_whether_retrying_can_help() -> None:
     """A wrong key must not be retried eight times; a dropped packet must."""
-    import websockets
-
     assert classify_error(TimeoutError()) is ErrorClass.RETRYABLE
     assert classify_error(ConnectionRefusedError()) is ErrorClass.RETRYABLE
 
@@ -333,6 +334,127 @@ def test_error_classes_decide_whether_retrying_can_help() -> None:
     # Unknown close codes stay retryable: an unexplained drop is far more
     # often a network blip than a refusal, and a wrong FATAL means silence.
     assert classify_error(policy) is ErrorClass.RETRYABLE
+
+
+def _closed(code: int | None) -> websockets.ConnectionClosedError:
+    """A real ConnectionClosedError, with or without a received close frame."""
+    return websockets.ConnectionClosedError(Close(code, "") if code is not None else None, None)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 405, 409, 422])
+def test_a_handshake_the_server_refused_is_never_retried(status: int) -> None:
+    """Every one of these means the request itself is wrong. Retrying a wrong
+    key or a wrong model name eight times is an hour of silent stream."""
+
+    class _Rejected(Exception):
+        status_code = status
+
+    assert classify_error(_Rejected()) is ErrorClass.FATAL
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+def test_a_busy_backend_backs_off_instead_of_giving_up(status: int) -> None:
+    """A full or wedged backend comes back; hammering it does not help and
+    stopping dead throws away a stream that would have recovered."""
+
+    class _Busy(Exception):
+        status_code = status
+
+    assert classify_error(_Busy()) is ErrorClass.BACKOFF
+
+
+def test_an_unlisted_status_stays_retryable() -> None:
+    """The table is a whitelist on both sides: anything unclassified is a
+    hiccup, because a wrong FATAL costs an hour and a wrong retry costs 1 s."""
+
+    class _Odd(Exception):
+        status_code = 418
+
+    assert classify_error(_Odd()) is ErrorClass.RETRYABLE
+
+
+def test_the_status_is_found_on_the_response_object_too() -> None:
+    """websockets moved the attribute across versions; both shapes must read."""
+
+    class _Response:
+        status_code = 401
+
+    class _Rejected(Exception):
+        response = _Response()
+
+    assert classify_error(_Rejected()) is ErrorClass.FATAL
+
+
+@pytest.mark.parametrize("code", [1003, 1008])
+def test_the_two_close_codes_that_mean_we_are_wrong_are_fatal(code: int) -> None:
+    """1003 unsupported data and 1008 policy violation are both us being wrong,
+    and reconnecting into the same refusal is the eight-retry silence again."""
+    assert classify_error(_closed(code)) is ErrorClass.FATAL
+
+
+@pytest.mark.parametrize("code", [1000, 1001, 1006, 1011, 1012])
+def test_every_other_close_code_is_worth_a_reconnect(code: int) -> None:
+    assert classify_error(_closed(code)) is ErrorClass.RETRYABLE
+
+
+def test_a_close_with_no_frame_at_all_is_retryable() -> None:
+    """A severed socket sends nothing. That is the ordinary network blip."""
+    assert classify_error(_closed(None)) is ErrorClass.RETRYABLE
+
+
+def test_the_close_code_is_read_without_the_deprecated_property() -> None:
+    """ConnectionClosed.code has been deprecated since websockets 13.1
+    (exceptions.py:137). It is the only input to "is 1008 fatal", so the day it
+    is removed the fatal branch would quietly stop firing — and until then it
+    prints a warning per drop. rcvd.code is the supported spelling.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        assert classify_error(_closed(1008)) is ErrorClass.FATAL
+        assert classify_error(_closed(1011)) is ErrorClass.RETRYABLE
+
+
+def test_each_class_tells_the_streamer_what_to_do() -> None:
+    """Section 7.6: the line names the fix, not the traceback. Chinese, because
+    this one reaches a streamer (CONTRIBUTING's language split)."""
+    fatal = describe(ErrorClass.FATAL, "401")
+    assert "401" in fatal
+    assert "密钥" in fatal and "重试也没用" in fatal
+
+    backoff = describe(ErrorClass.BACKOFF, "429")
+    assert "429" in backoff and "限流" in backoff
+
+    retry = describe(ErrorClass.RETRYABLE, "connection_closed:1011")
+    assert "1011" in retry and "重连" in retry
+
+
+async def test_a_drop_names_its_close_code_without_the_deprecated_property() -> None:
+    """The other reader of the same deprecated property. The streamer's report
+    was literally `connection_closed:1008`, so the code has to survive in the
+    reason string — but reading it must not depend on an attribute websockets
+    already deprecated.
+    """
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        hosted = HostedLink(
+            server.url,
+            ProviderName.DASHSCOPE,
+            clock=clock,
+            auto_reconnect=False,
+            session_cap_min=0,
+        )
+        await hosted.connect()
+        try:
+            events = hosted.events()
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", DeprecationWarning)
+                await server.drop_connection()
+                down = await _next_event(events, link.LinkDown)
+            assert isinstance(down, link.LinkDown)
+            # 1011 is what MockRealtimeServer.drop_connection closes with.
+            assert down.reason == "connection_closed:1011", down.reason
+        finally:
+            await hosted.aclose()
 
 
 # ------------------------------------------------------------ playback backlog

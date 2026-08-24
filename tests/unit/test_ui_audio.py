@@ -200,6 +200,36 @@ def test_a_late_receipt_after_a_barge_in_cannot_wedge_the_gate() -> None:
     assert gate[-1] is True, "下一句还得能正常关门"
 
 
+def test_the_count_is_also_the_witness_that_she_is_making_sound() -> None:
+    """页面拿着设备的时候，「她在出声」只有这一个证人。
+
+    本机扬声器这时没有流，play() 直接返回，`speaker.busy` 整段都是 False——桌宠
+    于是生成期显示「思考中」，ReplyDone 一到就掉回「空闲」，而页面这时候才刚开始
+    播（清单第 26 条）。同一个计数既是闸门也是这个证据，不该再造第二个。
+    """
+    tally, _gate, _woke = _tally()
+    seen = [tally.busy]  # 还没开播
+    tally.started()
+    seen.append(tally.busy)
+    tally.started()
+    tally.ended()  # 第一段播完了，第二段还在
+    seen.append(tally.busy)
+    tally.ended()
+    seen.append(tally.busy)
+    assert seen == [False, True, True, False], f"「说话中」跟着声音走的：{seen}"
+
+
+def test_a_barge_in_stops_the_speaking_state_with_the_sound() -> None:
+    """打断之后页面不再出声，桌宠也不能继续摆「说话中」。"""
+    tally, _gate, _woke = _tally()
+    tally.started()
+    tally.cancelled()
+    seen = [tally.busy]
+    tally.ended()  # 迟到的收条：计数被夹在 0，状态也不能跟着翻过去
+    seen.append(tally.busy)
+    assert seen == [False, False], f"打断之后桌宠还在摆说话中：{seen}"
+
+
 async def test_a_displaced_client_is_hung_up_on() -> None:
     """Losing the devices has to reach the client that lost them.
 

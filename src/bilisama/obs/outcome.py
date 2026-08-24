@@ -12,8 +12,10 @@ Read them as a pair: `skipped@gated` means the speaking floor held it back,
 
 from __future__ import annotations
 
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 
 class Outcome(StrEnum):
@@ -86,3 +88,42 @@ class Verdict:
     def __str__(self) -> str:
         base = f"{self.outcome}@{self.phase}"
         return f"{base}({self.reason})" if self.reason else base
+
+
+class OutcomeWindow:
+    """The last N verdicts, aggregated for the health snapshot.
+
+    Plan §4.12 asks health for "the last N outcomes, aggregated", and the
+    question that actually gets asked on the panel is 「这十分钟里被闸门挡了几条」.
+    One verdict per line answers it only for someone willing to count, which
+    during a stream is nobody.
+
+    Deliberately not time-based: the panel polls, the counts have to be cheap and
+    they have to mean the same thing whether the room is dead or flooding. A
+    running total sits beside the window so "since when" does not get lost.
+    """
+
+    __slots__ = ("_recent", "_seen")
+
+    def __init__(self, size: int = 50) -> None:
+        self._recent: deque[Verdict] = deque(maxlen=size)
+        self._seen = 0
+
+    def note(self, verdict: Verdict) -> None:
+        """Record one terminal verdict. Cheap enough for the scheduler's sink."""
+        self._recent.append(verdict)
+        self._seen += 1
+
+    def status(self) -> dict[str, Any]:
+        """The probe body. Every key is present even before the first verdict —
+        a probe that returns an empty dict reads as broken rather than as idle."""
+        by_outcome: Counter[str] = Counter(str(v.outcome) for v in self._recent)
+        by_reason: Counter[str] = Counter(str(v.reason) for v in self._recent if v.reason)
+        return {
+            "window": self._recent.maxlen,
+            "seen": self._seen,
+            "recent": len(self._recent),
+            "by_outcome": dict(by_outcome),
+            "by_reason": dict(by_reason),
+            "last": str(self._recent[-1]) if self._recent else "",
+        }

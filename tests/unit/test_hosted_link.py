@@ -9,12 +9,17 @@ free — and the GA dialect, whose VAD is on by default, stays untouched.
 from __future__ import annotations
 
 import asyncio
+import logging
 
+from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import HostedTurnConfig
 from bilisama.realtime import capabilities as caps_mod
+from bilisama.realtime import dialect as dia
+from bilisama.realtime import link
 from bilisama.realtime.providers.hosted import HostedLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
+from tests.unit.test_realtime_client import _next_event
 
 
 async def test_dashscope_connect_sends_the_beta_bootstrap() -> None:
@@ -211,6 +216,126 @@ async def test_the_voice_rides_the_bootstrap() -> None:
             frames = [e for e in server.recorded.events if e.get("type") == "session.update"]
             assert frames, "no bootstrap reached the server"
             assert frames[0]["session"]["voice"] == "longanlingxin"
+        finally:
+            await hosted.aclose()
+
+
+async def test_rotation_is_armed_from_the_providers_own_cap_by_default() -> None:
+    """Debt #19's open half: the rotation code shipped 2026-08-20 and nothing
+    could turn it on. dev-talk builds the link without session_cap_min, the
+    default was 0, and 0 returns immediately — so DashScope's 120-minute cap
+    was still met the passive way, by being cut off mid-sentence.
+
+    The cap is a published property of the provider, so the adapter knows it
+    without being told (plan section 3.1: DashScope 120, OpenAI 60).
+    """
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        hosted = HostedLink(server.url, ProviderName.DASHSCOPE, clock=clock, auto_reconnect=True)
+        await hosted.connect()
+        try:
+            events = hosted.events()
+            await clock.advance(116 * 60)
+            await asyncio.sleep(0)
+            assert hosted._rotation is not None and not hosted._rotation.done()
+
+            await clock.advance(2 * 60)  # crosses 120 minus the 3-minute margin
+            down = await _next_event(events, link.LinkDown)
+            assert isinstance(down, link.LinkDown)
+            assert down.reason == "rotate:session_cap", down.reason
+        finally:
+            await hosted.aclose()
+
+
+async def test_rotation_can_still_be_switched_off() -> None:
+    """0 keeps meaning "never rotate" — the escape hatch for an endpoint whose
+    cap we guessed wrong, and what every test that does not care passes."""
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        hosted = HostedLink(
+            server.url, ProviderName.DASHSCOPE, clock=clock, session_cap_min=0, auto_reconnect=True
+        )
+        await hosted.connect()
+        try:
+            assert hosted._rotation is None
+            await clock.advance(10 * 60 * 60)
+            await asyncio.sleep(0)
+            assert hosted._rotation is None
+        finally:
+            await hosted.aclose()
+
+
+async def test_a_provider_with_no_known_cap_does_not_rotate_on_a_guess() -> None:
+    """s2s never reaches this adapter, but a hosted provider we have not
+    measured must not be rotated on an invented number."""
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.OPENAI_GA, script=Script()) as server:
+        hosted = HostedLink(server.url, ProviderName.OPENAI_GA, clock=clock)
+        await hosted.connect()
+        try:
+            # OpenAI's cap IS known (60 minutes), so this one does arm — the
+            # assertion that matters is that the number came from the table
+            # rather than from DashScope's.
+            assert hosted._session_cap_s == (60 - 3) * 60
+        finally:
+            await hosted.aclose()
+
+
+async def test_a_protected_reply_says_so_when_the_provider_cannot_protect() -> None:
+    """Ledger #45: hosted request_reply ignores spec.protected and
+    end_protection is a no-op, so a paid SC answer is interruptible on
+    DashScope while the scheduler's books say it is protected. The gap is not
+    closable from here — disarming the server's own barge-in needs a
+    turn_detection field no live probe has confirmed — but it must not be
+    invisible, which is what made it survive three months.
+    """
+    from bilisama.realtime import link as link_mod
+
+    lines: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(f"{record.getMessage()} {getattr(record, 'fields', {})}")
+
+    logger = logging.getLogger("bilisama.realtime.providers.hosted")
+    sink = _Sink()
+    logger.addHandler(sink)
+    try:
+        async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+            hosted = HostedLink(server.url, ProviderName.DASHSCOPE, session_cap_min=0)
+            await hosted.connect()
+            try:
+                await hosted.request_reply(link_mod.ReplySpec(protected=True))
+                await hosted.request_reply(link_mod.ReplySpec(protected=True))
+                await hosted.request_reply(link_mod.ReplySpec())
+            finally:
+                await hosted.aclose()
+    finally:
+        logger.removeHandler(sink)
+
+    warned = [line for line in lines if "hosted.protection_unsupported" in line]
+    # Once per link, not once per SC: an answer-every-gift stream would drown
+    # its own log.
+    assert len(warned) == 1, lines
+    assert "dashscope" in warned[0]
+
+
+async def test_ending_protection_on_a_hosted_link_sends_nothing() -> None:
+    """The scheduler calls end_protection on every protected reply's done and
+    again on the hard cap. With nothing to re-arm, the pair must stay a no-op
+    rather than invent a session.update no endpoint was probed for."""
+    from bilisama.realtime import link as link_mod
+
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        hosted = HostedLink(server.url, ProviderName.DASHSCOPE, session_cap_min=0)
+        await hosted.connect()
+        try:
+            await hosted.request_reply(link_mod.ReplySpec(protected=True))
+            before = server.recorded.count("session.update")
+            await hosted.end_protection()
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+            assert server.recorded.count("session.update") == before
         finally:
             await hosted.aclose()
 

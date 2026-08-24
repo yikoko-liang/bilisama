@@ -22,6 +22,7 @@ import json
 import math
 import os
 import socket
+import time
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,16 @@ _CLEAR_MARKER = json.dumps({"event": "playback.clear", "data": {}})
 # every 20 ms, so this is one line per outage plus one every five seconds while
 # it lasts — visible in the log without drowning it.
 _UPLINK_LOG_EVERY = 250
+
+# One uplink block: 20 ms of 16 kHz mono s16, the frame the page's capture
+# worklet posts (ui/web/js/capture-worklet.js:16-19).
+_UPLINK_FRAME_S = 0.02
+_UPLINK_SILENCE = b"\x00" * 640
+# How long the page may say nothing before the server starts speaking for it.
+# Five frames: past anything ordinary loop jitter produces, and short enough
+# that the hole left in the audio clock is well inside one turn-detection
+# window (the shortest silence any provider ends a turn on is ~200 ms).
+_UPLINK_GAP_S = 0.1
 
 
 # ------------------------------------------------------------ socket & files
@@ -387,15 +398,27 @@ def create_ui_app(
             # them, and releasing would take them out from under that client.
             granted: bool | None = None
             pump: asyncio.Task[None] | None = None
+            filler: asyncio.Task[None] | None = None
             dropped = 0
+            # Starts running at the claim, not at the first block: a page whose
+            # getUserMedia was refused never sends one, and that is the outage
+            # that lasts the whole session.
+            heard_at = time.monotonic()
             try:
                 granted = await broker.claim(who, send=send, close=close, flush=flush)
                 if not granted:
                     # Someone stronger has the devices. Say so and hang up
-                    # rather than sit on a socket nobody feeds.
+                    # rather than sit on a socket nobody feeds. Nothing is
+                    # started before this line: a client that is only watching
+                    # must not push silence over the holder's microphone.
                     await ws.close(code=4409)
                     return
                 pump = asyncio.create_task(_pump_audio(ws, outbound), name="ui:audio-out")
+                if on_audio is not None:
+                    filler = asyncio.create_task(
+                        _fill_uplink_silence(on_audio, lambda: time.monotonic() - heard_at),
+                        name="ui:audio-fill",
+                    )
                 while True:
                     # Both kinds on one socket: PCM up, and the playback
                     # receipts that describe the PCM coming down. They used to
@@ -409,6 +432,7 @@ def create_ui_app(
                         break
                     payload = message.get("bytes")
                     if payload is not None:
+                        heard_at = time.monotonic()
                         if on_audio is not None:
                             dropped = await _forward_uplink(on_audio, payload, dropped)
                         continue
@@ -420,10 +444,14 @@ def create_ui_app(
             finally:
                 if granted is not False:
                     await broker.release(who)
-                if pump is not None:
-                    pump.cancel()
+                for task in (pump, filler):
+                    if task is None:
+                        continue
+                    task.cancel()
+                    # CancelledError is a BaseException and needs naming; the
+                    # Exception arm swallows what the task itself died of.
                     with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await pump
+                        await task
 
     # health app mounts last because its prefix is the bare token and a mount
     # swallows everything under itself.
@@ -480,6 +508,55 @@ async def _forward_uplink(
     if dropped:
         log.info("ui.uplink_resumed", dropped=dropped)
     return 0
+
+
+async def _fill_uplink_silence(
+    on_audio: Callable[[bytes], Awaitable[None]],
+    idle_for: Callable[[], float],
+    *,
+    gap_s: float = _UPLINK_GAP_S,
+    frame_s: float = _UPLINK_FRAME_S,
+) -> None:
+    """Keep the audio clock running while the page's microphone is not.
+
+    Plan section 3.3 rule 7: the speculative-reopen window is measured on the
+    audio the session has appended (RealtimeClient.push_audio,
+    realtime/client.py:217-219), so a stream that stops does not pause the
+    provider's sense of time — it freezes it, and the streamer's next sentence
+    is merged into the turn before it. The local microphone path has honoured
+    this from the start: while the mic is muted for the echo shield it pushes
+    a silence block rather than skipping one (dev_talk.py:342-347), and the WAV
+    pump does the same after the file ends. The page inherited the devices and
+    not the rule, and its capture can be missing for a whole session (getUserMedia
+    denied, and ws.onopen does not look at the answer) or for the length of a
+    device switch, with the socket open and the local pair parked throughout.
+
+    Filling in from this end rather than from the page is deliberate: every
+    reason the page has nothing to send is also a reason it cannot be trusted
+    to send silence about it.
+
+    Args:
+        on_audio: Where uplink blocks go, the same handler the socket uses.
+        idle_for: Seconds since the last real block arrived from the page.
+        gap_s: How long the page may say nothing before this starts filling.
+        frame_s: One block of audio time; also the tick.
+    """
+    dropped = 0
+    filled = 0
+    while True:
+        await asyncio.sleep(frame_s)
+        if idle_for() < gap_s:
+            if filled:
+                log.info("ui.uplink_page_resumed", filled=filled)
+                filled = 0
+            continue
+        if filled == 0:
+            # One line per outage. Nobody else reports this: the echo card's
+            # 「麦克风这一路没数据」 answers a different question and only
+            # fires once the whole window has run dry.
+            log.warning("ui.uplink_silence_filled", idle_ms=int(idle_for() * 1000))
+        filled += 1
+        dropped = await _forward_uplink(on_audio, _UPLINK_SILENCE, dropped)
 
 
 async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | str | None]) -> None:

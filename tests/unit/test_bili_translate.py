@@ -8,8 +8,12 @@ must trip these before it reaches a live room (VENDOR.md's promise).
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+import re
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from bilisama.clock import FakeClock
 from bilisama.ingest.bilibili._vendor.blivedm.models import pb
@@ -30,6 +34,61 @@ from tests.fakes.bili import sc_data as _sc_data
 from tests.fakes.bili import toast_data as _toast_data
 
 _KW: dict[str, Any] = {"room_id": 777, "recv_at": 1.0, "generation": 2}
+
+# ------------------------------------------------------------------ the re-vendor alarm
+
+_VENDOR_MD = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "bilisama"
+    / "ingest"
+    / "bilibili"
+    / "_vendor"
+    / "blivedm"
+    / "VENDOR.md"
+)
+# Plan section 5.1's cadence, in days. One quarter, counted from the date the
+# snapshot in VENDOR.md was taken.
+_REVENDOR_PERIOD_DAYS = 92
+
+
+def _vendored_on(text: str) -> date:
+    """The snapshot date VENDOR.md records, as a date."""
+    match = re.search(r"^- Vendored: (\d{4})-(\d{2})-(\d{2})", text, re.MULTILINE)
+    if match is None:
+        raise AssertionError("VENDOR.md 里读不到 `- Vendored: YYYY-MM-DD` 那一行，到期提醒失灵了")
+    return date(int(match[1]), int(match[2]), int(match[3]))
+
+
+def test_vendor_md_records_a_readable_snapshot_date() -> None:
+    assert _vendored_on(_VENDOR_MD.read_text(encoding="utf-8")) >= date(2026, 8, 13)
+
+
+def test_an_unreadable_vendor_date_fails_loudly_instead_of_silently_never_firing() -> None:
+    """Error path: the line the alarm reads gets reworded. Swallowing that
+    would leave a reminder that can never fire again, which is the state this
+    whole alarm exists to end."""
+    with pytest.raises(AssertionError, match=re.escape("VENDOR.md")):
+        _vendored_on("- Vendored: 上个月，大概吧\n")
+
+
+def test_quarterly_revendor_is_not_overdue() -> None:
+    """The trigger for "每季度 re-vendor" (plan section 5.1).
+
+    Before this, the discipline existed only as prose in VENDOR.md: nothing
+    would say a word on the day it came due. A dated test is the one alarm
+    that needs neither CI nor a calendar entry — it rings inside the gate the
+    next person runs. Going red here is not a bug report, it is the reminder;
+    clear it by doing the re-vendor (VENDOR.md's four steps) and updating the
+    date, not by widening the window.
+    """
+    vendored = _vendored_on(_VENDOR_MD.read_text(encoding="utf-8"))
+    due = vendored + timedelta(days=_REVENDOR_PERIOD_DAYS)
+    assert date.today() <= due, (
+        f"该 re-vendor blivedm 了：上次快照 {vendored}，{due} 到期。"
+        "按 VENDOR.md「How to re-vendor」四步走完，把新 sha 和日期写回 VENDOR.md，"
+        "然后跑本文件的映射测试确认上游行为没变。"
+    )
 
 
 def test_danmaku_maps_identity_medal_and_millisecond_timestamp() -> None:
@@ -69,6 +128,25 @@ def test_gold_gift_derives_cny_and_merges_on_tid() -> None:
     assert event.gift is not None
     assert event.gift.combo_id == "uid:9:31036", "synthesised: same viewer, same gift"
     assert event.is_paid
+
+
+def test_the_wire_never_fills_the_platform_combo_fields() -> None:
+    """Pins the "NO WIRE WRITER" marker on Gift.combo_count / combo_end.
+
+    Both fields exist because the replay fixtures record what arrived, and
+    both stay at their defaults on every real mapping — the aggregator settles
+    on its idle timer, not on the platform's combo_end. Without this, the next
+    reader sees two populated-looking fields on a public model and builds a
+    combo counter on data that is never there in production.
+    """
+    for message in (
+        web_models.GiftMessage.from_command(_gift_data()),
+        web_models.GiftMessage.from_command(_gift_data(coin_type="silver", total_coin=990)),
+    ):
+        gift = event_from_gift(message, **_KW).gift
+        assert gift is not None
+        assert gift.combo_count == 0
+        assert gift.combo_end is None
 
 
 def test_silver_gift_is_worth_nothing_and_not_paid() -> None:
@@ -125,6 +203,19 @@ def test_legacy_guard_buy_maps_the_same_shape() -> None:
 def _interact_message(msg_type: int) -> object:
     raw = pb.InteractWordV2(uid=66, uname="路过", msg_type=msg_type, timestamp=1755000400).dumps()
     return web_models.InteractWordV2Message.from_command({"pb": base64.b64encode(raw).decode()})
+
+
+def test_upstream_still_names_only_the_three_verified_msg_types() -> None:
+    """Guards the 待验证 marker on msg_type 4/5/6 (ledger item 50).
+
+    Upstream names 1/2/3 and stops (pb.py's InteractWordV2MsgType); our
+    special-follow / mutual-follow / like readings above that are a guess. The
+    day a re-vendor adds a name for 4, 5 or 6, this goes red and somebody gets
+    to confirm the guess or fix it — which is cheaper than the alternative on
+    offer, sitting in a live room counting msg_types.
+    """
+    named = {member.value: member.name for member in pb.InteractWordV2MsgType}
+    assert named == {0: "Unknown", 1: "EnterRoom", 2: "Follow", 3: "ShareRoom"}
 
 
 def test_interact_word_v2_splits_by_msg_type_through_real_protobuf() -> None:

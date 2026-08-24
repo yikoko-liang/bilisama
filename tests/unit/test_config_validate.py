@@ -13,12 +13,17 @@ review. Where the CLI turns these into printed output is test_config_validation.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import ast
+from fnmatch import fnmatchcase
+from pathlib import Path
+from typing import Any, Literal, NamedTuple
 
 import pytest
 from pydantic import BaseModel
 
 from bilisama.config import ConfigProblem, ProviderName, Settings, check
+from bilisama.config import validate as validate_module
+from bilisama.config.schema import CURRENT_VERSION
 
 ExpressionSource = Literal["tag", "lexicon", "tool_call"]
 OutputRoute = Literal["virtual", "direct"]
@@ -47,6 +52,8 @@ def _settings(
     credential_ref: str = "",
     growth_voice: str = "off",
     side_base_url: str = "",
+    tts_voice: str = "",
+    config_version: int = CURRENT_VERSION,
 ) -> Settings:
     """Shipped defaults with a model id, and one axis moved off it.
 
@@ -64,7 +71,9 @@ def _settings(
     speech["side"] = {"base_url": side_base_url}
     return Settings.model_validate(
         {
+            "config_version": config_version,
             "speech": speech,
+            "custom_tts": {"voice": tts_voice},
             "avatar": {"expression_source": expression_source},
             "audio": {"output_route": output_route, "echo_guard": echo_guard},
             "room": {"room_id": room_id, "credential_ref": credential_ref},
@@ -73,14 +82,16 @@ def _settings(
     )
 
 
-def _fields(s: Settings) -> list[str]:
-    return [p.field for p in check(s)]
+def _fields(s: Settings, config_dir: Path | None = None) -> list[str]:
+    return [p.field for p in check(s, config_dir=config_dir)]
 
 
-def _one(s: Settings, field: str) -> ConfigProblem:
+def _one(s: Settings, field: str, config_dir: Path | None = None) -> ConfigProblem:
     """The single problem on `field`, or a failure naming everything reported."""
-    matches = [p for p in check(s) if p.field == field]
-    assert len(matches) == 1, f"expected exactly one problem on {field}, got {_fields(s)}"
+    matches = [p for p in check(s, config_dir=config_dir) if p.field == field]
+    assert (
+        len(matches) == 1
+    ), f"expected exactly one problem on {field}, got {_fields(s, config_dir)}"
     return matches[0]
 
 
@@ -101,20 +112,85 @@ def _resolves(path: str) -> bool:
     return leaf in model.model_fields
 
 
-# One deliberately broken config per rule. Reused by the two tests that have to
-# see every problem `check` can produce, not just the ones they happen to trip.
+class _Broken(NamedTuple):
+    """One deliberately broken config, plus the config dir `check` needs to see it.
+
+    `config_dir` is None for every rule that reads nothing off disk. The wordlist
+    rule is the exception, and it is exactly the rule that went untested for as
+    long as this table only held Settings objects.
+    """
+
+    settings: Settings
+    config_dir: Path | None = None
+
+    def problems(self) -> list[ConfigProblem]:
+        return check(self.settings, config_dir=self.config_dir)
+
+
+# A directory that does not exist, so `wordlist.txt` under it cannot either. No
+# tmp_path: this table is built at import time, and a stat on a missing path is
+# the whole interaction with the filesystem.
+_NO_CONFIG_DIR = Path(__file__).resolve().parent / "_no_such_config_dir"
+
+
+# One deliberately broken config per rule. Reused by the tests that have to see
+# every problem `check` can produce, not just the ones they happen to trip.
 BROKEN_ONE_WAY_EACH = {
-    "avatar.expression_source": _settings(patches=("raw_instructions",), expression_source="tag"),
+    "avatar.expression_source": _Broken(
+        _settings(patches=("raw_instructions",), expression_source="tag")
+    ),
     # virtual routes her voice out through something that is not the shell,
     # which is exactly what the canceller cannot see.
-    "audio.output_route": _settings(output_route="virtual"),
-    "speech.s2s.llm_model": _settings(llm_model=""),
-    "speech.dashscope.endpoint": _settings(
-        provider=ProviderName.DASHSCOPE, endpoint="", expression_source="lexicon"
+    "audio.output_route": _Broken(_settings(output_route="virtual")),
+    "speech.s2s.llm_model": _Broken(_settings(llm_model="")),
+    "speech.dashscope.endpoint": _Broken(
+        _settings(provider=ProviderName.DASHSCOPE, endpoint="", expression_source="lexicon")
     ),
-    "room.credential_ref": _settings(room_id=12345, credential_ref=""),
-    "speech.side.base_url": _settings(growth_voice="collect", side_base_url=""),
+    "room.credential_ref": _Broken(_settings(room_id=12345, credential_ref="")),
+    "speech.side.base_url": _Broken(_settings(growth_voice="collect", side_base_url="")),
+    "config_version": _Broken(_settings(config_version=99)),
+    "safety.wordlist_path": _Broken(
+        _settings(room_id=12345, credential_ref="env:BILI_SESSDATA"), _NO_CONFIG_DIR
+    ),
+    "custom_tts.engine": _Broken(
+        _settings(provider=ProviderName.DASHSCOPE, expression_source="lexicon", tts_voice="知性")
+    ),
+    "speech.s2s.patches": _Broken(_settings(patches=("raw_instructions",), tts_voice="知性")),
+    "speech.provider": _Broken(
+        _settings(provider=ProviderName.OPENAI_GA, expression_source="lexicon")
+    ),
 }
+
+
+def _rule_field_patterns() -> list[str]:
+    """Every `field=` that `validate.check` can report, read out of its source.
+
+    The table above is hand-maintained, so a rule nobody wrote a fixture for is
+    invisible to the three whole-list tests below — which is how the wordlist
+    rule (§7.6's one hard gate) stayed uncovered. This reads the rules from the
+    only place that cannot lie about them.
+
+    An f-string field becomes a glob: `f"speech.{provider}.endpoint"` reads back
+    as `speech.*.endpoint`, which one concrete fixture is enough to satisfy.
+    """
+    source = Path(validate_module.__file__).read_text(encoding="utf-8")
+    patterns: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ConfigProblem"):
+            continue
+        field = next((kw.value for kw in node.keywords if kw.arg == "field"), None)
+        if isinstance(field, ast.Constant) and isinstance(field.value, str):
+            patterns.append(field.value)
+        elif isinstance(field, ast.JoinedStr):
+            patterns.append(
+                "".join(
+                    str(part.value) if isinstance(part, ast.Constant) else "*"
+                    for part in field.values
+                )
+            )
+        else:  # pragma: no cover - a field built some third way needs a decision
+            raise AssertionError(f"看不懂 validate.py 第 {node.lineno} 行的 field=")
+    return patterns
 
 
 # ------------------------------------------------------------ the quiet case
@@ -162,7 +238,10 @@ def test_hosted_provider_without_endpoint_is_fatal(provider: ProviderName) -> No
     assert problem.message and problem.fix
 
     configured = _settings(provider=provider, expression_source="lexicon")
-    assert check(configured) == []
+    # openai_ga keeps its own sample-rate note whatever the endpoint says; the
+    # endpoint rule is the only thing this test is about.
+    expected = ["speech.provider"] if provider is ProviderName.OPENAI_GA else []
+    assert _fields(configured) == expected
 
 
 @pytest.mark.parametrize(
@@ -238,6 +317,160 @@ def test_anonymous_room_is_advisory_and_silent_before_setup() -> None:
     assert check(_settings(room_id=12345, credential_ref="keychain:bili")) == []
 
 
+# ------------------------------------------------------------ config_version
+
+
+def test_a_config_from_a_newer_build_is_fatal() -> None:
+    """Nothing can read it honestly: migrations only run forwards, and a value
+    whose meaning changed keeps its old name."""
+    problem = _one(_settings(config_version=CURRENT_VERSION + 1), "config_version")
+    assert problem.fatal is True
+    assert str(CURRENT_VERSION) in problem.message
+
+
+@pytest.mark.parametrize("version", [CURRENT_VERSION, CURRENT_VERSION - 1])
+def test_this_version_and_older_pass_the_validator(version: int) -> None:
+    """An older file is the migrator's business (`config.migrate`), not this
+    one's — by the time `check` runs it has already been walked forward."""
+    assert "config_version" not in _fields(_settings(config_version=version))
+
+
+# ------------------------------------------------------------ the wordlist gate
+
+
+def _with_wordlist(root: Path) -> Path:
+    """A config dir laid out the way `load_guard` resolves "auto"."""
+    (root / "safety").mkdir(parents=True)
+    (root / "safety" / "wordlist.txt").write_text("测试词\n", encoding="utf-8")
+    return root
+
+
+def test_a_missing_wordlist_refuses_to_start(tmp_path: Path) -> None:
+    """§7.6's only hard gate: no output backstop, no stream.
+
+    Fatal on purpose — everything else in this file that can be worked around is
+    advisory, and this one cannot: what it protects against reaches the audience.
+    """
+    live = _settings(room_id=12345, credential_ref="env:BILI_SESSDATA")
+    problem = _one(live, "safety.wordlist_path", tmp_path)
+    assert problem.fatal is True
+    assert str(tmp_path / "safety" / "wordlist.txt") in problem.message
+
+
+def test_the_wordlist_gate_is_quiet_once_the_file_is_there(tmp_path: Path) -> None:
+    live = _settings(room_id=12345, credential_ref="env:BILI_SESSDATA")
+    assert check(live, config_dir=_with_wordlist(tmp_path)) == []
+
+
+def test_the_wordlist_gate_follows_an_explicit_path(tmp_path: Path) -> None:
+    """ "auto" is resolved against the config dir; anything else is taken as
+    written, the same way `director.output_guard.load_guard` does it."""
+    elsewhere = tmp_path / "elsewhere.txt"
+    live = Settings.model_validate(
+        {
+            "speech": {"s2s": {"llm_model": "our-s2t-v1"}},
+            "room": {"room_id": 12345, "credential_ref": "env:BILI_SESSDATA"},
+            "safety": {"wordlist_path": str(elsewhere)},
+        }
+    )
+    assert _fields(live, tmp_path) == ["safety.wordlist_path"]
+    elsewhere.write_text("测试词\n", encoding="utf-8")
+    assert check(live, config_dir=tmp_path) == []
+
+
+def test_the_wordlist_gate_warns_before_a_room_is_configured(tmp_path: Path) -> None:
+    """No room yet: told, not blocked.
+
+    It used to say nothing at all, which meant the rule could not fire for the
+    config that ships (room_id = 0) — so `bilisama config validate`, the check
+    gate.sh runs on every commit, never once looked at the file. A fresh install
+    still gets to start; what it does not get is silence.
+    """
+    problem = _one(_settings(room_id=0), "safety.wordlist_path", tmp_path)
+    assert problem.fatal is False
+    assert "--director" in problem.message
+
+
+def test_the_wordlist_gate_cannot_fire_without_a_config_dir(tmp_path: Path) -> None:
+    """`config_dir=None` means "do not touch the filesystem", not "clean".
+
+    Every caller that can resolve the path passes it (cli.py:144,
+    dev_talk.py:901, loader.py:86); this pins that a caller which cannot is
+    skipping the check rather than passing it.
+    """
+    live = _settings(room_id=12345, credential_ref="env:BILI_SESSDATA")
+    assert check(live) == []
+
+
+# ------------------------------------------------------------ TTS ownership
+
+
+def test_a_hand_set_custom_tts_is_flagged_when_the_provider_speaks_for_us() -> None:
+    """§7.6 row 2. Nothing reads `[custom_tts]` while the provider makes its own
+    audio, so a voice picked there is silently ignored — and on DashScope it even
+    has a same-named twin that IS read (`speech.dashscope.voice`)."""
+    hosted = _settings(
+        provider=ProviderName.DASHSCOPE, expression_source="lexicon", tts_voice="知性"
+    )
+    problem = _one(hosted, "custom_tts.engine")
+    assert problem.fatal is False
+    assert "speech.dashscope.voice" in problem.fix
+
+
+def test_an_untouched_custom_tts_section_says_nothing() -> None:
+    """The shipped defaults are "not configured", and nagging every hosted run
+    about a section nobody filled in is how a warning list stops being read."""
+    hosted = _settings(provider=ProviderName.DASHSCOPE, expression_source="lexicon")
+    assert check(hosted) == []
+
+
+def test_custom_tts_is_fine_when_we_own_the_synthesiser() -> None:
+    """Patched s2s hands us text; our own chain is exactly what speaks it."""
+    ours = _settings(patches=("text_modality", "raw_instructions"), tts_voice="知性")
+    assert check(ours) == []
+
+
+def test_dropping_the_text_patch_while_custom_tts_is_configured_is_flagged() -> None:
+    """§7.6 row 4, and it points at the patch rather than at the TTS: on this
+    provider the patch list is the thing that decides who speaks."""
+    s = _settings(patches=("raw_instructions",), tts_voice="知性")
+    problem = _one(s, "speech.s2s.patches")
+    assert problem.fatal is False
+    assert "text_modality" in problem.fix
+
+
+def test_the_two_tts_rules_never_both_fire() -> None:
+    """They describe the same mistake from two sides, and a streamer reading two
+    warnings about one setting starts discounting both."""
+    for provider in ProviderName:
+        for patches in (("text_modality", "raw_instructions"), ("raw_instructions",), ()):
+            s = _settings(
+                provider=provider, patches=patches, expression_source="lexicon", tts_voice="知性"
+            )
+            fired = set(_fields(s)) & {"custom_tts.engine", "speech.s2s.patches"}
+            assert len(fired) <= 1, f"{provider}/{patches} 同时报了 {fired}"
+
+
+# ------------------------------------------------------------ openai_ga
+
+
+def test_openai_ga_warns_about_the_sample_rate_without_refusing() -> None:
+    """§7.6 row 5. It is 24k in both directions (plan §3.1) while the uplink
+    everywhere else is 16k, and the resampling that would bridge them is not
+    written — dev_talk.py:1066 refuses the provider outright."""
+    problem = _one(
+        _settings(provider=ProviderName.OPENAI_GA, expression_source="lexicon"), "speech.provider"
+    )
+    assert problem.fatal is False
+    assert "24" in problem.message
+
+
+def test_the_sample_rate_note_is_only_for_openai_ga() -> None:
+    for provider in (ProviderName.S2S, ProviderName.DASHSCOPE):
+        s = _settings(provider=provider, expression_source="lexicon")
+        assert "speech.provider" not in _fields(s)
+
+
 # ------------------------------------------------------------ the whole list
 
 
@@ -262,13 +495,31 @@ def test_problems_accumulate_and_never_short_circuit() -> None:
 
 
 def test_every_rule_is_covered_by_the_broken_fixtures() -> None:
-    """Keeps the two tests below honest.
+    """Keeps the tests below honest.
 
     They only assert over problems they can produce, so a new rule that no fixture
-    trips would sail past both of them.
+    trips would sail past all of them.
     """
-    for field, s in BROKEN_ONE_WAY_EACH.items():
-        assert field in _fields(s), f"the fixture for {field} no longer trips that rule"
+    for field, broken in BROKEN_ONE_WAY_EACH.items():
+        assert field in [
+            p.field for p in broken.problems()
+        ], f"the fixture for {field} no longer trips that rule"
+
+
+def test_no_rule_in_the_source_is_missing_a_fixture() -> None:
+    """The teeth behind the test above: rules come from validate.py, not from us.
+
+    §7.6's hard gate — a missing wordlist refuses to start — sat in `check` with
+    no fixture and no test at all, because the table above is written by hand and
+    a rule that is absent from it is simply invisible.
+    """
+    covered = set(BROKEN_ONE_WAY_EACH)
+    orphans = [
+        pattern
+        for pattern in _rule_field_patterns()
+        if not any(fnmatchcase(field, pattern) for field in covered)
+    ]
+    assert not orphans, f"validate.py 里这些规则没有对应的坏样本：{orphans}"
 
 
 def test_every_problem_is_actionable() -> None:
@@ -276,8 +527,8 @@ def test_every_problem_is_actionable() -> None:
 
     A `fix` that only rephrases the message leaves them exactly where they were.
     """
-    for s in BROKEN_ONE_WAY_EACH.values():
-        for p in check(s):
+    for broken in BROKEN_ONE_WAY_EACH.values():
+        for p in broken.problems():
             assert p.message, f"{p.field} has no message"
             assert p.fix, f"{p.field} has no fix"
             assert any(
@@ -299,6 +550,6 @@ def test_every_problem_is_actionable() -> None:
 def test_every_problem_points_at_a_real_settings_field() -> None:
     """A field path the settings page cannot resolve is a dead link, and the only
     thing that would ever notice is a person clicking it."""
-    for s in BROKEN_ONE_WAY_EACH.values():
-        for p in check(s):
+    for broken in BROKEN_ONE_WAY_EACH.values():
+        for p in broken.problems():
             assert _resolves(p.field), f"{p.field} is not a Settings field"

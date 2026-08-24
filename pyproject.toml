@@ -5,6 +5,12 @@ description = "BiliSama —— B 站直播 AI 伴播"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 
+# Ledger #51: numpy, pysbd and pydantic-settings used to sit in this list and were
+# imported by nothing in src, tests, tools or scripts — about 38 MiB measured in
+# .venv, against plan section 6.5's budget of "tens to low hundreds of MB" for the
+# whole product. The config layer reads plain pydantic BaseModel, not
+# pydantic-settings. tests/unit/test_gate.py's
+# test_every_runtime_dependency_is_actually_imported now catches the next one.
 dependencies = [
     # 传输：自己收发帧，不用 openai SDK 的客户端（见计划 §3.1）
     "websockets>=13.0",
@@ -16,9 +22,6 @@ dependencies = [
     "brotli>=1.1",
     "pure-protobuf~=3.1.2",
     "pydantic>=2.9",
-    "pydantic-settings>=2.6",
-    "numpy>=1.26",
-    "pysbd>=0.3.4",
 ]
 
 [project.optional-dependencies]
@@ -109,7 +112,7 @@ force-exclude = "src/bilisama/ingest/bilibili/_vendor"
 mypy_path = "src"
 # So a bare `mypy` checks exactly what scripts/gate.sh checks. One definition of
 # "the whole tree", not two.
-files = ["src", "tests", "tools"]
+files = ["src", "tests", "tools", "scripts"]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
@@ -121,7 +124,7 @@ exclude = ["src/bilisama/ingest/bilibili/_vendor"]
 # 第三方库没有类型标注的，单独放行
 [[tool.mypy.overrides]]
 # sounddevice is dev-talk's optional mic layer, installed on demand.
-module = ["pysbd.*", "brotli.*", "mlx_audio.*", "sounddevice.*"]
+module = ["brotli.*", "mlx_audio.*", "sounddevice.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -143,8 +146,15 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: 需要真实的 speech-to-speech 服务，默认不跑",
+    # Nothing carries provider_a yet — half of ledger #37. Registered anyway,
+    # because plan section 10.5 owes the tier; what keeps that from reading as
+    # covered is test_gate.py's EMPTY_TIERS, which names it as excused AND empty
+    # instead of letting one line of excuse balance a row of zeroes.
     "provider_a: 需要真实的托管 Realtime 端点，默认不跑",
-    "manual: 一次性探针，手动跑",
+    # A `manual` marker was removed from here: registered, deselected below and
+    # excused in the gate, with not one test carrying it and an excuse describing
+    # probe files that were never committed. An empty marker is worse than no
+    # marker, because the reconciliation table balances either way.
     "ui_browser: 浏览器驱动的界面测试（要 playwright + chromium），gate 单独跑",
 ]
 # Keeps the inner loop down to the tier that needs nothing installed. The cost is
@@ -153,4 +163,4 @@ markers = [
 # way to a commit. scripts/gate.sh runs `-m integration` as a step of its own and
 # reports the skip when the venv is missing; tests/unit/test_gate.py fails if a
 # marker is deselected here without either a gate step or a written reason.
-addopts = "-m 'not integration and not provider_a and not manual and not ui_browser'"
+addopts = "-m 'not integration and not provider_a and not ui_browser'"

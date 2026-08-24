@@ -17,7 +17,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
 
-from bilisama.clock import FakeClock, SystemClock
+from bilisama.clock import Clock, FakeClock, SystemClock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.director.intents import WRAP_OPEN, intent_for, wrap_events
@@ -48,6 +48,7 @@ def _intent(
     dedup: str = "",
     requeue: bool = False,
     expires_at: float | None = None,
+    created_at: float = 0.0,
     text: str | None = "[弹幕] 观众A: 你好",
 ) -> Intent:
     return Intent(
@@ -55,6 +56,7 @@ def _intent(
         priority=priority,
         injection=Injection(reply=ReplySpec(instructions="回一句"), item_text=text),
         dedup_key=dedup,
+        created_at=created_at,
         expires_at=expires_at,
         requeue_on_interrupt=requeue,
     )
@@ -430,6 +432,7 @@ class _ScriptedLink:
     def __init__(self, *, cancel_error: Exception | None = None, item_failures: int = 0) -> None:
         self.feed: asyncio.Queue[LinkEvent] = asyncio.Queue()
         self.items: list[str] = []
+        self.item_attempts = 0
         self.replies: list[ReplySpec] = []
         self.cancels: list[ReplyHandle] = []
         self._cancel_error = cancel_error
@@ -448,6 +451,11 @@ class _ScriptedLink:
         return None
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        self.item_attempts += 1
+        # The real one reaches the socket before it can fail (s2s.py:126-142),
+        # so it always hands the loop a turn. Without that turn here a retry
+        # loop would starve the test's own watchdog instead of failing it.
+        await asyncio.sleep(0)
         if self._item_failures > 0:
             self._item_failures -= 1
             raise ConnectionError("还没连接")
@@ -479,8 +487,9 @@ async def _scheduler_on(
     *,
     guard: Callable[[str], bool] | None = None,
     quiet_after_speech_s: float = 1.1,
+    clock: Clock | None = None,
 ) -> AsyncIterator[Scheduler]:
-    clock = SystemClock()
+    clock = clock or SystemClock()
     scheduler = Scheduler(
         speech,
         SpeakingFloor(clock),
@@ -643,6 +652,189 @@ async def test_a_failed_history_write_is_retried_on_the_requeue() -> None:
         )
         await _until(lambda: len(speech.replies) == 1, "重试没把这条重新派发出去")
     assert speech.items == [text], "写失败的那条没有补写"
+
+
+async def test_a_dispatch_that_never_lands_stops_retrying_instead_of_spinning() -> None:
+    """The retry had neither a bound nor a backoff.
+
+    Paid intents requeue on a failed send, and intents.py:160 leaves their
+    expires_at None on purpose — so "expired, drop it" never fired for exactly
+    the intents that come back. A send that keeps failing therefore redispatched
+    forever: probed 2026-08-25 at roughly 65000 attempts a second, zero
+    verdicts, and with a synchronous raise the event loop starved outright.
+
+    Section 4.11's rule is that the bound is a deadline, not a retry counter —
+    "a reply retried eight times across ten seconds is worse than no reply".
+    """
+    clock = FakeClock()
+    speech = _ScriptedLink(item_failures=10_000)  # the socket never comes back
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True))
+        await _until(lambda: speech.item_attempts >= 1, "第一次派发就没发生")
+        await clock.advance(20.0)
+        await _until(lambda: bool(scheduler.verdicts), "一直在重派，永远不给终局", timeout=2.0)
+    verdict = scheduler.verdicts[0]
+    assert verdict.outcome is Outcome.EXPIRED, str(verdict)
+    assert verdict.reason is None, "没有后台链路，别再说成 background.result_expired"
+    assert 2 <= speech.item_attempts <= 8, f"重试次数失控：{speech.item_attempts}"
+    _assert_one_verdict_each(scheduler)
+
+
+async def test_a_dispatch_failure_on_unpaid_work_fails_once_and_says_so() -> None:
+    """The other branch of the same failure: nothing requeues work the audience
+    did not pay for, so it ends right there — failed@dispatched with the send's
+    own error in the detail, and no second half of the two-step attempted."""
+    speech = _ScriptedLink(item_failures=1)
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _until(lambda: bool(scheduler.verdicts), "派发失败了却没有终局")
+    verdict = scheduler.verdicts[0]
+    assert verdict.outcome is Outcome.FAILED
+    assert verdict.phase is Phase.DISPATCHED
+    assert "还没连接" in verdict.detail
+    assert not speech.replies, "历史都没写进去，不该再去要回复"
+
+
+async def test_the_gate_that_held_an_expired_intent_is_named_in_its_verdict() -> None:
+    """Ledger #35: `skipped@gated` had no producer at all.
+
+    An intent the speaking floor held onto until its TTL ran out used to end as
+    `expired@queued(background.result_expired)` — a background lane that does
+    not exist, on the single most common reason she said nothing. The verdict
+    now names the gate that actually held it.
+    """
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        speech.feed.put_nowait(SpeechStarted(audio_ms=0))
+        await _until(lambda: scheduler._floor.streamer_speaking, "主播开口的事件没人消费")
+        scheduler.submit(_intent(dedup="dan_1", expires_at=5.0))
+        await _until(lambda: scheduler.status()["queued"] == 1, "没排进队列")
+        await clock.advance(6.0)
+        scheduler.notify()  # the streamer is still talking; the danmaku just went stale
+        await _until(lambda: bool(scheduler.verdicts), "被闸门挡住的意图拿不到终局")
+    verdict = scheduler.verdicts[0]
+    assert verdict.outcome is Outcome.EXPIRED
+    assert verdict.phase is Phase.GATED, str(verdict)
+    assert verdict.reason is SkipReason.HOST_SPEAKING, str(verdict)
+    assert not speech.replies, "过期的意图不该被派发"
+
+
+async def test_a_reply_settles_at_played_once_its_audio_has_drained() -> None:
+    """`spoken@generating` says the model stopped producing tokens, which is
+    not what the audience heard — the 106-second playback backlog was exactly
+    that gap. With a playback receipt in hand (PlaybackTally feeds the floor),
+    the verdict waits for the audio to drain and settles at `spoken@played`."""
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        active = scheduler._active
+        assert active is not None
+        scheduler._floor.on_playback(True)  # L1 holds audio for this reply
+        speech.feed.put_nowait(ReplyDone(active.handle, ReplyStatus.COMPLETED, text="说完了"))
+        await _until(lambda: scheduler._active is None, "回复没有结算")
+        assert not scheduler.verdicts, "音频还在放，终局不该先落"
+
+        scheduler._floor.on_playback(False)
+        scheduler.notify()  # whoever owns the speaker says so; the link never does
+        await _until(lambda: bool(scheduler.verdicts), "放完了也没给终局")
+    verdict = scheduler.verdicts[0]
+    assert verdict.outcome is Outcome.SPOKEN
+    assert verdict.phase is Phase.PLAYED, str(verdict)
+
+
+async def test_a_reply_with_no_playback_receipt_still_settles_at_generating() -> None:
+    """The other half: nobody reports playback (text replies, or no speaker
+    wired), so `generating` stays the honest answer — waiting for a receipt
+    that never comes would hold the verdict forever."""
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        active = scheduler._active
+        assert active is not None
+        speech.feed.put_nowait(ReplyDone(active.handle, ReplyStatus.COMPLETED, text="说完了"))
+        await _until(lambda: bool(scheduler.verdicts), "没有终局")
+    assert scheduler.verdicts[0].phase is Phase.GENERATING
+
+
+async def test_playback_that_never_drains_settles_on_the_grace_instead() -> None:
+    """The error path: the page holding the devices goes away mid-playback and
+    no receipt ever arrives. The wait is bounded, and the verdict says
+    `generating` rather than claiming an audience that may never have heard it."""
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        active = scheduler._active
+        assert active is not None
+        scheduler._floor.on_playback(True)
+        speech.feed.put_nowait(ReplyDone(active.handle, ReplyStatus.COMPLETED, text="说完了"))
+        await _until(lambda: scheduler._active is None, "回复没有结算")
+        await clock.advance(60.0)  # the receipt never comes
+        await _until(lambda: bool(scheduler.verdicts), "等播放回执等成了永远没有终局")
+    verdict = scheduler.verdicts[0]
+    assert verdict.outcome is Outcome.SPOKEN
+    assert verdict.phase is Phase.GENERATING, str(verdict)
+
+
+async def test_shutdown_gives_every_leftover_intent_a_verdict() -> None:
+    """Section 4.12 says every intent lands on exactly one (outcome, phase).
+
+    Ctrl-C used to be the exception: run() cancelled the loops and whatever sat
+    in the heap simply vanished. The process is leaving either way, but a hole
+    in the books is still a hole — the panel's counts stop adding up.
+    """
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        speech.feed.put_nowait(SpeechStarted(audio_ms=0))
+        await _until(lambda: scheduler._floor.streamer_speaking, "主播开口的事件没人消费")
+        scheduler.submit(_intent(dedup="dan_1"))
+        scheduler.submit(_intent(dedup="dan_2"))
+        await _until(lambda: scheduler.status()["queued"] == 2, "没排进队列")
+    assert {v.intent_id for v in scheduler.verdicts} == {"dan_1", "dan_2"}
+    assert all(v.outcome is Outcome.SKIPPED for v in scheduler.verdicts)
+    assert all(v.phase is Phase.QUEUED for v in scheduler.verdicts)
+
+
+async def test_the_verdict_carries_the_wait_and_the_speaking_time() -> None:
+    """Verdict has carried `waited_s` / `spoken_ms` since section 4.12 defined
+    it, and both were hard zeros — nothing ever wrote them. The wait counts
+    from the event's own arrival to dispatch, the speaking time from dispatch
+    to the settle. (No reader yet either: dev_talk.py:1114-1118 forwards only
+    source/outcome/phase/reason to the panel.)"""
+    clock = FakeClock(start=100.0)
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1", created_at=98.0))
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        active = scheduler._active
+        assert active is not None
+        await clock.advance(3.0)
+        speech.feed.put_nowait(ReplyDone(active.handle, ReplyStatus.COMPLETED, text="说完了"))
+        await _until(lambda: bool(scheduler.verdicts), "没有终局")
+    verdict = scheduler.verdicts[0]
+    assert verdict.waited_s == 2.0, f"排队时长记成了 {verdict.waited_s}"
+    assert verdict.spoken_ms == 3000, f"说话时长记成了 {verdict.spoken_ms}"
+
+
+async def test_an_intent_with_no_arrival_time_reports_no_wait() -> None:
+    """created_at defaults to 0.0 — "nobody said when this arrived". Subtracting
+    that from a monotonic clock would record a wait of several days."""
+    clock = FakeClock(start=100.0)
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, clock=clock) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        active = scheduler._active
+        assert active is not None
+        speech.feed.put_nowait(ReplyDone(active.handle, ReplyStatus.COMPLETED, text="说完了"))
+        await _until(lambda: bool(scheduler.verdicts), "没有终局")
+    assert scheduler.verdicts[0].waited_s == 0.0
 
 
 # ------------------------------------------------------------ the guard alone

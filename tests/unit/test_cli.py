@@ -67,7 +67,14 @@ _DERIVED_KEYS = frozenset(
 
 
 def _write(tmp_path: Path, body: str, name: str = "bilisama.toml") -> Path:
-    """Put a config in tmp_path and return its path."""
+    """Put a config in tmp_path and return its path.
+
+    The wordlist comes with it: a config directory without one is a real problem
+    (§7.6) and `check` now says so whether or not a room is named, so a bare TOML
+    here would add an unrelated advisory to every assertion below.
+    """
+    (tmp_path / "safety").mkdir(exist_ok=True)
+    (tmp_path / "safety" / "wordlist.txt").write_text("测试敏感词\n", encoding="utf-8")
     path = tmp_path / name
     path.write_text(body, encoding="utf-8")
     return path
@@ -84,6 +91,18 @@ def _key_paths(value: Any) -> set[str]:
         for child in value:
             keys |= _key_paths(child)
     return keys
+
+
+def _key_paths_dotted(payload: dict[str, Any], prefix: str = "") -> set[str]:
+    """Every leaf in a nested payload, as the dotted path the origin map uses."""
+    paths: set[str] = set()
+    for key, child in payload.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(child, dict):
+            paths |= _key_paths_dotted(child, path)
+        else:
+            paths.add(path)
+    return paths
 
 
 def _fake_upstream(root: Path, fields: Iterable[str]) -> Path:
@@ -125,7 +144,10 @@ def test_show_prints_the_config_that_actually_took_effect(
     payload = json.loads(captured.out)
     assert payload["interaction"]["chattiness"] == "high"
     assert payload["speech"]["s2s"]["llm_model"] == "our-s2t-v1"
-    assert payload["_derived"]["source"] == "chattiness"
+    # The field path, not the bare word: the settings page renders these five as
+    # read-only rows and needs somewhere to send a click (config/ui_meta.py
+    # DERIVED_META is where the answer now comes from).
+    assert payload["_derived"]["source"] == "interaction.chattiness"
     derived = derive(Chattiness.HIGH).model_dump()
     for key, expected in derived.items():
         assert payload["_derived"][key] == expected
@@ -519,3 +541,144 @@ def test_default_config_path_is_absolute_and_exists() -> None:
     assert cli.DEFAULT_CONFIG.is_absolute()
     assert cli.DEFAULT_CONFIG.exists()
     assert cli.DEFAULT_CONFIG.name == "bilisama.toml"
+
+
+# ------------------------------------------------------------------ config diff / origins
+
+_PROFILED = """
+config_version = 1
+active_profile = "chat"
+[speech.s2s]
+llm_model = "our-s2t-v1"
+[interaction]
+chattiness = "medium"
+"""
+
+_CHAT_PROFILE = """
+[interaction]
+chattiness = "low"
+[interaction.speak]
+entry = false
+"""
+
+
+def _with_profile(tmp_path: Path) -> Path:
+    path = _write(tmp_path, _PROFILED)
+    (tmp_path / "profiles").mkdir(exist_ok=True)
+    (tmp_path / "profiles" / "chat.toml").write_text(_CHAT_PROFILE, encoding="utf-8")
+    return path
+
+
+def test_show_says_which_layer_each_value_came_from(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Plan §7.7 asks `config show` to tag every value with its layer. Until now
+    the module docstring said flatly that it could not: `load` collapsed the
+    layers as it merged them and nothing downstream knew who won.
+    """
+    cli.main(["config", "show", "--config", str(_with_profile(tmp_path))])
+    payload = json.loads(capsys.readouterr().out)
+
+    origins = payload["_origins"]
+    assert origins["interaction.chattiness"] == "profiles/chat.toml"
+    assert origins["speech.s2s.llm_model"] == "bilisama.toml"
+    # A value nobody set has to say so rather than go missing — "not in the map"
+    # reads as a bug to whoever renders it.
+    assert origins["memory.db_path"] == "默认值"
+
+
+def test_the_origin_map_covers_every_value_show_prints(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One row per setting. A settings page renders the two together, so a path
+    in one and not the other is a blank column."""
+    cli.main(["config", "show", "--config", str(_write(tmp_path, _CLEAN))])
+    payload = json.loads(capsys.readouterr().out)
+    origins = payload["_origins"]
+    printed = {p for p in _key_paths_dotted(payload) if not p.startswith("_")}
+    assert printed == set(origins)
+
+
+def test_diff_lists_what_the_profile_changed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`bilisama config diff` (plan §7.7): what does this profile do, exactly?
+
+    Reading two TOML files side by side does not answer it — a profile only
+    names what it moves, and the interesting part is the value it moved it from.
+    """
+    code = cli.main(["config", "diff", "--config", str(_with_profile(tmp_path))])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "chat" in out
+    assert "interaction.chattiness" in out
+    assert "medium" in out and "low" in out
+    assert "interaction.speak.entry" in out
+
+
+def test_diff_says_so_when_the_profile_changes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The empty case is an answer, not an empty screen."""
+    path = _write(tmp_path, _CLEAN)
+    (tmp_path / "profiles").mkdir(exist_ok=True)
+    (tmp_path / "profiles" / "normal.toml").write_text("", encoding="utf-8")
+    code = cli.main(["config", "diff", "--config", str(path)])
+
+    assert code == 0
+    assert "没改" in capsys.readouterr().out
+
+
+def test_diff_names_the_missing_profile_instead_of_printing_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A profile named in the file but absent from disk overlays nothing at all
+    (test_config_loader.py pins that), and "no differences" would be a lie about
+    a typo."""
+    code = cli.main(["config", "diff", "--config", str(_write(tmp_path, _PROFILED))])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "chat" in captured.err
+
+
+# ------------------------------------------------------------ the patch list
+
+
+def test_the_patch_list_renders_as_the_env_line_that_actually_decides() -> None:
+    """`[speech.s2s].patches` decided nothing until this.
+
+    The server's patch set comes from `BILISAMA_S2S_PATCHES`
+    (tools/s2s_shim/bilisama_s2s_shim/patches.py:275), and
+    scripts/smoke_provider_b.sh:70 exports whatever the shell had — empty by
+    default. So editing the config moved `owns_tts` inside `validate` and
+    nothing else, which is precisely the 「不知道去哪改」 §7.1 exists to kill.
+    """
+    cfg = S2SConfig.model_validate({"patches": ["text_modality"]})
+    assert s2s_launch.patch_env(cfg) == {"BILISAMA_S2S_PATCHES": "text_modality"}
+
+
+def test_zero_patch_mode_renders_an_empty_value_not_a_missing_one() -> None:
+    """Empty means zero-patch; unset means "apply the defaults" (patches.py:274).
+    Dropping the variable would turn the official pipeline into the patched one.
+    """
+    cfg = S2SConfig.model_validate({"patches": []})
+    assert s2s_launch.patch_env(cfg) == {"BILISAMA_S2S_PATCHES": ""}
+
+
+def test_render_s2s_prints_the_export_line_with_the_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The launch JSON cannot carry the patch list — upstream would refuse the
+    key (`write` rejects anything its dataclasses do not name) — so the command
+    that renders the config also hands over the one line that applies it."""
+    out = tmp_path / "s2s.json"
+    code = cli.main(
+        ["config", "render-s2s", "--config", str(_write(tmp_path, _CLEAN)), "--out", str(out)]
+    )
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert "BILISAMA_S2S_PATCHES=text_modality,raw_instructions" in printed
+    assert "export" in printed

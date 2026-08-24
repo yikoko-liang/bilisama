@@ -16,6 +16,15 @@ def test_every_provider_name_has_a_profile() -> None:
     assert set(PROFILES) == set(ProviderName)
 
 
+def test_every_hosted_provider_has_a_socket_path() -> None:
+    """The address builder indexes this table. A hosted provider missing from
+    it is a KeyError at connect time — on the streamer's machine, mid-setup."""
+    from bilisama.realtime.providers import _HOSTED_PATHS
+
+    hosted = set(ProviderName) - {ProviderName.S2S}
+    assert hosted <= set(_HOSTED_PATHS)
+
+
 @pytest.mark.parametrize(
     ("provider", "caps", "codec"),
     [
@@ -48,6 +57,53 @@ def test_an_undeclared_turn_type_is_refused_with_a_fix() -> None:
 def test_a_declared_turn_type_passes() -> None:
     assert turn_type_problems(ProviderName.OPENAI_GA, "server_vad") == []
     assert turn_type_problems(ProviderName.DASHSCOPE, "semantic_vad") == []
+
+
+def test_semantic_vad_is_refused_on_the_model_that_refuses_it() -> None:
+    """Turn detection is a per-MODEL fact on DashScope, not a per-provider one
+    (probed live 2026-08-10, capabilities.py's DASHSCOPE note). Checking only
+    the provider let the factory default — qwen-audio-3.0-realtime-flash with
+    semantic_vad — pass validation and then be refused by the real endpoint,
+    which is worse than no check: it promises the config was looked at.
+    """
+    problems = turn_type_problems(
+        ProviderName.DASHSCOPE, "semantic_vad", model="qwen-audio-3.0-realtime-flash"
+    )
+    assert len(problems) == 1
+    assert problems[0].field == "speech.dashscope.turn.type"
+    # The fix lists what THIS model takes, not what some other one does.
+    assert "server_vad" in problems[0].fix
+    assert "semantic_vad" not in problems[0].fix
+
+
+def test_the_omni_model_keeps_semantic_vad() -> None:
+    """A provider-level intersection would have refused it here too, and that
+    is exactly the over-refusal the narrowing has to avoid."""
+    assert (
+        turn_type_problems(
+            ProviderName.DASHSCOPE, "semantic_vad", model="qwen3.5-omni-flash-realtime"
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("model", ["", "  ", "某个还没探过的模型"])
+def test_an_unprobed_model_falls_back_to_the_provider_declaration(model: str) -> None:
+    """We refuse what a model is KNOWN to refuse. Guessing about an unprobed
+    one would block a working config on nothing but our own ignorance."""
+    assert turn_type_problems(ProviderName.DASHSCOPE, "semantic_vad", model=model) == []
+
+
+def test_the_factory_default_model_is_covered_by_the_narrowing() -> None:
+    """The scenario the check exists for: config leaves [speech.dashscope].model
+    blank, resolve_endpoint fills in this name, and the turn type is validated
+    against it."""
+    from bilisama.realtime.providers import _DEFAULT_MODELS
+
+    default = _DEFAULT_MODELS[ProviderName.DASHSCOPE]
+    assert turn_type_problems(ProviderName.DASHSCOPE, "semantic_vad", model=default)
+    assert turn_type_problems(ProviderName.DASHSCOPE, "server_vad", model=default) == []
+    assert turn_type_problems(ProviderName.DASHSCOPE, "smart_turn", model=default) == []
 
 
 def test_dashscope_declares_smart_turn_and_the_single_slot() -> None:

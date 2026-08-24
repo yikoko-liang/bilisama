@@ -21,6 +21,7 @@ from bilisama.ingest.events import EventKind, LiveEvent, Viewer
 from bilisama.memory.distill import Distiller, _parse_json
 from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
+from bilisama.side import SideModelError
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
 
@@ -57,8 +58,11 @@ def _make(
     replies: list[str] | None = None,
     growth: GrowthSwitches | None = None,
     guard: object = None,
+    clock: FakeClock | None = None,
 ) -> tuple[Distiller, MemoryStore, PersonaStore, FakeSide]:
-    clock = FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
+    # Pass a clock in when the test has to drive it: the B18 retry sleeps, and
+    # FakeClock only moves when someone calls advance().
+    clock = clock or FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
     store = MemoryStore(":memory:", clock)
     store.begin_stream()
     store.on_event(
@@ -76,6 +80,28 @@ def _make(
         guard=guard,  # type: ignore[arg-type]
     )
     return distiller, store, persona, side
+
+
+class FailingSide:
+    """Raises SideModelError for the first `fail_times` calls, then answers.
+
+    FakeSide never fails, so nothing exercised the distiller's error paths —
+    the rolling summary's single catch and the batch's one-retry-then-give-up.
+    """
+
+    def __init__(self, *, fail_times: int, reply: str = "") -> None:
+        self.fail_times = fail_times
+        self.reply = reply
+        self.calls = 0
+
+    async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise SideModelError(f"侧路模型返回 503: 第 {self.calls} 次")
+        return self.reply
+
+    async def aclose(self) -> None:
+        return None
 
 
 class BlockingSide:
@@ -211,6 +237,113 @@ async def test_invented_identities_are_dropped(tmp_path: Path) -> None:
     assert any("unknown_identity" in d for d in report.dropped)
 
 
+async def test_the_final_summary_lands_under_the_stream_the_latch_recorded(
+    tmp_path: Path,
+) -> None:
+    """One id per batch, captured at the door.
+
+    The latch remembers the stream id read on entry; the final summary used to
+    re-read the live one at write time. Anyone who moves end_stream() ahead of
+    the batch — the ordering dev_talk.py happens to get right today — makes the
+    two disagree: the summary lands under subject "0" while the latch holds the
+    real stream, and nothing complains.
+    """
+    distiller, store, _persona, _side = _make(tmp_path)
+    sid = store.stream_id
+
+    class EndingSide:
+        """Ends the stream from inside the call — the reordering, simulated."""
+
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            store.end_stream()
+            return _batch_reply()
+
+        async def aclose(self) -> None:
+            return None
+
+    distiller._side = EndingSide()
+    report = await distiller.end_of_stream()
+
+    assert report.ran
+    assert [f.text for f in store.facts("stream", str(sid))] == ["聊了编译器和猫"]
+    assert store.facts("stream", "0") == [], "摘要不能落到已经关掉的场次号下面"
+
+
+# ------------------------------------------------------------ error paths
+
+
+async def test_a_failed_rolling_call_writes_nothing_and_stays_retryable(tmp_path: Path) -> None:
+    """A 503 must cost the tick, not the stream.
+
+    The fingerprint may not advance on a failure: it is the "已经蒸馏过这批事件"
+    marker, and moving it here would make the next tick skip the same events as
+    unchanged — one transient error and the session summary stops updating
+    until new events arrive.
+    """
+    distiller, store, _persona, _side = _make(tmp_path)
+    distiller._side = FailingSide(fail_times=1)
+
+    report = await distiller.rolling_summary()
+
+    assert not report.ran
+    assert report.reason == "side_error"
+    assert store.facts("stream", str(store.stream_id)) == []
+    assert distiller._state.fingerprint == "", "失败不能算作已经蒸馏过"
+
+
+async def test_the_batch_backs_off_and_retries_once_after_a_transient_failure(
+    tmp_path: Path,
+) -> None:
+    """B18: the end-of-stream call is the only memory-sedimentation chance a
+    whole stream gets (runbook.md:177), so one failure buys a second shot."""
+    clock = FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
+    growth = GrowthSwitches.model_validate({"relationship": "on", "voice": "on"})
+    distiller, store, persona, _side = _make(tmp_path, growth=growth, clock=clock)
+    side = FailingSide(fail_times=1, reply=_batch_reply())
+    distiller._side = side
+
+    task = asyncio.create_task(distiller.end_of_stream())
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert not task.done(), "重试之间必须真的退避，不能立刻打第二枪"
+    assert side.calls == 1
+
+    await clock.advance(2.0)
+    report = await task
+
+    assert report.ran
+    assert side.calls == 2
+    assert [f.text for f in store.facts("viewer", "uid:1001")] == ["爱聊猫"]
+    assert persona.growth_entries("voice") == ["这把稳了，稳得一批"], "重试一次，不是写两遍"
+
+
+async def test_two_batch_failures_write_nothing_and_leave_the_latch_open(
+    tmp_path: Path,
+) -> None:
+    """Give up after the second try — and do not mark the stream as done.
+
+    Nothing was written, so a later caller (the Ctrl-C path calls this twice)
+    can safely try again; latching here would spend the stream's one chance on
+    a call that produced nothing.
+    """
+    clock = FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
+    growth = GrowthSwitches.model_validate({"relationship": "on", "voice": "on"})
+    distiller, store, persona, _side = _make(tmp_path, growth=growth, clock=clock)
+    side = FailingSide(fail_times=2)
+    distiller._side = side
+
+    task = asyncio.create_task(distiller.end_of_stream())
+    await clock.advance(2.0)
+    report = await task
+
+    assert not report.ran
+    assert report.reason == "side_error"
+    assert side.calls == 2, "两次就收手，不无限重试"
+    assert store.facts("viewer", "uid:1001") == []
+    assert not persona.growth_path("voice").exists()
+    assert distiller._state.batch_done == set(), "一次没写成的批量不占用那把闩"
+
+
 async def test_malformed_json_writes_nothing(tmp_path: Path) -> None:
     distiller, store, persona, _side = _make(tmp_path, replies=["这不是 JSON"])
     report = await distiller.end_of_stream()
@@ -275,6 +408,27 @@ async def test_swap_cap_holds_even_when_the_model_overdelivers(tmp_path: Path) -
     assert persona.growth_entries("voice") == ["句一", "句二"], "two per stream, plan section 4.6"
 
 
+async def test_a_budget_trim_says_so_out_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plan section 4.7: budgets drop whole entries, and never quietly.
+
+    A full 共同经历 layer taking one more entry pushes the oldest out. Silent,
+    that reads as "the layer stopped growing" to anyone watching the file.
+    """
+    growth = GrowthSwitches.model_validate({"relationship": "on"})
+    distiller, _store, persona, _side = _make(tmp_path, growth=growth)
+    persona.write_growth("relationship", [f"2026-08-01 旧事{i}" for i in range(30)])
+
+    with caplog.at_level("WARNING", logger="bilisama.memory.distill"):
+        report = await distiller.end_of_stream()
+
+    assert report.ran
+    assert len(persona.growth_entries("relationship")) == 30, "预算就是 30 条，不会长到 31"
+    assert any("growth_trimmed" in record.getMessage() for record in caplog.records)
+    assert distiller.status()["growth_added_last_batch"] == 1
+
+
 async def test_anchor_files_are_byte_identical_through_a_full_cycle(tmp_path: Path) -> None:
     """THE acceptance invariant: distillation with growth on never touches an
     anchor, template or live."""
@@ -312,5 +466,74 @@ def test_parse_json_tolerates_fences_and_rejects_garbage() -> None:
     assert _parse_json("[1, 2]") is None
 
 
-async def _noop() -> None:
-    await asyncio.sleep(0)
+# ------------------------------------------------------------ health probe
+
+
+async def test_the_probe_answers_what_a_running_stream_cannot_show_today(
+    tmp_path: Path,
+) -> None:
+    """Whether the end-of-stream batch landed, when the last rolling rewrite
+    was, and how many growth entries it added: none of it is visible while the
+    stream runs — Ctrl-C printing two lines afterwards is the only report."""
+    growth = GrowthSwitches.model_validate({"relationship": "on", "voice": "on"})
+    distiller, store, _persona, _side = _make(
+        tmp_path, growth=growth, replies=["弹幕在聊猫", _batch_reply()]
+    )
+
+    cold = distiller.status()
+    assert cold["side_configured"] is True
+    assert cold["rolling_ok"] == 0
+    assert cold["rolling_last_wall"] == ""
+    assert cold["batch_ok"] == 0
+    assert cold["batch_ran_this_stream"] is False
+
+    await distiller.rolling_summary()
+    await distiller.end_of_stream()
+
+    hot = distiller.status()
+    assert hot["rolling_ok"] == 1
+    assert str(hot["rolling_last_wall"]).startswith("2026-08-12T20:00")
+    assert hot["batch_ok"] == 1
+    assert hot["batch_ran_this_stream"] is True
+    assert hot["growth_added_last_batch"] == 2, "一条共同经历加一句口癖"
+    assert hot["dropped_last_batch"] == 0
+    _ = store
+
+
+async def test_the_probe_counts_failures_too(tmp_path: Path) -> None:
+    """A degraded distiller looks exactly like a healthy one from outside —
+    which is the reason the failure counters are the point of the probe."""
+    clock = FakeClock(wall=datetime(2026, 8, 12, 20, 0, tzinfo=UTC))
+    distiller, _store, _persona, _side = _make(tmp_path, clock=clock)
+    distiller._side = FailingSide(fail_times=3)
+
+    await distiller.rolling_summary()
+    task = asyncio.create_task(distiller.end_of_stream())
+    await clock.advance(2.0)
+    await task
+
+    probe = distiller.status()
+    assert probe["rolling_failed"] == 1
+    assert probe["rolling_ok"] == 0
+    assert probe["batch_failed"] == 1, "两次重试算一次失败的批量，不是两次"
+    assert probe["batch_ran_this_stream"] is False
+
+
+def test_the_probe_is_shaped_for_the_health_registry(tmp_path: Path) -> None:
+    """The complaint behind this probe was "stage 5 mounts /health and finds
+    nothing to mount here" — so assert it mounts."""
+    from bilisama.obs.health import HealthRegistry
+
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    distiller = Distiller(
+        None, store, PersonaStore(tmp_path, TEMPLATE_ROOT), GrowthSwitches(), clock
+    )
+
+    registry = HealthRegistry()
+    registry.register("distill", distiller.status)
+    snapshot = registry.snapshot()
+
+    assert snapshot["status"] == "ok"
+    assert snapshot["components"]["distill"]["side_configured"] is False

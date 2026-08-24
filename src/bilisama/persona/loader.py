@@ -200,12 +200,6 @@ class PersonaStore:
 
     # ------------------------------------------------------------ anchors
 
-    def anchor_path(self, name: AnchorName) -> Path:
-        """The file a read would actually use: live copy first, then template."""
-        if self._live_anchor_text(name) is not None:
-            return self._data_dir / f"{name}.md"
-        return self._template_dir / f"{name}.md"
-
     def _live_anchor_text(self, name: AnchorName) -> str | None:
         """The live copy's text, or None when absent, blank or unreadable.
 

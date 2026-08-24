@@ -13,9 +13,25 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from bilisama.config.enums import GrowthMode, ProviderName
+from bilisama.config.schema import CURRENT_VERSION
 
 if TYPE_CHECKING:
     from bilisama.config.schema import Settings
+
+
+def _customised(section: BaseModel) -> tuple[str, ...]:
+    """Which fields of one config section were moved off their shipped default.
+
+    "Did the streamer configure this at all" has no other answer: every field
+    here has a default, so `[custom_tts]` looks equally filled in whether it was
+    typed out or left alone. Comparing against the defaults is what separates a
+    section that means something from one that is just sitting there.
+    """
+    return tuple(
+        name
+        for name, info in type(section).model_fields.items()
+        if getattr(section, name) != info.default
+    )
 
 
 class ConfigProblem(BaseModel):
@@ -56,22 +72,49 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     """
     problems: list[ConfigProblem] = []
 
+    # A file a NEWER build wrote. Migrations only run forwards (migrate.py), so
+    # there is nothing to bring this one back with, and reading it anyway means
+    # honouring values whose meaning may have changed under the same name.
+    if s.config_version > CURRENT_VERSION:
+        problems.append(
+            ConfigProblem(
+                field="config_version",
+                message=(
+                    f"这份配置是更新版本的 BiliSama 写的（config_version={s.config_version}，"
+                    f"本机只认到 {CURRENT_VERSION}）。"
+                ),
+                fix="装回新版本再打开它；或者改用另一份配置文件。",
+            )
+        )
+
     # Plan section 7.6 row 7: a missing wordlist refuses to start — a mouth
-    # with no backstop must not reach an audience. Gated on room_id like the
-    # credential rule: the backstop matters when going live, and nagging a
-    # fresh install trains people to ignore the list. "auto" resolves the
-    # same way director/output_guard.load_guard does (keep the two in step).
-    if config_dir is not None and s.room.room_id:
+    # with no backstop must not reach an audience. "auto" resolves the same way
+    # director/output_guard.load_guard does (keep the two in step).
+    #
+    # The room_id decides how loud, not whether. It used to decide whether, and
+    # that made this rule unreachable for the config that ships (room_id = 0,
+    # config/bilisama.toml): `bilisama config validate` — the check gate.sh runs
+    # every commit — answered 「配置没问题」 for a config that dev-talk --director
+    # then refuses outright (dev_talk.py, load_guard raises). Fatal only once a
+    # room is named, so a fresh install is told rather than blocked.
+    if config_dir is not None:
         raw = s.safety.wordlist_path
         wordlist = (
             config_dir / "safety" / "wordlist.txt" if raw == "auto" else Path(raw).expanduser()
         )
         if not wordlist.is_file():
+            going_live = bool(s.room.room_id)
+            tail = (
+                "没有输出兜底不能开播。"
+                if going_live
+                else "现在只是提醒，但 dev-talk --director 会直接拒绝启动。"
+            )
             problems.append(
                 ConfigProblem(
                     field="safety.wordlist_path",
-                    message=f"敏感词表文件不存在：{wordlist}。没有输出兜底不能开播。",
+                    message=f"敏感词表文件不存在：{wordlist}。{tail}",
                     fix="把词表放到该路径，或在设置里改成真实文件的位置。",
+                    fatal=going_live,
                 )
             )
     owns_tts = (
@@ -105,6 +148,56 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
                 message="「走虚拟声卡给 OBS」这条路会绕过回声消除。",
                 fix="让她的声音从桌宠壳直接出扬声器；OBS 只采集、别开「监听并输出」。"
                 "面板「现场」页的回声卡会告诉你有没有漏。",
+                fatal=False,
+            )
+        )
+
+    # Plan section 7.6 rows 2 and 4, split by which field the streamer should go
+    # and change. Both only fire once `[custom_tts]` has actually been filled in:
+    # the section has a default for everything, so warning about it on every
+    # hosted run would warn on the shipped config of the most common setup.
+    touched = _customised(s.custom_tts)
+    if touched and owns_tts:
+        if s.speech.provider is not ProviderName.S2S:
+            hosted_voice = f"speech.{s.speech.provider.value}.voice"
+            problems.append(
+                ConfigProblem(
+                    field="custom_tts.engine",
+                    message=(
+                        f"托管语音服务自己出音频，[custom_tts] 这一节"
+                        f"（{'、'.join(touched)}）没人读。"
+                    ),
+                    fix=f"改 {hosted_voice}——那才是这条路上决定她声音的字段。",
+                    fatal=False,
+                )
+            )
+        else:
+            # Without the text_modality patch the s2s server synthesises its own
+            # replies (tools/s2s_shim/bilisama_s2s_shim/patches.py:113-140 explains
+            # which two places the patch has to touch), so our chain never sees
+            # the text.
+            problems.append(
+                ConfigProblem(
+                    field="speech.s2s.patches",
+                    message=(
+                        "没打 text_modality 补丁时，自建语音服务自己出音频，"
+                        "[custom_tts] 不会被调用。"
+                    ),
+                    fix="把 text_modality 加回补丁列表，或者把 [custom_tts] 改回默认。",
+                    fatal=False,
+                )
+            )
+
+    # Plan section 7.6 row 5, and it is a note rather than a refusal on purpose.
+    # The rate mismatch is real (24k both ways per plan section 3.1, against the
+    # 16k uplink everywhere else — dev_talk.py:67-68), but so is the fact that
+    # this provider has no adapter at all yet (dev_talk.py:1066).
+    if s.speech.provider is ProviderName.OPENAI_GA:
+        problems.append(
+            ConfigProblem(
+                field="speech.provider",
+                message="openai_ga 收发都是 24kHz，而这条链路的上行按 16kHz 发，中间要重采样。",
+                fix="换成 dashscope 或自建这两条接通了的路；真要走 openai_ga，得先补上重采样。",
                 fatal=False,
             )
         )

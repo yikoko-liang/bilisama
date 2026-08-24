@@ -9,11 +9,16 @@ UI metadata is not here either — see `ui_meta.UI_META`, keyed by field path.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
 from bilisama.config.enums import Chattiness, GrowthMode, ProviderName
+
+# The config shape this build reads. It lives here rather than in `migrate`
+# because both of that module's neighbours need it and neither may import it:
+# `validate` refuses a file from the future, `migrate` walks an old one forward.
+CURRENT_VERSION: Final[int] = 1
 
 
 class TurnConfig(BaseModel):
@@ -49,9 +54,19 @@ class S2SConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     endpoint: str = Field("ws://127.0.0.1:8765/v1/realtime")
+    # "We start the server ourselves." Nothing reads it: today the server is
+    # started by hand (scripts/smoke_provider_b.sh serve), and supervising it
+    # from inside the app is a stage-7 job. Left in the schema so the intent is
+    # visible, with this note so nobody assumes flipping it does anything.
     managed: bool = Field(True)
     llm_base_url: str = Field("http://127.0.0.1:9010/v1")
     llm_model: str = Field("")
+    # Which shim patches the server starts with. This is the source, but not the
+    # channel: the shim reads BILISAMA_S2S_PATCHES
+    # (tools/s2s_shim/bilisama_s2s_shim/patches.py:275) and the launch JSON
+    # cannot carry the list, so `bilisama config render-s2s` prints the export
+    # line to go with the file (bootstrap/s2s_launch.py patch_env). Inside this
+    # process the value also decides `owns_tts` in config/validate.py.
     patches: tuple[Literal["text_modality", "raw_instructions"], ...] = Field(
         ("text_modality", "raw_instructions")
     )
@@ -96,6 +111,13 @@ class HostedConfig(BaseModel):
     # there was no way to say otherwise. Names are the provider's own; ask for
     # a wrong one and the server answers with the list it accepts.
     voice: str = Field("")
+    # Rotate the session this many minutes in, or 0 to leave it alone. None —
+    # the default — follows the provider's own published ceiling (DashScope 120
+    # minutes, OpenAI 60), which the adapter already knows; this field only
+    # exists for someone who wants a different number. Not `int = 0`: 0 already
+    # means "never rotate", so defaulting to it would close the switch the
+    # adapter just opened.
+    session_cap_min: int | None = Field(None, ge=0)
     turn: HostedTurnConfig = Field(default_factory=HostedTurnConfig)
 
 
@@ -339,7 +361,7 @@ class Settings(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    config_version: int = 1
+    config_version: int = CURRENT_VERSION
     active_profile: str = Field("normal")
 
     room: RoomConfig = Field(default_factory=RoomConfig)

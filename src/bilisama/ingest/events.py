@@ -64,6 +64,9 @@ class GuardLevel(StrEnum):
 class Medal:
     name: str = ""
     level: int = 0
+    # NO CONSUMER YET. Mapped from DANMU_MSG only (source.py's _medal call for
+    # danmaku passes runame; every other kind passes ""), so it is empty on
+    # most events. Read it and you are reading a field nothing maintains.
     up_name: str = ""
     anchor_room_id: int = 0
 
@@ -83,14 +86,22 @@ class Viewer:
     uid == 0 does not mean "no identity", it means "the platform masked it". Use
     `identity`, which falls back to uid_hash and never returns an empty key, so
     callers never have to special-case masking.
+
+    Some fields here are marked NO CONSUMER YET. They are filled by the mapper
+    and read by nobody, and the marker exists because a populated field in a
+    public model reads as a working feature: reach for `face_url` expecting the
+    avatar pipeline behind it and there is none. The marker is the contract —
+    wire a reader and delete the marker in the same change.
     """
 
     uid: int = 0
     uid_hash: str = ""  # stable per-room id, the only handle we get when uid is masked
     name: str = ""  # may literally be "***" when masked
+    # NO CONSUMER YET — see the note on hollow fields in the class docstring.
+    # This one is the easiest to misread: every mapped event fills it.
     face_url: str = ""
-    user_level: int = 0
-    wealth_level: int = 0
+    user_level: int = 0  # scoring.py:74 reads this one
+    wealth_level: int = 0  # NO CONSUMER YET; DANMU_MSG fills it, nothing reads it
     guard_level: GuardLevel = GuardLevel.NONE
     is_admin: bool = False
     medal: Medal | None = None
@@ -110,6 +121,8 @@ class Viewer:
 
     @property
     def display_name(self) -> str:
+        """NO CONSUMER YET: the fallback wording a greeting would need, kept
+        here so the "一位观众" string has one home rather than three."""
         return self.name or "一位观众"
 
 
@@ -121,12 +134,23 @@ class Gift:
     coin_type: str = ""  # gold | silver | ""; only gold is real money
     total_coin: int = 0  # 1000 gold == CNY 1
     combo_id: str = ""
+    # NO WIRE WRITER, NO CONSUMER. The platform's own combo signals: only the
+    # replay fixtures fill them (tests/fakes/replay.py), because a fixture
+    # records what arrived. No mapper in source.py sets either one, and the
+    # aggregator settles a combo on its 1.0s idle timer rather than on
+    # combo_end (safety.py) — deliberately, since the last hit's combo_end can
+    # go missing and an unsettled combo is an unthanked gift.
     combo_count: int = 0
     combo_end: bool | None = None
+    # NO CONSUMER YET: written by GiftComboAggregator._aggregate; the thank-you
+    # text that would say "连击 50 次" is not built yet.
     aggregated_count: int = 1  # >1 once several small gifts were merged into one
 
     @property
     def is_paid(self) -> bool:
+        """NO CONSUMER YET — mind the near-namesake. What routes an event into
+        the paid lane is LiveEvent.is_paid (source.py's offer), which reads
+        value_cny. This one answers the same question from the gift block."""
         return self.coin_type == "gold" and self.total_coin > 0
 
 
@@ -148,7 +172,11 @@ class LiveEvent:
     event_id: str = ""  # primary dedup key when the platform gives us one
     ts_ms: int = 0  # platform timestamp
     recv_at: float = 0.0  # our monotonic clock
-    session_generation: int = 0  # bumped on outer restart (observability; dedup is the ring's job)
+    # NO CONSUMER YET: stamped on every mapped event by the source, read by
+    # nothing. Restart-crossing duplicates are the dedup ring's job, not this
+    # field's — it is here for the day a log or the panel needs to say which
+    # connection an event came in on.
+    session_generation: int = 0
     raw: dict[str, Any] | None = None
 
     @property

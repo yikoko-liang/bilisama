@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from bilisama.clock import Clock, SystemClock
 from bilisama.config.enums import ProviderName
+from bilisama.obs.logging import get_logger
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
@@ -28,6 +29,19 @@ if TYPE_CHECKING:
     from bilisama.config.schema import HostedTurnConfig
 
 __all__ = ["HostedLink"]
+
+log = get_logger(__name__)
+
+# How long each endpoint lets one connection live, in minutes (plan section
+# 3.1). An adapter constant, not a capability: capabilities.py's own docstring
+# puts session limits here, because a field only the adapter reads is not a
+# capability. A provider missing from this table is one whose cap we never
+# measured, and it is left un-rotated — rotating on an invented number costs a
+# break-before-make for nothing.
+_SESSION_CAP_MIN: dict[ProviderName, int] = {
+    ProviderName.DASHSCOPE: 120,
+    ProviderName.OPENAI_GA: 60,
+}
 
 
 class HostedLink:
@@ -45,7 +59,7 @@ class HostedLink:
         voice: str = "",
         auto_reconnect: bool = True,
         reconnect_backoff_s: float = 1.0,
-        session_cap_min: int = 0,
+        session_cap_min: int | None = None,
         rotate_margin_min: float = 3.0,
     ) -> None:
         """Args:
@@ -54,11 +68,18 @@ class HostedLink:
             at 343 Hz, high enough to read as shrill. Names are the
             provider's; a wrong one draws a refusal listing the valid ones.
         session_cap_min: How long this endpoint lets one connection live.
-            DashScope 120, OpenAI 60 (plan section 3.1); 0 disables rotation.
+            None takes the provider's published cap (_SESSION_CAP_MIN); 0
+            disables rotation. It defaulted to 0, and every caller left it
+            alone — so the rotation code shipped with no path that could
+            reach it and the cap kept being met the passive way, by being cut
+            off mid-sentence (backlog item 19). The cap is a property of the
+            provider, so the adapter can know it without being told; a config
+            field only has to exist to override it.
             We rotate `rotate_margin_min` early so the swap happens on our
             clock rather than mid-sentence on theirs.
         """
         profile = profile_for(provider)
+        self._provider = provider
         self._client = RealtimeClient(
             url,
             caps=profile.caps,
@@ -75,8 +96,11 @@ class HostedLink:
         self._voice = voice
         self._context = ""
         self._clock: Clock = clock or SystemClock()
-        self._session_cap_s = max(0.0, (session_cap_min - rotate_margin_min) * 60.0)
+        cap_min = _SESSION_CAP_MIN.get(provider, 0) if session_cap_min is None else session_cap_min
+        self._session_cap_s = max(0.0, (cap_min - rotate_margin_min) * 60.0)
         self._rotation: asyncio.Task[None] | None = None
+        # Said once per link, not once per protected reply: see request_reply.
+        self._warned_unprotected = False
 
     async def connect(self) -> None:
         """Open the socket, bootstrap the session, restore what we knew.
@@ -183,6 +207,23 @@ class HostedLink:
         )
 
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
+        if spec.protected and not self._warned_unprotected:
+            # Half of protection works here and half does not, which is why it
+            # took months to notice: the scheduler still refuses to cancel a
+            # protected reply itself (its _on_barge_in checks
+            # _protection_active first), but the provider's own barge-in stays
+            # armed, so the streamer's next word kills the paid answer
+            # anyway. Closing it means disarming turn_detection over the
+            # wire the way s2s does, and no live probe has confirmed the field
+            # on either hosted endpoint — inventing one risks a rejected
+            # session.update taking the reply with it. Until that probe lands
+            # the gap is at least audible in the log instead of silent.
+            self._warned_unprotected = True
+            log.warning(
+                "hosted.protection_unsupported",
+                provider=self._provider.value,
+                error_text="这个语音后端还不支持付费保护：SC 答谢仍会被主播开口打断。",
+            )
         # Out-of-band only where it does not cost the slot: on GA it runs in
         # parallel; on the beta dialect the bit is a guess pending the real
         # endpoint test, so stay in-band there rather than assume.
@@ -198,9 +239,10 @@ class HostedLink:
         await self._client.cancel(handle)
 
     async def end_protection(self) -> None:
-        # Hosted protection is not implemented yet (request_reply ignores
-        # spec.protected too — backlog item 19); a paired no-op keeps the
-        # scheduler's lifecycle uniform across adapters.
+        # Nothing to re-arm: request_reply never disarmed anything (backlog
+        # item 45, and it warns when asked). A paired no-op keeps the
+        # scheduler's lifecycle uniform across adapters, and it stays a no-op
+        # rather than sending a session.update no endpoint was probed for.
         return
 
     def events(self) -> AsyncIterator[link.LinkEvent]:

@@ -17,7 +17,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
+from bilisama.obs.outcome import Outcome, OutcomeWindow, Phase, SkipReason, Verdict
 
 # Pinned from plan §4.12. Renaming a member goes red here; appending one does not.
 SKIP_REASONS = {
@@ -188,3 +188,53 @@ def test_a_stored_reason_string_round_trips_and_a_typo_does_not() -> None:
         SkipReason("gate.cooldwon")
     with pytest.raises(ValueError):
         Outcome("COOLDOWN")
+
+
+# ------------------------------------------------------------ the recent window
+
+
+def test_the_window_answers_how_many_the_gate_held_back() -> None:
+    """Plan §4.12 asks health for "the last N outcomes, aggregated". The panel
+    question it exists for is 「这十分钟里被闸门挡了几条」, which a per-intent
+    stream of verdicts cannot answer without someone counting."""
+    window = OutcomeWindow(size=10)
+    for _ in range(3):
+        window.note(_verdict(Outcome.SKIPPED, Phase.GATED, SkipReason.HOST_SPEAKING))
+    window.note(_verdict(Outcome.SPOKEN, Phase.SPEAKING))
+
+    status = window.status()
+    assert status["seen"] == 4
+    assert status["by_outcome"]["skipped"] == 3
+    assert status["by_outcome"]["spoken"] == 1
+    assert status["by_reason"]["gate.host_speaking"] == 3
+
+
+def test_the_window_forgets_past_its_size() -> None:
+    """ "Recent" is the whole point: a counter that never forgets reports the
+    warm-up minutes forever and stops tracking what is happening now."""
+    window = OutcomeWindow(size=2)
+    window.note(_verdict(Outcome.FAILED, Phase.DISPATCHED))
+    window.note(_verdict(Outcome.SPOKEN, Phase.SPEAKING))
+    window.note(_verdict(Outcome.SPOKEN, Phase.SPEAKING))
+
+    status = window.status()
+    assert status["seen"] == 3  # the running total is not a window
+    assert status["recent"] == 2
+    assert "failed" not in status["by_outcome"]
+
+
+def test_an_empty_window_still_reports_a_shape() -> None:
+    """A probe that returns nothing before the first intent looks broken on the
+    panel. Zeroes are an answer; a missing key is not."""
+    status = OutcomeWindow().status()
+    assert status["seen"] == 0
+    assert status["recent"] == 0
+    assert status["by_outcome"] == {}
+    assert status["last"] == ""
+
+
+def test_the_window_names_the_last_verdict_in_full() -> None:
+    """One line the operator can read without expanding anything."""
+    window = OutcomeWindow()
+    window.note(_verdict(Outcome.EXPIRED, Phase.QUEUED, SkipReason.COOLDOWN))
+    assert window.status()["last"] == "expired@queued(gate.cooldown)"

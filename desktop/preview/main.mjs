@@ -269,11 +269,29 @@ ipcMain.on("pet:fit", (event, w, h) => {
 
 // ------------------------------------------------------------ lifecycle
 
-app.whenReady().then(() => {
-  createPetWindow();
-  watchEndpoint();
-});
-
-app.on("window-all-closed", () => {
+// Two shells, one microphone. AudioBroker turns the second one away at the
+// door — 「同级不顶同级」, ui/audio.py:161 — but the control socket's sticky
+// audio.owner still says owner=shell, so the newcomer's panel reads 「麦克风和
+// 扬声器已接管」 over a window that is capturing nothing. Two identical pets
+// on the desktop and no way to tell which one is live. So the second process
+// does not get that far: it hands the desktop back to the one already running.
+if (!app.requestSingleInstanceLock()) {
   app.quit();
-});
+} else {
+  app.on("second-instance", () => {
+    // Quitting silently would look like `npm start` doing nothing at all.
+    if (!petWindow || petWindow.isDestroyed()) return;
+    if (petWindow.isMinimized()) petWindow.restore();
+    petWindow.show();
+    petWindow.focus();
+  });
+
+  app.whenReady().then(() => {
+    createPetWindow();
+    watchEndpoint();
+  });
+
+  app.on("window-all-closed", () => {
+    app.quit();
+  });
+}

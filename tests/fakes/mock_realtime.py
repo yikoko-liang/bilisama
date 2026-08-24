@@ -19,7 +19,9 @@ tests/unit/test_mock_realtime.py:
   swallowed and wedges the connection — has a fault, Fault.WEDGE_ON_INJECTION,
   and a control [test_out_of_band_injection_is_immune_to_the_wedge]. Both routes
   to an open turn are covered: the streamer starting to talk, and the streamer
-  talking over the assistant [test_barge_in_reopens_the_speculative_window].
+  talking over the assistant [test_barge_in_reopens_the_speculative_window]. The
+  way out is the client's watchdog, and the slot really does come back
+  [test_the_watchdog_gets_the_slot_back_from_a_wedged_injection].
 - Rule 3, cancel cannot pre-empt a reply before its first token: failure case
   and control [test_cancel_before_the_first_token_is_ignored_and_the_reply_still_speaks,
   test_cancel_after_the_first_token_is_honoured].
@@ -59,6 +61,12 @@ test_barge_in_cancels_again_once_interrupts_are_restored]. speech_started and
 the speculative bookkeeping happen either way — protection mutes the axe, not
 the microphone.
 
+Row 5 of the failure-mode table (plan section 10.1), an item.create that draws no
+ack at all, is Fault.NEVER_ACK — the one row with no upstream behaviour behind it,
+kept because "late" and "never" look identical to a client and a retry on either
+duplicates the item [test_an_item_create_that_is_never_acked_draws_no_retry,
+test_an_unacked_item_is_still_not_resent_after_the_reply_ends].
+
 Three more quirks are modelled although they are not among the eight, because
 each costs a debugging session every time it is met cold. conversation.item.create
 is deferred while a reply generates, and the acks come back in arrival order
@@ -66,6 +74,10 @@ is deferred while a reply generates, and the acks come back in arrival order
 test_item_create_is_acked_at_once_when_nothing_is_generating,
 test_deferred_items_are_acked_in_arrival_order]. Barge-in sends response.done
 before speech_started [test_barge_in_sends_response_done_before_speech_started].
+The streamer's own words arrive either as partials, as one final, or not at all,
+and each combination is somebody's provider
+[test_a_streaming_recogniser_reaches_the_client_delta_by_delta,
+test_a_recogniser_that_only_sends_the_final_is_still_normal].
 A cancelled text reply never sends output_text.done, whether the cancel lands
 mid-stream or after the last delta
 [test_cancelled_text_reply_sends_no_output_text_done,
@@ -122,6 +134,16 @@ class Fault(StrEnum):
     WEDGE_ON_INJECTION = "wedge_on_injection"
     # Reply hangs forever, to exercise the client-side watchdog.
     STALL_RESPONSE = "stall_response"
+    # conversation.item.create is accepted and never acknowledged — not deferred,
+    # never. Behind a flag rather than in _on_item_create's default path because
+    # upstream does not do this: it defers the ack and flushes it later
+    # (handlers/conversation.py:48-52), which is what the unflagged path models.
+    #
+    # What it is for is plan section 10.1 row 5, "no ack → L3 must not resend".
+    # From the client's side "late" and "never" are the same thing until the ack
+    # shows up, so this is the shape that tells a fire-and-forget client apart
+    # from one that retries on a timeout and writes the item twice.
+    NEVER_ACK = "never_ack"
     # Every pipeline slot is busy, so the connection is refused at the handshake.
     SESSION_LIMIT = "session_limit"
     # Emit a tool call.
@@ -411,6 +433,22 @@ class MockRealtimeServer:
             item_id=f"item_user_{self._user_item_seq}",
         )
 
+    async def user_transcript_delta(self, delta: str) -> None:
+        """One partial from a recogniser that streams as it hears.
+
+        The eighteenth server event, and the last one the fake could not produce:
+        client.py:512 has always mapped it to link.UserTranscriptDelta and nothing
+        had ever run that line. Separate from user_transcript() for the same
+        reason that one is separate from speech_stopped — a provider may send
+        partials, finals, both or neither, and a fake that bundled them would hide
+        the code paths that cope with each.
+
+        Carries no item_id: upstream's delta names the transcription item it is
+        building, but nothing on our side reads it, and inventing a shape for an
+        unused field is how a fake starts certifying its own inventions.
+        """
+        await self.send(dia.ServerEvent.USER_TRANSCRIPT_DELTA, delta=delta)
+
     async def user_transcript(self, text: str) -> None:
         """What the recogniser decided the streamer said.
 
@@ -668,6 +706,11 @@ class MockRealtimeServer:
         broken client.
         """
         self._seen_user_item = True
+        if self.script.has(Fault.NEVER_ACK):
+            # Accepted, just never announced: the item still counts as a user
+            # message, so a create that depends on one (requires_user_message)
+            # still goes through. Silence about the ack, not about everything.
+            return
         if self._generating():
             self._deferred.append(event)
             return

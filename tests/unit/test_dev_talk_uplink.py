@@ -13,20 +13,27 @@ violation — a gate whose teeth are never exercised is a gate nobody can trust.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import asyncio
 import io
 import json
 import logging
-from collections.abc import Iterator
+import shutil
+import sys
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import pytest
 
 from bilisama import dev_talk
+from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
+from bilisama.obs.health import LinkHealth
 from bilisama.obs.logging import setup
+from bilisama.realtime import link
+from bilisama.realtime.providers import s2s as s2s_module
 
 _DEV_TALK_PY = Path(dev_talk.__file__)
 
@@ -504,3 +511,489 @@ def test_teardown_latches_the_local_pair_before_it_cancels_anything() -> None:
 )
 def test_the_teardown_check_catches_a_microphone_that_comes_back(planted: str) -> None:
     assert _teardown_problems(_function(planted, "run_director")) != []
+
+
+# ------------------------------------------------------------ panic mute from the terminal
+
+
+class _FakePanics:
+    """Stands in for the Scheduler's two panic controls."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def panic_mute(self) -> None:
+        self.calls.append("mute")
+
+    def release_panic(self) -> None:
+        self.calls.append("release")
+
+
+@pytest.mark.parametrize("typed", ["/mute", "/闭麦", "  /MUTE  "])
+def test_the_terminal_can_panic_mute(typed: str) -> None:
+    """Backlog #47: the red button lived only on the web panel, so a session
+    started with --no-ui — or one whose port was taken — had no way to shut her
+    up at all. panic-mute is the plan's single 「出事了一键闭嘴」 mechanism.
+    """
+    assert dev_talk._panic_command(typed) is True
+
+
+@pytest.mark.parametrize("typed", ["/unmute", "/开麦"])
+def test_the_terminal_can_let_her_speak_again(typed: str) -> None:
+    assert dev_talk._panic_command(typed) is False
+
+
+@pytest.mark.parametrize("typed", ["", "你好", "/sc 阿强 30 在玩什么", "/mut", "mute", "/mute now"])
+def test_an_ordinary_line_is_not_a_panic_command(typed: str) -> None:
+    """The console is a danmaku box first. Swallowing 「mute」 as a command would
+    make an ordinary word unsendable, and a partial match would fire on a typo.
+    """
+    assert dev_talk._panic_command(typed) is None
+
+
+def test_the_panic_command_reaches_the_scheduler_and_says_so(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    panics = _FakePanics()
+    said: list[str] = []
+    dev_talk._apply_panic(True, panics, said.append)
+    dev_talk._apply_panic(False, panics, said.append)
+
+    assert panics.calls == ["mute", "release"]
+    assert any("闭麦" in line for line in said)
+    assert any("恢复" in line for line in said)
+
+
+# ------------------------------------------------------------ correlation ids
+
+
+def _handle() -> link.ReplyHandle:
+    return link.ReplyHandle()
+
+
+def _done(status: link.ReplyStatus) -> link.ReplyDone:
+    return link.ReplyDone(handle=_handle(), status=status)
+
+
+async def _feed(events: list[Any]) -> AsyncIterator[Any]:
+    for event in events:
+        yield event
+
+
+async def test_every_turn_gets_a_correlation_id(log_stream: io.StringIO) -> None:
+    """Backlog #62: `bind()` had no caller anywhere in src, so `turn_id` never
+    reached a single log line and §4.12's "correlation ids on every line" was
+    zero lines. Without it the log groups by event name and by nothing else —
+    "why didn't she answer that one" needs the lines of ONE turn together.
+    """
+    await dev_talk._consume_events(
+        _feed(
+            [
+                link.SpeechStopped(),
+                link.UserTranscriptDone(text="在玩什么"),
+                link.ReplyTextDelta(handle=_handle(), text="在玩老头环。"),
+                _done(link.ReplyStatus.COMPLETED),
+            ]
+        ),
+        None,
+        None,
+    )
+    lines = [json.loads(line) for line in log_stream.getvalue().splitlines() if line]
+    turns = [line for line in lines if line["event"] == "dev_talk.turn_done"]
+    assert len(turns) == 1
+    assert turns[0]["turn_id"]
+    assert turns[0]["status"] == "completed"
+
+
+async def test_two_turns_do_not_share_an_id(log_stream: io.StringIO) -> None:
+    """Two ids or the grouping is decoration."""
+    await dev_talk._consume_events(
+        _feed(
+            [
+                link.ReplyTextDelta(handle=_handle(), text="一"),
+                _done(link.ReplyStatus.COMPLETED),
+                link.ReplyTextDelta(handle=_handle(), text="二"),
+                _done(link.ReplyStatus.CANCELLED),
+            ]
+        ),
+        None,
+        None,
+    )
+    turns = [
+        json.loads(line)
+        for line in log_stream.getvalue().splitlines()
+        if line and json.loads(line)["event"] == "dev_talk.turn_done"
+    ]
+    assert len(turns) == 2
+    assert turns[0]["turn_id"] != turns[1]["turn_id"]
+
+
+async def test_the_correlation_id_is_gone_once_the_turn_is(log_stream: io.StringIO) -> None:
+    """A contextvar left set would tag every later line with a turn that ended —
+    worse than no id at all, because it reads as evidence."""
+    await dev_talk._consume_events(_feed([_done(link.ReplyStatus.COMPLETED)]), None, None)
+    dev_talk.log.info("dev_talk.after_the_turn")
+    lines = [json.loads(line) for line in log_stream.getvalue().splitlines() if line]
+    after = next(line for line in lines if line["event"] == "dev_talk.after_the_turn")
+    assert "turn_id" not in after
+
+
+async def test_the_link_probe_is_fed_from_the_event_stream(log_stream: io.StringIO) -> None:
+    """§4.12 wants provider connection state in the health snapshot. The link's
+    own events are the only place it exists, and this consumer already reads
+    every one of them."""
+    clock = FakeClock()
+    health = LinkHealth(clock, provider="s2s")
+    await dev_talk._consume_events(
+        _feed(
+            [
+                link.LinkDown(reason="1006", retrying=True),
+                link.LinkUp(attempts=2),
+                link.LinkError(code="invalid_request_error", detail="voice 名字不对"),
+            ]
+        ),
+        None,
+        None,
+        link_health=health,
+    )
+    status = health.status()
+    assert status["connected"] is True
+    assert status["reconnect_attempts"] == 2
+    assert status["drops"] == 1
+    assert "voice 名字不对" in status["last_error"]
+
+
+# ------------------------------------------------------------ run_director, actually run
+#
+# Backlog #53: the checks above read this function's source. That catches wiring
+# that was written wrong, and nothing at all about wiring that was never reached
+# — measured, only 26 of dev_talk's 80 definitions ever executed, and neither
+# run_director nor main was among them. What follows starts the real thing with
+# every device and socket replaced, and then asserts on what it printed and left
+# behind.
+#
+# The two replacements are not optional: _Speaker opens a PortAudio output
+# stream in its constructor (dev_talk.py:433) and _pump_mic opens the microphone
+# (dev_talk.py:384). A test run must touch neither.
+
+
+class _FakeLink:
+    """A SpeechLink that connects instantly and says nothing.
+
+    Collects its instances so the test can reach the one run_director built
+    inside itself — readiness is "the persona has been pushed", and teardown is
+    "this got closed".
+    """
+
+    instances: ClassVar[list[_FakeLink]] = []
+
+    def __init__(self, url: str, **kwargs: Any) -> None:
+        _FakeLink.instances.append(self)
+        self.url = url
+        self.contexts: list[str] = []
+        self.closed = False
+        self._events: asyncio.Queue[Any] = asyncio.Queue()
+
+    async def connect(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    async def set_context(self, instructions: str) -> None:
+        self.contexts.append(instructions)
+
+    async def push_audio(self, pcm: bytes) -> None:
+        return None
+
+    async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        return None
+
+    async def request_reply(self, spec: Any) -> Any:
+        return link.ReplyHandle()
+
+    async def cancel(self, handle: Any) -> None:
+        return None
+
+    async def end_protection(self) -> None:
+        return None
+
+    async def events(self) -> AsyncIterator[Any]:
+        while True:
+            yield await self._events.get()
+
+
+class _SilentSpeaker:
+    """dev_talk._Speaker without PortAudio behind it."""
+
+    def __init__(self, device: int | None = None) -> None:
+        self.closed = False
+        self.played = bytearray()
+
+    @property
+    def busy(self) -> bool:
+        return False
+
+    backlog_s = 0.0
+    dropped_s = 0.0
+
+    def play(self, pcm: bytes) -> None:
+        self.played.extend(pcm)
+
+    def flush(self) -> None:
+        self.played.clear()
+
+    def suspend(self) -> None:
+        return None
+
+    def resume(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _director_args(config: Path) -> argparse.Namespace:
+    """The real flag parser, driven the way the runbook drives it.
+
+    Through `build_parser` rather than a hand-built Namespace: a Namespace
+    written out here goes stale the day a flag is added, and it would go stale
+    silently in the one test that runs this function for real.
+    """
+    return dev_talk.build_parser().parse_args(
+        [
+            "--director",
+            "--no-ui",  # no uvicorn, no browser, no port to bind
+            "--no-pet",
+            "--plain-console",
+            "--provider",
+            "s2s",
+            "--config",
+            str(config),
+        ]
+    )
+
+
+def _director_config(root: Path) -> Path:
+    """A config directory complete enough for the real startup path."""
+    repo = Path(__file__).resolve().parents[2]
+    (root / "safety").mkdir(parents=True, exist_ok=True)
+    (root / "safety" / "wordlist.txt").write_text("测试敏感词\n", encoding="utf-8")
+    (root / "prompts").mkdir(exist_ok=True)
+    (root / "prompts" / "proactive.md").write_text("随便聊点什么。\n", encoding="utf-8")
+    shutil.copytree(repo / "config" / "personas" / "mia", root / "personas" / "mia")
+    path = root / "bilisama.toml"
+    path.write_text(
+        "config_version = 1\n"
+        '[speech.s2s]\nllm_model = "our-s2t-v1"\n'
+        '[interaction]\nchattiness = "low"\n'
+        '[persona]\nid = "mia"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture
+def director_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Everything that would otherwise reach a device, a socket or $HOME."""
+    _FakeLink.instances.clear()
+    monkeypatch.setattr(dev_talk, "_Speaker", _SilentSpeaker)
+
+    async def _no_mic(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(dev_talk, "_pump_mic", _no_mic)
+    monkeypatch.setattr(s2s_module, "S2SLink", _FakeLink)
+    # persona.loader.default_data_dir reads this, so the memory db and the live
+    # persona copies land in tmp instead of the developer's real data home.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))  # closes at once, pump returns
+    yield _director_config(tmp_path / "conf")
+
+
+async def _run_until_ready(args: Any, *, ready: float = 5.0) -> _FakeLink:
+    """Start run_director, wait until it has pushed the persona, then Ctrl-C it.
+
+    Cancelling is what Ctrl-C does to this coroutine — it is parked on
+    `stop.wait()` — so the whole finally chain runs exactly as it does at 下播.
+    """
+    task = asyncio.create_task(dev_talk.run_director(args), name="test:director")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + ready
+    while loop.time() < deadline:
+        if _FakeLink.instances and _FakeLink.instances[-1].contexts:
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover - only on a hang, and then the assert says so
+        task.cancel()
+        raise AssertionError("run_director 没在预期时间内把人设推上去")
+    await asyncio.sleep(0.05)  # let the task list settle
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    return _FakeLink.instances[-1]
+
+
+async def test_the_director_stands_the_whole_stack_up_and_takes_it_down(
+    director_box: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One end-to-end pass: config in, banners out, teardown chain complete.
+
+    Each assertion below is a step that had no behavioural test at all — the
+    AST checks further up cannot tell whether any of this RUNS.
+    """
+    speech = await _run_until_ready(_director_args(director_box))
+    printed = capsys.readouterr().out
+
+    # Config actually drove the run: chattiness low comes from the file, and
+    # 180s is what derive() makes of it (config/derive.py).
+    assert "话痨度 low" in printed
+    assert "冷场 180s" in printed
+    # The wordlist gate ran on the real path, not just in `validate`.
+    assert "[安全] 词表已装载，命中策略 drop_sentence" in printed
+    # The persona reached the link before any task started.
+    assert speech.contexts
+    # Teardown, in order: the snapshot, distillation, then the farewell.
+    assert "[状态]" in printed
+    assert "[蒸馏] ran=False" in printed
+    assert printed.rstrip().endswith("再见。")
+    assert speech.closed is True
+
+
+async def test_the_director_registers_every_health_probe(
+    director_box: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Plan §4.12 wants one snapshot that answers "what state is everything in".
+
+    The exit snapshot is its only reader until the panel is up, and it is also
+    the only place a probe that was never registered shows up as missing.
+    """
+    await _run_until_ready(_director_args(director_box))
+    snapshot = _exit_snapshot(capsys.readouterr().out)
+
+    assert set(snapshot) >= {
+        "assembly",
+        "proactive",
+        "scheduler",
+        "loop",
+        "selector",
+        "link",
+        "outcomes",
+    }
+    # The two this round added, with the shape health promises rather than an
+    # empty dict: connected because _connect_or_exit got past.
+    assert snapshot["link"]["connected"] is True
+    assert snapshot["link"]["provider"] == "s2s"
+    assert snapshot["outcomes"]["seen"] == 0
+    assert snapshot["outcomes"]["by_outcome"] == {}
+
+
+async def test_a_missing_wordlist_stops_the_director_with_a_sentence(
+    director_box: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The error path of §7.6's one hard gate, on the real startup path.
+
+    `validate` reports it in Chinese first (that is test_config_validate.py);
+    this pins that the run then actually refuses, and refuses with a sentence
+    rather than the FileNotFoundError underneath it.
+    """
+    (director_box.parent / "safety" / "wordlist.txt").unlink()
+
+    with pytest.raises(SystemExit) as exc_info:
+        await dev_talk.run_director(_director_args(director_box))
+
+    printed = capsys.readouterr().out
+    assert "敏感词表文件不存在" in printed  # the validate line, before the refusal
+    assert "词表是上线硬门槛" in str(exc_info.value)
+    assert "Traceback" not in str(exc_info.value)
+
+
+async def test_a_broken_config_file_is_a_sentence_too(
+    director_box: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """dev-talk loads with strict=False, which covers a config that is merely
+    wrong. A file that cannot be PARSED goes down a different road, and that one
+    used to arrive as a traceback in front of a streamer."""
+    director_box.write_text("this is not = = toml", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        await dev_talk.run_director(_director_args(director_box))
+
+    err = capsys.readouterr().err
+    assert exc_info.value.code == 2
+    assert "TOML 语法错误" in err
+    assert "怎么办" in err
+
+
+def _exit_snapshot(printed: str) -> dict[str, Any]:
+    """The health snapshot dev-talk prints on its way out (dev_talk.py)."""
+    line = next(one for one in printed.splitlines() if one.startswith("[状态] "))
+    parsed: dict[str, Any] = json.loads(line[len("[状态] ") :])
+    return parsed
+
+
+# ------------------------------------------------------------ signals other groups left
+
+
+class _Busy:
+    def __init__(self, busy: bool) -> None:
+        self.busy = busy
+
+
+@pytest.mark.parametrize(
+    ("local", "page", "expected"),
+    [
+        (False, False, False),
+        (True, False, True),  # no page: the sounddevice speaker is the witness
+        (False, True, True),  # a page holds the devices: the local speaker is mute
+        (True, True, True),
+    ],
+)
+def test_the_pet_hears_whichever_end_is_playing(local: bool, page: bool, expected: bool) -> None:
+    """Backlog #26. `speaker.busy` alone reads False for the whole reply once a
+    page holds the devices — play() returns immediately with no stream
+    (dev_talk.py `_Speaker.play`) — so the pet dropped to 「空闲」 exactly when
+    she started talking. PlaybackTally.busy is the other end's witness
+    (ui/audio.py, VoiceSignals.audio_busy).
+    """
+    assert dev_talk._audio_busy(_Busy(local), _Busy(page)) is expected
+
+
+class _Credential:
+    """A danmaku source that answers the two questions the banner cannot."""
+
+    def __init__(self, *, logged_in: bool = False, stale: bool = False) -> None:
+        self.logged_in = logged_in
+        self.credential_stale = stale
+
+
+async def test_a_stale_sessdata_corrects_the_startup_banner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Backlog #12. The banner is printed before the connection exists, so all
+    it can see is that a credential STRING was resolved — an expired SESSDATA
+    still prints 「登录态」 while the platform masks every uid to 0
+    (ingest/bilibili/source.py `credential_stale`). The correction has to come
+    after the connection, and it has to reach the console: the source's own
+    warning goes to the log, which is not where the banner was read.
+    """
+    await dev_talk._watch_credential(_Credential(stale=True), poll_s=0.0)
+    printed = capsys.readouterr().out
+    assert "匿名" in printed
+    assert "SESSDATA" in printed
+
+
+async def test_a_working_login_says_nothing_more(capsys: pytest.CaptureFixture[str]) -> None:
+    """The banner was already right; a second line about it is noise."""
+    await dev_talk._watch_credential(_Credential(logged_in=True), poll_s=0.0)
+    assert capsys.readouterr().out == ""
+
+
+async def test_the_credential_watch_waits_rather_than_accusing_early() -> None:
+    """Both answers are False until init_room replies, and 「匿名」 printed
+    during connect would be a guess dressed as a fact."""
+    source = _Credential()
+    task = asyncio.create_task(dev_talk._watch_credential(source, poll_s=0.0))
+    await asyncio.sleep(0)
+    assert not task.done()
+    source.logged_in = True
+    await asyncio.wait_for(task, timeout=1.0)

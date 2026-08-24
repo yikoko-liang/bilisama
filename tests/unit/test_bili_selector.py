@@ -19,13 +19,14 @@ from bilisama.config.derive import DerivedThresholds, derive
 from bilisama.config.enums import Chattiness
 from bilisama.director.intent import Intent
 from bilisama.ingest.bilibili.scoring import danmaku_score
-from bilisama.ingest.bilibili.selector import DanmakuSelector
+from bilisama.ingest.bilibili.selector import DanmakuSelector, SkipSink
 from bilisama.ingest.events import (
     EventKind,
     GuardLevel,
     LiveEvent,
     Viewer,
 )
+from bilisama.obs.outcome import SkipReason
 from tests.fakes.bili import danmaku_event as _dm
 from tests.fakes.bili import gift_event
 from tests.fakes.replay import FIXTURE_DIR, replay_driving_clock
@@ -92,11 +93,18 @@ def _thresholds(window_s: int = 2, score: float = 0.35) -> DerivedThresholds:
 
 
 async def _selector(
-    *, window_s: int = 2, score: float = 0.35, cooldown_s: float = 60.0
+    *,
+    window_s: int = 2,
+    score: float = 0.35,
+    cooldown_s: float = 60.0,
+    on_skip: SkipSink | None = None,
 ) -> tuple[DanmakuSelector, FakeClock, list[LiveEvent], asyncio.Task[None]]:
     clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
     selector = DanmakuSelector(
-        clock, thresholds=lambda: _thresholds(window_s, score), per_uid_cooldown_s=cooldown_s
+        clock,
+        thresholds=lambda: _thresholds(window_s, score),
+        per_uid_cooldown_s=cooldown_s,
+        on_skip=on_skip,
     )
     delivered: list[LiveEvent] = []
 
@@ -204,6 +212,84 @@ async def test_three_delivery_failures_latch_the_breaker_for_the_run() -> None:
         selector.offer(_dm("现在还有人在吗", uid=1))
         skips = selector.status()["skips"]
         assert isinstance(skips, dict) and skips["selection.breaker_open"] == 1
+    finally:
+        await _finish(task)
+
+
+# ------------------------------------------------------------ per-event skips (#49)
+
+
+async def test_every_funnel_drop_hands_out_the_event_it_dropped() -> None:
+    """Ledger item 49: the funnel kept only a tally per reason, so the panel
+    could say "12 条低分" and never which twelve. "为什么没回我" is the most
+    frequent question a viewer asks, and it is about ONE danmaku."""
+    records: list[tuple[LiveEvent | None, SkipReason]] = []
+    selector, clock, delivered, task = await _selector(on_skip=lambda e, r: records.append((e, r)))
+    try:
+        selector.offer(_dm("主播这局到底怎么打", uid=1))
+        selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # higher score
+        selector.offer(_dm("666", uid=3))  # below the bar
+        await clock.advance(2.5)
+        assert [e.viewer.uid for e in delivered] == [2]
+        assert [(e.viewer.uid, r) for e, r in records if e is not None] == [
+            (1, SkipReason.LOST_WINDOW),
+            (3, SkipReason.LOW_VALUE),
+        ]
+        skips = selector.status()["skips"]
+        assert isinstance(skips, dict)
+        assert sum(skips.values()) == len(records), "逐条终局和聚合计数必须对得上"
+    finally:
+        await _finish(task)
+
+
+async def test_an_empty_window_reports_the_reason_with_no_event() -> None:
+    """Boundary: window_empty is the one account that belongs to a window
+    rather than to any single danmaku, so it hands out None."""
+    records: list[tuple[LiveEvent | None, SkipReason]] = []
+    selector, clock, _delivered, task = await _selector(on_skip=lambda e, r: records.append((e, r)))
+    try:
+        selector.offer(_dm("666", uid=1))  # opens the window, fails the bar
+        await clock.advance(2.5)
+        assert (None, SkipReason.WINDOW_EMPTY) in records
+        assert [r for _e, r in records] == [SkipReason.LOW_VALUE, SkipReason.WINDOW_EMPTY]
+    finally:
+        await _finish(task)
+
+
+async def test_a_broken_skip_sink_never_takes_the_funnel_down_with_it() -> None:
+    """Error path: the sink is a panel broadcast, so it can fail on a torn-down
+    websocket. The funnel is on the emit path — a raise here would travel all
+    the way back into on_event and cost the room its danmaku."""
+    calls = 0
+
+    def exploding(event: LiveEvent | None, reason: SkipReason) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("面板连接断了")
+
+    selector, clock, delivered, task = await _selector(on_skip=exploding)
+    try:
+        selector.offer(_dm("666", uid=1))  # low value: the first sink call
+        selector.offer(_dm("主播这个怎么设置的", uid=2))  # must still win the window
+        await clock.advance(2.5)
+        assert [e.viewer.uid for e in delivered] == [2], "水槽炸了，漏斗照常出货"
+        assert calls >= 1
+        skips = selector.status()["skips"]
+        assert isinstance(skips, dict) and skips["selection.low_value"] == 1, "账还是记下了"
+    finally:
+        await _finish(task)
+
+
+async def test_no_sink_configured_is_still_a_working_funnel() -> None:
+    """Boundary: the sink is optional — nothing is wired in the replay and
+    unit paths, and the counters have to keep working without it."""
+    selector, clock, delivered, task = await _selector()
+    try:
+        selector.offer(_dm("666", uid=1))
+        await clock.advance(2.5)
+        assert delivered == []
+        skips = selector.status()["skips"]
+        assert isinstance(skips, dict) and skips["selection.window_empty"] == 1
     finally:
         await _finish(task)
 

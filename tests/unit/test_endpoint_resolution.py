@@ -97,6 +97,31 @@ def test_an_already_complete_socket_url_is_left_alone() -> None:
     assert got.url == "wss://主机/api-ws/v1/realtime"
 
 
+def test_openai_ga_gets_its_own_socket_path() -> None:
+    """One hosted path for two providers was DashScope's. OpenAI GA serves
+    Realtime on /v1/realtime — the same path our own s2s server uses
+    (config/schema.py's S2SConfig.endpoint default), because both speak GA.
+    Stapling /api-ws/v1/realtime on it dials a 404 and reports it as a refused
+    handshake, which sends people checking their key.
+    """
+    s = _settings(provider="openai_ga", openai_ga={"endpoint": "api.openai.com"})
+    got = resolve_endpoint(s, provider=None, url=None, model=None, env={})
+    assert got.provider is ProviderName.OPENAI_GA
+    assert got.url == "wss://api.openai.com/v1/realtime"
+
+
+def test_the_dashscope_env_fallback_does_not_answer_for_openai() -> None:
+    """`dashscope_url` is one vendor's address under one vendor's name. Letting
+    it stand in for openai_ga sends OpenAI credentials at DashScope."""
+    s = _settings(provider="openai_ga")
+    with pytest.raises(SystemExit) as caught:
+        resolve_endpoint(
+            s, provider=None, url=None, model=None, env={"dashscope_url": "https://主机"}
+        )
+    message = str(caught.value)
+    assert "[speech.openai_ga]" in message, message
+
+
 def test_the_model_falls_back_to_the_known_default() -> None:
     """The flag used to carry it. Moved here, it stops outranking the config.
 

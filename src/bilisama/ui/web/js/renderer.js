@@ -9,24 +9,60 @@ import { mountSprite } from "./skins/sprite.js";
 
 const BUILTIN = "tofu";
 
+// What this build can actually put on screen. config/schema.py:324 also allows
+// live2d, whose renderer is stage 5's work and still behind §6.4's licensing
+// gate — so it is a configured value with nothing behind it, not a typo.
+const RENDERABLE = new Set(["tofu", "sprite"]);
+
+/** The one line to say when the configured avatar cannot be honoured as
+ * written, or null when there is nothing to say.
+ *
+ * Both branches end at the same built-in, quietly, and 「改了配置看不出改没改
+ * 上」 is the whole complaint. Exported because the panel window is a second
+ * window that mounts no pet: hello reaches both, the mount only one (see
+ * panel.js's setHello).
+ */
+export function unsupportedRenderer(avatar) {
+  const wanted = avatar?.renderer;
+  if (!wanted) return null;
+  if (!RENDERABLE.has(wanted)) {
+    return (
+      `配置里的形象渲染器「${wanted}」这一版还没有，先按内置形象显示。` +
+      `要换的话改 config/bilisama.toml 的 [avatar] renderer，可选 tofu 或 sprite。`
+    );
+  }
+  // config validate does not catch this pair (checked validate.py, 2026-08-25),
+  // and the mount reads it as "no pack named", which is the built-in.
+  if (wanted === "sprite" && !avatar.model_id) {
+    return "配置里选了 sprite 皮肤包，但 [avatar] model_id 是空的，先按内置形象显示。";
+  }
+  return null;
+}
+
 export async function createRenderer(mount, avatar, hooks) {
   const wanted = avatar?.renderer === "sprite" && avatar.model_id ? avatar.model_id : BUILTIN;
   // Asking for the built-in by name means the PACKAGED one: a user pack that
   // happens to be called "tofu" may shadow a configured skin, but not the
   // robot `--skin tofu` and the degrade chain both name explicitly.
   const packagedOnly = wanted === BUILTIN;
+  // Both surfaces, on purpose: the console keeps the exception object (with
+  // its stack) for whoever is debugging, and the notice gets one sentence to
+  // the streamer, who has no devtools inside the shell.
+  const say = (text, err) => {
+    console.warn(text, err);
+    hooks.onNotice?.(`${text}${err}`);
+  };
   try {
     return await mountSprite(mount, wanted, hooks, { packagedOnly });
   } catch (err) {
-    // Missing pack, malformed manifest, oversized sheet: degrade, and say so
-    // in the browser console (the panel's log tab shows server-side lines).
-    console.warn(`皮肤包 ${wanted} 加载失败，退回内置形象：`, err);
+    // Missing pack, malformed manifest, oversized sheet.
+    say(`皮肤包 ${wanted} 加载失败，退回内置形象：`, err);
   }
   if (!packagedOnly) {
     try {
       return await mountSprite(mount, BUILTIN, hooks, { packagedOnly: true });
     } catch (err) {
-      console.warn("豆腐皮肤也加载失败，退回 CSS 形象：", err);
+      say("豆腐皮肤也加载失败，退回 CSS 形象：", err);
     }
   }
   return mountFallback(mount, hooks);

@@ -133,6 +133,20 @@ body.panel-only .scrim {
   border-bottom-color: var(--accent);
 }
 
+/* An unread local notice (panel.js's notice): the panel opens on 现场, so a
+   line written into 日志 needs something pointing at it. Cleared by opening
+   the tab. */
+.tab[data-alert]::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  vertical-align: 3px;
+  border-radius: 50%;
+  background: var(--c-warn);
+}
+
 .tab-page {
   display: none;
   flex: 1;

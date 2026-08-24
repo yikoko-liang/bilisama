@@ -26,18 +26,26 @@ Two things are pinned here:
 
 from __future__ import annotations
 
+import ast
 import os
 import re
+import shutil
 import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GATE = _REPO_ROOT / "scripts" / "gate.sh"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _SMOKE = _REPO_ROOT / "scripts" / "smoke_provider_b.sh"
 _INTEGRATION_TESTS = _REPO_ROOT / "tests" / "integration" / "test_s2s_patches.py"
+_TESTS = _REPO_ROOT / "tests"
+# Every tree that holds first-party Python. `scripts` is here because it was the
+# one that used to be outside all three of black, ruff and mypy.
+_PYTHON_TREES = ("src", "tests", "tools", "scripts")
 
 # Markers the gate deliberately does not run, and why. A tier that neither appears
 # in a gate step nor here is a tier everyone assumes is covered — which is exactly
@@ -48,9 +56,20 @@ NOT_GATED: dict[str, str] = {
         "to talk to on a dev machine, and putting a paid third party in the path of "
         "every commit is not a gate, it is an outage waiting for a bad afternoon."
     ),
-    "manual": (
-        "one-off probes, kept so the next investigation starts from a working script "
-        "rather than a blank file. They assert nothing a regression could break."
+}
+
+# Markers that are excused above AND carry no tests at all. An excuse says "this
+# tier cannot run here"; it quietly also reads as "this tier exists", and for a
+# long time `manual` and `provider_a` were both empty — a row on the
+# reconciliation table that balances forever because both sides are zero. Listing
+# them separately is what makes the difference visible, and removing a name from
+# here is the chore that lands the day somebody writes the first test.
+EMPTY_TIERS: dict[str, str] = {
+    "provider_a": (
+        "ledger #37: plan section 10.5 owes this tier and nothing carries the marker "
+        "yet. Kept registered rather than deleted, because the tier is planned — "
+        "unlike `manual`, whose probe files were never committed and whose marker "
+        "was therefore removed."
     ),
 }
 
@@ -131,6 +150,9 @@ def _run_gate(
     require: str | None = None,
     chromium_installed: bool = True,
     require_ui: str | None = None,
+    eslint_installed: bool = True,
+    eslint_exit: int = 0,
+    require_js: str | None = None,
 ) -> GateRun:
     """Run the whole gate with `$PY` replaced by a recorder that always succeeds.
 
@@ -144,6 +166,14 @@ def _run_gate(
             keys on the BROWSER, not the pip package, so the stub has to be able
             to fail that one call while succeeding at everything else.
         require_ui: Value for BILISAMA_GATE_REQUIRE_UI, the browser tier's
+            equivalent CI switch.
+        eslint_installed: Whether the eslint binary the gate looks for exists.
+            Pointed at a stub rather than at the repo's own node_modules, so
+            whether somebody ran `npm install` on this machine cannot decide
+            what these runs prove.
+        eslint_exit: What the eslint stub exits with, so the "it found problems"
+            path can be observed without writing broken JavaScript into the tree.
+        require_js: Value for BILISAMA_GATE_REQUIRE_JS, the JavaScript tier's
             equivalent CI switch.
 
     Returns:
@@ -173,21 +203,35 @@ def _run_gate(
         (venv / "bin" / "python").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (venv / "bin" / "python").chmod(0o755)
 
+    # Logged with a prefix of its own: eslint is not invoked through `$PY`, so
+    # without one its argument list would be indistinguishable from a python call.
+    eslint = tmp_path / "recording-eslint"
+    if eslint_installed:
+        eslint.write_text(
+            f'#!/bin/sh\nprintf \'eslint %s\\n\' "$*" >> "$GATE_STUB_LOG"\nexit {eslint_exit}\n',
+            encoding="utf-8",
+        )
+        eslint.chmod(0o755)
+
     env = {
         **os.environ,
         "PY": str(stub),
         "GATE_STUB_LOG": str(log),
         "BILISAMA_S2S_VENV": str(venv),
+        "BILISAMA_ESLINT": str(eslint),
         "GATE_STUB_PROBE_EXIT": "0" if chromium_installed else "1",
     }
-    # Both CI switches are scrubbed: whatever the host machine sets must not
+    # All three CI switches are scrubbed: whatever the host machine sets must not
     # decide what these runs prove.
     env.pop("BILISAMA_GATE_REQUIRE_INTEGRATION", None)
     env.pop("BILISAMA_GATE_REQUIRE_UI", None)
+    env.pop("BILISAMA_GATE_REQUIRE_JS", None)
     if require is not None:
         env["BILISAMA_GATE_REQUIRE_INTEGRATION"] = require
     if require_ui is not None:
         env["BILISAMA_GATE_REQUIRE_UI"] = require_ui
+    if require_js is not None:
+        env["BILISAMA_GATE_REQUIRE_JS"] = require_js
 
     proc = subprocess.run(
         ["bash", str(_GATE)],
@@ -299,6 +343,122 @@ def test_everyone_looks_for_the_s2s_venv_in_the_same_place() -> None:
         assert _VENV_HOME in text, f"{path.name} does not default to ~/{_VENV_HOME}"
 
 
+def markers_tests_carry(tests_root: Path) -> set[str]:
+    """Marker names any test file actually applies.
+
+    Reads the source rather than collecting with pytest: collection would import
+    every test module, which is a whole test run's worth of work to answer a
+    question about text.
+
+    Args:
+        tests_root: The tests/ directory.
+
+    Returns:
+        Names from `@pytest.mark.<name>` and from `pytestmark = pytest.mark.<name>`.
+    """
+    found: set[str] = set()
+    for path in tests_root.rglob("*.py"):
+        found |= set(re.findall(r"pytest\.mark\.(\w+)", path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_an_excused_marker_that_no_test_carries_is_named_as_such() -> None:
+    """An excuse for an empty tier balances the table without covering anything.
+
+    NOT_GATED answers "why does the gate not run this". It does not answer "is
+    there anything to run", and reading the first as the second is how a marker
+    with zero tests sat on the reconciliation table looking accounted for.
+    """
+    excused_and_empty = set(NOT_GATED) - markers_tests_carry(_TESTS)
+    assert excused_and_empty == set(EMPTY_TIERS), (
+        f"excused markers carrying no tests: {sorted(excused_and_empty)}; "
+        f"EMPTY_TIERS says {sorted(EMPTY_TIERS)}. Write the first test for it and drop "
+        "it from EMPTY_TIERS, or drop the marker and its excuse."
+    )
+
+
+def test_a_marker_nothing_carries_is_the_thing_that_check_looks_for() -> None:
+    """The planted violation, so the check above is known to bite."""
+    assert "provider_a" not in markers_tests_carry(_TESTS)
+    assert "integration" in markers_tests_carry(_TESTS), (
+        "the scan found no @pytest.mark.integration anywhere — it is reading the "
+        "wrong thing, and every marker would look empty"
+    )
+
+
+# ------------------------------------------------------------ What the gate covers
+
+
+def _dependency_names(pyproject: str) -> set[str]:
+    """Distribution names from [project] dependencies, without their versions."""
+    raw = tomllib.loads(pyproject)["project"]["dependencies"]
+    assert isinstance(raw, list)
+    return {re.split(r"[<>=!~\[ ]", str(entry), maxsplit=1)[0].strip() for entry in raw}
+
+
+def _imported_top_level_modules() -> set[str]:
+    """Every top-level module name imported anywhere first-party code lives.
+
+    Vendored code counts: src/bilisama/ingest/bilibili/_vendor is what pulls in
+    brotli and pure-protobuf, and it ships.
+    """
+    names: set[str] = set()
+    for tree in _PYTHON_TREES:
+        for path in (_REPO_ROOT / tree).rglob("*.py"):
+            tree_ast = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree_ast):
+                if isinstance(node, ast.Import):
+                    names.update(alias.name.split(".")[0] for alias in node.names)
+                # level > 0 is a relative import: it names no distribution.
+                elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                    names.add(node.module.split(".")[0])
+    return names
+
+
+def test_every_runtime_dependency_is_actually_imported() -> None:
+    """A dependency nobody imports is download size the streamer pays for nothing.
+
+    Ledger #51: numpy, pysbd and pydantic-settings were installed and never
+    referenced — about 38 MiB measured in .venv, against a plan (section 6.5)
+    that budgets the whole product at "tens to low hundreds of MB". They were
+    added for work that took a different shape, and nothing noticed because
+    nothing looks.
+
+    Import name, not distribution name: `pure-protobuf` arrives as
+    `pure_protobuf`. Optional-dependency groups are out of scope — mlx and the
+    dev group are opt-in by definition.
+    """
+    imported = _imported_top_level_modules()
+    unused = {
+        name
+        for name in _dependency_names(_PYPROJECT.read_text(encoding="utf-8"))
+        if name.replace("-", "_") not in imported and name not in imported
+    }
+    assert not unused, (
+        f"declared as runtime dependencies and imported nowhere: {sorted(unused)}. "
+        "Use them or drop them — this is weight in every install."
+    )
+
+
+def test_the_lint_and_type_gates_cover_every_python_tree() -> None:
+    """scripts/ used to be outside all three, so nothing read 389 lines of it.
+
+    black and ruff take their paths from gate.sh; mypy takes its from
+    [tool.mypy] files, which is what makes a bare `mypy` check the same tree the
+    gate checks. Both spellings are asserted here because both were wrong in the
+    same direction, under a step labelled 「mypy（全量，不只 src）」.
+    """
+    gate = _GATE.read_text(encoding="utf-8")
+    for tool in ("black --check", "ruff check"):
+        line = next((ln for ln in gate.splitlines() if tool in ln), "")
+        assert line, f"gate.sh no longer runs {tool}"
+        for tree in _PYTHON_TREES:
+            assert re.search(rf"\b{tree}\b", line), f"{tool} does not cover {tree}/: {line!r}"
+
+    files = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["tool"]["mypy"]["files"]
+    assert set(_PYTHON_TREES) <= set(files), f"mypy files misses {set(_PYTHON_TREES) - set(files)}"
+
+
 # ------------------------------------------------------------ What the gate does
 
 
@@ -395,13 +555,19 @@ def test_requiring_the_browser_tier_can_be_switched_off_with_a_zero(tmp_path: Pa
     assert "跳过" in run.stdout
 
 
-def test_the_closing_line_names_both_missing_tiers(tmp_path: Path) -> None:
-    """The fourth corner of the honesty matrix: neither tier ran."""
-    run = _run_gate(tmp_path, s2s_installed=False, chromium_installed=False)
+def test_the_closing_line_names_every_missing_tier(tmp_path: Path) -> None:
+    """The far corner of the honesty matrix: none of the three optional tiers ran.
+
+    Named one by one rather than as "some tiers": the line is read by somebody
+    deciding whether they are done, and 「有的没跑」 tells them nothing.
+    """
+    run = _run_gate(tmp_path, s2s_installed=False, chromium_installed=False, eslint_installed=False)
 
     assert run.returncode == 0, run.stderr
     assert "单元层全部通过" in run.last_line, run.last_line
-    assert "集成层与界面层没跑" in run.last_line, run.last_line
+    for tier in ("集成层", "界面层", "JavaScript"):
+        assert tier in run.last_line, f"{tier} missing from the closing line: {run.last_line!r}"
+    assert "没跑" in run.last_line, run.last_line
 
 
 def test_requiring_the_integration_tier_can_be_switched_off_with_a_zero(
@@ -416,3 +582,121 @@ def test_requiring_the_integration_tier_can_be_switched_off_with_a_zero(
 
     assert run.returncode == 0, run.stderr
     assert "跳过" in run.stdout
+
+
+# ------------------------------------------------------------ the JavaScript tier
+
+
+def test_the_gate_lints_the_javascript_when_eslint_is_installed(tmp_path: Path) -> None:
+    """Ledger #52: ~2700 lines of shipped JS with no gate of any kind.
+
+    The Python beside it goes through black, ruff and mypy --strict. This is the
+    step that stops the page and the Electron shell being the one tree where a
+    typo'd identifier ships.
+    """
+    run = _run_gate(tmp_path, s2s_installed=True)
+
+    assert run.returncode == 0, run.stderr
+    assert any(
+        call.startswith("eslint") for call in run.calls
+    ), f"eslint was installed and the gate did not run it: {run.calls}"
+    assert "JavaScript" in run.last_line and "没跑" not in run.last_line, run.last_line
+
+
+def test_the_gate_says_so_when_eslint_is_missing(tmp_path: Path) -> None:
+    """Boundary: no node_modules, so the tier cannot run — and the gate says so.
+
+    Same contract as the s2s and browser tiers: `npm install` is a download, and
+    a laptop without one still commits. What it must not do is read as a pass.
+    """
+    run = _run_gate(tmp_path, s2s_installed=True, eslint_installed=False)
+
+    assert run.returncode == 0, run.stderr
+    assert not any(call.startswith("eslint") for call in run.calls), run.calls
+    assert "跳过" in run.stdout, "the skip was not reported at all"
+    assert "npm install" in run.stdout, "no way to act on the skip"
+    assert "没跑" in run.last_line, run.last_line
+
+
+def test_the_gate_can_be_told_that_skipping_the_javascript_lint_is_not_allowed(
+    tmp_path: Path,
+) -> None:
+    """Error path: the switch CI would set, and the failure it produces."""
+    run = _run_gate(tmp_path, s2s_installed=True, eslint_installed=False, require_js="1")
+
+    assert run.returncode != 0, "a missing eslint passed the gate that was told to require it"
+    assert "npm install" in run.stderr, run.stderr
+    assert "全部通过" not in run.stdout, "printed a success banner on the way out of a failure"
+
+
+def test_requiring_the_javascript_tier_can_be_switched_off_with_a_zero(tmp_path: Path) -> None:
+    run = _run_gate(tmp_path, s2s_installed=True, eslint_installed=False, require_js="0")
+
+    assert run.returncode == 0, run.stderr
+    assert "跳过" in run.stdout
+
+
+def test_a_failing_eslint_fails_the_gate(tmp_path: Path) -> None:
+    """The step has to be able to say no.
+
+    `set -e` is what carries this, and it is one stray `|| true` away from a lint
+    step that runs, prints, and passes regardless.
+    """
+    run = _run_gate(tmp_path, s2s_installed=True, eslint_exit=1)
+
+    assert run.returncode != 0, "eslint reported errors and the gate still passed"
+    assert "全部通过" not in run.stdout, run.stdout
+
+
+# ------------------------------------------------------------ the eslint config itself
+
+_ESLINT_BIN = _REPO_ROOT / "node_modules" / ".bin" / "eslint"
+
+
+def _eslint(source: str, *, filename: str) -> subprocess.CompletedProcess[str]:
+    """Lint one snippet through the repo's real config, without writing a file."""
+    return subprocess.run(
+        [str(_ESLINT_BIN), "--stdin", "--stdin-filename", filename],
+        cwd=_REPO_ROOT,
+        input=source,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.skipif(
+    not _ESLINT_BIN.exists() or shutil.which("node") is None,
+    reason="eslint 没装：先在仓库根跑 npm install",
+)
+def test_the_eslint_config_rejects_an_undeclared_name() -> None:
+    """The rule that pays for the tier: a typo'd identifier is a runtime crash.
+
+    Checked against the config the gate uses rather than a config written here,
+    because the failure mode being guarded against is a config that matches
+    nothing and reports a clean tree.
+    """
+    done = _eslint("export const go = () => documnet.body;", filename="src/bilisama/ui/web/js/x.js")
+
+    assert done.returncode != 0, f"a misspelt `document` passed the lint: {done.stdout}"
+    assert "no-undef" in done.stdout, done.stdout
+
+
+@pytest.mark.skipif(
+    not _ESLINT_BIN.exists() or shutil.which("node") is None,
+    reason="eslint 没装：先在仓库根跑 npm install",
+)
+def test_the_eslint_config_knows_the_browser_and_the_worklet_apart() -> None:
+    """Control: the same names that must fail above have to pass where they exist.
+
+    A config that flagged `document` in a page module, or `sampleRate` in the
+    capture worklet, would be turned off within a week.
+    """
+    page = _eslint("export const go = () => document.body;", filename="src/bilisama/ui/web/js/x.js")
+    assert page.returncode == 0, page.stdout
+
+    worklet = _eslint(
+        "export const rate = () => sampleRate;",
+        filename="src/bilisama/ui/web/js/capture-worklet.js",
+    )
+    assert worklet.returncode == 0, worklet.stdout

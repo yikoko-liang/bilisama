@@ -15,7 +15,7 @@ what earns it a place here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +76,9 @@ DASHSCOPE = Capabilities(
     # qwen3.5-omni-flash-realtime accepts and echoes all three;
     # qwen-audio-3.0-realtime-flash/-plus refuse semantic_vad outright
     # ("Supported values: server_vad, smart_turn. Use turn_detection: null for
-    # push-to-talk mode."). This constant keeps the omni set; the dashscope
-    # adapter narrows by model when it lands — a provider-level intersection
-    # would wrongly refuse semantic_vad on omni.
+    # push-to-talk mode."). This constant keeps the omni set and `for_model`
+    # below narrows the ones we measured — a provider-level intersection would
+    # wrongly refuse semantic_vad on omni.
     turn_detection_types=frozenset({"smart_turn", "server_vad", "semantic_vad"}),
 )
 
@@ -86,7 +86,43 @@ OPENAI_GA = Capabilities(
     owns_tts=True,
     single_response_slot=True,  # only one response may write the default conversation
     out_of_band_exempt_from_slot=True,  # out-of-band responses do run in parallel
-    item_truncate=True,  # required over WebSocket, and supported here
+    # Required over WebSocket, and supported here. Nothing in src/ reads this
+    # flag yet, and the honest reason is not laziness: truncating the model's
+    # own history takes the played_ms the browser reports on playback.cancelled
+    # (ui/events.py:71) carried from L4 through L3 down to a client method that
+    # does not exist — and the only provider declaring True is the one dev-talk
+    # refuses to dial (dev_talk.py:1066). Until both land, a barge-in trims our
+    # memory and leaves the model still holding what the audience never heard.
+    item_truncate=True,
     acknowledges_session_update=True,
     turn_detection_types=frozenset({"server_vad", "semantic_vad"}),
 )
+
+
+# Turn detection is the one capability that splits BELOW the provider: the same
+# DashScope account serves models with different answers (see DASHSCOPE above).
+# Only models we actually probed are listed — an unlisted one inherits its
+# provider, because blocking a working config on our own ignorance is worse
+# than the endpoint refusal this check exists to pre-empt.
+_MODEL_TURN_TYPES: dict[str, frozenset[str]] = {
+    "qwen-audio-3.0-realtime-flash": frozenset({"server_vad", "smart_turn"}),
+    "qwen-audio-3.0-realtime-plus": frozenset({"server_vad", "smart_turn"}),
+}
+
+
+def for_model(base: Capabilities, model: str) -> Capabilities:
+    """Narrow a provider's declaration down to one model's measured reality.
+
+    Args:
+        base: The provider-level capabilities.
+        model: The model that will actually be dialed. Empty or unprobed
+            names leave `base` untouched.
+
+    Returns:
+        `base` itself when nothing is known about the model, so identity
+        comparisons in the registry keep working.
+    """
+    narrowed = _MODEL_TURN_TYPES.get(model.strip())
+    if narrowed is None or narrowed == base.turn_detection_types:
+        return base
+    return replace(base, turn_detection_types=narrowed)

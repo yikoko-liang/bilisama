@@ -227,14 +227,25 @@ class _FakeClient:
 
     init_result = True
     room_id = 7734200
+    # What upstream's _init_uid resolves a `uid=None` request to. 0 is the
+    # -101 branch: an expired SESSDATA, uid forced to 0, init_room still True
+    # (_vendor/blivedm/clients/web.py:257-262).
+    resolved_uid = 0
 
     def __init__(self, room_id: int, uid: int | None = None, session: object = None) -> None:
         self._need_init_room = True
+        self._uid = uid
+
+    @property
+    def uid(self) -> int | None:
+        return self._uid
 
     def set_handler(self, handler: object) -> None:
         self.handler = handler
 
     async def init_room(self) -> bool:
+        if self._uid is None:
+            self._uid = type(self).resolved_uid
         return type(self).init_result
 
     def start(self) -> None:
@@ -329,6 +340,42 @@ def test_mirror_danmaku_is_dropped_and_accounted() -> None:
     assert source.status()["counts"] == {}, "never mapped, never offered"
     shed = source.status()["shed"]
     assert isinstance(shed, dict) and shed["mirror"] == 1
+
+
+def test_a_linked_room_flood_does_not_eat_the_home_rooms_parse_budget() -> None:
+    """A PK opponent's danmaku shared the home lane's 80/s, so the other
+    room's flood pushed our own viewers into the sampled remainder — for
+    events we discard anyway, since those people cannot hear a reply here."""
+    source, forwarder, _clock = _source()
+    for i in range(1000):
+        info = _danmu_info(uid=50_000 + i, msg=f"对面{i}", medal=False, privilege=0, admin=0)
+        forwarder.handle(None, {"cmd": "DANMU_MSG_MIRROR", "info": info})
+    for i in range(80):
+        info = _danmu_info(uid=10_000 + i, msg=f"本房{i}", medal=False, privilege=0, admin=0)
+        forwarder.handle(None, {"cmd": "DANMU_MSG", "info": info})
+    status = source.status()
+    counts = status["counts"]
+    assert isinstance(counts, dict)
+    assert counts.get("danmaku") == 80, "本房那 80 条一条都不该被对面挤掉"
+    shed = status["shed"]
+    assert isinstance(shed, dict)
+    assert shed["mirror"] == 1000, "镜像弹幕全记在自己名下"
+    assert "danmaku" not in shed, "本房这一秒没有超预算，不该有丢弃"
+    assert status["map_errors"] == 0
+
+
+def test_the_home_lane_budget_still_bites_on_its_own() -> None:
+    """Boundary: giving mirrors their own lane must not quietly lift the home
+    lane's cap — 81 in one second is still 80 parsed and one shed."""
+    source, forwarder, _clock = _source()
+    for i in range(81):
+        info = _danmu_info(uid=20_000 + i, msg=f"本房{i}", medal=False, privilege=0, admin=0)
+        forwarder.handle(None, {"cmd": "DANMU_MSG", "info": info})
+    status = source.status()
+    counts = status["counts"]
+    shed = status["shed"]
+    assert isinstance(counts, dict) and counts["danmaku"] == 80
+    assert isinstance(shed, dict) and shed["danmaku"] == 1
 
 
 def test_sc_delete_purges_the_paid_pocket_before_revoking() -> None:
@@ -500,3 +547,131 @@ def test_tierless_upsert_never_erases_a_recorded_guard_level() -> None:
     store.on_event(_entry(55))  # wire entries carry no guard field
     record = store.viewer("uid:55")
     assert record is not None and record.guard_level is GuardLevel.CAPTAIN
+
+
+# ------------------------------------------------------------------ credential state (#12)
+
+
+async def _status_after_connect(
+    monkeypatch: pytest.MonkeyPatch, *, sessdata: str, resolved_uid: int
+) -> dict[str, object]:
+    """Run start() as far as "connected", read health, then shut down cleanly."""
+    from bilisama.clock import SystemClock
+
+    monkeypatch.setattr("bilisama.ingest.bilibili.source.bili_web.BLiveClient", _FakeClient)
+    monkeypatch.setattr(_FakeClient, "init_result", True)
+    monkeypatch.setattr(_FakeClient, "resolved_uid", resolved_uid)
+    source = BilibiliEventSource(6, SystemClock(), sessdata=sessdata)
+    task = asyncio.create_task(source.start(_drain_nothing))
+    for _ in range(200):
+        if source.status()["connected"]:
+            break
+        await asyncio.sleep(0.01)
+    status = dict(source.status())
+    status["credential_stale_property"] = source.credential_stale
+    await source.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+    return status
+
+
+async def test_working_credential_reports_a_logged_in_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = await _status_after_connect(monkeypatch, sessdata="有效凭据", resolved_uid=90001)
+    assert status["logged_in"] is True
+    assert status["credential_stale"] is False
+
+
+async def test_expired_sessdata_is_reported_as_a_stale_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The silent failure this exists for: upstream's _init_uid takes the -101
+    branch, sets uid 0 and returns True, so init_room succeeds and the whole
+    stream is anonymous while every downstream reader still sees "logged in"
+    (_vendor/blivedm/clients/web.py:257-262)."""
+    status = await _status_after_connect(monkeypatch, sessdata="过期凭据", resolved_uid=0)
+    assert status["logged_in"] is False
+    assert status["credential_stale"] is True, "配了凭据却拿回 uid 0，这一场其实是匿名"
+    assert status["credential_stale_property"] is True, "G7 打横幅要读的那个属性"
+
+
+async def test_deliberate_anonymous_is_not_a_stale_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary: no credential configured at all. Anonymous is then the chosen
+    mode, not a broken one, and must not raise the alarm."""
+    status = await _status_after_connect(monkeypatch, sessdata="", resolved_uid=0)
+    assert status["logged_in"] is False
+    assert status["credential_stale"] is False
+
+
+def test_credential_state_before_connecting_claims_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary: a source that never connected has read no uid, so it cannot
+    call a credential stale — the alarm needs the platform's answer first."""
+    from bilisama.clock import SystemClock
+
+    source = BilibiliEventSource(6, SystemClock(), sessdata="还没连过")
+    assert source.credential_stale is False
+    assert source.status()["logged_in"] is False
+
+
+# ------------------------------------------------------------------ re-vendor tripwire (#13)
+
+
+class _NoInitFlagClient(_FakeClient):
+    """A re-vendored client that dropped the private flag we clear."""
+
+    def __init__(self, room_id: int, uid: int | None = None, session: object = None) -> None:
+        super().__init__(room_id, uid, session)
+        del self._need_init_room
+
+
+async def test_clearing_the_upstream_init_flag_is_recorded_when_it_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = await _status_after_connect(monkeypatch, sessdata="", resolved_uid=0)
+    assert status["vendor_drift"] == "", "属性还在，没有漂移可报"
+
+
+async def test_a_renamed_init_flag_shows_up_instead_of_minting_a_dead_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Error path: upstream renames or drops `_need_init_room`. A plain
+    assignment would create a fresh attribute nobody reads — every start pays a
+    second room-init round trip and nothing ever says so."""
+    from bilisama.clock import SystemClock
+
+    monkeypatch.setattr("bilisama.ingest.bilibili.source.bili_web.BLiveClient", _NoInitFlagClient)
+    monkeypatch.setattr(_FakeClient, "init_result", True)
+    source = BilibiliEventSource(6, SystemClock())
+    task = asyncio.create_task(source.start(_drain_nothing))
+    for _ in range(200):
+        if source.status()["connected"]:
+            break
+        await asyncio.sleep(0.01)
+    assert source.status()["vendor_drift"] == "_need_init_room"
+    await source.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_upstream_still_carries_both_internals_start_reaches_into() -> None:
+    """The re-vendor tripwire VENDOR.md promises, for the two upstream
+    internals start() touches.
+
+    Neither is visible to any other test here, because the fake client above
+    defines them itself. `_need_init_room` is the flag that keeps
+    client.start() from running init_room a second time
+    (_vendor/blivedm/clients/ws_base.py:301-310); `uid` is the only thing that
+    separates an expired SESSDATA from a working one
+    (_vendor/blivedm/clients/web.py:204-210). Construction only — no network.
+    """
+    import aiohttp
+
+    from bilisama.ingest.bilibili._vendor.blivedm.clients import web as bili_web
+
+    async with aiohttp.ClientSession() as session:
+        client = bili_web.BLiveClient(1, uid=0, session=session)
+        assert hasattr(client, "_need_init_room"), "上游改名了：init_room 会跑两遍"
+        assert client.uid == 0, "上游的 uid 读法变了：过期凭据会被当成登录态"

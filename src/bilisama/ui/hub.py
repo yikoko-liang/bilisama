@@ -48,7 +48,19 @@ class VoiceSignals:
     dispatching: bool  # scheduler.status()["dispatching"]
     active: bool  # scheduler.status()["active_source"] is not None
     implicit: bool  # floor.implicit_active
-    audio_busy: bool  # the local speaker is actually making sound
+    audio_busy: bool
+    """Sound is being made, wherever it is coming out.
+
+    Deliberately not 「the local speaker」: since audio moved into the page
+    there are two producers and only one of them is ever live at a time. The
+    local sounddevice speaker answers for a run with no page (dev-talk's
+    report_playback polls `speaker.busy`), and PlaybackTally.busy
+    (ui/audio.py) answers for a page holding the devices, where the local
+    speaker has no stream and reads False all through her reply. The floor's
+    `queued_audio` (floor.py:87) is already fed by both, which makes it the one
+    reading that is true in both shapes — a caller passing the speaker alone shows
+    「思考中」 while she talks and 「空闲」 while the page is still playing.
+    """
 
 
 def resolve_voice_state(signals: VoiceSignals) -> str:

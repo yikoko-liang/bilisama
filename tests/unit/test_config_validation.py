@@ -41,6 +41,14 @@ llm_model = "our-s2t-v1"
 
 
 def _write(tmp_path: Path, body: str) -> Path:
+    """Put a config in tmp_path and return its path.
+
+    The wordlist comes with it: a config directory without one is a real
+    problem (§7.6) and `check` now says so whether or not a room is named, so
+    a bare TOML here would put an unrelated advisory in every assertion below.
+    """
+    (tmp_path / "safety").mkdir(exist_ok=True)
+    (tmp_path / "safety" / "wordlist.txt").write_text("测试敏感词\n", encoding="utf-8")
     path = tmp_path / "bilisama.toml"
     path.write_text(body, encoding="utf-8")
     return path
@@ -184,7 +192,7 @@ def test_show_emits_json_a_browser_can_parse(
     assert code == 0
     payload = _strict_json(out)
     assert payload["speech"]["s2s"]["turn"]["max_speech_ms"] is None
-    assert payload["_derived"]["source"] == "chattiness"
+    assert payload["_derived"]["source"] == "interaction.chattiness"
 
 
 def test_show_keeps_a_finite_limit_as_a_number(

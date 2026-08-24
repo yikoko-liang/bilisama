@@ -15,7 +15,8 @@ import json
 import signal
 import socket
 import stat
-from collections.abc import Callable, Iterator, MutableMapping
+import time
+from collections.abc import Awaitable, Callable, Iterator, MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,9 @@ from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import (
     _AUDIO_QUEUE,
+    _UPLINK_SILENCE,
     UiServer,
+    _fill_uplink_silence,
     bind_ui_socket,
     config_snapshot,
     create_ui_app,
@@ -462,6 +465,106 @@ def test_a_failing_uplink_costs_one_chunk_not_the_devices() -> None:
         assert ws.receive_bytes() == b"\xaa\xbb", "一次发送失败把整条 socket 掀了"
         assert broker.owner == "shell", "设备被一次上行失败还了回去"
     assert heard == [b"\x02\x02"], "丢的应该只有出事的那一块"
+
+
+# ------------------------------------------------------- the uplink never stops
+
+
+async def _run_filler(
+    idle: Callable[[], float],
+    on_audio: Callable[[bytes], Awaitable[None]],
+    *,
+    ticks: float = 0.05,
+) -> None:
+    """Let the filler tick for a while, then stop it the way the endpoint does."""
+    task = asyncio.create_task(
+        _fill_uplink_silence(on_audio, idle, gap_s=0.02, frame_s=0.001),
+        name="test:fill",
+    )
+    await asyncio.sleep(ticks)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_a_page_that_is_still_capturing_is_never_padded() -> None:
+    """页面在正常送采集块的时候，服务端一个字都不该插。
+
+    多插进去的每一块都是凭空长出来的时间，供应商的判停窗口按音频时钟走
+    （realtime/client.py:218-219），插多了等于把主播的停顿拉长。
+    """
+    sent: list[bytes] = []
+
+    async def on_audio(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    await _run_filler(lambda: 0.0, on_audio)
+    assert sent == [], f"页面还在送，服务端却插了 {len(sent)} 块"
+
+
+async def test_a_page_that_stopped_capturing_gets_silence_put_under_it() -> None:
+    """§3.3 规则 7：断流不是暂停，是把供应商的音频时钟冻住。
+
+    麦克风被拒、或者换设备时 getUserMedia 慢了几秒，socket 照样开着、设备照样
+    算页面拿着、本机麦克风还 park 着——上行整段归零。本机那条路一直老实照做
+    （静音块顶着，dev_talk.py:342-347），页面这条继承了设备没继承规矩。
+    """
+    sent: list[bytes] = []
+
+    async def on_audio(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    await _run_filler(lambda: 5.0, on_audio)
+    assert sent, "页面不采集了，上行整个停住"
+    assert set(sent) == {_UPLINK_SILENCE}, "补进去的不是一块 20ms 的静音"
+
+
+async def test_a_failing_link_does_not_kill_the_filler() -> None:
+    """链路重连的那几百毫秒里 push_audio 必抛，而这正是最不能停的时候。"""
+    sent: list[bytes] = []
+    failures = [3]
+
+    async def on_audio(pcm: bytes) -> None:
+        if failures[0]:
+            failures[0] -= 1
+            raise ConnectionError("还没连接")
+        sent.append(pcm)
+
+    await _run_filler(lambda: 5.0, on_audio)
+    assert failures[0] == 0
+    assert sent, "一次发送失败就把补静音的活儿停了"
+
+
+def test_the_audio_socket_keeps_the_clock_running_when_the_page_goes_quiet() -> None:
+    """接线测试：这条规矩得真的挂在音频 socket 上，不是只有一个函数会做。"""
+    broker = AudioBroker()
+    client, heard = _audio_app(broker)
+    block = b"\x11\x22" * 320
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        ws.send_bytes(block)  # 采集正常的最后一块
+        deadline = time.monotonic() + 3.0
+        while len(heard) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert block in heard, "真的采集块没送上去"
+    assert len(heard) >= 3, f"页面不出声之后上行也跟着停了：{len(heard)} 块"
+    assert set(heard) - {block} == {_UPLINK_SILENCE}, "补的不是静音块"
+
+
+def test_a_client_that_never_got_the_devices_does_not_speak_for_the_holder() -> None:
+    """被 4409 挡回去的标签页不能往链路里插静音——持有者正在采集，插进去的是噪声。"""
+    broker = AudioBroker()
+    client, heard = _audio_app(broker)
+    # The holder is the broker itself rather than a second socket: a real one
+    # would be running its own filler, and then nothing in `heard` says which
+    # client put it there.
+    asyncio.run(broker.claim("shell", send=lambda _pcm: None))
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect(f"/{_TOKEN}/audio") as loser,
+    ):
+        loser.receive_bytes()
+    time.sleep(0.25)  # 好几个补静音周期
+    assert heard == [], f"只是来看看的那个标签页往上行插了 {len(heard)} 块"
 
 
 class _StuckPage:

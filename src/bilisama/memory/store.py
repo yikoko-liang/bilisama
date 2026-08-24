@@ -185,7 +185,17 @@ class MemoryStore:
 
     def streams_this_week(self) -> int:
         """How many streams started in the current logical ISO week, this one
-        included — the "本周第 N 场" number."""
+        included — the "本周第 N 场" number.
+
+        Whole-table scan with the week filter in Python, and it grows with the
+        history: the 04:00 logical day (logical_date) has no SQL expression, so
+        narrowing it in the query would mean comparing UTC ISO strings by
+        range the way prune_events does, and getting the two offsets wrong
+        there miscounts silently. The table gains a handful of rows a day, so
+        the scan is cheap for years — but this hangs off the context ticker
+        (app.py:285-291, every 10s by default), so if context pushes ever turn
+        sluggish on an old install, start here.
+        """
         this_week = logical_date(self._clock.wall()).isocalendar()[:2]
         rows = self._db.execute("SELECT started_at FROM stream").fetchall()
         return sum(

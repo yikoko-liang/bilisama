@@ -78,7 +78,9 @@ def test_a_gift_that_cost_nothing_is_not_paid() -> None:
     Why the boundary is worth a test: is_paid is what puts an event in the paid
     lane, which plan §2.7 lets pre-empt L1/L3 and §5.3 exempts from the 1.5 s gift
     output cooldown. A free gift in there jumps the queue for CNY 0 and pushes a
-    real danmaku out of the window.
+    real danmaku out of the window. (That 1.5 s cooldown is a plan rule, not
+    something this tree implements — see the ledger-39 note in
+    ingest/bilibili/safety.py's module docstring.)
     """
     assert not Gift(coin_type="gold", total_coin=0).is_paid
     assert Gift(coin_type="gold", total_coin=1).is_paid  # a single coin is still money

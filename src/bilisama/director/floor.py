@@ -14,6 +14,7 @@ names to L3 would leak the engine into the orchestration layer.
 from __future__ import annotations
 
 from bilisama.clock import Clock
+from bilisama.obs.outcome import SkipReason
 
 __all__ = ["SpeakingFloor"]
 
@@ -93,16 +94,33 @@ class SpeakingFloor:
     # ------------------------------------------------------------ the gate
 
     def is_blocked(self) -> bool:
+        return self.blocking_reason() is not None
+
+    def blocking_reason(self) -> SkipReason | None:
+        """Which gate is holding the floor right now, or None when it is open.
+
+        "She said nothing" and "she said nothing because you were still talking"
+        are different support tickets, and section 4.12's `skipped@gated` is the
+        machine-readable half of the second one. is_blocked() is this method's
+        boolean so the name and the gate can never disagree.
+        """
         now = self._clock.monotonic()
-        return (
-            self.streamer_speaking
-            or self.turn_pending
-            or self.implicit_active
-            or self.queued_audio
-            or now < self._quiet_until
-            or now < self._cooldown_until
-            or now < self._speech_edge_until
-        )
+        if self.streamer_speaking:
+            return SkipReason.HOST_SPEAKING
+        if self.turn_pending or self.implicit_active:
+            # One reason for both: from the queue's side a dispatched reply and
+            # the provider's own implicit turn are the same fact — a turn is
+            # already booked. The pair only differs to the rule-5 logic (A2).
+            return SkipReason.TURN_PENDING
+        if self.queued_audio:
+            return SkipReason.AUDIO_QUEUED
+        if now < self._quiet_until or now < self._speech_edge_until:
+            # Both are the speculative window around a speech edge, which is
+            # exactly what gate.injection_window names.
+            return SkipReason.INJECTION_GATE
+        if now < self._cooldown_until:
+            return SkipReason.COOLDOWN
+        return None
 
     def blocked_for(self) -> float:
         """Seconds until the time-based gates release, 0 when only state gates

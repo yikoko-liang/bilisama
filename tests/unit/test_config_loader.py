@@ -10,10 +10,12 @@ it just selected.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from bilisama.config import Chattiness, ConfigError, load
+from bilisama.config.migrate import CURRENT_VERSION, MIGRATIONS, Step, migrate
 
 BASE = """\
 active_profile = "normal"
@@ -153,3 +155,94 @@ def test_broken_profile_toml_names_the_profile_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as exc_info:
         load(path)
     assert exc_info.value.problems[0].field == str(profile)
+
+
+# ------------------------------------------------------------ config_version
+
+
+def test_a_file_from_the_future_is_refused_in_plain_language(config_path: Path) -> None:
+    """The case that has no good silent answer.
+
+    A newer BiliSama can change what a value MEANS, and this one would read it
+    with today's meaning and behave differently from what the file says. Loud is
+    the only honest option, and the message has to name both numbers.
+    """
+    config_path.write_text(f"config_version = {CURRENT_VERSION + 1}\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc_info:
+        load(config_path)
+    problem = exc_info.value.problems[0]
+    assert problem.field == "config_version"
+    assert str(CURRENT_VERSION + 1) in problem.message
+    assert problem.fix
+
+
+def test_a_file_from_the_future_is_still_reported_without_strict(config_path: Path) -> None:
+    """dev-talk loads with strict=False so a half-configured box stays usable
+    (dev_talk.py:898). That must not turn "cannot read this file" into silence."""
+    config_path.write_text(f"config_version = {CURRENT_VERSION + 9}\n", encoding="utf-8")
+    settings = load(config_path, strict=False)
+    from bilisama.config import check
+
+    assert "config_version" in [p.field for p in check(settings) if p.fatal]
+
+
+def test_todays_file_needs_no_migration() -> None:
+    raw, notes = migrate({"config_version": CURRENT_VERSION, "room": {"room_id": 7}})
+    assert notes == ()
+    assert raw["room"]["room_id"] == 7
+
+
+def test_a_file_with_no_version_is_read_as_the_oldest_shape() -> None:
+    """Absent is not "current": the key was optional before it meant anything, so
+    a file without it is the oldest shape we know, not the newest."""
+    raw, _ = migrate({"room": {"room_id": 7}}, steps={}, current=1)
+    assert raw["config_version"] == 1
+
+
+def _rename_room(raw: dict[str, Any]) -> dict[str, Any]:
+    moved = dict(raw)
+    moved["room"] = {"room_id": moved.pop("legacy_room_id", 0)}
+    return moved
+
+
+def test_the_machinery_runs_a_migration_and_chains_them() -> None:
+    """Today's table is empty, so the steps here are planted ones.
+
+    Same reasoning as the planted violations in test_dependency_direction.py: a
+    migration path nobody has ever walked is not a migration path, and the first
+    real schema change is the worst moment to find that out.
+    """
+    steps: dict[int, Step] = {
+        1: _rename_room,
+        2: lambda raw: {**raw, "active_profile": "chat"},
+    }
+    raw, notes = migrate({"config_version": 1, "legacy_room_id": 12345}, steps=steps, current=3)
+    assert raw["room"] == {"room_id": 12345}
+    assert "legacy_room_id" not in raw
+    assert raw["active_profile"] == "chat"
+    assert raw["config_version"] == 3
+    assert len(notes) == 2  # one per step, for the line the CLI prints
+
+
+def test_a_gap_in_the_table_refuses_rather_than_guessing() -> None:
+    """A version with no step out of it cannot be upgraded, and pretending it can
+    hands the schema a shape it will misread."""
+    with pytest.raises(ConfigError) as exc_info:
+        migrate({"config_version": 1}, steps={}, current=2)
+    assert exc_info.value.problems[0].field == "config_version"
+
+
+def test_every_shipped_version_has_a_way_forward() -> None:
+    """The gate that keeps the case above unreachable in production."""
+    missing = [v for v in range(1, CURRENT_VERSION) if v not in MIGRATIONS]
+    assert not missing, f"这些 config_version 没有升级步骤：{missing}"
+    ahead = sorted(v for v in MIGRATIONS if v >= CURRENT_VERSION)
+    assert not ahead, f"迁移表里有还没到的版本：{ahead}"
+
+
+def test_a_non_integer_version_is_left_for_the_schema_to_report() -> None:
+    """Type errors have one reporter, and it is not this module — `config_version
+    = "2"` comes back as a field error with a path in front (cli.py:50-59)."""
+    raw, notes = migrate({"config_version": "2"})
+    assert raw["config_version"] == "2"
+    assert notes == ()

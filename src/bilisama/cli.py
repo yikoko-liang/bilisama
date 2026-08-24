@@ -3,9 +3,10 @@
 `bilisama config show` expands every overlay and prints the values that actually
 took effect. It is the first thing to run when a config behaves unexpectedly.
 
-Plan §7.7 also asks it to tag each value with the layer it came from. That part is
-not built: `loader.load` collapses the layers as it merges them, so nothing here
-knows which one won.
+Plan §7.7 also asks it to tag each value with the layer it came from; that is the
+`_origins` block, built from `loader.layers` rather than from the merged result.
+`config diff` answers the narrower question — what does the active profile move,
+and what was it before.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from pydantic import ValidationError
 from bilisama import __version__
 from bilisama.bootstrap import s2s_launch
 from bilisama.config import (
+    UI_META,
     Chattiness,
     ConfigError,
     ConfigProblem,
@@ -32,6 +34,8 @@ from bilisama.config import (
     derive,
     load,
 )
+from bilisama.config.loader import layers, origins
+from bilisama.config.ui_meta import DERIVED_META
 
 # Relative to the repo, not the working directory, so the CLI works from anywhere.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,11 +51,11 @@ _FIELD_ERROR_TEXT = {
 }
 
 
-def _report_validation(exc: ValidationError, *, stream: TextIO | None = None) -> None:
+def report_validation(exc: ValidationError, *, stream: TextIO | None = None) -> None:
     """Print schema errors as field path + plain Chinese, one per line.
 
-    Plan §7.6: a streamer who sees a raw `pydantic.ValidationError` just files
-    a ticket.
+    Public alongside `report_problems`: dev-talk reads the same config and owes
+    the streamer the same sentence rather than a pydantic dump (§7.6).
     """
     for err in exc.errors():
         loc = ".".join(str(part) for part in err["loc"]) or "（顶层）"
@@ -59,8 +63,12 @@ def _report_validation(exc: ValidationError, *, stream: TextIO | None = None) ->
         print(f"[错误] {loc}：{detail}", file=stream)
 
 
-def _report(problems: list[ConfigProblem], *, stream: TextIO | None = None) -> None:
+def report_problems(problems: list[ConfigProblem], *, stream: TextIO | None = None) -> None:
     """Print problems the way plan §7.6 promises: which field, what is wrong, what to do.
+
+    Public because dev-talk shows the same list on its own way in, and two
+    formatters for one shape drift (this one is already the shape the streamer
+    has learned to read).
 
     Args:
         problems: What `check` found.
@@ -73,13 +81,14 @@ def _report(problems: list[ConfigProblem], *, stream: TextIO | None = None) -> N
             print(f"        怎么办：{p.fix}", file=stream)
 
 
-def _load(path: Path, *, strict: bool = True) -> Settings:
+def _load(path: Path, *, strict: bool = True, overrides: dict[str, Any] | None = None) -> Settings:
     """Read the config, reporting problems in plain language.
 
     Args:
         path: Path to the TOML file.
         strict: Refuse a config with a fatal problem. Off only for commands whose
             whole job is to describe a config that cannot start.
+        overrides: The panel layer, on top of everything the file says.
 
     Returns:
         A validated settings object.
@@ -92,14 +101,14 @@ def _load(path: Path, *, strict: bool = True) -> Settings:
         print(f"找不到配置文件：{path}", file=sys.stderr)
         raise SystemExit(2)
     try:
-        return load(path, strict=strict)
+        return load(path, strict=strict, overrides=overrides)
     except ConfigError as exc:
         print("配置有问题，没法启动：", file=sys.stderr)
-        _report(exc.problems, stream=sys.stderr)
+        report_problems(exc.problems, stream=sys.stderr)
         raise SystemExit(2) from exc
     except ValidationError as exc:
         print("配置有问题，没法启动：", file=sys.stderr)
-        _report_validation(exc, stream=sys.stderr)
+        report_validation(exc, stream=sys.stderr)
         raise SystemExit(2) from exc
     except (tomllib.TOMLDecodeError, OSError) as exc:
         print(f"配置有问题：\n{exc}", file=sys.stderr)
@@ -124,17 +133,74 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _dotted(payload: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Flatten a settings dump to dotted paths, one entry per value."""
+    flat: dict[str, Any] = {}
+    for key, value in payload.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_dotted(value, path))
+        else:
+            flat[path] = value
+    return flat
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     settings = _load(args.config)
     payload: dict[str, Any] = settings.model_dump(mode="json")
-    # Called out separately so nobody assumes these can be set in the TOML.
-    payload["_derived"] = {
-        "source": "chattiness",
-        **derive(settings.interaction.chattiness).model_dump(),
-    }
+    # Taken before the two underscore blocks below join the payload: they are
+    # not settings and have no layer to come from.
+    printed = _dotted(payload)
+    thresholds = derive(settings.interaction.chattiness)
+    # Called out separately so nobody assumes these can be set in the TOML. The
+    # source comes off the metadata rather than a literal, so it cannot drift
+    # from what the settings page will render (config/ui_meta.py DERIVED_META).
+    sources = sorted({meta.derived_from for meta in DERIVED_META.values()})
+    payload["_derived"] = {"source": "、".join(sources), **thresholds.model_dump()}
+    # Plan §7.7: which layer won, per value. Every printed path gets a row —
+    # "absent from the map" would render as a blank column rather than as the
+    # answer, which for most fields is "nobody set it, this is the default".
+    where = origins(layers(args.config))
+    payload["_origins"] = {path: where.get(path, "默认值") for path in printed}
     # allow_nan=False so a future non-finite default fails here instead of printing
     # Infinity, which no JSON parser outside Python accepts.
     print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, allow_nan=False))
+    return 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    """What the active profile changes, relative to the global file (plan §7.7).
+
+    Not a text diff of two TOMLs: a profile names only what it moves, and the
+    number worth seeing is the one it moved away from.
+    """
+    settings = _load(args.config, strict=False)
+    name = settings.active_profile
+    profile_path = args.config.parent / "profiles" / f"{name}.toml"
+    if not profile_path.is_file():
+        # An overlay that does not exist applies nothing (test_config_loader.py
+        # pins that), and "changes nothing" would describe a typo as a decision.
+        print(f"配置里写的场景预设是「{name}」，但没有这个文件：{profile_path}", file=sys.stderr)
+        print(f"        怎么办：改 active_profile，或者建 profiles/{name}.toml。", file=sys.stderr)
+        return 2
+
+    # Load twice rather than diff the files: the left side has to be what would
+    # ACTUALLY run without the overlay, defaults and all.
+    without = _load(args.config, strict=False, overrides={"active_profile": "__none__"})
+    before = _dotted(without.model_dump(mode="json"))
+    after = _dotted(settings.model_dump(mode="json"))
+    changed = [path for path, value in after.items() if before.get(path) != value]
+    # active_profile itself always differs — that is the override we just used to
+    # switch the overlay off, not something the profile did.
+    changed = [path for path in changed if path != "active_profile"]
+    if not changed:
+        print(f"场景预设「{name}」相对全局配置没改任何东西。")
+        return 0
+    print(f"场景预设「{name}」相对全局配置改了 {len(changed)} 项：")
+    for path in changed:
+        meta = UI_META.get(path)
+        label = f"（{meta.label}）" if meta is not None else ""
+        print(f"  {path}{label}：{before.get(path)} → {after[path]}")
     return 0
 
 
@@ -149,11 +215,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
         from bilisama.realtime.providers import turn_type_problems
 
         hosted = getattr(settings.speech, settings.speech.provider.value)
-        problems += turn_type_problems(settings.speech.provider, hosted.turn.type)
+        problems += turn_type_problems(
+            settings.speech.provider, hosted.turn.type, model=hosted.model
+        )
     if not problems:
         print("配置没问题。")
         return 0
-    _report(problems)
+    report_problems(problems)
     return 1 if any(p.fatal for p in problems) else 0
 
 
@@ -171,6 +239,12 @@ def cmd_render_s2s(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     print(f"已写入 {args.out}")
+    # The file alone does not decide how the server behaves: the patch list
+    # travels in an environment variable the shim reads (s2s_launch.patch_env),
+    # and a config edit that never reaches that line changes nothing at all.
+    for name, value in s2s_launch.patch_env(settings.speech.s2s).items():
+        shown = value or "（空＝零补丁，用它自带的 TTS）"
+        print(f"起服务前先 export {name}={shown}")
     # Read the state off the result. The third state, UNAVAILABLE, never gets
     # here: s2s_launch.write refuses to write an unreconciled config, so it left
     # through the S2SConfigError arm above.
@@ -300,8 +374,9 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub = config.add_subparsers(dest="config_command", required=True)
 
     for name, fn, helptext in (
-        ("show", cmd_show, "展开所有覆盖层，打印最终生效值"),
+        ("show", cmd_show, "展开所有覆盖层，打印最终生效值，并标注每个值来自哪一层"),
         ("validate", cmd_validate, "只校验不启动"),
+        ("diff", cmd_diff, "当前场景预设相对全局配置改了什么"),
     ):
         p = config_sub.add_parser(name, help=helptext)
         p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)

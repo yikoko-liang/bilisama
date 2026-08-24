@@ -20,6 +20,13 @@ an event — for danmaku, uid_crc32 becomes the identity (info[0][7], verified
 in VENDOR.md). The other message kinds carry no crc on the wire, so under an
 anonymous connection they all collapse to the "anon" identity; that is the
 masking cost the runbook spells out, not something this module can repair.
+
+Which makes "are we actually logged in" a question worth answering honestly,
+and this module is the only place that can: an expired SESSDATA still yields
+a successful init_room with uid 0, so every caller upstream of here sees a
+configured credential and assumes it worked. `credential_stale` and the
+matching status() keys are that answer — read them once the connection is up
+rather than trusting the presence of a credential string.
 """
 
 from __future__ import annotations
@@ -70,11 +77,15 @@ _DANMAKU_PARSE_BUDGET_PER_S = 80
 _PRESENCE_PARSE_BUDGET_PER_S = 40
 _PARSE_LANES: dict[str, str] = {
     "DANMU_MSG": "danmaku",
-    # Cross-room mirrors ride the danmaku budget too: a linked-room flood is
-    # exactly the case a parse budget exists for.
-    "DANMU_MSG_MIRROR": "danmaku",
     "INTERACT_WORD_V2": "presence",
 }
+# Cross-room danmaku during a link/PK. Those viewers are watching the OTHER
+# room and cannot hear a reply from this one, so the event is discarded either
+# way (_Forwarder._on_danmaku). Dropping it at the command — upstream sets
+# is_mirror only from this one command (_vendor/blivedm/handlers.py:83-86) —
+# is what keeps the opponent's flood from spending the home room's parse
+# budget and pushing our own viewers into the sampled remainder.
+_MIRROR_CMDS = frozenset({"DANMU_MSG_MIRROR"})
 _LANE_BUDGETS = {
     "danmaku": _DANMAKU_PARSE_BUDGET_PER_S,
     "presence": _PRESENCE_PARSE_BUDGET_PER_S,
@@ -91,9 +102,22 @@ _GUARD_MERGE_WINDOW_S = 30.0
 # dying client each push one so _next_event never has to poll on a timer.
 _WAKE = None
 
-# InteractWordV2 msg_type → our kind. 4 (special-follow) and 5 (mutual-follow)
-# are follow-shaped; 6 is the like path the web dialect exposes (upstream has
-# no dedicated web LIKE callback — verified against the dispatch table).
+# InteractWordV2 msg_type → our kind.
+#
+# 1/2/3 are named by upstream's own enum (_vendor/blivedm/models/pb.py:16-20:
+# EnterRoom / Follow / ShareRoom) and are the three the plan's B2 acceptance
+# lists.
+#
+# 4, 5 and 6 are UNVERIFIED (待验证). Upstream names no value above 3, so
+# "special-follow / mutual-follow / like" is our reading, not a checked fact —
+# what the dispatch table actually shows is only that upstream exposes no
+# dedicated web LIKE callback, which is a different claim. Plan section 5.1
+# settled likes as "second batch, parse ourselves or drop", so the safe way to
+# close this is a real room: log the msg_type distribution for a session and
+# confirm or correct these three. Kept rather than dropped meanwhile because
+# all four kinds are feed-only — none of them reaches intent_for
+# (director/intents.py:118), so a wrong guess mislabels a feed row and costs
+# nothing audible, while dropping them would lose arrivals we do get right.
 _INTERACT_KIND: dict[int, EventKind] = {
     1: EventKind.ENTRY,
     2: EventKind.FOLLOW,
@@ -321,6 +345,36 @@ def event_from_interact(
 # ------------------------------------------------------------------ transport
 
 
+def _suppress_second_init(client: Any) -> bool:
+    """Clear upstream's "still needs init_room" flag; False when it is gone.
+
+    Upstream only clears the flag on its own start path
+    (_vendor/blivedm/clients/ws_base.py:301-310), so a start() that already
+    ran init_room itself has to clear it or the room-init round trip happens
+    twice. A plain assignment would make a re-vendor that renames or drops the
+    attribute invisible: we would mint a fresh one nobody reads, every start
+    would pay the second round trip, and every unit test would stay green,
+    because the fake client defines the attribute itself. Reporting the miss
+    is what puts the drift somewhere VENDOR.md's tripwire promise can reach.
+    """
+    if not hasattr(client, "_need_init_room"):
+        return False
+    client._need_init_room = False
+    return True
+
+
+def _resolved_uid(client: Any) -> int:
+    """The uid upstream actually ended up with, 0 meaning anonymous.
+
+    Read AFTER init_room, never inferred from whether a SESSDATA string
+    existed: an expired cookie comes back code -101, and upstream sets uid 0
+    and returns True (_vendor/blivedm/clients/web.py:257-262), so init_room
+    succeeds and the connection is anonymous with nothing on the wire saying
+    so.
+    """
+    return int(getattr(client, "uid", 0) or 0)
+
+
 class _Forwarder(bili_handlers.BaseHandler):  # type: ignore[misc]
     """blivedm callbacks → owner's queues. Callbacks run on OUR event loop
     (blivedm schedules its network coroutine there), so plain put_nowait is
@@ -344,6 +398,9 @@ class _Forwarder(bili_handlers.BaseHandler):  # type: ignore[misc]
         if cmd in ("LIVE", "PREPARING"):
             self._owner.on_room_state("live" if cmd == "LIVE" else "preparing")
             return
+        if cmd in _MIRROR_CMDS:
+            self._owner.note_shed("mirror")
+            return
         lane = _PARSE_LANES.get(cmd)
         if lane is not None and not self._owner.parse_allowed(lane):
             return
@@ -365,8 +422,9 @@ class _Forwarder(bili_handlers.BaseHandler):  # type: ignore[misc]
 
     def _on_danmaku(self, client: Any, message: Any) -> None:
         if getattr(message, "is_mirror", False):
-            # Cross-room danmaku during a link/PK session: those viewers are
-            # watching another room and cannot hear a reply from this one.
+            # Belt and braces behind the command-level drop in handle(): if a
+            # re-vendor ever routes mirrors through plain DANMU_MSG, they are
+            # still discarded here rather than answered.
             self._owner.note_shed("mirror")
             return
         self._guarded(event_from_danmaku, message)
@@ -431,6 +489,12 @@ class BilibiliEventSource:
         self._generation = 0
         self._real_room_id = 0
         self._connected = False
+        # Credential reality, filled once init_room has spoken. Kept apart
+        # from `_sessdata` on purpose: that only says a string was configured,
+        # these say what the platform did with it.
+        self._connection_uid = 0
+        self._credential_checked = False
+        self._vendor_drift = ""
         self._popularity = 0
         self._counts: dict[str, int] = {}
         self._dropped = 0
@@ -452,6 +516,11 @@ class BilibiliEventSource:
         self._stop_requested = False
         self._client_dead = False
         self._client_error = None
+        # A restart re-asks the platform, so last run's answer stops counting
+        # until the new init_room replies.
+        self._connection_uid = 0
+        self._credential_checked = False
+        self._vendor_drift = ""
         # Fresh failure book per supervised run: without this, a tripped
         # breaker would re-raise instantly on every restart and burn the
         # supervisor's budget without giving the new connection a chance.
@@ -477,16 +546,35 @@ class BilibiliEventSource:
                 # instead — a wrong room id poisons medal matching all run.
                 raise RuntimeError(f"房间 {self._room_id_arg} 初始化失败（房号不对，或接口被风控）")
             # init_room succeeded, so keep client.start() from running the
-            # whole thing again inside the network coroutine — upstream only
-            # clears this flag on its own start path (ws_base.py:305-310).
-            client._need_init_room = False
+            # whole thing again inside the network coroutine.
+            if not _suppress_second_init(client):
+                self._vendor_drift = "_need_init_room"
+                log.warning(
+                    "bilibili.vendor_drift",
+                    field="_need_init_room",
+                    advice="上游改名或删了这个私有属性，每次连接会多打一轮房间初始化接口；"
+                    "按 blivedm/VENDOR.md 的 re-vendor 步骤重新核对",
+                )
+            self._connection_uid = _resolved_uid(client)
+            self._credential_checked = True
             self._real_room_id = int(getattr(client, "room_id", 0) or 0)
             self._connected = True
             log.info(
                 "bilibili.connected",
                 room_id=self._real_room_id,
-                logged_in=bool(self._sessdata),
+                logged_in=self._connection_uid > 0,
             )
+            if self.credential_stale:
+                # The one moment the truth is knowable. Nothing downstream can
+                # tell this apart from a working login on its own — the banner
+                # only ever saw a non-empty string — so say it here, loudly.
+                log.warning(
+                    "bilibili.credential_stale",
+                    room_id=self._real_room_id,
+                    advice="SESSDATA 已失效，这一场连的其实是匿名：观众全部打码，"
+                    "认不出常客、点不了名。重新登录 B 站取一份新的 SESSDATA，"
+                    "写进 path.sh 的 BILI_SESSDATA 后重开",
+                )
             client.start()
             while True:
                 event = await self._next_event()
@@ -509,6 +597,26 @@ class BilibiliEventSource:
     async def stop(self) -> None:
         self._stop_requested = True
         self._nudge()
+
+    # ---- credential reality ----
+
+    @property
+    def logged_in(self) -> bool:
+        """Whether the platform recognised us. False until init_room replies."""
+        return self._connection_uid > 0
+
+    @property
+    def credential_stale(self) -> bool:
+        """A SESSDATA was configured and the platform still handed back uid 0.
+
+        The startup banner is printed before the connection exists and can only
+        see whether a credential STRING was resolved, so it says "登录态" for an
+        expired cookie too. This is the fact it is missing; read it once
+        `status()["connected"]` turns true (or on the first event) and correct
+        the banner. It stays false while the answer is unknown — an unconnected
+        source accuses nobody.
+        """
+        return self._credential_checked and bool(self._sessdata) and self._connection_uid == 0
 
     # ---- callback side (same loop, synchronous) ----
 
@@ -654,6 +762,11 @@ class BilibiliEventSource:
         return {
             "connected": self._connected,
             "room_id": self._real_room_id,
+            # Not `bool(self._sessdata)`: that is the claim the startup banner
+            # already makes wrongly. This one is the platform's answer.
+            "logged_in": self.logged_in,
+            "credential_stale": self.credential_stale,
+            "vendor_drift": self._vendor_drift,
             "popularity": self._popularity,
             "counts": dict(self._counts),
             "dropped": self._dropped,

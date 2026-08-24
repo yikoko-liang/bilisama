@@ -40,7 +40,16 @@ _DASHSCOPE_URL_ENV = "dashscope_url"
 
 # What a hosted address looks like once it reaches the socket. path.sh holds
 # an https base for the REST API, so the host is the only reusable part.
-_HOSTED_PATH = "/api-ws/v1/realtime"
+#
+# Per provider, not one constant: DashScope serves Realtime on its own path,
+# while OpenAI GA uses /v1/realtime — the same path our s2s server answers on
+# (config/schema.py:51), because both speak the GA protocol. Stapling
+# DashScope's path onto an OpenAI host dials a 404 and reports it as a refused
+# handshake, which sends people checking a key that was never the problem.
+_HOSTED_PATHS: dict[ProviderName, str] = {
+    ProviderName.DASHSCOPE: "/api-ws/v1/realtime",
+    ProviderName.OPENAI_GA: "/v1/realtime",
+}
 
 # The model to ask for when no layer names one. Kept here rather than in
 # argparse because position matters: as a flag default it outranked the
@@ -67,7 +76,7 @@ class Endpoint:
     source: str
 
 
-def _hosted_url(raw: str) -> str:
+def _hosted_url(raw: str, provider: ProviderName) -> str:
     """Normalise whatever a human or path.sh wrote into a socket address.
 
     Three shapes turn up in practice: a bare host, the https REST base that
@@ -77,7 +86,7 @@ def _hosted_url(raw: str) -> str:
     if raw.startswith(("ws://", "wss://")):
         return raw
     host = raw.replace("https://", "").replace("http://", "").split("/")[0]
-    return f"wss://{host}{_HOSTED_PATH}"
+    return f"wss://{host}{_HOSTED_PATHS[provider]}"
 
 
 def resolve_endpoint(
@@ -121,16 +130,26 @@ def resolve_endpoint(
     if url:
         return Endpoint(chosen, url, picked_model, "命令行")
     if configured:
-        address = configured if chosen is ProviderName.S2S else _hosted_url(configured)
+        address = configured if chosen is ProviderName.S2S else _hosted_url(configured, chosen)
         return Endpoint(chosen, address, picked_model, "配置")
-    if chosen is not ProviderName.S2S:
+    # DashScope only: the variable is one vendor's address under one vendor's
+    # name, and letting it answer for openai_ga would point OpenAI credentials
+    # at DashScope's socket.
+    if chosen is ProviderName.DASHSCOPE:
         from_env = (env.get(_DASHSCOPE_URL_ENV) or "").strip()
         if from_env:
-            return Endpoint(chosen, _hosted_url(from_env), picked_model, "环境变量")
+            return Endpoint(chosen, _hosted_url(from_env, chosen), picked_model, "环境变量")
 
+    # The env fallback is only offered where it exists, so the fix line never
+    # sends an openai_ga user to source a file that cannot help them.
+    fallback = (
+        f"，或者开发机上 source path.sh 用 {_DASHSCOPE_URL_ENV} 兜底"
+        if chosen is ProviderName.DASHSCOPE
+        else ""
+    )
     raise SystemExit(
         f"不知道该连哪儿：[speech.{chosen.value}] 的 endpoint 没填，命令行也没给 --url。\n"
-        f"填上 bilisama.toml 里那一行，或者开发机上 source path.sh 用 {_DASHSCOPE_URL_ENV} 兜底。"
+        f"填上 bilisama.toml 里那一行{fallback}。"
     )
 
 
@@ -184,16 +203,27 @@ def profile_for(provider: ProviderName) -> ProviderProfile:
     return PROFILES[provider]
 
 
-def turn_type_problems(provider: ProviderName, turn_type: str) -> list[ConfigProblem]:
-    """Refuse a turn-detection type the provider never declared.
+def turn_type_problems(
+    provider: ProviderName, turn_type: str, *, model: str = ""
+) -> list[ConfigProblem]:
+    """Refuse a turn-detection type the provider or the model never declared.
 
     Plan section 3.3 is explicit: an unsupported type must be an error, never a
     silent downgrade — speech-to-speech accepts semantic_vad on the wire and
     then ignores it (vad_handler.py:173-202 reads only threshold and
     silence_duration_ms), which is exactly the failure mode this check exists
     to catch before a stream starts.
+
+    Args:
+        provider: Which backend the config selected.
+        turn_type: The configured `turn.type`.
+        model: The model that will actually be dialed, when the caller knows
+            it. DashScope answers differently per model (capabilities.py's
+            DASHSCOPE note), so a provider-level pass on qwen-audio-3.0 plus
+            semantic_vad is a pass the endpoint will not honour. Empty means
+            "unknown", and then only the provider declaration applies.
     """
-    declared = PROFILES[provider].caps.turn_detection_types
+    declared = caps_mod.for_model(PROFILES[provider].caps, model).turn_detection_types
     if turn_type in declared:
         return []
     return [

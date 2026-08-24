@@ -82,11 +82,30 @@ def _log_task_failure(task: asyncio.Task[Any]) -> None:
 
 @dataclass(frozen=True, slots=True)
 class DistillReport:
-    """What one distillation attempt did — health and tests read this."""
+    """What one distillation attempt did.
+
+    Per attempt, returned to whoever asked for it — the Ctrl-C teardown prints
+    it (dev_talk.py:1823) and tests assert on it. The running-total view that
+    health mounts is `Distiller.status()`.
+    """
 
     ran: bool
     reason: str
     dropped: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class _Health:
+    """What the health probe reports. Separate from _State because _State is
+    thrown away between streams (B14) and these counters must not be."""
+
+    rolling_ok: int = 0
+    rolling_failed: int = 0
+    rolling_last_wall: str = ""
+    batch_ok: int = 0
+    batch_failed: int = 0
+    growth_added_last_batch: int = 0
+    dropped_last_batch: int = 0
 
 
 @dataclass(slots=True)
@@ -123,6 +142,7 @@ class Distiller:
         # the scheduler's output guard uses).
         self._guard = guard
         self._state = _State()
+        self._health = _Health()
 
     # ------------------------------------------------------------ intake
 
@@ -175,6 +195,7 @@ class Distiller:
             )
         except SideModelError as exc:
             log.warning("distill.rolling_failed", error_text=str(exc))
+            self._health.rolling_failed += 1
             return DistillReport(ran=False, reason="side_error")
         if self._store.stream_id != sid or sid in self._state.batch_done:
             # The stream ended (or its batch already ran) while we were on the
@@ -190,6 +211,8 @@ class Distiller:
         if clipped:
             log.warning("distill.summary_clipped", chars=len(raw.strip()))
         self._store.replace_facts("stream", str(sid), [(new_summary, "")])
+        self._health.rolling_ok += 1
+        self._health.rolling_last_wall = self._clock.wall().isoformat()
         return DistillReport(ran=True, reason="ok")
 
     async def end_of_stream(self) -> DistillReport:
@@ -242,6 +265,7 @@ class Distiller:
             except SideModelError as exc:
                 log.warning("distill.batch_failed", attempt=attempt, error_text=str(exc))
                 if attempt == 2:
+                    self._health.batch_failed += 1
                     return DistillReport(ran=False, reason="side_error")
                 # One short-backoff retry: this is the highest-value call of
                 # the whole stream and it has no natural second chance (B18).
@@ -250,7 +274,10 @@ class Distiller:
         if payload is None:
             log.warning("distill.batch_unparseable", head_text=raw[:120])
             return DistillReport(ran=False, reason="bad_json")
-        dropped = self._apply(payload, {v.identity for v in viewers})
+        self._health.growth_added_last_batch = 0
+        dropped = self._apply(payload, {v.identity for v in viewers}, stream_id=sid)
+        self._health.batch_ok += 1
+        self._health.dropped_last_batch = len(dropped)
         self._state.batch_done.add(sid)
         # Fresh state for the next stream (B14): last stream's spoken lines
         # must not become next stream's voice candidates. The latch survives.
@@ -260,7 +287,12 @@ class Distiller:
 
     # ------------------------------------------------------------ applying
 
-    def _apply(self, payload: dict[str, Any], known_identities: set[str]) -> list[str]:
+    def _apply(
+        self, payload: dict[str, Any], known_identities: set[str], *, stream_id: int
+    ) -> list[str]:
+        # stream_id is passed in rather than re-read: it must be the same id the
+        # once-latch records, or a caller who ends the stream before the batch
+        # files the summary under subject "0" while the latch holds the real one.
         dropped: list[str] = []
 
         for item in _as_list(payload.get("viewer_facts")):
@@ -282,7 +314,7 @@ class Distiller:
             clean, clipped = _clip(summary, _SUMMARY_MAX_CHARS)
             if clipped:
                 log.warning("distill.summary_clipped", chars=len(summary))
-            self._store.replace_facts("stream", str(self._store.stream_id), [(clean, "")])
+            self._store.replace_facts("stream", str(stream_id), [(clean, "")])
 
         self._apply_growth("relationship", _as_list(payload.get("relationship")), dropped)
         self._apply_growth("voice", _as_list(payload.get("voice")), dropped)
@@ -317,32 +349,49 @@ class Distiller:
             with self._persona.growth_update("relationship") as rows:
                 existing = list(rows)
                 merged = merge_relationship(existing, fresh)
-                self._warn_trimmed(layer, existing, fresh, merged)
                 rows[:] = merged
         else:
+            fresh = entries
             with self._persona.growth_update("voice") as rows:
-                merged = merge_voice(list(rows), entries)
+                existing = list(rows)
+                merged = merge_voice(existing, fresh)
                 rows[:] = merged
+        added = _added(existing, fresh, merged)
+        # Budget trims must not be silent (plan section 4.7).
+        trimmed = len(existing) + added - len(merged)
+        if trimmed > 0:
+            log.warning("distill.growth_trimmed", layer=layer, count=trimmed)
+        self._health.growth_added_last_batch += added
 
     @staticmethod
     def _flatten(text: str) -> str:
         return " ".join(text.split())
 
-    @staticmethod
-    def _warn_trimmed(layer: str, existing: list[str], fresh: list[str], merged: list[str]) -> None:
-        # Budget trims must not be silent (plan section 4.7).
-        added = sum(1 for entry in fresh if entry in merged and entry not in existing)
-        trimmed = len(existing) + added - len(merged)
-        if trimmed > 0:
-            log.warning("distill.growth_trimmed", layer=layer, count=trimmed)
+    # ------------------------------------------------------------ health
+
+    def status(self) -> dict[str, Any]:
+        """Health probe, registered as "distill" (plan section 4.12).
+
+        Everything here is bookkeeping already held in memory, so the probe
+        stays cheap and side-effect free the way HealthRegistry expects. The
+        three numbers worth watching during a stream: whether the side model
+        exists at all, how long ago the rolling rewrite last landed, and
+        whether the end-of-stream batch has run for the open stream.
+        """
+        return {
+            "side_configured": self._side is not None,
+            "rolling_ok": self._health.rolling_ok,
+            "rolling_failed": self._health.rolling_failed,
+            "rolling_last_wall": self._health.rolling_last_wall,
+            "events_since_rolling": self._state.events_since,
+            "batch_ok": self._health.batch_ok,
+            "batch_failed": self._health.batch_failed,
+            "batch_ran_this_stream": self._store.stream_id in self._state.batch_done,
+            "growth_added_last_batch": self._health.growth_added_last_batch,
+            "dropped_last_batch": self._health.dropped_last_batch,
+        }
 
     # ------------------------------------------------------------ helpers
-
-    def _growth_enabled(self) -> bool:
-        return (
-            self._growth.relationship is not GrowthMode.OFF
-            or self._growth.voice is not GrowthMode.OFF
-        )
 
     def _session_summary(self) -> str:
         rows = self._store.facts("stream", str(self._store.stream_id))
@@ -360,6 +409,11 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _added(existing: list[str], fresh: list[str], merged: list[str]) -> int:
+    """How many of this batch's entries actually survived the merge."""
+    return sum(1 for entry in fresh if entry in merged and entry not in existing)
 
 
 def _parse_json(raw: str) -> dict[str, Any] | None:

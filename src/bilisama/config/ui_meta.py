@@ -8,13 +8,23 @@ side can read this directly instead of digging it out of a JSON Schema.
 The cost is a second place to keep in sync, so `tests/unit/test_ui_meta.py`
 reconciles the two: field paths must match exactly, numeric fields must be bounded.
 Labels and hints stay in Chinese — they are shown to the streamer.
+
+Who actually reads this today: `ui/server.py:149` (`config_snapshot`) renders the
+config tab from it, and `ui/config_edit.py` refuses a write to a path that is not
+in here. Between them they pass through label, hint, group, order, unit, audience,
+reload and secret. `widget`, `provider_scoped`, `wizard_step` and `aliases` are
+written and not yet read by anything — the panel infers its controls and shows
+every provider's section at once. `check_ui_meta` below and the tests keep those
+four honest until the page catches up (plan §7.5, backlog: panel side).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from bilisama.config._ui import Audience, Reload
+from bilisama.config.enums import ProviderName
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,9 +149,14 @@ UI_META: dict[str, FieldMeta] = {
         group="总览",
         order=1,
     ),
+    # The whole [audio] section is written and not read (schema.py:150-180).
+    # Every hint here says so out loud rather than describing the behaviour the
+    # field was named for: a switch that promises a number it does not deliver
+    # sends people tuning it when something else is wrong.
     "audio.echo_guard": FieldMeta(
         label="抢跑静音",
-        hint="主播一开口先把 AI 音量压下去，体感打断从 520ms 降到 90ms",
+        hint="这个开关现在没人读。打断走的是「她一听见你说话就把播放队列清空」那条路，"
+        "不是压音量",
         audience=Audience.OPERATOR,
         reload=Reload.RESTART,
         group="音频",
@@ -149,6 +164,7 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "audio.input_device": FieldMeta(
         label="麦克风",
+        hint="这里选了不算数：真正用哪个麦克风由面板「现场」页上的下拉框决定",
         widget="device",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
@@ -158,6 +174,7 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "audio.output_device": FieldMeta(
         label="AI 声音输出到",
+        hint="同上，这里选了不算数：扬声器也在面板「现场」页上选",
         widget="device",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
@@ -486,6 +503,15 @@ UI_META: dict[str, FieldMeta] = {
         order=4,
         wizard_step=2,
     ),
+    "speech.dashscope.session_cap_min": FieldMeta(
+        label="会话轮换（分钟）",
+        hint="留空跟随服务商自己的上限；0 = 不轮换。到点前主动换一条连接，免得说到一半被服务端掐断",
+        provider_scoped="dashscope",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="托管语音服务",
+        order=5,
+    ),
     "speech.dashscope.turn": FieldMeta(
         label="DashScope 判停", provider_scoped="dashscope", group="判停"
     ),
@@ -565,6 +591,15 @@ UI_META: dict[str, FieldMeta] = {
         order=1,
         wizard_step=2,
         aliases=("provider", "后端", "模型"),
+    ),
+    "speech.openai_ga.session_cap_min": FieldMeta(
+        label="会话轮换（分钟）",
+        hint="留空跟随服务商自己的上限；0 = 不轮换。到点前主动换一条连接，免得说到一半被服务端掐断",
+        provider_scoped="openai_ga",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="托管语音服务",
+        order=5,
     ),
     "speech.openai_ga.turn": FieldMeta(
         label="OpenAI 判停", provider_scoped="openai_ga", group="判停"
@@ -816,3 +851,101 @@ UI_META: dict[str, FieldMeta] = {
         wizard_step=3,
     ),
 }
+
+
+# Read-only rows: chattiness computes these five and the TOML has no field for
+# any of them (derive.py is the single writer). They are a separate dict rather
+# than UI_META entries because `ui/server.py:149` resolves every UI_META path
+# with getattr against Settings — a `_derived.*` key in there would raise on the
+# config tab instead of rendering. `_derived` is the name `bilisama config show`
+# already prints them under.
+DERIVED_META: dict[str, FieldMeta] = {
+    "_derived.idle_threshold_s": FieldMeta(
+        label="冷场多久起话题",
+        derived_from="interaction.chattiness",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="互动",
+        order=20,
+        unit="秒",
+    ),
+    "_derived.danmaku_window_s": FieldMeta(
+        label="弹幕挑选窗口",
+        derived_from="interaction.chattiness",
+        audience=Audience.DEVELOPER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=21,
+        unit="秒",
+    ),
+    "_derived.score_threshold": FieldMeta(
+        label="弹幕入选分数线",
+        derived_from="interaction.chattiness",
+        audience=Audience.DEVELOPER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=22,
+    ),
+    "_derived.cooldown_s": FieldMeta(
+        label="两次发言最短间隔",
+        derived_from="interaction.chattiness",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="互动",
+        order=23,
+        unit="秒",
+    ),
+    "_derived.max_output_tokens": FieldMeta(
+        label="单次回复长度上限",
+        derived_from="interaction.chattiness",
+        audience=Audience.DEVELOPER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=24,
+        unit="token",
+    ),
+}
+
+
+_PROVIDERS = frozenset(p.value for p in ProviderName)
+
+
+def check_ui_meta(meta: Mapping[str, FieldMeta] | None = None) -> list[str]:
+    """Plan §7.7 gate 1: metadata complete enough to render a control.
+
+    `group` is in here because it was the one key the gate named and never
+    looked at. All 108 entries carry one today, so nothing would have noticed
+    until a settings page put an unlabelled row in a group called "".
+
+    The bounds half of that gate needs the schema rather than the metadata and
+    stays a schema walk (`test_numeric_fields_declare_bounds`).
+
+    Args:
+        meta: The table to check. Defaults to the shipped one; the tests pass a
+            planted entry so every rule here is known to bite.
+
+    Returns:
+        One Chinese complaint per problem, empty when the table is fit to render.
+    """
+    table = UI_META if meta is None else meta
+    complaints: list[str] = []
+    for path, entry in table.items():
+        if not entry.label:
+            complaints.append(f"{path}：缺 label，控件会渲染成空白")
+        if not entry.group:
+            complaints.append(f"{path}：缺 group，设置页不知道把它放进哪一栏")
+        scoped = entry.provider_scoped
+        if scoped:
+            if scoped not in _PROVIDERS:
+                complaints.append(f"{path}：provider_scoped={scoped!r} 不是一个 provider 名字")
+            elif not path.startswith(f"speech.{scoped}"):
+                complaints.append(f"{path}：provider_scoped={scoped!r} 跟它自己的路径对不上")
+        seen: set[str] = set()
+        for alias in entry.aliases:
+            # The path itself is fair game as an alias — `speech.provider` is
+            # English and 「后端」 is what the streamer would type. Only a repeat
+            # of the label, or of another alias, adds a row and finds nothing.
+            if not alias or alias == entry.label or alias in seen:
+                complaints.append(f"{path}：aliases 里的 {alias!r} 搜不出任何新东西")
+            seen.add(alias)
+    return complaints

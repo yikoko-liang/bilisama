@@ -13,6 +13,12 @@ from the one shared vocabulary (obs/outcome.py) — so "why didn't it answer
 that one" is a status query, not a log dig. Windows that close with no
 survivor count under `selection.window_empty`.
 
+That account is kept twice over: a per-reason tally in status(), and, when a
+sink is wired, one `on_skip` call per dropped event carrying the event itself.
+The tally alone could only ever say how many were dropped for a reason, never
+which ones — and in a live room most danmaku end here rather than at the
+scheduler, where the Intent-level verdicts live (ledger item 49).
+
 Chattiness owns the window length and the score bar (derive.py); both are
 snapshotted when a window opens, so a mid-window slider change applies to
 the NEXT window rather than moving the goalposts under the current one.
@@ -43,7 +49,7 @@ if TYPE_CHECKING:
     from bilisama.clock import Clock
     from bilisama.config.derive import DerivedThresholds
 
-__all__ = ["SELECTOR_KINDS", "DanmakuSelector", "PresenceWelcomer"]
+__all__ = ["SELECTOR_KINDS", "DanmakuSelector", "PresenceWelcomer", "SkipSink"]
 
 log = get_logger(__name__)
 
@@ -53,6 +59,14 @@ SELECTOR_KINDS = frozenset({EventKind.DANMAKU, EventKind.GIFT})
 _TICK_S = 0.25  # combo settle precision; the window check rides along
 
 Deliver = Callable[[LiveEvent], Awaitable[None]]
+
+# One call per dropped event, carrying the event itself. The Intent-level
+# verdicts the panel already shows only cover what REACHED the scheduler, and
+# in a live room most danmaku end here instead — a per-reason tally could say
+# "12 条低分" but never which twelve, which is not an answer to "为什么没回我"
+# (ledger item 49). The event is None for WINDOW_EMPTY, the one account that
+# belongs to a window rather than to any single danmaku.
+SkipSink = Callable[[LiveEvent | None, SkipReason], None]
 
 
 class DanmakuSelector:
@@ -64,9 +78,11 @@ class DanmakuSelector:
         *,
         thresholds: Callable[[], DerivedThresholds],
         per_uid_cooldown_s: float = 60.0,
+        on_skip: SkipSink | None = None,
     ) -> None:
         self._clock = clock
         self._thresholds = thresholds
+        self._on_skip = on_skip
         self._ring = DedupRing()
         self._uid_cooldown = PerUidCooldown(per_uid_cooldown_s)
         self._combos = GiftComboAggregator()
@@ -86,16 +102,16 @@ class DanmakuSelector:
         now = self._clock.monotonic()
         self._offered += 1
         if self._breaker.is_open:
-            self._skip(SkipReason.BREAKER_OPEN)
+            self._skip(SkipReason.BREAKER_OPEN, event)
             return
         if self._ring.seen(event.dedup_key, now):
-            self._skip(SkipReason.DUPLICATE)
+            self._skip(SkipReason.DUPLICATE, event)
             return
         if event.kind is EventKind.GIFT:
             self._combos.add(event, now)
             return
         if self._uid_cooldown.blocked(event.viewer.identity, now):
-            self._skip(SkipReason.UID_COOLDOWN)
+            self._skip(SkipReason.UID_COOLDOWN, event)
             return
         score = danmaku_score(event)
         if self._window_opened is None:
@@ -107,15 +123,17 @@ class DanmakuSelector:
         rules = self._window_rules
         assert rules is not None  # set whenever a window is open
         if score < rules.score_threshold:
-            self._skip(SkipReason.LOW_VALUE)
+            self._skip(SkipReason.LOW_VALUE, event)
             return
         if self._best is None or score > self._best_score:
             if self._best is not None:
-                self._skip(SkipReason.LOST_WINDOW)
+                # The dethroned incumbent is the one that lost, not the
+                # newcomer that just took the slot.
+                self._skip(SkipReason.LOST_WINDOW, self._best)
             self._best = event
             self._best_score = score
         else:
-            self._skip(SkipReason.LOST_WINDOW)
+            self._skip(SkipReason.LOST_WINDOW, event)
 
     # ------------------------------------------------------------ loop
 
@@ -167,7 +185,7 @@ class DanmakuSelector:
         except Exception:
             # The winner is gone either way — the window already closed — so
             # put the loss on the books before the breaker hears about it.
-            self._skip(SkipReason.DELIVER_FAILED)
+            self._skip(SkipReason.DELIVER_FAILED, best)
             raise
         # Armed by the reply, not the attempt (safety.PerUidCooldown).
         self._uid_cooldown.mark(best.viewer.identity, now)
@@ -175,8 +193,19 @@ class DanmakuSelector:
 
     # ------------------------------------------------------------ accounting
 
-    def _skip(self, reason: SkipReason) -> None:
+    def _skip(self, reason: SkipReason, event: LiveEvent | None = None) -> None:
+        """One account for one dropped event: the tally, then the record."""
         self._skips[reason.value] = self._skips.get(reason.value, 0) + 1
+        if self._on_skip is None:
+            return
+        try:
+            self._on_skip(event, reason)
+        except Exception as exc:
+            # The sink is a panel broadcast and offer() sits on the emit path,
+            # so letting this out would cost the room its danmaku over a dead
+            # websocket. The tally above already landed; log the loss of the
+            # detailed record rather than swallowing it.
+            log.warning("selector.skip_sink_failed", reason=reason.value, error_text=str(exc)[:200])
 
     def status(self) -> dict[str, object]:
         return {

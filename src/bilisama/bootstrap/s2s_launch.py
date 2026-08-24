@@ -113,6 +113,31 @@ def render(cfg: S2SConfig) -> dict[str, object]:
     return payload
 
 
+# The shim reads its patch list from here and nowhere else
+# (tools/s2s_shim/bilisama_s2s_shim/patches.py:275).
+PATCH_ENV = "BILISAMA_S2S_PATCHES"
+
+
+def patch_env(cfg: S2SConfig) -> dict[str, str]:
+    """The environment the patched server has to start with, from the config.
+
+    The patch list cannot ride in the launch JSON: `write` refuses any key
+    upstream's dataclasses do not name, which is the whole reason that check
+    exists. So the config's `patches` becomes the one variable the shim reads,
+    and `config render-s2s` prints it beside the file it just wrote.
+
+    Args:
+        cfg: Our provider (b) settings.
+
+    Returns:
+        Variable name to value. The value is empty for zero-patch mode and the
+        key is always present — the shim treats UNSET as "apply the defaults"
+        (patches.py:274), so dropping it would silently patch a run that asked
+        for none.
+    """
+    return {PATCH_ENV: ",".join(cfg.patches)}
+
+
 def render_checked(cfg: S2SConfig, s2s_root: Path | None) -> RenderResult:
     """Render, then reconcile field names against upstream when we can.
 

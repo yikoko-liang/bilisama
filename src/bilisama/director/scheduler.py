@@ -26,7 +26,14 @@ What it guarantees, and where each promise is tested:
   dispatch until released. A panic landing inside the dispatch window is
   honoured the moment the dispatch completes (A1).
 - Every intent ends in exactly one Verdict (section 4.12): the machine-readable
-  answer to "why did it not speak just now". Dispatch failures included (A8).
+  answer to "why did it not speak just now". Dispatch failures included (A8),
+  shutdown included, and the verdict names the gate that held it rather than a
+  generic "expired".
+- A send that keeps failing is bounded by a deadline, not retried forever
+  (section 4.11). Paid intents requeue, and they are also the ones with no
+  expires_at of their own, so the retry has to bring its own.
+- spoken@played when a playback receipt says the audience heard it out,
+  spoken@generating when nobody is reporting playback at all.
 """
 
 from __future__ import annotations
@@ -54,6 +61,26 @@ log = get_logger(__name__)
 # healthy link; 0.3s is the safety bound for a shape that never sends it).
 _SPEECH_EDGE_GRACE_S = 0.3
 
+# Section 4.11's rule for a send that keeps failing: the bound is a DEADLINE,
+# not a retry counter — "a reply retried eight times across ten seconds is
+# worse than no reply". Paid intents are the only ones that requeue and they
+# carry no expires_at of their own (intents.py:160, deliberately: paid work
+# must not go stale in the queue), so the first failure gives them one.
+_DISPATCH_RETRY_WINDOW_S = 6.0
+# And the attempts inside that window are spaced. A failed send means the
+# socket is sick, and redispatching into it as fast as the loop allows is not
+# a retry, it is a spin: probed 2026-08-25 at roughly 65000 attempts a second
+# with zero verdicts, and the loop starved outright when the send raised
+# without yielding.
+_DISPATCH_RETRY_BACKOFF_S = 1.0
+
+# How long a settled reply waits for the playback receipt that turns
+# spoken@generating into spoken@played. Whoever owns the speaker reports
+# through floor.on_playback + notify (ui/audio.py's PlaybackTally); a page that
+# goes away mid-playback never reports again, so the wait is bounded and the
+# verdict falls back to what we actually know.
+_PLAYBACK_RECEIPT_GRACE_S = 15.0
+
 
 class StreamGuard(Protocol):
     """What the scheduler needs from an output guard: OutputGuard fits."""
@@ -75,12 +102,27 @@ class PlaybackClear:
 class _Active:
     intent: Intent
     handle: link.ReplyHandle
+    # When the sends landed: the verdict's spoken_ms counts from here.
+    started_at: float = 0.0
     # Inside this window only panic may kill the reply (paid protection).
     protected_until: float | None = None
     protection_ended: bool = False
     # A PlaybackClear already went out for this reply; the late done(cancelled)
     # must not send a second one under a made-up reason (A10).
     cleared: bool = False
+
+
+@dataclass(slots=True)
+class _Parked:
+    """A reply that finished generating while L1 still held its audio.
+
+    Its verdict is written when the playback drains (spoken@played) or when the
+    grace runs out (spoken@generating) — see _flush_played.
+    """
+
+    intent: Intent
+    started_at: float
+    deadline: float
 
 
 @dataclass(slots=True)
@@ -130,6 +172,10 @@ class Scheduler:
         self._queued_keys: set[str] = set()
         self._revoked: set[str] = set()
         self._active: _Active | None = None
+        # Replies waiting for their playback receipt before their verdict is
+        # written. At most one at a time in practice: the floor's queued_audio
+        # gate holds the next dispatch until this one's audio is gone.
+        self._parked: list[_Parked] = []
         self._dispatching = False
         self._panicked = False
         # Set between LinkDown and LinkUp. Work that arrives in that window is
@@ -200,6 +246,9 @@ class Scheduler:
         """Kill everything, protected included — the one switch allowed to."""
         self._panicked = True
         self.controls.put_nowait(PlaybackClear(reason="panic_mute"))
+        # The clear above takes the parked replies' audio with it, so no
+        # receipt is coming: write what we know rather than wait for it.
+        self._flush_played(played=False)
         self._drain_queue(SkipReason.PANIC_MUTE)
         active = self._active
         if active is not None:
@@ -245,6 +294,12 @@ class Scheduler:
         try:
             await self._dispatch_loop()
         finally:
+            # Shutdown is not an exemption from section 4.12: whatever is still
+            # in the heap when Ctrl-C lands would otherwise end nowhere, and the
+            # panel's counts stop adding up. No SkipReason names "the process
+            # left" — skipped@queued says it without inventing one.
+            self._flush_played(played=False)
+            self._drain_queue(None)
             event_task.cancel()
             await asyncio.gather(event_task, return_exceptions=True)
 
@@ -310,6 +365,7 @@ class Scheduler:
     async def _dispatch_loop(self) -> None:
         while True:
             self._wake.clear()
+            self._flush_played()
             intent = self._next_dispatchable()
             if intent is None:
                 wait = self._floor.blocked_for() if self._heap and self._active is None else 0.0
@@ -342,7 +398,17 @@ class Scheduler:
                 continue
             if self._expired(intent):
                 heapq.heappop(self._heap)
-                self._drop_queued(intent, SkipReason.RESULT_EXPIRED, outcome=Outcome.EXPIRED)
+                # Name the gate that ate the runway. Every expiry used to read
+                # background.result_expired — a lane that does not exist yet —
+                # so the panel answered "the background result went stale" for
+                # a danmaku that simply waited out the streamer (ledger #35).
+                gate = self._floor.blocking_reason()
+                self._drop_queued(
+                    intent,
+                    gate,
+                    outcome=Outcome.EXPIRED,
+                    phase=Phase.GATED if gate is not None else Phase.QUEUED,
+                )
                 continue
             if self._floor.is_blocked():
                 return None
@@ -371,7 +437,18 @@ class Scheduler:
                 # audience watched them pay. Same rule as barge-in (section
                 # 4.2): back in the queue, and the key was freed above so the
                 # resubmission is not eaten as a duplicate.
-                self._requeue(intent, item_written=wrote_item)
+                #
+                # Bounded, though: the first failure hands the intent the
+                # deadline it never had, later ones inherit it, and once it
+                # passes _next_dispatchable drops the intent with a verdict.
+                # The backoff below spaces the attempts inside that window;
+                # _dispatching stays set through it on purpose, because this
+                # attempt still holds the slot.
+                deadline = intent.expires_at
+                if deadline is None:
+                    deadline = self._clock.monotonic() + _DISPATCH_RETRY_WINDOW_S
+                await self._clock.sleep(_DISPATCH_RETRY_BACKOFF_S)
+                self._requeue(intent, item_written=wrote_item, deadline=deadline)
                 return
             self._verdict_sink(
                 Verdict(
@@ -386,7 +463,7 @@ class Scheduler:
         finally:
             self._dispatching = False
 
-        active = _Active(intent=intent, handle=handle)
+        active = _Active(intent=intent, handle=handle, started_at=self._clock.monotonic())
         reply = intent.injection.reply
         if reply.protected:
             active.protected_until = self._clock.monotonic() + reply.protect_ms / 1000.0
@@ -559,7 +636,7 @@ class Scheduler:
         else:
             self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, reason=SkipReason.PREEMPTED)
 
-    def _drain_queue(self, reason: SkipReason) -> None:
+    def _drain_queue(self, reason: SkipReason | None) -> None:
         """Empty the heap, giving every waiting intent a verdict.
 
         Silence here would leave intents that never end anywhere, which is the
@@ -569,12 +646,18 @@ class Scheduler:
             entry = heapq.heappop(self._heap)
             self._drop_queued(entry.intent, reason)
 
-    def _requeue(self, intent: Intent, *, item_written: bool) -> None:
+    def _requeue(
+        self, intent: Intent, *, item_written: bool, deadline: float | None = None
+    ) -> None:
         """Put one intent back at the end of its priority band.
 
         A fresh Intent rather than the original so nothing downstream can hold
         a stale reference; the dedup key must already be freed by the caller,
         or submit() eats this as a duplicate.
+
+        `deadline` overrides expires_at — the dispatch-failure path uses it to
+        bound its own retries (section 4.11). An interruption requeue passes
+        nothing: being talked over is not a reason to start a countdown.
 
         `item_written` drops the history half. That line is already in the
         conversation and add_context_item dedups nothing (s2s.py:126-142), so
@@ -597,7 +680,7 @@ class Scheduler:
                 event=intent.event,
                 dedup_key=intent.dedup_key,
                 created_at=intent.created_at,
-                expires_at=intent.expires_at,
+                expires_at=intent.expires_at if deadline is None else deadline,
                 requeue_on_interrupt=intent.requeue_on_interrupt,
             )
         )
@@ -628,6 +711,14 @@ class Scheduler:
             # the same paid message arrived twice.
             self._requeue(intent, item_written=True)
             return
+        if outcome is Outcome.SPOKEN and self._floor.queued_audio:
+            # The model stopped producing tokens; the audience has not heard it
+            # yet. Hold the verdict for the playback receipt so it can say
+            # spoken@played — the 106-second playback backlog is what taught us
+            # the two are different facts.
+            self._park_for_playback(active)
+            self._wake.set()
+            return
         self._verdict_sink(
             Verdict(
                 intent_id=intent.dedup_key or intent.source,
@@ -635,16 +726,81 @@ class Scheduler:
                 outcome=outcome,
                 phase=phase,
                 reason=reason,
+                waited_s=self._waited_s(intent, active.started_at),
+                spoken_ms=self._spoken_ms(active.started_at),
             )
         )
         self._wake.set()
 
+    def _park_for_playback(self, active: _Active) -> None:
+        self._parked.append(
+            _Parked(
+                intent=active.intent,
+                started_at=active.started_at,
+                deadline=self._clock.monotonic() + _PLAYBACK_RECEIPT_GRACE_S,
+            )
+        )
+
+        async def deadline_wake() -> None:
+            # The receipt arrives as notify(); nothing else would wake the loop
+            # to notice that the grace ran out.
+            await self._clock.sleep(_PLAYBACK_RECEIPT_GRACE_S)
+            self._wake.set()
+
+        self._spawn(deadline_wake(), name="scheduler:playback-grace")
+
+    def _flush_played(self, *, played: bool | None = None) -> None:
+        """Write the verdicts held for a playback receipt.
+
+        `played` forces the answer for callers who already know it — panic and
+        shutdown both take the audio with them. Left None it is read off the
+        floor: audio gone and nobody talking over it means the audience heard
+        the whole thing.
+        """
+        if not self._parked:
+            return
+        now = self._clock.monotonic()
+        drained = not self._floor.queued_audio
+        # Talked over mid-playback: the audio is gone because someone cut it,
+        # not because the room heard it out.
+        heard = played if played is not None else (drained and not self._floor.streamer_speaking)
+        still_waiting: list[_Parked] = []
+        for parked in self._parked:
+            if played is None and not drained and now < parked.deadline:
+                still_waiting.append(parked)
+                continue
+            self._verdict_sink(
+                Verdict(
+                    intent_id=parked.intent.dedup_key or parked.intent.source,
+                    source=parked.intent.source,
+                    outcome=Outcome.SPOKEN,
+                    phase=Phase.PLAYED if heard else Phase.GENERATING,
+                    waited_s=self._waited_s(parked.intent, parked.started_at),
+                    spoken_ms=self._spoken_ms(parked.started_at),
+                )
+            )
+        self._parked = still_waiting
+
+    def _waited_s(self, intent: Intent, until: float) -> float:
+        """How long this intent waited for its turn, 0 when nobody said when it
+        arrived — created_at defaults to 0.0, and subtracting that from a
+        monotonic clock would put "waited 6 days" on the panel."""
+        if intent.created_at <= 0.0:
+            return 0.0
+        return max(0.0, until - intent.created_at)
+
+    def _spoken_ms(self, started_at: float) -> int:
+        if started_at <= 0.0:
+            return 0
+        return max(0, int((self._clock.monotonic() - started_at) * 1000))
+
     def _drop_queued(
         self,
         intent: Intent,
-        reason: SkipReason,
+        reason: SkipReason | None,
         *,
         outcome: Outcome = Outcome.SKIPPED,
+        phase: Phase = Phase.QUEUED,
     ) -> None:
         self._free_key(intent)
         self._verdict_sink(
@@ -652,8 +808,9 @@ class Scheduler:
                 intent_id=intent.dedup_key or intent.source,
                 source=intent.source,
                 outcome=outcome,
-                phase=Phase.QUEUED,
+                phase=phase,
                 reason=reason,
+                waited_s=self._waited_s(intent, self._clock.monotonic()),
             )
         )
 

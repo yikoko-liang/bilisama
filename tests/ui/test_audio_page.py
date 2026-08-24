@@ -263,6 +263,49 @@ async def test_a_dropped_audio_socket_reconnects_once_and_the_microphone_survive
     )
 
 
+async def test_a_stale_socket_closing_late_does_not_take_the_live_one_down(
+    audio_page: Page, harness: Harness
+) -> None:
+    """Ledger #59: the `if (socket !== ws) return` guard in audio.js's onclose.
+
+    stopCapture() and onOwner() are shared across connections, so an old
+    socket's close notification arriving after `socket` has moved on tears down
+    the capture chain the CURRENT one is using: microphone dead, uplink dead,
+    and — because the server still holds the claim — a panel that goes on
+    saying 「已接管」 over a window that is deaf.
+
+    The close event is injected rather than raced for, and that is the honest
+    part of this test. Ledger #59 recorded five green runs with the guard taken
+    out: on this machine the first socket always reaches CLOSED before the
+    replacement exists, so the ordering the guard defends against cannot be
+    produced by timing here. Dispatching the event puts the page in exactly
+    that state — a stale connection's onclose running while a newer one is
+    live — which is the condition the guard reads, not a simulation of it.
+    4409 is the code the ledger's third socket came back with.
+    """
+    await _ready(audio_page, harness)
+    # A second socket, the ordinary way: drop the first and let the page
+    # reconnect (the path test_a_dropped_audio_socket_reconnects pins).
+    await audio_page.evaluate(f"{_AUDIO_SOCKETS}.at(-1).close()")
+    await _wait(audio_page, f"{_AUDIO_SOCKETS}.length >= 2")
+    await _wait(audio_page, f"{_AUDIO_SOCKETS}.at(-1).readyState === WebSocket.OPEN")
+    await _until(lambda: harness.broker.owner == "browser", what="重连之后页面没拿回设备")
+    await _until(lambda: bool(harness.uplink), what="重连之后麦克风没有恢复上行")
+
+    await audio_page.evaluate(
+        f"{_AUDIO_SOCKETS}[0].dispatchEvent(new CloseEvent('close', {{ code: 4409 }}))"
+    )
+    before = len(harness.uplink)
+    await asyncio.sleep(0.5)
+
+    live = await audio_page.evaluate(_LIVE_TRACKS)
+    assert live == 1, f"旧连接的 close 把在用的采集链拆了，还剩 {live} 条麦克风"
+    assert len(harness.uplink) > before, "旧连接的 close 之后，麦克风不再上行"
+    assert harness.broker.owner == "browser", "服务端这边的持有者也被旧连接带走了"
+    owner_text = await audio_page.locator("#audio-owner").inner_text()
+    assert "已接管" in owner_text, f"面板被旧连接改口了：{owner_text}"
+
+
 async def test_a_refused_tab_lets_go_of_the_microphone(
     browser: Browser, harness: Harness, audio_page: Page
 ) -> None:

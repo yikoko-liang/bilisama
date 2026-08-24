@@ -17,12 +17,14 @@ from typing import Any
 import pytest
 import websockets
 
+from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import TurnConfig
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.providers.hosted import HostedLink
+from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes import mock_realtime as mock_module
 from tests.fakes.mock_realtime import _INPUT_BYTES_PER_MS, Fault, MockRealtimeServer, Script
 from tests.unit.test_realtime_client import _next_event
@@ -306,6 +308,61 @@ async def test_in_band_injection_during_a_speculative_turn_wedges_the_connection
             e.get("error", {}).get("type") == "conversation_already_has_active_response"
             for e in events
         ), "a wedged connection should start refusing new responses"
+
+
+async def test_the_watchdog_gets_the_slot_back_from_a_wedged_injection() -> None:
+    """Plan section 10.1, row 1: wedge → watchdog fires → the slot is usable again.
+
+    Both halves, because the second one is what the row promises and nothing
+    asserted it: tests/unit/test_realtime_client.py's watchdog test stops at
+    「timed out, cancel sent, handle stale」 and its docstring claims the recovery
+    it never checks. It also runs against Fault.STALL_RESPONSE — a reply that
+    simply never finishes — while the path the plan names is this one: an in-band
+    create landing on the streamer's still-open speculative turn. Until here, the
+    wedge had only ever been driven by hand-written frames, with the out-of-band
+    control (below) standing in for L3.
+
+    Hosted rather than S2SLink because the wedge needs an in-band create, and
+    that is what the beta dialect sends (providers/hosted.py:232-236 against
+    Capabilities.out_of_band_exempt_from_slot=False, capabilities.py:70).
+
+    The reopen budget is 40 ms so the test can close the speculative window with
+    one push_audio. That is rule 7 as the client is meant to obey it — keep
+    appending and the window closes — not a shortcut around the fault.
+    """
+    clock = FakeClock()
+    script = Script(faults={Fault.WEDGE_ON_INJECTION}, unanswered_reopen_ms=40, reply_text="回来了")
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=script) as server:
+        linkobj = HostedLink(server.url, ProviderName.DASHSCOPE, clock=clock, watchdog_s=25.0)
+        await linkobj.connect()
+        try:
+            await server.speech_started()
+            await server.speech_stopped()  # window open, budget counting
+
+            wedged = await linkobj.request_reply(link.ReplySpec(instructions="第一次"))
+            await asyncio.sleep(0.05)  # let the watchdog task register its sleeper
+            await clock.advance(26.0)
+
+            done = await _next_event(linkobj.events(), link.ReplyDone, timeout=5.0)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.TIMED_OUT, done.status
+            assert done.handle is wedged
+            assert wedged.stale
+            await _await_recorded(server, "response.cancel", 1)
+
+            # The half that was missing. 64 bytes of 16 kHz mono s16 is 2 ms;
+            # 40 ms of budget needs 1280.
+            await linkobj.push_audio(b"\x00" * (_INPUT_BYTES_PER_MS * 40))
+            second = await linkobj.request_reply(link.ReplySpec(instructions="第二次"))
+            recovered = await _next_event(linkobj.events(), link.ReplyDone, timeout=5.0)
+            assert isinstance(recovered, link.ReplyDone)
+            assert recovered.handle is second
+            assert recovered.status is link.ReplyStatus.COMPLETED, (
+                "the watchdog freed the handle but not the slot: "
+                f"{recovered.status}. Row 1 promises the slot comes back."
+            )
+        finally:
+            await linkobj.aclose()
 
 
 async def test_out_of_band_injection_is_immune_to_the_wedge() -> None:
@@ -822,6 +879,68 @@ async def test_item_create_is_acked_at_once_when_nothing_is_generating() -> None
         await ws.send(json.dumps({"type": "conversation.item.create", "item": {"id": "i2"}}))
         ack = await _recv_until(ws, "conversation.item.created")
         assert ack["item"]["id"] == "i2", "response_pending is not in_response"
+
+
+async def test_an_item_create_that_is_never_acked_draws_no_retry() -> None:
+    """Plan section 10.1, row 5: no ack for conversation.item.create → L3 must not resend.
+
+    The deferral above is the shape upstream really has: the ack is late, not
+    absent. This is the row the plan names anyway, because "late" and "never" are
+    indistinguishable from the client's side until the ack shows up — and a
+    client that retries on the timeout writes the item twice into the history the
+    moment the reply ends. add_context_item is deliberately fire-and-forget for
+    exactly that reason (providers/s2s.py:126-131); what was missing was anything
+    that would go red if somebody added a retry.
+    """
+    async with MockRealtimeServer(
+        caps=caps_mod.S2S, script=Script(faults={Fault.NEVER_ACK})
+    ) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            await linkobj.add_context_item("阿强又来了")
+            # Generous next to any plausible ack timeout, and cheap: nothing is
+            # expected to arrive, so the wait is the whole measurement.
+            await asyncio.sleep(0.3)
+            assert server.recorded.count("conversation.item.create") == 1, (
+                "the item was sent more than once with no ack to prompt it — a retry "
+                "here duplicates the streamer's line in the model's history"
+            )
+
+            # The control, in the same run: silence about the item must not
+            # become silence about everything. Without it this would also pass
+            # against a client that blocked forever waiting for the ack.
+            await linkobj.request_reply(link.ReplySpec(instructions="说点什么"))
+            done = await _next_event(linkobj.events(), link.ReplyDone, timeout=5.0)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.COMPLETED, done.status
+        finally:
+            await linkobj.aclose()
+
+
+async def test_an_unacked_item_is_still_not_resent_after_the_reply_ends() -> None:
+    """The moment a retry would actually fire, if one existed.
+
+    Upstream flushes deferred acks out of finish_response
+    (handlers/response.py:311-314), so response.done is when a client that
+    reconciles acks to requests would notice one missing. Checked separately from
+    the case above because that one never gives it the chance.
+    """
+    script = Script(faults={Fault.NEVER_ACK}, delta_chunks=4, delta_interval_s=0.02)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            await linkobj.request_reply(link.ReplySpec(instructions="讲两句"))
+            await _next_event(linkobj.events(), link.ReplyStarted, timeout=5.0)
+            await linkobj.add_context_item("说话中间插进来的一条")
+            done = await _next_event(linkobj.events(), link.ReplyDone, timeout=5.0)
+            assert isinstance(done, link.ReplyDone)
+            await asyncio.sleep(0.2)  # past the flush that never comes
+
+            assert server.recorded.count("conversation.item.create") == 1
+        finally:
+            await linkobj.aclose()
 
 
 async def test_two_held_implicit_replies_both_wake_up() -> None:
@@ -1450,6 +1569,60 @@ async def test_speech_events_carry_the_audio_clock_and_item_id() -> None:
         second = await _recv_until(ws, "input_audio_buffer.speech_started")
         assert second["item_id"] != started["item_id"]
         assert second["audio_start_ms"] == 800
+
+
+async def test_a_streaming_recogniser_reaches_the_client_delta_by_delta() -> None:
+    """The eighteenth server event, and the one the mock could not produce.
+
+    client.py:512 turns user_transcript.delta into link.UserTranscriptDelta, and
+    nothing had ever executed it: the fake only ever sent the .done, so the
+    branch's first run would have been against a live endpoint. Recognisers that
+    stream partials are ordinary — the .done is the one that is optional (s2s
+    with `--stt none` sends neither).
+
+    Both events on one connection, in the order a streaming recogniser produces
+    them, so the pair is pinned as a sequence rather than two isolated frames.
+    """
+    async with MockRealtimeServer(caps=caps_mod.S2S) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            await server.speech_started()
+            await server.user_transcript_delta("今天")
+            await server.user_transcript_delta("打什么")
+            await server.user_transcript("今天打什么？")
+
+            first = await _next_event(events, link.UserTranscriptDelta, timeout=5.0)
+            assert isinstance(first, link.UserTranscriptDelta)
+            assert first.text == "今天"
+            second = await _next_event(events, link.UserTranscriptDelta, timeout=5.0)
+            assert isinstance(second, link.UserTranscriptDelta)
+            assert second.text == "打什么"
+            final = await _next_event(events, link.UserTranscriptDone, timeout=5.0)
+            assert isinstance(final, link.UserTranscriptDone)
+            assert final.text == "今天打什么？"
+        finally:
+            await linkobj.aclose()
+
+
+async def test_a_recogniser_that_only_sends_the_final_is_still_normal() -> None:
+    """The control: partials are optional, so their absence must stay silent.
+
+    A mock that started emitting deltas of its own would hide every code path
+    that has to cope without them — which is the shape of provider the shipping
+    one actually is.
+    """
+    async with MockRealtimeServer(caps=caps_mod.S2S) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            await server.speech_started()
+            await server.user_transcript("今天打什么？")
+            final = await _next_event(linkobj.events(), link.UserTranscriptDone, timeout=5.0)
+            assert isinstance(final, link.UserTranscriptDone), "the .done must not need a delta"
+        finally:
+            await linkobj.aclose()
 
 
 async def test_a_create_on_an_empty_conversation_can_be_refused() -> None:

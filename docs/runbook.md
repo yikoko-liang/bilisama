@@ -204,6 +204,9 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 **音频跑在壳里**（2026-08-24 起）。壳本身就是 Chromium，所以拿得到浏览器自带的回声消除
 ——她说话的时候你照样能插话，不用戴耳机，也不用 `--mute-while-speaking`。
 
+真机验过：外放不戴耳机做三组对照，本机播放那两组分别被自己的声音打断 3 次和 1 次，
+走壳这组 0 次。
+
 关键前提：回声消除只能消掉**浏览器自己放出去的**声音。所以采集和播放必须一起在页面里，
 少一半都不管用。
 
@@ -215,8 +218,10 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 | 只开了浏览器标签页 | 那个页面 |
 | 都没开（`--no-ui`、壳没装） | 退回本机 sounddevice，跟以前一样 |
 
-壳和标签页同时开着时**壳赢**，标签页会写一行「麦克风和扬声器在桌宠窗口，这里只看不听」。
-壳一关，标签页自己把设备拿回去，不用刷新。
+壳和标签页同时开着时**壳赢**：标签页既不采麦也不出声。注意它的面板上写的仍然是
+「麦克风和扬声器已接管（回声消除已请求）」——那一行说的是**设备有人拿着**，不是
+「这个窗口在拿」（`panel.js` 的 `handleFrame("audio.owner")` 注释写明了是有意如此），
+所以别拿它判断声音从哪个窗口出。壳一关，标签页自己把设备拿回去，不用刷新。
 
 面板「现场」页有音频那一节：麦克风和扬声器的下拉（**带设备名**，不是命令行那种序号）、
 输入电平条、一键试音。**切扬声器是安全的**——Chromium 会把消除的参考信号跟着一起搬过去
@@ -287,14 +292,24 @@ VAD 阈值。
   零素材、无版权包袱；`"sprite"` 读皮肤包（`model_id` 填包名，内部分支带了 kirby）。
   自己导入的皮肤包放 `~/.local/share/bilisama/skins/<包名>/`，与仓库内置的同名时你的
   优先——但 `--skin tofu` 和降级链只认打包的那份豆腐，用户包顶不掉它。
-- **自制皮肤包的硬性要求**：pet.json 的 animations 必须把 11 条标准轨道名全部写上
+- **自制皮肤包的硬性要求**：pet.json 的 animations 要把 11 条标准轨道名全部写上
   （idle / running-right / running-left / waving / jumping / failed / waiting /
-  running / review / working / attention）——渲染器按全量校验，缺一条整包被拒、
-  退回豆腐。其中真正会播的只有 6 条（idle、waiting 听、review 想、waving 说、
-  jumping 戳、failed 断线），剩下 5 条随便复用别的帧填上即可。用
-  `tools/skin_pack.py` 打包会替你把这些校验和尺寸上限（单帧 ≤512px、
-  整图 ≤4096px、≤32 行）在构建期报出来。
-- 界面只做展示和轻控制，**声音仍从 dev-talk 进程出**（浏览器不出声、不采麦）。
+  running / review / working / attention）。**这条硬规矩在构建期**：
+  `tools/skin_pack.py:78-84` 缺一条就不给打包。运行期不是这么查的——
+  `sprite.js:103-127` 先铺一份默认轨道，再拿 manifest 里写了的覆盖，没写的用默认值
+  补上，最后只查帧索引越不越界（`sprite.js:128-131`）。默认轨道最远取到第 9 行
+  （review 是索引 64–69），所以行数不够的图漏写轨道多半会越界、整包被拒退回豆腐，
+  但不是每一条都会。2026-08-25 在 8×3＝24 帧上逐条试过：漏写 waving / jumping /
+  failed / waiting / running / review / attention 会抛「越界的帧索引」，漏写
+  idle / running-right / running-left / working 照样通过，那四条播的是默认帧；
+  图有 9 行以上时 11 条全不写也不报错。结论是别指望运行期替你把关，老实用
+  `tools/skin_pack.py` 打包——尺寸上限（单帧 ≤512px、整图 ≤4096px、≤32 行）
+  也是它在构建期报。
+  11 条里真正会播的只有 6 条（idle、waiting 听、review 想、waving 说、jumping 戳、
+  failed 断线），剩下 5 条随便复用别的帧填上即可。
+- 界面不只是展示：**页面拿到设备之后，采麦和放声都在浏览器里**（`ui/audio.py`、
+  `ui/web/js/audio.js`），dev-talk 进程只在没有任何页面接管时兜底。规则见上面
+  「声音在哪儿放，以及为什么不用戴耳机了」。
 - 只绑 127.0.0.1；地址里的口令就是门禁，别把整条 URL 发给别人。
 - 端口被占时 dev-talk 会明说并继续跑（语音链路不受影响）；固定端口改
   `[runtime] ui_port`，默认 0 是随机。
@@ -352,12 +367,18 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/mia/pinned.m
 
 体验须知：
 
-- **外放会让 AI 听到自己的声音**（管线没有回声消除），表现为"一点点声音就被打断"。
-  戴耳机，或加 `--mute-while-speaking`（播放期间闭麦，代价是那期间插不了话）。
+- **要不要戴耳机，看这一场的声音走哪条路。** 走界面（director 档、壳或浏览器页面开着）
+  有回声消除，不用戴；走本机 sounddevice 的那几种情况——裸链路档、`--director --no-ui`、
+  界面开着但壳和标签页都没打开——没有回声消除，外放会让她听到自己的声音，表现为
+  「一点点声音就被打断」，这时候戴耳机，或加 `--mute-while-speaking`（播放期间闭麦，
+  代价是那期间插不了话）。谁拿设备的完整规则见上面「声音在哪儿放」。
+- 顺带一提：启动横幅里那句「外放会让 AI 听到自己的声音」目前不分路径都会打
+  （`dev_talk.py:1656-1657`），界面接管了设备的那一场可以不理它。
 - 打断：正常说一句话（约 0.4 秒以上的连续语音）就能掐断播报；短促噪音不会。
 - 不用麦克风也能测：`--wav 某段16k单声道.wav`，回复音频存在旁边的 `.reply.wav`。
 - 音频设备用编号指定（`--input-device N`），看编号：
-  `.venv/bin/python -m sounddevice`。麦克风建议用内置的，别用蓝牙耳机的麦。
+  `.venv/bin/python -m sounddevice`。**这个参数只管本机那条老路**——页面接管设备之后
+  在面板「声音」那一节按设备名选。麦克风建议用内置的，别用蓝牙耳机的麦。
 - 首次运行终端会要麦克风权限。
 
 上游自带的体验客户端（只适用本地 s2s，绕开我们的代码）：
@@ -434,7 +455,9 @@ export BILI_SESSDATA=<浏览器 cookie 里的 SESSDATA>
 后台提炼和主动话题都走侧路模型——跑在对话主链路旁边的便宜辅助模型，配置段
 `[speech.side]`。没配地址它们不干活：生长层开着时
 `config validate` 会提醒；主动话题的缺配在运行期日志（`proactive.no_side_model`）
-和 health 探针里报。health 端点本体在 `obs/health.py`，挂到 UI 服务器是阶段 5 的事。
+和 health 探针里报。health 端点本体在 `obs/health.py`，已经挂在界面服务器上
+（`ui/server.py:433`，地址就是界面 URL 后面接 `health`），面板「现场」页的健康卡
+每 5 秒 fetch 的就是它（`panel.js:89`，只在面板开着时轮询）。
 
 ## 阶段 3 体验对比方案
 
@@ -464,11 +487,14 @@ export BILI_SESSDATA=<浏览器 cookie 里的 SESSDATA>
 ## 门禁与测试
 
 ```bash
-scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测 / CLI 冒烟 / profile 覆盖层
+scripts/gate.sh          # 提交前必跑，九步
 ```
 
-装了 s2s 引擎它连集成层一起跑；没装会明说跳过了哪层。CI 上设
-`BILISAMA_GATE_REQUIRE_INTEGRATION=1` 可以把"没装"直接判失败。
+九步是：black / ruff / mypy 全量 / mypy 假装 Windows / 单测 / CLI 冒烟 / profile
+覆盖层，加上两个装了才跑的可选层——s2s 集成层和浏览器界面层。哪层没跑它会在最后一行
+明说，别扫一眼绿色就走。CI 上设 `BILISAMA_GATE_REQUIRE_INTEGRATION=1` 和
+`BILISAMA_GATE_REQUIRE_UI=1` 可以把「没装」直接判失败。细节见
+[CONTRIBUTING.md 的「提交前跑一遍门禁」](../CONTRIBUTING.md)。
 
 真机契约测试——对着真服务器验证协议行为（要求服务器在跑）：
 
@@ -499,4 +525,4 @@ scripts/gate.sh          # 提交前必跑：black / ruff / mypy 全量 / 单测
 | NLTK LookupError | 它的下载器把假 IP 网段当 SSRF 拦了；用 curl 手动下数据包解压到 venv 的 `nltk_data/` |
 | director 刷 `proactive.refresh_failed` | 侧路模型连不上。回退顺序：`[speech.side]` 配置 → path.sh 的阿里 compatible-mode（免 VPN，默认 qwen3.7-flash）→ 内网 LLM（要 EasyConnect + no_proxy 那套）。启动时看 `[侧路]` 那行用的是哪个 |
 | TTS 音色不正常 / 每次回复换嗓子 | CustomVoice 模型没拿到 speaker 就无条件生成（同句实测基频漂 36 Hz）。配置生成脚本已默认钉 `vivian`；重渲染配置并重启服务器即可，换音色设 `tts_speaker` |
-| director 打字「没反应」 | 按顺序看：有没有 `[已注入 弹幕]` 回显（没有＝输入没进来）→ 有没有 `[调度] danmaku → …` 结论（`expired@queued`＝排队超过 20 秒有效期，多半是外放回声让说话权一直放不开——戴耳机或 `--mute-while-speaking`；每答完一句还有 12 秒话痨度冷却，medium 档） |
+| director 打字「没反应」 | 按顺序看：有没有 `[已注入 弹幕]` 回显（没有＝输入没进来）→ 有没有 `[调度] danmaku → …` 结论（`expired@queued`＝排队超过 20 秒有效期，多半是说话权一直没放开。先看「现场」页那张 `echo` 卡：她要是在听自己说话，就有东西在回声消除够不着的地方放她的声音，最常见是 OBS 的「监听并输出」。走本机那条老路的场次才轮到戴耳机或 `--mute-while-speaking`。另外每答完一句还有 12 秒话痨度冷却，medium 档） |

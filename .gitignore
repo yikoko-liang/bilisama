@@ -15,6 +15,8 @@ logs/
 config/s2s/*.json
 desktop/resources/vendor/
 desktop/node_modules/
+# eslint 的安装目录（仓库根的 package.json 装的）；配置和 lock 入库，包不入库
+/node_modules/
 
 # 本地凭据，绝不入库
 path.sh

@@ -56,9 +56,19 @@ models"。
 
 ## 工程侧的对冲
 
-形象层封在 `AvatarRenderer` 接口后面（`load` / `setExpression` / `playMotion` /
-`setMouth`），Live2D 只是它的一个实现。今天在跑的精灵图桌宠走的就是同一个接口。
-真要是商务谈不下来，加一个 PNGTuber 实现是前端一两天的事，P2 一行都不用改。
+形象层确实收在一个接缝后面，但**不是**早先这里写的那个 `AvatarRenderer`——那个接口
+（`load` / `setExpression` / `playMotion` / `setMouth`）全仓不存在，2026-08-25 核过。
+
+今天真正的接缝是 `ui/web/js/renderer.js` 的 `createRenderer(mount, avatar, hooks)`：
+一个工厂函数，按 `[avatar] renderer` 挑实现，返回的句柄只有三个方法——`setState`
+（换视觉状态）、`poke`（被戳一下）、`destroy`。精灵图桌宠和 CSS 兜底都实现它，
+renderer.js:5 的注释也写着「Live2D 到阶段 5 就是这里的另一个分支」。
+
+所以「加一个 PNGTuber 实现是前端一两天的事、P2 一行都不用改」这个估算，前半句仍然
+成立（PNGTuber 只需要 setState 那一路），后半句也成立（P2 只发归一化事件）。但换成
+Live2D 就是另一回事：表情、动作、口型这三条通道现在**一条都没有**，上面那三个方法
+撑不住，接缝得重新设计。谈判兜底的那个「一两天」只能用来估 PNGTuber，不能拿去估
+Live2D——**这一条待验证**，没有人试着照 Live2D 的需求扩过这个接口。
 
 ## 一个反面教材
 

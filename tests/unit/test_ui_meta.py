@@ -7,6 +7,7 @@ in one and not the other, so this is the only thing keeping them honest.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +15,9 @@ from pydantic import BaseModel
 
 from bilisama.config import UI_META, Settings
 from bilisama.config._ui import Audience, Reload
+from bilisama.config.derive import DerivedThresholds
+from bilisama.config.enums import ProviderName
+from bilisama.config.ui_meta import DERIVED_META, FieldMeta, check_ui_meta
 
 # Not surfaced as settings: the version is for migrations, and the active profile
 # gets its own dropdown.
@@ -100,28 +104,93 @@ def test_secret_fields_are_marked() -> None:
     assert not unmarked, f"these look like secrets but are not marked: {unmarked}"
 
 
+def test_every_derived_threshold_is_declared() -> None:
+    """§7.7 gate 3 needs something to guard.
+
+    It used to guard nothing: no entry declared `derived_from`, so the test below
+    skipped every run — the only skip in the unit layer, and a gate that has
+    never once been asked a question. The five names come from `derive()`, which
+    is the single writer.
+    """
+    assert set(DERIVED_META) == {f"_derived.{name}" for name in DerivedThresholds.model_fields}
+    for path, meta in DERIVED_META.items():
+        assert meta.derived_from, f"{path} sits in DERIVED_META without saying what it comes from"
+
+
 def test_derived_fields_are_not_configurable() -> None:
     """Derived values must not also be configurable.
 
     The chattiness thresholds have exactly one source. Let the TOML pin one too and
-    nothing defines whether the file or the slider wins.
-
-    Nothing sets `derived_from` yet, so this checks an empty set and says so rather
-    than passing in silence — a vacuous gate reads exactly like a satisfied one.
-    What actually enforces the rule today is that the five names are absent from the
-    schema and InteractionConfig forbids extras, covered by
-    test_the_toml_cannot_pin_a_derived_threshold in test_derive.py. This one starts
-    biting the moment a derived value gains a UI entry, which is when the marker
-    becomes the only thing standing between it and a second writer.
+    nothing defines whether the file or the slider wins. The other half of the rule
+    — that the five names are absent from the schema, where InteractionConfig
+    forbids extras — is test_the_toml_cannot_pin_a_derived_threshold in
+    test_derive.py.
     """
-    derived = [path for path, meta in UI_META.items() if meta.derived_from]
-    if not derived:
-        pytest.skip(
-            "§7.5: no field declares derived_from — enforcement is currently "
-            "schema absence plus extra='forbid', see test_derive.py"
-        )
-    leaked = [p for p in derived if p in ALL_FIELDS]
+    leaked = [p for p in DERIVED_META if p.split(".", 1)[-1] in ALL_FIELDS or p in ALL_PATHS]
     assert not leaked, f"derived values must not be configurable: {leaked}"
+
+
+def test_derived_entries_name_a_source_that_exists() -> None:
+    """`derived_from` is a field path, not prose: `config show` prints it as the
+    answer to "then where does this number come from" (cli.py)."""
+    for path, meta in DERIVED_META.items():
+        assert meta.derived_from in ALL_FIELDS, f"{path} derives from a field that is gone"
+
+
+def test_the_derived_table_stays_out_of_the_panel_snapshot() -> None:
+    """Separate dicts on purpose. `ui/server.py:149` walks every UI_META path
+    through `getattr(settings, part)`, so a `_derived.*` key in there would raise
+    AttributeError on the config tab rather than render a read-only row."""
+    assert not set(DERIVED_META) & set(UI_META)
+
+
+# ------------------------------------------------------------ the export-time gate
+
+
+def test_the_completeness_gate_covers_what_it_promises() -> None:
+    """§7.7 gate 1 names four keys and the numeric bounds. `group` was the one it
+    never actually looked at — all 108 entries happen to carry one today, so the
+    gap was invisible."""
+    assert check_ui_meta() == []
+
+
+@pytest.mark.parametrize(
+    ("path", "meta", "expected"),
+    [
+        pytest.param("room.room_id", FieldMeta(label="", group="房间"), "label", id="缺 label"),
+        pytest.param("room.room_id", FieldMeta(label="房间号"), "group", id="缺 group"),
+        pytest.param(
+            "speech.dashscope.voice",
+            FieldMeta(label="音色", group="语音", provider_scoped="nope"),
+            "provider_scoped",
+            id="provider_scoped 名字不存在",
+        ),
+        pytest.param(
+            "room.room_id",
+            FieldMeta(label="房间号", group="房间", provider_scoped="dashscope"),
+            "provider_scoped",
+            id="provider_scoped 跟路径对不上",
+        ),
+        pytest.param(
+            "interaction.burst_uniques",
+            FieldMeta(label="人数", group="互动", aliases=("人数",)),
+            "aliases",
+            id="别名跟标签重复",
+        ),
+    ],
+)
+def test_the_gate_catches_a_planted_violation(path: str, meta: FieldMeta, expected: str) -> None:
+    """Every rule is also run over a violation. A gate whose teeth are never
+    exercised is one nobody can trust — same reasoning as
+    tests/unit/test_dev_talk_uplink.py."""
+    complaints = check_ui_meta({path: meta})
+    assert complaints, f"{expected} 这条规则没有咬住"
+    assert any(expected in complaint for complaint in complaints), complaints
+
+
+def test_the_gate_leaves_a_complete_entry_alone() -> None:
+    """A gate that fires on legal metadata is a gate someone switches off."""
+    assert check_ui_meta({"room.room_id": FieldMeta(label="房间号", group="房间")}) == []
 
 
 def test_wizard_steps_are_contiguous() -> None:
@@ -152,6 +221,58 @@ def test_streamer_sees_a_manageable_number_of_controls() -> None:
     """
     controls = _visible_controls(Audience.STREAMER)
     assert len(controls) <= 20, f"streamer view has {len(controls)} controls: {sorted(controls)}"
+
+
+def test_provider_scoped_sections_point_at_their_own_provider() -> None:
+    """Nothing reads this key at runtime yet — `ui/server.py:149` does not pass
+    it to the page, which is why the panel shows DashScope and openai_ga fields
+    side by side. Pinning it here is what keeps it true until something does: a
+    hide rule that has quietly rotted is worse than no hide rule.
+    """
+    scoped = {path: meta.provider_scoped for path, meta in UI_META.items() if meta.provider_scoped}
+    assert scoped, "provider_scoped 一条都没有了——是不是删过头了"
+    for path, provider in scoped.items():
+        assert path.startswith(f"speech.{provider}"), f"{path} 说自己属于 {provider}"
+
+
+def test_every_provider_section_is_scoped() -> None:
+    """The three sections that swap with the provider, none missing.
+
+    Left off one section and the panel would keep showing it after the switch —
+    the one thing this key exists to prevent.
+    """
+    for provider in ProviderName:
+        assert UI_META[f"speech.{provider.value}"].provider_scoped == provider.value
+
+
+def test_search_aliases_add_something_to_search_by() -> None:
+    """`aliases` is the search index (§7.5). An alias that repeats the label or
+    the path adds a row to that index and no way to find anything."""
+    for path, meta in UI_META.items():
+        for alias in meta.aliases:
+            assert alias and alias != meta.label, f"{path} 的别名 {alias!r} 白写了"
+
+
+def test_the_audio_hints_stay_honest_about_having_no_reader() -> None:
+    """Three [audio] fields are written and never read (schema.py:150-180), and
+    their hints now say so. If someone wires one up, this goes red and the hint
+    gets rewritten in the same change — the echo_guard hint promised "520ms 降到
+    90ms" for months while nothing read the field at all.
+
+    Textual rather than clever: `getattr(settings.audio, name)` would slip past,
+    but this is a gate on prose, and the shape it does catch is the shape the
+    wiring would take.
+    """
+    root = Path(__file__).resolve().parents[2] / "src" / "bilisama"
+    readers = [
+        f"{path.relative_to(root)}:{n}"
+        for path in sorted(root.rglob("*.py"))
+        if "config/" not in str(path.relative_to(root))
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        for field in ("audio.input_device", "audio.output_device", "audio.echo_guard")
+        if field in line and not line.lstrip().startswith("#")
+    ]
+    assert not readers, f"[audio] 有人读了，去把 ui_meta 里那三条提示改掉：{readers}"
 
 
 def test_developer_sees_everything() -> None:

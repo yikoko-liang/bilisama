@@ -9,8 +9,11 @@ hosted endpoints.
 Deliberately narrow. The classes below cover what the transport itself can
 tell us: HTTP status at the handshake, close codes, OS-level failures. What a
 specific endpoint sends at its own session cap is NOT in here, because nobody
-has watched one expire yet (debt #19); when that probe lands, its findings
-belong in this table with the close code written down.
+has watched one expire yet (debt #19). Hosted links now rotate a few minutes
+early (providers/hosted.py), so an expiry should stop happening rather than
+stop mattering; if one is ever observed, its close code belongs in this table.
+Note the shape of that risk: 1008 is fatal here, and a server that closes an
+expired session with 1008 would be read as a refusal and never reconnected.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import enum
 
 import websockets
 
-__all__ = ["ErrorClass", "classify_error", "describe"]
+__all__ = ["ErrorClass", "classify_error", "close_code", "describe"]
 
 
 class ErrorClass(enum.StrEnum):
@@ -45,6 +48,23 @@ _BACKOFF_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 # Close codes that mean "you are not welcome" rather than "we got cut off".
 # 1008 policy violation and 1003 unsupported data are both us being wrong.
 _FATAL_CLOSE = frozenset({1003, 1008})
+
+# What websockets reports when the peer never sent a close frame at all — a
+# severed socket rather than a refusal (websockets/frames.py, ABNORMAL_CLOSURE).
+_NO_CLOSE_FRAME = 1006
+
+
+def close_code(exc: websockets.ConnectionClosed) -> int:
+    """The close code, read the way websockets wants it read since 13.1.
+
+    `ConnectionClosed.code` has been a deprecated property since 13.1
+    (websockets/exceptions.py:137) and warns on every read. It is the sole
+    input to "is this 1008 fatal", so the release that removes it would take
+    the fatal branch with it silently. `rcvd` is the supported spelling; None
+    there means no close frame arrived, which is what .code called 1006.
+    """
+    rcvd = exc.rcvd
+    return rcvd.code if rcvd is not None else _NO_CLOSE_FRAME
 
 
 def _status_of(exc: BaseException) -> int | None:
@@ -85,8 +105,7 @@ def classify_error(exc: BaseException) -> ErrorClass:
         return ErrorClass.RETRYABLE
 
     if isinstance(exc, websockets.ConnectionClosed):
-        code = getattr(exc, "code", None) or getattr(getattr(exc, "rcvd", None), "code", None)
-        if code in _FATAL_CLOSE:
+        if close_code(exc) in _FATAL_CLOSE:
             return ErrorClass.FATAL
         return ErrorClass.RETRYABLE
 
