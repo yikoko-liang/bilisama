@@ -405,3 +405,113 @@ def test_extra_handler_output_is_scrubbed_like_the_stream() -> None:
     payload = json.loads(extra.lines[0])
     assert payload["api_key"] == "***"
     assert payload["user_text"] == "<4 chars>"
+
+
+# ------------------------------------------------------------ reserved names
+
+
+def test_a_field_called_event_does_not_blow_up_the_call() -> None:
+    """The exact regression this section exists for.
+
+    `event` was a normal parameter, so a caller wanting to record WHICH event
+    failed wrote the natural thing and got `TypeError: got multiple values for
+    argument 'event'` instead of a log line. It was found inside an except
+    block in director/scheduler.py, where the TypeError killed the very task
+    the handler had been added to keep alive — the failure mode is not a
+    missing line, it is a dead event loop.
+    """
+    log, stream = _capture()
+    log.warning("scheduler.dispatch_failed", event="link.reply_done", reason="没有槽位")
+    payload = _one(stream)
+    assert payload["event"] == "scheduler.dispatch_failed"
+    assert payload["field_event"] == "link.reply_done"
+    assert payload["reason"] == "没有槽位"
+
+
+def test_a_field_called_level_does_not_blow_up_the_call() -> None:
+    """`level` is reserved by _emit for the same reason `event` was."""
+    log, stream = _capture()
+    log.info("persona.growth_written", level="voice", entries=12)
+    payload = _one(stream)
+    assert payload["event"] == "persona.growth_written"
+    assert payload["level"] == "info"
+    assert payload["field_level"] == "voice"
+    assert payload["entries"] == 12
+
+
+@pytest.mark.parametrize("name", ["ts", "logger"])
+def test_a_field_never_overwrites_a_key_the_formatter_always_writes(name: str) -> None:
+    """Renamed rather than dropped, on purpose.
+
+    Dropping would lose whatever the caller thought was worth recording, and
+    silently — the same shape as the scrub that ate `error_text`. Overwriting
+    is worse still: `event` and `logger` are how every downstream consumer
+    groups these lines, in the file and on the panel alike.
+    """
+    log, stream = _capture()
+    log.info("some.event", **{name: "调用方给的值"})
+    payload = _one(stream)
+    assert payload[f"field_{name}"] == "调用方给的值"
+    assert payload[name] != "调用方给的值"
+
+
+@pytest.mark.parametrize("name", ["turn_id", "intent_id", "job_id"])
+def test_an_unbound_correlation_id_leaves_its_name_to_the_caller(name: str) -> None:
+    """Renaming is for collisions, not for reserved words.
+
+    With nothing bound there is no second value to protect, and moving the
+    field to `field_turn_id` would cost the one name every other line in the
+    file is grouped by, for nothing.
+    """
+    log, stream = _capture()
+    log.info("some.event", **{name: "调用方给的值"})
+    payload = _one(stream)
+    assert payload[name] == "调用方给的值"
+    assert f"field_{name}" not in payload
+
+
+def test_a_field_called_exc_keeps_its_name_when_there_is_no_traceback() -> None:
+    """`exc` only collides on the exception path; elsewhere it is an ordinary
+    field name and gets left alone."""
+    log, stream = _capture()
+    log.info("link.retry_scheduled", exc="ConnectionError")
+    payload = _one(stream)
+    assert payload["exc"] == "ConnectionError"
+    assert "field_exc" not in payload
+
+
+def test_a_field_called_exc_survives_the_traceback() -> None:
+    """`exc` collides in the other direction: it is written AFTER the fields,
+    so the traceback used to eat the caller's value rather than the reverse."""
+    log, stream = _capture()
+    try:
+        raise RuntimeError("原始故障")
+    except RuntimeError:
+        log.exception("link.send_failed", exc="调用方自己记的那一份")
+    payload = _one(stream)
+    assert "RuntimeError: 原始故障" in payload["exc"]
+    assert payload["field_exc"] == "调用方自己记的那一份"
+
+
+def test_an_explicit_correlation_id_does_not_shadow_the_bound_one() -> None:
+    """Both are real. The bound id is what every other line in the file is
+    grouped by, so it keeps the canonical name; the caller's — typically a
+    stale frame's turn, named while running inside a newer one — arrives
+    beside it rather than in place of it."""
+    log, stream = _capture()
+    with bind(turn_id="现在这一轮"):
+        log.info("link.stale_frame_dropped", turn_id="迟到那一帧的")
+    payload = _one(stream)
+    assert payload["turn_id"] == "现在这一轮"
+    assert payload["field_turn_id"] == "迟到那一帧的"
+
+
+@pytest.mark.parametrize("method", ["debug", "info", "warning", "error", "exception"])
+def test_every_level_takes_the_event_name_positionally_only(method: str) -> None:
+    """One signature slipping back to a named parameter is enough to bring the
+    TypeError back on that one level only, which is the hardest kind to spot."""
+    import inspect
+
+    sig = inspect.signature(getattr(EventLogger, method))
+    kinds = {p.name: p.kind for p in sig.parameters.values()}
+    assert kinds["event"] is inspect.Parameter.POSITIONAL_ONLY, f"{method} 的 event 不是仅位置"

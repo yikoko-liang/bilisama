@@ -259,9 +259,12 @@ class Scheduler:
                 # floor stayed shut and every later intent sat in the heap
                 # without a verdict, against the module docstring's contract.
                 #
-                # The field is `frame`, not `event`: EventLogger takes the
-                # event NAME as its first parameter, so a field called `event`
-                # raises TypeError inside the handler meant to keep us alive.
+                # `frame` rather than `event` because that is what it is — the
+                # link frame being handled, not an event name. A field called
+                # `event` used to raise TypeError right here, inside the very
+                # handler meant to keep this task alive; EventLogger takes the
+                # event name positional-only now, so the trap is gone and this
+                # name is a choice again.
                 log.exception(
                     "scheduler.event_failed",
                     frame=type(event).__name__,

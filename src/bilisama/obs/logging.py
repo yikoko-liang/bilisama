@@ -151,8 +151,25 @@ class _JsonFormatter(logging.Formatter):
 
         extra = getattr(record, "fields", None)
         if isinstance(extra, dict):
+            # A field may be named like a key this formatter writes, and the
+            # collision loses data in whichever direction it happens: `event`
+            # and `logger` would overwrite the two keys every consumer groups
+            # by, while `exc` lands after the fields and would overwrite the
+            # caller's. Prefixed rather than dropped — dropping is the same
+            # silent-loss shape that folding `error_text` into `<N chars>`
+            # turned out to be. Only on a real collision, so an explicit
+            # turn_id with nothing bound still reads as `turn_id`.
+            taken = set(payload) | ({"exc"} if record.exc_info else set())
             for key, value in extra.items():
-                payload[key] = _scrub(key, value, log_viewer_content=self._log_viewer_content)
+                # Scrubbed under the name the caller wrote: every redaction
+                # rule reads field names, so judging a renamed key would let a
+                # collision walk a credential straight past them.
+                scrubbed = _scrub(key, value, log_viewer_content=self._log_viewer_content)
+                name = key
+                while name in taken:
+                    name = f"field_{name}"
+                taken.add(name)
+                payload[name] = scrubbed
 
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
@@ -172,22 +189,31 @@ class EventLogger:
     def __init__(self, name: str) -> None:
         self._logger = logging.getLogger(name)
 
-    def _emit(self, level: int, event: str, **fields: Any) -> None:
+    # The event name is positional-only on every one of these, and that slash
+    # is load-bearing. As a normal parameter it reserved `event` (and `level`
+    # on _emit) as field names, so the natural way to record WHICH event failed
+    # — log.exception("scheduler.event_failed", event=frame) — raised TypeError
+    # instead of logging. It was found inside an except block in
+    # director/scheduler.py, where the TypeError killed the very task the
+    # handler existed to keep alive: a swallowed field would have been a lost
+    # line, this was a dead event loop.
+
+    def _emit(self, level: int, event: str, /, **fields: Any) -> None:
         self._logger.log(level, event, extra={"fields": fields})
 
-    def debug(self, event: str, **fields: Any) -> None:
+    def debug(self, event: str, /, **fields: Any) -> None:
         self._emit(logging.DEBUG, event, **fields)
 
-    def info(self, event: str, **fields: Any) -> None:
+    def info(self, event: str, /, **fields: Any) -> None:
         self._emit(logging.INFO, event, **fields)
 
-    def warning(self, event: str, **fields: Any) -> None:
+    def warning(self, event: str, /, **fields: Any) -> None:
         self._emit(logging.WARNING, event, **fields)
 
-    def error(self, event: str, **fields: Any) -> None:
+    def error(self, event: str, /, **fields: Any) -> None:
         self._emit(logging.ERROR, event, **fields)
 
-    def exception(self, event: str, **fields: Any) -> None:
+    def exception(self, event: str, /, **fields: Any) -> None:
         self._logger.exception(event, extra={"fields": fields})
 
 
