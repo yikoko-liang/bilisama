@@ -284,7 +284,21 @@ export function createPanel({ send }) {
 
   // ------------------------------------------------------------ logs tab
 
+  // A healthy session logs almost nothing. Only 15 call sites in the whole of
+  // src log at info, and the per-turn detail a streamer actually watches —
+  // dispatch verdicts, context pushes, barge-ins — goes to the terminal through
+  // print() and never enters the logging stream at all. Measured on three real
+  // sessions: one JSON line each, against 14 to 99 printed ones. So an empty
+  // log pane is the normal state, and a blank box reads as a broken feature.
+  const logEmpty = el(
+    "p",
+    "empty",
+    "这一场还没有日志。这里只在出问题时才有内容——调度结论和打断在「对话」页看。",
+  );
+  loglinesEl.appendChild(logEmpty);
+
   const pushLog = (node, rank) => {
+    logEmpty.remove();
     node.dataset.rank = String(rank);
     node.hidden = rank < (LOG_RANK[levelSel.value] ?? 1);
     loglinesEl.appendChild(node);
@@ -713,7 +727,7 @@ export function createPanel({ send }) {
         panicked = Boolean(data.panicked);
         panicBtn.dataset.panicked = String(panicked);
         panicBtn.setAttribute("aria-pressed", String(panicked));
-        panicBtn.textContent = panicked ? "恢复说话" : "紧急闭麦";
+        panicBtn.textContent = panicked ? "恢复说话" : "紧急叫停";
         renderSpeak(data.speak);
         applySpeakToConfig(data.speak);
       }

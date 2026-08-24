@@ -560,7 +560,10 @@ def test_the_panic_command_reaches_the_scheduler_and_says_so(
     dev_talk._apply_panic(False, panics, said.append)
 
     assert panics.calls == ["mute", "release"]
-    assert any("闭麦" in line for line in said)
+    # 「叫停」不是「闭麦」：这个开关停的是她，麦克风一根汗毛都不碰，而
+    # --mute-while-speaking 停的才是麦克风。两个词曾经在同一个程序里指相反的事。
+    assert any("叫停" in line for line in said)
+    assert not any("闭麦" in line for line in said)
     assert any("恢复" in line for line in said)
 
 

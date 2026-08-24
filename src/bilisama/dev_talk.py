@@ -949,7 +949,17 @@ class _Panics(Protocol):
 
 # Whole lines, not prefixes: the console is a danmaku box first, and a prefix
 # match would swallow 「/mute now」 as if it had been understood.
-_PANIC_COMMANDS = {"/mute": True, "/闭麦": True, "/unmute": False, "/开麦": False}
+# 「闭麦」两个字在这个程序里曾经指两件相反的事：这个开关停的是**她**，而
+# --mute-while-speaking 停的是**麦克风**。按钮和提示都改成「叫停」了，旧的两个
+# 中文别名留着不删——直播中途手一抖打了旧的，不该什么都不发生。
+_PANIC_COMMANDS = {
+    "/mute": True,
+    "/叫停": True,
+    "/闭麦": True,
+    "/unmute": False,
+    "/恢复": False,
+    "/开麦": False,
+}
 
 
 def _panic_command(text: str) -> bool | None:
@@ -974,7 +984,7 @@ def _apply_panic(mute: bool, panics: _Panics, say: Callable[[str], None]) -> Non
     """
     if mute:
         panics.panic_mute()
-        say("紧急闭麦（终端）")
+        say("紧急叫停（终端）：她不再开口，直到 /unmute")
     else:
         panics.release_panic()
         say("恢复说话（终端）")
@@ -1461,7 +1471,7 @@ async def run_director(args: argparse.Namespace) -> int:
 
     _USAGE = (
         "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额；"
-        "/mute 紧急闭麦，/unmute 恢复"
+        "/mute 紧急叫停（让她住嘴，不碰麦克风），/unmute 恢复"
     )
     _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
 
@@ -1480,7 +1490,7 @@ async def run_director(args: argparse.Namespace) -> int:
         panic = _panic_command(line)
         if panic is not None:
             # Backlog #47: this is the only entrance without a browser.
-            _apply_panic(panic, scheduler, lambda said: print(f"[闭麦] {said}"))
+            _apply_panic(panic, scheduler, lambda said: print(f"[叫停] {said}"))
             sync_panel()  # the page's red button must not disagree with the terminal
             return
         event = _parse_console_event(line, next(seq))
@@ -1590,7 +1600,7 @@ async def run_director(args: argparse.Namespace) -> int:
                 if "panic_mute" in data:
                     if bool(data["panic_mute"]):
                         scheduler.panic_mute()
-                        print("[面板] 紧急闭麦")
+                        print("[面板] 紧急叫停")
                     else:
                         scheduler.release_panic()
                         print("[面板] 恢复说话")

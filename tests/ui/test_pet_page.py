@@ -1035,3 +1035,61 @@ async def test_a_page_older_than_its_server_says_so_instead_of_failing_quietly(
         assert flagged == "1", "版本对不上却没给日志页签打提醒角标"
     finally:
         await context.close()
+
+
+async def test_the_panic_button_says_what_it_actually_does(page: Page, harness: Harness) -> None:
+    """It stops HER, and it never touches the microphone.
+
+    The label used to read 「紧急闭麦」. 闭麦 means muting your own microphone,
+    which is the opposite of what the button does — and the same word was
+    already spoken for by `--mute-while-speaking`, which really does mute the
+    microphone. One word, two opposite meanings, in one program.
+    """
+    await _wait(page, "document.title.includes('米娅')")
+    label = await page.locator("#p-panic").inner_text()
+    assert label == "紧急叫停", f"按钮文案又变回去了：{label}"
+    assert "闭麦" not in label
+    title = await page.locator("#p-panic").get_attribute("title")
+    assert title is not None and "不碰麦克风" in title, "没说清它不关麦克风"
+
+    # The button lives in the panel header, which is off-screen until opened.
+    await page.click("#corner")
+    await _wait(page, "document.getElementById('panel').classList.contains('open')")
+    await page.click("#p-panic")
+    for _ in range(100):
+        hit = [
+            data
+            for event, data in harness.calls
+            if event is ClientEvent.PANEL_SET and "panic_mute" in data
+        ]
+        if hit:
+            assert hit[0]["panic_mute"] is True
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("点了叫停，服务端什么也没收到")
+
+
+async def test_an_empty_log_pane_explains_itself(page: Page, harness: Harness) -> None:
+    """A healthy session logs almost nothing, so blank is the normal state.
+
+    Only 15 call sites in src log at info, and the per-turn detail a streamer
+    watches — dispatch verdicts, context pushes, barge-ins — goes to the
+    terminal through print() and never enters the logging stream. Three real
+    sessions measured one JSON line each against 14 to 99 printed ones. A blank
+    box reads as a broken feature; this one says where to look instead.
+    """
+    await _wait(page, "document.title.includes('米娅')")
+    empty = await page.locator("#loglines .empty").inner_text()
+    assert "「对话」页" in empty, f"空状态没指路：{empty}"
+
+    harness.hub.broadcast(
+        ServerEvent.LOG_LINE,
+        {
+            "line": '{"ts":"2026-08-25T06:00:00+0800","level":"warning",'
+            '"event":"probe.something_broke","logger":"probe","error_text":"人话原因"}'
+        },
+    )
+    await _wait(page, "document.querySelectorAll('#loglines .logline').length > 0")
+    assert await page.locator("#loglines .empty").count() == 0, "来了日志，空状态没让位"
+    text = await page.locator("#loglines").inner_text()
+    assert "人话原因" in text, f"error_text 又被脱敏吃掉了：{text}"

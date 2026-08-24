@@ -742,3 +742,25 @@ def test_the_holders_answer_comes_back_to_the_panel() -> None:
     assert seen[0]["data"]["inputs"] == devices["inputs"]
     assert seen[1]["data"]["rms"] == 0.4
     assert [event for event, _data in calls] == [ClientEvent.AUDIO_REPORT] * 3
+
+
+def test_the_panic_control_never_calls_itself_a_microphone_switch() -> None:
+    """It stops HER; the microphone is not touched.
+
+    The label read 「紧急闭麦」 until 2026-08-25. 闭麦 means muting your own
+    microphone, which is the opposite of what the button does — and the word was
+    already taken by `--mute-while-speaking`, which really does mute the
+    microphone during playback. One word, two opposite meanings, in one program,
+    on the one control a streamer reaches for when something has gone wrong.
+
+    Asserted against the file rather than the rendered page: the browser caches
+    static assets between tests, so a page-level check does not go red when this
+    line changes.
+    """
+    page = (Path(__file__).resolve().parents[2] / "src/bilisama/ui/web/index.html").read_text(
+        encoding="utf-8"
+    )
+    button = next(line for line in page.splitlines() if 'id="p-panic"' in line)
+    assert "紧急叫停" in button, f"按钮文案变了：{button.strip()}"
+    assert "闭麦" not in button, f"又叫回「闭麦」了，那是关麦克风的意思：{button.strip()}"
+    assert "不碰麦克风" in button, "title 里没写清它不关麦克风"
