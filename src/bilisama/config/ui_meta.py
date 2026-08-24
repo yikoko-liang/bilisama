@@ -167,7 +167,8 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "audio.output_route": FieldMeta(
         label="输出方式",
-        hint="virtual 走虚拟声卡给 OBS，AI 的声音不会进你的麦克风；direct 必须戴耳机",
+        hint="这两个值现在都不生效，声音去哪儿由「声音」那一节的扬声器决定；"
+        "别让 OBS 把她的声音再放出来，那条路回声消除够不着",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
         group="音频",

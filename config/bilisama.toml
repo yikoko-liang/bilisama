@@ -71,7 +71,10 @@ api_key_ref = "tts"
 [audio]
 input_device = "auto"
 output_device = "auto"
-output_route = "virtual"                # virtual 走虚拟声卡给 OBS；direct 必须戴耳机
+# direct = 她的声音直接从桌宠壳出扬声器，回声消除才盖得住。virtual（走虚拟声卡给 OBS）
+# 是 2026-08-24 之前的答案，那时没有回声消除；现在它反而是唯一会把消除绕开的路。
+# 注意这两个字段目前运行期没有读者，真正决定声音去哪儿的是面板「声音」那一节。
+output_route = "direct"
 echo_guard = "duck"                     # 主播一开口先把 AI 音量压下去
 
 [safety]

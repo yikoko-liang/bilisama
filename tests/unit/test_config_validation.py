@@ -30,8 +30,7 @@ config_version = 1
 [speech.s2s]
 llm_model = "our-s2t-v1"
 [audio]
-output_route = "direct"
-echo_guard = "off"
+output_route = "virtual"
 """
 
 _CLEAN = """
@@ -81,7 +80,7 @@ def test_load_refuses_a_fatal_config(tmp_path: Path) -> None:
 def test_load_lets_a_warning_through(tmp_path: Path) -> None:
     """Only fatal problems refuse. A warning still starts."""
     settings = load(_write(tmp_path, _WARN_ONLY))
-    assert settings.audio.output_route == "direct"
+    assert settings.audio.output_route == "virtual"
     assert [p.field for p in check(settings)] == ["audio.output_route"]
 
 

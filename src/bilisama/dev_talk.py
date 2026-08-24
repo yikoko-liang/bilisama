@@ -747,7 +747,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
-    from bilisama.ui.audio import AudioBroker, PlaybackTally
+    from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
     from bilisama.ui.config_edit import apply_panel_edits
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
     from bilisama.ui.hub import UiHub, VoiceSignals
@@ -1186,6 +1186,17 @@ async def run_director(args: argparse.Namespace) -> int:
             # create_ui_app wires the announcement and the panel relay; the
             # only thing this end owns is which devices get parked.
             broker = AudioBroker(local=local_pair)
+            # The one question Chromium cannot answer: is she hearing herself?
+            # Its canceller only removes what the shell played, so a reply
+            # routed back out by OBS — the very setup this product's config
+            # page recommends — echoes with nothing complaining anywhere.
+            echo = EchoProbe()
+            registry.register("echo", echo.status)
+
+            async def uplink(pcm: bytes) -> None:
+                echo.note_captured(pcm)
+                await speech.push_audio(pcm)
+
             # The gate SpeakingFloor has always had and nothing ever fed with
             # real receipts. Counting segments rather than watching the last
             # one is the whole point — see PlaybackTally (ledger #41).
@@ -1285,7 +1296,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.PLAYBACK_CANCELLED: on_playback_cancelled,
                     },
                     broker=broker,
-                    on_audio=speech.push_audio,
+                    on_audio=uplink,
                     hello=hello,
                     # <data home>/bilisama/skins — user-imported packs, shadowing
                     # the packaged ones. Endpoint file and skins share the roof.
@@ -1558,6 +1569,12 @@ async def run_director(args: argparse.Namespace) -> int:
                 """
                 async for ev in speech.events():
                     if isinstance(ev, link.ReplyAudioDelta):
+                        if not ev.handle.stale:
+                            # Only what actually goes out: a stale chunk is
+                            # dropped below and never reaches a speaker, so
+                            # counting it would invent an echo of audio nobody
+                            # played.
+                            echo.note_played(ev.pcm)
                         if ev.handle.stale:
                             # Cancelling marks the handle, but audio already
                             # decoded and sitting in this fanout view keeps

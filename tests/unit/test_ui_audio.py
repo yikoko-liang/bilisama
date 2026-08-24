@@ -8,7 +8,11 @@ sounddevice pair keeps running exactly as it did before any of this existed.
 
 from __future__ import annotations
 
-from bilisama.ui.audio import AudioBroker, PlaybackTally
+import math
+import random
+import struct
+
+from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
 
 
 class _Local:
@@ -193,3 +197,99 @@ async def test_the_first_claimant_is_not_hung_up_on() -> None:
     broker = AudioBroker()
     await broker.claim("shell", send=lambda _pcm: None, close=lambda: hung_up.append("shell"))
     assert hung_up == []
+
+
+# ------------------------------------------------------------ hearing herself
+
+
+def _tone(seconds: float, rate: int, amp: int = 9000, hz: int = 220) -> bytes:
+    n = max(1, int(rate * seconds))
+    if amp == 0:
+        return b"\x00\x00" * n
+    return struct.pack(
+        f"<{n}h", *(int(amp * math.sin(2 * math.pi * hz * i / rate)) for i in range(n))
+    )
+
+
+def _converse(probe: EchoProbe, *, leak: float, lag_s: float = 0.3, seed: int = 7) -> None:
+    """Drive both streams the way a live session does: interleaved, in step.
+
+    The speaking pattern is deliberately irregular. A regular one correlates
+    with itself at every multiple of its period, which would let a broken
+    probe look right.
+    """
+    rnd = random.Random(seed)
+    plan = [(rnd.choice([0.18, 0.31, 0.47, 0.62]), rnd.random() < 0.65) for _ in range(30)]
+    down, up = bytearray(), bytearray()
+    for duration, speaking in plan:
+        down += _tone(duration, 24000, amp=9000 if speaking else 0)
+        up += _tone(duration, 16000, amp=int(9000 * leak) if speaking else 0)
+    up = bytearray(_tone(lag_s, 16000, amp=0)) + up  # the trip through the air
+
+    step_down, step_up = 24000 * 2 * 20 // 1000, 16000 * 2 * 20 // 1000
+    for k in range(max(len(down) // step_down, len(up) // step_up)):
+        probe.note_played(bytes(down[k * step_down : (k + 1) * step_down]))
+        probe.note_captured(bytes(up[k * step_up : (k + 1) * step_up]))
+
+
+def test_a_clean_session_reports_no_echo() -> None:
+    """Cancellation working, or headphones on: the mic never hears her."""
+    probe = EchoProbe()
+    _converse(probe, leak=0.0)
+    reading = probe.reading()
+    assert reading is not None
+    assert reading.verdict == "ok", reading
+
+
+def test_her_voice_coming_back_is_caught() -> None:
+    """The case Chromium cannot report: her reply reaches the microphone by a
+    route its canceller never saw — OBS monitoring it back out, most likely.
+    Nothing errors, the panel says cancellation is on, and turn detection
+    starts firing on her own voice."""
+    probe = EchoProbe()
+    _converse(probe, leak=1.0)
+    reading = probe.reading()
+    assert reading is not None
+    assert reading.verdict == "leaking", reading
+
+
+def test_a_faint_echo_counts_the_same_as_a_loud_one() -> None:
+    """Amplitude-blind on purpose. A quiet leak false-triggers turn detection
+    just as well, so 「any of her voice is coming back」 is the question."""
+    probe = EchoProbe()
+    _converse(probe, leak=0.15)
+    reading = probe.reading()
+    assert reading is not None
+    assert reading.verdict == "leaking", reading
+
+
+def test_silence_is_not_evidence() -> None:
+    """She has not spoken, so the mic has no echo of hers to contain. Reporting
+    「ok」 off that would be a clean bill of health nobody earned."""
+    probe = EchoProbe()
+    for _ in range(400):
+        probe.note_played(_tone(0.02, 24000, amp=0))
+        probe.note_captured(_tone(0.02, 16000, amp=3000))
+    assert probe.reading() is None
+
+
+def test_too_little_history_says_nothing() -> None:
+    probe = EchoProbe()
+    _converse(probe, leak=1.0)
+    fresh = EchoProbe()
+    fresh.note_played(_tone(0.1, 24000))
+    assert fresh.reading() is None, "刚开始就下结论，等于拿噪声当证据"
+
+
+def test_the_health_card_stays_calm_about_a_suspicion() -> None:
+    """Only an outright leak marks the card unhealthy. The streamer answering
+    her produces genuine correlation, and a card that cries wolf gets ignored."""
+    quiet = EchoProbe()
+    _converse(quiet, leak=0.0)
+    assert quiet.status()["ok"] is True
+
+    loud = EchoProbe()
+    _converse(loud, leak=1.0)
+    card = loud.status()
+    assert card["ok"] is False
+    assert "漏" in str(card["state"]), card

@@ -35,8 +35,7 @@ config_version = 1
 [speech.s2s]
 llm_model = "our-s2t-v1"
 [audio]
-output_route = "direct"
-echo_guard = "off"
+output_route = "virtual"
 """
 
 # One advisory and one fatal, in that order, so the exit code cannot be read off
@@ -46,8 +45,7 @@ config_version = 1
 [speech.s2s]
 llm_model = ""
 [audio]
-output_route = "direct"
-echo_guard = "off"
+output_route = "virtual"
 """
 
 # A hosted provider that is otherwise complete, so render-s2s reaches its own

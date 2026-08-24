@@ -41,7 +41,7 @@ def _settings(
     patches: tuple[Patch, ...] = ("text_modality", "raw_instructions"),
     endpoint: str = "wss://example.invalid/realtime",
     expression_source: ExpressionSource = "tag",
-    output_route: OutputRoute = "virtual",
+    output_route: OutputRoute = "direct",
     echo_guard: EchoGuard = "duck",
     room_id: int = 0,
     credential_ref: str = "",
@@ -105,7 +105,9 @@ def _resolves(path: str) -> bool:
 # see every problem `check` can produce, not just the ones they happen to trip.
 BROKEN_ONE_WAY_EACH = {
     "avatar.expression_source": _settings(patches=("raw_instructions",), expression_source="tag"),
-    "audio.output_route": _settings(output_route="direct", echo_guard="off"),
+    # virtual routes her voice out through something that is not the shell,
+    # which is exactly what the canceller cannot see.
+    "audio.output_route": _settings(output_route="virtual"),
     "speech.s2s.llm_model": _settings(llm_model=""),
     "speech.dashscope.endpoint": _settings(
         provider=ProviderName.DASHSCOPE, endpoint="", expression_source="lexicon"
@@ -192,17 +194,22 @@ def test_inline_tags_flagged_only_when_the_provider_owns_tts(
     assert ("avatar.expression_source" in _fields(s)) is flagged
 
 
-def test_echo_guard_problem_is_advisory_not_fatal() -> None:
-    """Only the pair is a problem, so fixing either side clears it.
+def test_routing_her_voice_out_of_the_shell_is_advisory_not_fatal() -> None:
+    """Sending playback down a virtual cable defeats echo cancellation.
 
-    Advisory on purpose: plenty of people run direct output on headphones, and
-    refusing to start would be wrong for them.
+    It used to be the recommended setup, back when nothing cancelled echo and
+    keeping her voice out of the air was the whole trick. Now whatever plays
+    the cable back out is another process, and the canceller only subtracts
+    what the shell itself played.
+
+    Advisory, not fatal: someone routing to OBS with headphones on is fine,
+    and refusing to start would be wrong for them.
     """
-    problem = _one(_settings(output_route="direct", echo_guard="off"), "audio.output_route")
+    problem = _one(_settings(output_route="virtual"), "audio.output_route")
     assert problem.fatal is False
-
-    assert check(_settings(output_route="direct", echo_guard="duck")) == []
-    assert check(_settings(output_route="virtual", echo_guard="off")) == []
+    assert check(_settings(output_route="direct")) == []
+    # echo_guard has nothing to do with it either way.
+    assert check(_settings(output_route="direct", echo_guard="off")) == []
 
 
 @pytest.mark.parametrize("mode", ["collect", "on"])
@@ -242,8 +249,7 @@ def test_problems_accumulate_and_never_short_circuit() -> None:
     """
     s = _settings(
         llm_model="",
-        output_route="direct",
-        echo_guard="off",
+        output_route="virtual",
         room_id=12345,
     )
     problems = check(s)

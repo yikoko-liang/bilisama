@@ -98,12 +98,13 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     # sends people tuning VAD thresholds that were never the problem.
     #
     # Neither field below has a runtime reader; this advice is all they do.
-    if s.audio.output_route == "direct" and s.audio.echo_guard == "off":
+    if s.audio.output_route == "virtual":
         problems.append(
             ConfigProblem(
                 field="audio.output_route",
-                message="AI 的声音会进你的麦克风，判停会一直误触发。",
-                fix="改用虚拟声卡输出，或者戴耳机并打开抢跑静音。",
+                message="「走虚拟声卡给 OBS」这条路会绕过回声消除。",
+                fix="让她的声音从桌宠壳直接出扬声器；OBS 只采集、别开「监听并输出」。"
+                "面板「现场」页的回声卡会告诉你有没有漏。",
                 fatal=False,
             )
         )

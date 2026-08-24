@@ -170,7 +170,12 @@ class AudioConfig(BaseModel):
 
     input_device: str = Field("auto")
     output_device: str = Field("auto")
-    output_route: Literal["virtual", "direct"] = Field("virtual")
+    # "direct" since 2026-08-24. Routing her voice through a virtual cable
+    # was right when nothing cancelled echo — it kept her out of the air
+    # entirely. Now it is the one path that DEFEATS cancellation: whatever
+    # plays the cable back out is another process, and the canceller only
+    # subtracts what the shell itself played.
+    output_route: Literal["virtual", "direct"] = Field("direct")
     echo_guard: Literal["duck", "off"] = Field("duck")
 
 
