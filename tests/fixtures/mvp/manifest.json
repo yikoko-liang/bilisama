@@ -161,7 +161,7 @@
       "module": "functional",
       "mode": "sandbox",
       "feature": "gift_thanks",
-      "title": "免费、小额、中额、大额礼物和连击",
+      "title": "普通、小额、中额、大额礼物和连击",
       "fixture": "gift_combo.jsonl",
       "stimulus": "分别送入银瓜子礼物、1 元、10 元礼物和同一 combo 连击。",
       "expected": "礼物按金额进入不同优先级；连击聚合成一次答谢；同一组合不会重复刷屏。",
@@ -616,7 +616,7 @@
       "feature": "priority_ladder",
       "title": "同秒优先级阶梯",
       "fixture": "mvp/priority_collision.jsonl",
-      "stimulus": "同一秒送入弹幕、免费/中额/大额礼物、VIP、上舰和 SC。",
+      "stimulus": "同一秒送入弹幕、普通/中额/大额礼物、VIP、上舰和 SC。",
       "expected": "主播语音 > SC > 大额礼物 > 上舰 > VIP/中额礼物 > 弹幕/小额礼物 > 主动话题。",
       "gate": "高优先级只抢占严格更低级；同级排队；付费被打断后重排。"
     },

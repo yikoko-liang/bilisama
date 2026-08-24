@@ -1,11 +1,16 @@
-"""The panel write path: only honest-LIVE leaves change, everything else refuses."""
+"""The panel write paths: direct-live fields and explicit runtime-hook fields."""
 
 from __future__ import annotations
 
 import pytest
 
 from bilisama.config.schema import RuntimeConfig, Settings
-from bilisama.ui.config_edit import ConfigEditError, apply_config_edit, field_control
+from bilisama.ui.config_edit import (
+    ConfigEditError,
+    apply_config_edit,
+    apply_runtime_config_edit,
+    field_control,
+)
 
 
 def test_unknown_path_refused() -> None:
@@ -27,7 +32,16 @@ def test_secret_refused_before_anything_else() -> None:
 
 def test_non_live_field_refused_with_reload_reason() -> None:
     with pytest.raises(ConfigEditError, match="直播中改不了"):
-        apply_config_edit(Settings(), "interaction.chattiness", "high")
+        apply_config_edit(Settings(), "persona.id", "miku")
+
+
+def test_runtime_hook_path_accepts_a_restart_annotated_field() -> None:
+    settings = Settings()
+
+    _meta, applied = apply_runtime_config_edit(settings, "persona.id", "miku")
+
+    assert applied == "miku"
+    assert settings.persona.id == "miku"
 
 
 def test_section_header_refused() -> None:
@@ -61,6 +75,18 @@ def test_literal_edit_applies() -> None:
     _, applied = apply_config_edit(settings, "runtime.log_level", "debug")
     assert applied == "debug"
     assert settings.runtime.log_level == "debug"
+
+
+def test_stream_intro_is_a_live_editable_room_field() -> None:
+    settings = Settings()
+    meta, applied = apply_config_edit(
+        settings,
+        "room.stream_intro",
+        "今晚测试 ComfyUI 工作流和显存优化",
+    )
+    assert applied == "今晚测试 ComfyUI 工作流和显存优化"
+    assert settings.room.stream_intro == applied
+    assert meta.reload.value == "live"
 
 
 def test_literal_edit_rejects_with_choices_listed() -> None:

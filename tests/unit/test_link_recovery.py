@@ -29,6 +29,10 @@ from tests.fakes.mock_realtime import MockRealtimeServer, Script
 from tests.unit.test_realtime_client import _next_event
 
 
+def _is_suspended(hosted: HostedLink) -> bool:
+    return hosted.suspended
+
+
 async def test_a_dropped_socket_comes_back_and_the_session_is_restored() -> None:
     """The headline: drop the link, and without anyone above lifting a finger
     the client reopens it and the adapter re-sends bootstrap plus context."""
@@ -92,6 +96,34 @@ async def test_a_deliberate_close_does_not_reconnect() -> None:
         # and no task is left running; a resurrected socket would show up as a
         # second connection in the recorded traffic.
         assert server.recorded.count("session.update") <= 1
+
+
+async def test_pause_suspends_transport_and_resume_restores_session() -> None:
+    clock = FakeClock()
+    async with MockRealtimeServer(
+        caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=Script(delta_chunks=1)
+    ) as server:
+        hosted = HostedLink(
+            server.url,
+            ProviderName.DASHSCOPE,
+            clock=clock,
+            turn=HostedTurnConfig(),
+            auto_reconnect=True,
+        )
+        await hosted.connect()
+        await hosted.set_context("你是米娅。")
+        before = server.recorded.count("session.update")
+
+        await hosted.suspend()
+        await clock.advance(181.0)
+        assert _is_suspended(hosted)
+
+        await hosted.resume()
+        assert not _is_suspended(hosted)
+        after = server.recorded.count("session.update")
+        assert after >= before + 2, "resume must restore bootstrap and persona"
+
+        await hosted.aclose()
 
 
 async def test_rotation_retires_the_socket_before_the_cap() -> None:
@@ -194,6 +226,7 @@ def test_the_speaker_never_falls_more_than_the_cap_behind() -> None:
     speaker = _Speaker.__new__(_Speaker)  # no PortAudio device in a unit test
     speaker._buffer = bytearray()
     speaker._dropped_s = 0.0
+    speaker._enabled = True
     speaker._lock = __import__("threading").Lock()
     speaker._stream = object()  # pretend a device is attached
 
@@ -215,6 +248,7 @@ def test_a_muted_run_does_not_latch_the_playback_gate() -> None:
     speaker = _Speaker.__new__(_Speaker)
     speaker._buffer = bytearray()
     speaker._dropped_s = 0.0
+    speaker._enabled = True
     speaker._lock = __import__("threading").Lock()
     speaker._stream = None
 
@@ -238,6 +272,7 @@ def test_dropping_backlog_keeps_sample_alignment() -> None:
     speaker = _Speaker.__new__(_Speaker)
     speaker._buffer = bytearray()
     speaker._dropped_s = 0.0
+    speaker._enabled = True
     speaker._lock = __import__("threading").Lock()
     speaker._stream = object()
 
@@ -256,3 +291,82 @@ def test_dropping_backlog_keeps_sample_alignment() -> None:
     assert got[0] in ramp, f"first surviving sample {got[0]} is not a real sample"
     head = ramp.index(got[0])
     assert list(got[:50]) == ramp[head : head + 50], "samples are out of phase"
+
+
+def test_disabling_speaker_flushes_current_audio_and_blocks_later_chunks() -> None:
+    from bilisama.dev_talk import _Speaker
+
+    speaker = _Speaker.__new__(_Speaker)
+    speaker._buffer = bytearray()
+    speaker._dropped_s = 0.0
+    speaker._enabled = True
+    speaker._lock = __import__("threading").Lock()
+    speaker._stream = object()
+
+    speaker.play(b"first reply")
+    assert speaker.busy
+    speaker.set_enabled(False)
+    assert (speaker.enabled, bytes(speaker._buffer)) == (False, b"")
+    speaker.play(b"must stay muted")
+    assert bytes(speaker._buffer) == b""
+    speaker.set_enabled(True)
+    speaker.play(b"audible again")
+    assert speaker.enabled is True
+    assert bytes(speaker._buffer) == b"audible again"
+
+
+def test_speaker_reopens_when_the_macos_default_output_changes() -> None:
+    """A Bluetooth headset selected after startup must not leave PCM on the
+    old PortAudio stream until the whole companion is restarted."""
+    from bilisama.dev_talk import _Speaker
+
+    class FakeStream:
+        def __init__(self, device: int) -> None:
+            self.device = device
+            self.active = True
+            self.started = False
+            self.closed = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.active = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeDefault:
+        device = (0, 2)
+
+    class FakeSoundDevice:
+        default = FakeDefault()
+
+        def __init__(self) -> None:
+            self.created: list[FakeStream] = []
+
+        def RawOutputStream(self, **kwargs: object) -> FakeStream:
+            device = kwargs["device"]
+            assert isinstance(device, int)
+            stream = FakeStream(device)
+            self.created.append(stream)
+            return stream
+
+    old = FakeStream(1)
+    sounddevice = FakeSoundDevice()
+    speaker = _Speaker.__new__(_Speaker)
+    speaker._buffer = bytearray()
+    speaker._dropped_s = 0.0
+    speaker._enabled = True
+    speaker._lock = __import__("threading").Lock()
+    speaker._sounddevice = sounddevice
+    speaker._requested_device = None
+    speaker._opened_device = 1
+    speaker._stream = old
+
+    message = speaker.refresh_default_device()
+
+    assert message == "默认扬声器已切换到设备 2"
+    assert old.closed is True
+    assert speaker._stream is sounddevice.created[0]
+    assert speaker._stream.started is True

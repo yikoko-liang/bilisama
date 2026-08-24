@@ -72,6 +72,7 @@ class S2SLink:
         self._codec = profile.codec
         self._text_replies = text_replies
         self._context = ""
+        self._suspended = False
 
     async def connect(self) -> None:
         """Open the socket and restore whatever this link already knew.
@@ -94,6 +95,18 @@ class S2SLink:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def suspend(self) -> None:
+        if self._suspended:
+            return
+        self._suspended = True
+        await self._client.aclose()
+
+    async def resume(self) -> None:
+        if not self._suspended:
+            return
+        await self.connect()
+        self._suspended = False
 
     async def set_context(self, instructions: str) -> None:
         # text_only pins the SESSION, which is what the implicit VAD turn obeys.

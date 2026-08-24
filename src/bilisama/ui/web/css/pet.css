@@ -51,19 +51,6 @@ body.shell .pet-mount {
   cursor: grab;
 }
 
-/* On the desktop the icon has no panel to belong to: at rest it is one grey
-   glyph floating in nothing, which reads as a smudge rather than a control.
-   It appears when the pointer enters the window and goes away with it. */
-body.shell .corner {
-  opacity: 0;
-  pointer-events: none;
-}
-
-body.shell.pointer-inside .corner {
-  opacity: 0.45;
-  pointer-events: auto;
-}
-
 body.shell .pet-mount.dragging {
   cursor: grabbing;
 }
@@ -282,51 +269,182 @@ body.shell .pet-mount.dragging {
   z-index: 2;
 }
 
-/* ------------------------------------------------------------ corner icon
+/* ------------------------------------------------------------ quick controls */
 
-   A frosted pill that stays out of the way: barely-there at rest, a real
-   button on approach. Sliders glyph = "controls", the one icon every
-   settings surface has taught people to read. */
-
-.corner {
+.pet-controls {
   position: fixed;
-  right: 14px;
-  bottom: 14px;
+  left: calc(50% + var(--pet-size) / 2 + 14px);
+  top: 50%;
   z-index: var(--z-corner);
-  width: 32px;
-  height: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transform: translateY(-50%);
+}
+
+body.shell .pet-controls {
+  top: auto;
+  bottom: 16px;
+  transform: none;
+}
+
+.pet-control {
+  position: relative;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: transparent;
+  border: 1px solid var(--panel-edge);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
   color: var(--ink-dim);
-  opacity: 0.35;
   cursor: pointer;
+  box-shadow: var(--shadow-1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   transition:
-    opacity var(--dur-fast) ease,
+    color var(--dur-fast) ease,
     background var(--dur-fast) ease,
     border-color var(--dur-fast) ease,
     box-shadow var(--dur-fast) ease,
     transform var(--dur-fast) ease;
 }
 
-.corner:hover,
-.corner:focus-visible {
-  opacity: 1;
-  color: var(--ink);
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
-  border-color: var(--panel-edge);
-  box-shadow: var(--shadow-1);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  transform: translateY(-1px);
-  outline: none;
+.pet-control svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.corner:active {
+.pet-control .resume-glyph { display: none; }
+.pet-control#pause-toggle.active .pause-glyph { display: none; }
+.pet-control#pause-toggle.active .resume-glyph { display: block; }
+
+.pet-control.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  box-shadow: 0 3px 14px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.pet-control:hover,
+.pet-control:focus-visible {
+  transform: translateY(-1px);
+  outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 2px;
+}
+
+.pet-control:active {
   transform: translateY(0) scale(0.95);
+}
+
+.pet-control::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 9px);
+  width: max-content;
+  max-width: 180px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ink) 92%, transparent);
+  color: var(--panel);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(3px, -50%);
+  transition: opacity var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.pet-control:hover::after,
+.pet-control:focus-visible::after {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+.control-slash {
+  position: absolute;
+  width: 22px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 1;
+  transform: rotate(-45deg) scaleX(1);
+  transition: opacity var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.pet-control.active .control-slash {
+  opacity: 0;
+  transform: rotate(-45deg) scaleX(0.4);
+}
+
+/* ------------------------------------------------------------ exit dialog */
+
+.exit-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-exit);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: var(--scrim);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.exit-dialog[hidden] {
+  display: none;
+}
+
+.exit-card {
+  width: min(320px, 100%);
+  padding: 20px;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+}
+
+.exit-card h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.exit-card p {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.exit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.exit-actions button {
+  min-width: 68px;
+  padding: 7px 12px;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.exit-actions .confirm {
+  border-color: var(--err-strong);
+  background: var(--err-strong);
+  color: #fff;
 }
 
 /* ------------------------------------------------------------ keyframes */

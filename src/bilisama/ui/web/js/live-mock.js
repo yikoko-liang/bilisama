@@ -9,6 +9,7 @@ const sourceName = $("#source-name");
 const audioState = $("#audio-state");
 const meterFill = $("#meter-fill");
 const roomInput = $("#room-id");
+const streamIntro = $("#stream-intro");
 const checkButton = $("#check-button");
 const startButton = $("#start-button");
 const stopButton = $("#stop-button");
@@ -31,18 +32,25 @@ let lastPeak = 0;
 let connected = false;
 let backendState = null;
 let monitorStarted = false;
+let configuredRoomId = 0;
+let configuredStreamIntro = "";
+let streamIntroEdited = false;
 
 const socket = connect({
   onFrame(event, data) {
     if (event === "hello") {
       applySpeak(data.panel?.speak);
+      applyRoomConfig(data.panel?.room);
       applyState(data.live_mock ?? null);
       return;
     }
     if (event === "live_mock.state") applyState(data);
     else if (event === "live_mock.event") appendEntry(data.kind, data.name, eventText(data));
     else if (event === "transcript.final") appendEntry("transcript", "浏览器语音", data.text ?? "");
-    else if (event === "reply.done" && data.text) appendEntry("reply", "伴播", data.text);
+    else if (event === "reply.done" && data.text) {
+      const reference = data.reference ? `引用${eventLabel(data.reference.kind)}：${eventText(data.reference)} ｜ ` : "";
+      appendEntry("reply", "伴播", `${reference}${data.text}`);
+    }
     else if (event === "panel.state") applySpeak(data.speak);
   },
   onStatus(value) {
@@ -54,8 +62,26 @@ const socket = connect({
 });
 
 function eventText(data) {
-  const amount = data.value_cny ? ` ¥${Number(data.value_cny).toFixed(0)}` : "";
-  return `${data.text ?? ""}${amount}`.trim();
+  const identity = [
+    data.identity && data.identity !== "anon" ? data.identity : "",
+    Number(data.user_level) > 0 ? `用户 Lv.${data.user_level}` : "",
+    Number(data.wealth_level) > 0 ? `财富 Lv.${data.wealth_level}` : "",
+    data.is_admin ? "房管" : "",
+    ({ governor: "总督", admiral: "提督", captain: "舰长" })[data.guard_level] ?? "",
+    data.medal?.name ? `${data.medal.this_room ? "本房" : "外房"}粉丝牌 ${data.medal.name} Lv.${data.medal.level}` : "",
+  ].filter(Boolean).join(" · ");
+  const gift = data.gift?.name
+    ? `${data.gift.name} ×${data.gift.num ?? 1} · ${data.gift.total_battery ?? 0} 电池`
+    : "";
+  const rawAmount = Number(data.value_cny) > 0 ? `原始金额 ¥${Number(data.value_cny).toFixed(2)}` : "";
+  return [identity, data.text, gift, rawAmount].filter(Boolean).join(" ｜ ");
+}
+
+function eventLabel(kind) {
+  return ({
+    danmaku: "弹幕", gift: "礼物", super_chat: "SC", guard_buy: "上舰",
+    vip_enter: "VIP 进房", entry: "进房", transcript: "主播语音",
+  })[kind] ?? kind ?? "事件";
 }
 
 function captureSnapshot() {
@@ -195,7 +221,29 @@ function runCheck() {
   }
   checkButton.disabled = true;
   checkButton.textContent = "检测中…";
-  socket.send("live_mock.check", { room_id: roomId, capture });
+  const speak = {};
+  for (const input of eventSwitches) {
+    if (input.dataset.speak === "entry") {
+      speak.entry = input.checked;
+      speak.vip_enter = input.checked;
+    } else {
+      speak[input.dataset.speak] = input.checked;
+    }
+  }
+  socket.send("live_mock.check", {
+    room_id: roomId,
+    stream_intro: streamIntro.value.trim(),
+    speak,
+    capture,
+  });
+}
+
+function applyRoomConfig(room) {
+  if (!room) return;
+  configuredRoomId = Number(room.room_id) || 0;
+  configuredStreamIntro = String(room.stream_intro ?? "");
+  if (!roomInput.value && configuredRoomId) roomInput.value = String(configuredRoomId);
+  if (!streamIntroEdited) streamIntro.value = configuredStreamIntro;
 }
 
 function applyState(state) {
@@ -208,7 +256,9 @@ function applyState(state) {
 
 function applySpeak(speak) {
   for (const input of eventSwitches) {
-    if (Object.hasOwn(speak ?? {}, input.dataset.speak)) {
+    if (input.dataset.speak === "entry") {
+      input.checked = Boolean(speak?.entry && speak?.vip_enter);
+    } else if (Object.hasOwn(speak ?? {}, input.dataset.speak)) {
       input.checked = Boolean(speak[input.dataset.speak]);
     }
   }
@@ -268,11 +318,23 @@ function appendEntry(kind, who, text) {
 shareButton.addEventListener("click", chooseShare);
 shareStop.addEventListener("click", () => stopCapture());
 checkButton.addEventListener("click", runCheck);
+roomInput.addEventListener("input", () => {
+  const candidate = Number(roomInput.value.trim());
+  if (candidate > 0 && candidate !== configuredRoomId && !streamIntroEdited) {
+    streamIntro.value = "";
+  }
+});
+streamIntro.addEventListener("input", () => {
+  streamIntroEdited = streamIntro.value !== configuredStreamIntro;
+});
 startButton.addEventListener("click", () => socket.send("live_mock.start", {}));
 stopButton.addEventListener("click", () => socket.send("live_mock.stop", {}));
 for (const input of eventSwitches) {
   input.addEventListener("change", () => {
-    socket.send("panel.set", { speak: { [input.dataset.speak]: input.checked } });
+    const patch = input.dataset.speak === "entry"
+      ? { entry: input.checked, vip_enter: input.checked }
+      : { [input.dataset.speak]: input.checked };
+    socket.send("panel.set", { speak: patch });
   });
 }
 window.addEventListener("pagehide", () => socket.send("live_mock.stop", {}));

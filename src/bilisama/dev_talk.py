@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -32,7 +33,7 @@ import sys
 import threading
 import wave
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -80,6 +81,28 @@ _LINE_SOFT_CAP = 32
 # hidden inside a closure is how "the panel says 配置已改 and nothing changes"
 # gets reintroduced.
 _RELOG_ON_EDIT = frozenset({"runtime.log_level", "runtime.log_viewer_content"})
+_MANUAL_MOCK_ROOM_ID = 1
+_LIVE_MOCK_SPEAK_KEYS = frozenset(
+    {"danmaku", "gift", "super_chat", "guard_buy", "entry", "vip_enter"}
+)
+
+
+def _live_mock_config_edits(data: Mapping[str, object]) -> list[tuple[str, object]]:
+    """Validated config values a successful live-mock preflight must own."""
+    edits: list[tuple[str, object]] = []
+    room_id = data.get("room_id")
+    if isinstance(room_id, int) and not isinstance(room_id, bool) and room_id > 0:
+        edits.append(("room.room_id", room_id))
+    stream_intro = data.get("stream_intro")
+    if isinstance(stream_intro, str):
+        edits.append(("room.stream_intro", stream_intro.strip()))
+    speak = data.get("speak")
+    if isinstance(speak, Mapping):
+        for name in _LIVE_MOCK_SPEAK_KEYS:
+            value = speak.get(name)
+            if isinstance(value, bool):
+                edits.append((f"interaction.speak.{name}", value))
+    return edits
 
 
 def _dashscope_url(model: str) -> str:
@@ -265,42 +288,106 @@ class _Speaker:
 
         self._buffer = bytearray()
         self._dropped_s = 0.0
+        self._enabled = True
         self._lock = threading.Lock()
+        self._requested_device = device
+        self._opened_device: int | None = None
+        self._sounddevice: Any = None
+        self._stream: Any = None
+        self._last_output_error = ""
         try:
             import sounddevice
         except ImportError:
-            self._stream = None
             return
-
-        def feed(outdata: Any, frames: int, time_info: Any, status: Any) -> None:
-            need = len(outdata)
-            with self._lock:
-                chunk = bytes(self._buffer[:need])
-                del self._buffer[: len(chunk)]
-            outdata[: len(chunk)] = chunk
-            if len(chunk) < need:
-                outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
-
-        stream = sounddevice.RawOutputStream(
-            samplerate=_OUTPUT_RATE,
-            channels=1,
-            dtype="int16",
-            device=device,
-            callback=feed,
-        )
+        self._sounddevice = sounddevice
         try:
-            stream.start()
+            self._stream = self._start_stream(device)
+            self._opened_device = device if device is not None else self._default_output_device()
         except Exception as exc:
             # An opened-but-unstartable device (Bluetooth pulled mid-setup)
             # would otherwise leave the stream unreachable — the constructor
             # raises, no caller ever holds the object, and close() can never
             # run. Release it here and carry on mute: the voice loop is worth
             # more than the speaker.
-            _close_audio_stream(stream)
-            self._stream = None
             print(f"[音频] 扬声器起不来（{exc}），这场没有声音输出。", file=sys.stderr)
-            return
-        self._stream = stream
+
+    def _feed(self, outdata: Any, frames: int, time_info: Any, status: Any) -> None:
+        """PortAudio callback: drain one block without touching asyncio."""
+        need = len(outdata)
+        with self._lock:
+            chunk = bytes(self._buffer[:need])
+            del self._buffer[: len(chunk)]
+        outdata[: len(chunk)] = chunk
+        if len(chunk) < need:
+            outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
+
+    def _start_stream(self, device: int | None) -> Any:
+        stream = self._sounddevice.RawOutputStream(
+            samplerate=_OUTPUT_RATE,
+            channels=1,
+            dtype="int16",
+            device=device,
+            callback=self._feed,
+        )
+        try:
+            stream.start()
+        except Exception:
+            _close_audio_stream(stream)
+            raise
+        return stream
+
+    def _default_output_device(self) -> int | None:
+        if self._sounddevice is None:
+            return None
+        pair = self._sounddevice.default.device
+        try:
+            value = int(pair[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    def refresh_default_device(self) -> str | None:
+        """Follow a macOS default-output change without restarting BiliSama.
+
+        Explicit ``--output-device`` selections stay pinned. The desktop
+        default follows System Settings, including a Bluetooth headset that
+        connects after this process started.
+        """
+        if self._requested_device is not None or self._sounddevice is None:
+            return None
+        target = self._default_output_device()
+        if target is None:
+            return None
+        old = self._stream
+        try:
+            active = bool(old is not None and old.active)
+        except Exception:
+            active = False
+        if target == self._opened_device and active:
+            return None
+        # Stop the old callback before starting the new one. Both callbacks
+        # share the same PCM ring; overlapping them, even briefly, lets two
+        # devices race to consume different halves of one sentence.
+        if old is not None:
+            _close_audio_stream(old)
+        self._stream = None
+        try:
+            replacement = self._start_stream(target)
+        except Exception as exc:
+            with self._lock:
+                self._buffer.clear()
+            message = f"默认扬声器重连失败（{exc}），会继续重试"
+            if message == self._last_output_error:
+                return None
+            self._last_output_error = message
+            return message
+        self._stream = replacement
+        previous = self._opened_device
+        self._opened_device = target
+        self._last_output_error = ""
+        if previous == target:
+            return f"默认扬声器设备 {target} 已重新连接"
+        return f"默认扬声器已切换到设备 {target}"
 
     def play(self, pcm: bytes) -> None:
         if self._stream is None:
@@ -310,6 +397,8 @@ class _Speaker:
             # floor shut for the rest of the stream.
             return
         with self._lock:
+            if not self._enabled:
+                return
             self._buffer.extend(pcm)
             over = len(self._buffer) - _MAX_BACKLOG_BYTES
             if over > 0:
@@ -341,6 +430,18 @@ class _Speaker:
         with self._lock:
             self._buffer.clear()
 
+    @property
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable playback; disabling also stops already-buffered speech."""
+        with self._lock:
+            self._enabled = enabled
+            if not enabled:
+                self._buffer.clear()
+
     def close(self) -> None:
         """Release the output stream. BLOCKING — call via asyncio.to_thread.
 
@@ -356,6 +457,15 @@ class _Speaker:
     def busy(self) -> bool:
         with self._lock:
             return len(self._buffer) > 0
+
+
+async def _watch_default_output(speaker: _Speaker) -> None:
+    """Keep desktop playback on the current macOS default output."""
+    while True:
+        await asyncio.sleep(1.0)
+        message = await asyncio.to_thread(speaker.refresh_default_device)
+        if message:
+            print(f"[音频] {message}")
 
 
 async def _consume(
@@ -501,6 +611,12 @@ class _Fanout:
             await asyncio.gather(self._task, return_exceptions=True)
         await self._inner.aclose()
 
+    async def suspend(self) -> None:
+        await self._inner.suspend()
+
+    async def resume(self) -> None:
+        await self._inner.resume()
+
     async def set_context(self, instructions: str) -> None:
         await self._inner.set_context(instructions)
 
@@ -545,7 +661,7 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     """One typed line, one simulated live event.
 
     "你好" — danmaku from 测试观众; "阿强:你好" — danmaku from 阿强;
-    "/sc 阿强 30 主播玩什么" — Super Chat; "/gift 阿强 52" — paid gift.
+    "/sc 阿强 30 主播玩什么" — Super Chat; "/gift 阿强 52" — 52-battery gift.
     """
     text = text.strip()
     if not text:
@@ -571,13 +687,13 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
         if len(parts) < 2:
             return None
         value = _parse_amount(parts[1])
-        if value is None:
+        if value is None or not value.is_integer():
             return None
+        batteries = int(value)
         return LiveEvent(
             kind=EventKind.GIFT,
             viewer=_console_viewer(parts[0]),
-            gift=Gift(name="礼物", num=1, coin_type="gold", total_coin=int(value * 1000)),
-            value_cny=value,
+            gift=Gift(name="礼物", num=1, coin_type="gold", unit_battery=batteries),
             event_id=event_id,
         )
     if text.startswith("/"):
@@ -600,6 +716,15 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     )
 
 
+def _as_live_mock_event(event: LiveEvent, room_id: int) -> LiveEvent:
+    """Mark a panel injection so Assembly applies the real-room funnel."""
+    return dataclasses.replace(
+        event,
+        room_id=room_id if room_id > 0 else _MANUAL_MOCK_ROOM_ID,
+        raw={**(event.raw or {}), "manual_mock": True},
+    )
+
+
 async def run_director(args: argparse.Namespace) -> int:
     """The whole stage-3 assembly behind the mic, before Electron exists.
 
@@ -615,7 +740,8 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.app import Assembly
     from bilisama.cli import DEFAULT_CONFIG
     from bilisama.clock import SystemClock
-    from bilisama.config import check, derive, load
+    from bilisama.config import check, effective_thresholds, load
+    from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
     from bilisama.director.intent import Intent
@@ -626,16 +752,23 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
     from bilisama.obs.outcome import Outcome, Verdict
-    from bilisama.persona.loader import PersonaStore, default_data_dir, template_variables
+    from bilisama.persona.loader import default_data_dir, template_variables
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
-    from bilisama.ui.config_edit import apply_panel_edits
-    from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
+    from bilisama.ui.assistants import (
+        active_persona_store,
+        assistant_snapshot,
+        persona_profile,
+        profile_config_changes,
+        save_anchor,
+    )
+    from bilisama.ui.config_edit import ConfigEditError, apply_runtime_config_edit, speak_paths
+    from bilisama.ui.events import ClientEvent, ServerEvent, link_frames, live_event_payload
     from bilisama.ui.hub import UiHub, VoiceSignals
     from bilisama.ui.live_mock import AudioInputSwitch, LiveMockController, RoomSource
-    from bilisama.ui.poke import PokeResponder
+    from bilisama.ui.room_control import RoomConnectionError, SwitchableRoomSource
     from bilisama.ui.server import (
         UiServer,
         bind_ui_socket,
@@ -705,7 +838,13 @@ async def run_director(args: argparse.Namespace) -> int:
         )
 
     relog()
-    thresholds = derive(settings.interaction.chattiness)
+
+    def thresholds() -> Any:
+        return effective_thresholds(
+            settings.interaction.chattiness,
+            reply_length=settings.interaction.reply_length,
+            danmaku_window_s=settings.interaction.danmaku.window_s,
+        )
 
     stop = asyncio.Event()
 
@@ -753,8 +892,11 @@ async def run_director(args: argparse.Namespace) -> int:
     store.prune_events(retain_days=settings.memory.retain_event_days)
     store.begin_stream()
 
-    persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
-    variables = template_variables(settings.persona)
+    persona = active_persona_store(settings, config_path.parent)
+    variables = template_variables(
+        settings.persona,
+        reply_length=settings.interaction.reply_length,
+    )
 
     # Side-model resolution, most reliable first: explicit config wins, then
     # the aliyun compatible-mode endpoint from path.sh (public network, no VPN
@@ -794,6 +936,7 @@ async def run_director(args: argparse.Namespace) -> int:
         print(f"[侧路] {side_desc}")
 
     inner: link.SpeechLink
+    hosted_link: Any = None
     connect_url: str = args.url
     if provider is ProviderName.S2S:
         # Audio replies, not the shipping default: this stands against the
@@ -814,19 +957,23 @@ async def run_director(args: argparse.Namespace) -> int:
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
         connect_url = _dashscope_url(args.model)
-        inner = HostedLink(
+        hosted_link = HostedLink(
             connect_url,
             ProviderName.DASHSCOPE,
             headers={"Authorization": f"Bearer {key}"},
             turn=settings.speech.dashscope.turn,
             voice=args.voice or settings.speech.dashscope.voice,
         )
+        inner = hosted_link
     else:
         raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
     speech = _Fanout(inner)
     await _connect_or_exit(speech, provider, connect_url)
     speech.start()
-    audio_input = AudioInputSwitch(speech.push_audio)
+    audio_input = AudioInputSwitch(
+        speech.push_audio, noise_sensitivity=settings.audio.noise_sensitivity
+    )
+    audio_input.set_enabled(settings.audio.input_enabled)
 
     from bilisama.director.output_guard import load_guard
 
@@ -877,7 +1024,7 @@ async def run_director(args: argparse.Namespace) -> int:
         speech,
         floor,
         clock,
-        cooldown_s=float(thresholds.cooldown_s),
+        cooldown_s=float(thresholds().cooldown_s),
         quiet_after_speech_s=quiet_s,
         verdict_sink=verdict_sink,
         guard=guard,
@@ -898,10 +1045,10 @@ async def run_director(args: argparse.Namespace) -> int:
         clock,
         submit=proactive_submit,
         prompt=persona.proactive_prompt(config_path.parent / "prompts" / "proactive.md", variables),
-        idle_threshold_s=float(thresholds.idle_threshold_s),
+        idle_threshold_s=float(thresholds().idle_threshold_s),
         wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
         max_per_hour=settings.interaction.proactive.max_per_hour,
-        max_tokens=thresholds.max_output_tokens,
+        max_tokens=thresholds().max_output_tokens,
     )
 
     async def push_context(text: str) -> None:
@@ -914,7 +1061,7 @@ async def run_director(args: argparse.Namespace) -> int:
 
     selector = DanmakuSelector(
         clock,
-        thresholds=lambda: thresholds,
+        thresholds=thresholds,
         per_uid_cooldown_s=float(settings.interaction.danmaku.per_uid_cooldown_s),
     )
     presence = PresenceWelcomer(
@@ -922,6 +1069,15 @@ async def run_director(args: argparse.Namespace) -> int:
         window_s=float(settings.interaction.burst_window_s),
         cooldown_s=float(settings.interaction.burst_cooldown_s),
     )
+
+    def publish_room_event(event: LiveEvent) -> None:
+        """Mirror each adopted platform event to the control-centre timeline."""
+        if hub is None:
+            return
+        hub.broadcast(ServerEvent.EVENT_FEED, live_event_payload(event))
+
+    from bilisama.persona.loader import live_event_rules
+
     assembly = Assembly(
         store=store,
         distiller=distiller,
@@ -932,38 +1088,26 @@ async def run_director(args: argparse.Namespace) -> int:
         submit=scheduler.submit,
         push_context=push_context,
         clock=clock,
-        max_tokens=thresholds.max_output_tokens,
+        max_tokens=thresholds().max_output_tokens,
         protect_ms=settings.interaction.sc_protect_ms,
         variables=variables,
+        event_rules=live_event_rules(config_path.parent, variables),
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
         presence=presence,
-        gift_gold_high=settings.interaction.gift_gold_high,
-        gift_gold_medium=settings.interaction.gift_gold_medium,
+        event_observer=publish_room_event,
+        entry_group_enabled=lambda group: bool(
+            getattr(settings.interaction.entry_welcome, group, False)
+        ),
+        stream_intro=lambda: settings.room.stream_intro,
+        gift_battery_high=settings.interaction.gift_battery_high,
+        gift_battery_medium=settings.interaction.gift_battery_medium,
     )
 
-    # Real danmaku, when a room is named (--room beats [room] room_id). The
-    # credential chain: config ref first, then path.sh's BILI_SESSDATA. No
-    # credential still connects — Bilibili then masks every uid to 0, which
-    # kills regular-viewer memory, so say it out loud.
-    bili_source = None
+    # The real room source is switchable: panel edits replace the transport in
+    # process, so changing room id never asks the streamer to restart.
     room_id = args.room if args.room is not None else settings.room.room_id
     sessdata = secrets.resolve(settings.room.credential_ref) or ""
-    if room_id:
-        from bilisama.ingest.bilibili import BilibiliEventSource
-
-        # One truth: the config reference (shipped default env:BILI_SESSDATA).
-        bili_source = BilibiliEventSource(
-            room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
-        )
-        if sessdata:
-            print(f"[弹幕] 连接房间 {room_id}（登录态）")
-        else:
-            print(
-                f"[弹幕] 连接房间 {room_id}（匿名：观众全部打码，认不出常客——"
-                "path.sh 加 export BILI_SESSDATA=... 后重跑）"
-            )
-
     from bilisama.ingest.bilibili import BilibiliEventSource
 
     def live_room_source(target_room_id: int) -> RoomSource:
@@ -974,6 +1118,11 @@ async def run_director(args: argparse.Namespace) -> int:
             on_sc_delete=scheduler.revoke,
         )
 
+    room_source = SwitchableRoomSource(live_room_source, room_id)
+    if room_id:
+        auth_label = "登录态" if sessdata else "匿名，观众身份可能被打码"
+        print(f"[弹幕] 准备连接房间 {room_id}（{auth_label}）")
+
     def publish_live_mock_state(data: dict[str, Any]) -> None:
         if hub is not None:
             hub.broadcast(ServerEvent.LIVE_MOCK_STATE, data)
@@ -982,20 +1131,14 @@ async def run_director(args: argparse.Namespace) -> int:
         if hub is not None:
             hub.broadcast(ServerEvent.LIVE_MOCK_EVENT, data)
 
-    fixed_room_reason = (
-        f"启动参数已经固定连接房间 {room_id}。要在界面换房间，请不传 --room，"
-        "并把 bilisama.toml 的 room_id 设为 0 后重启。"
-        if room_id
-        else ""
-    )
     live_mock = LiveMockController(
         source_factory=live_room_source,
         event_sink=assembly.on_event,
         audio=audio_input,
         publish_state=publish_live_mock_state,
         publish_event=publish_live_mock_event,
-        enabled=not bool(room_id),
-        disabled_reason=fixed_room_reason,
+        enabled=True,
+        disabled_reason="",
     )
 
     # The same probes stage 5's UI server will mount; until then the exit
@@ -1010,8 +1153,7 @@ async def run_director(args: argparse.Namespace) -> int:
     registry.register("loop", lag_monitor.status)
     registry.register("selector", selector.status)
     registry.register("live_mock", live_mock.state)
-    if bili_source is not None:
-        registry.register("bilibili", bili_source.status)
+    registry.register("bilibili", room_source.status)
 
     console = QueueSource("console")
     mock_source = QueueSource("ui-tests", maxsize=512)
@@ -1029,11 +1171,129 @@ async def run_director(args: argparse.Namespace) -> int:
     )
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
+    speaker.set_enabled(settings.audio.output_enabled)
+    runtime_paused = False
+    config_writer = TomlConfigWriter(config_path, settings)
 
-    _USAGE = "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额"
-    _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
+    def setting_value(path: str) -> Any:
+        current: Any = settings
+        for part in path.split("."):
+            current = getattr(current, part)
+        return current
 
-    async def handle_line(line: str) -> None:
+    def refresh_interaction_settings() -> None:
+        row = thresholds()
+        scheduler.set_cooldown(float(row.cooldown_s))
+        assembly.configure_interaction(
+            max_tokens=row.max_output_tokens,
+            protect_ms=settings.interaction.sc_protect_ms,
+            gift_battery_high=settings.interaction.gift_battery_high,
+            gift_battery_medium=settings.interaction.gift_battery_medium,
+        )
+        proactive.configure(
+            idle_threshold_s=float(row.idle_threshold_s),
+            wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
+            max_per_hour=settings.interaction.proactive.max_per_hour,
+            max_tokens=row.max_output_tokens,
+        )
+
+    async def refresh_persona_settings() -> None:
+        nonlocal persona, variables
+        persona = active_persona_store(settings, config_path.parent)
+        variables = template_variables(
+            settings.persona,
+            reply_length=settings.interaction.reply_length,
+        )
+        assembly.replace_persona(
+            persona,
+            settings.persona.growth,
+            variables,
+            live_event_rules(config_path.parent, variables),
+        )
+        distiller.replace_persona(persona, settings.persona.growth)
+        proactive.configure(
+            prompt=persona.proactive_prompt(
+                config_path.parent / "prompts" / "proactive.md", variables
+            )
+        )
+        await assembly.refresh_context()
+
+    async def run_reload_hook(path: str) -> None:
+        if path.startswith("interaction."):
+            refresh_interaction_settings()
+        if path.startswith("persona.") or path == "interaction.reply_length":
+            await refresh_persona_settings()
+        if path == "room.stream_intro":
+            await assembly.refresh_context()
+        if path == "audio.input_enabled":
+            if not runtime_paused:
+                audio_input.set_enabled(settings.audio.input_enabled)
+        elif path == "audio.output_enabled":
+            if not runtime_paused:
+                speaker.set_enabled(settings.audio.output_enabled)
+        elif path == "audio.noise_sensitivity":
+            audio_input.set_noise_sensitivity(settings.audio.noise_sensitivity)
+        elif path in _RELOG_ON_EDIT:
+            relog()
+        elif path == "room.room_id":
+            if settings.room.room_id:
+                await room_source.connect(settings.room.room_id)
+            else:
+                await room_source.disconnect()
+        elif path.startswith("speech.dashscope.") and hosted_link is not None:
+            await hosted_link.reconfigure_session(
+                voice=settings.speech.dashscope.voice,
+                turn=settings.speech.dashscope.turn,
+            )
+
+    async def apply_runtime_edit(path: Any, value: Any, *, reload_runtime: bool = True) -> str:
+        """Validate, hot-apply and durably save one visible panel field."""
+        try:
+            old = setting_value(path) if isinstance(path, str) else None
+        except AttributeError as exc:
+            raise ConfigEditError(f"没有「{path}」这个配置项") from exc
+        meta, applied = apply_runtime_config_edit(settings, path, value)
+        if settings.interaction.gift_battery_medium > settings.interaction.gift_battery_high:
+            apply_runtime_config_edit(settings, path, old)
+            raise ConfigEditError("中额礼物门槛不能高于高额礼物门槛")
+        try:
+            if reload_runtime:
+                await run_reload_hook(str(path))
+            config_writer.write(str(path), applied)
+        except (ConfigWriteError, RoomConnectionError, OSError) as exc:
+            apply_runtime_config_edit(settings, path, old)
+            if reload_runtime:
+                with contextlib.suppress(Exception):
+                    await run_reload_hook(str(path))
+            raise ConfigEditError(str(exc)) from exc
+        shown = "开" if applied is True else "关" if applied is False else str(applied)
+        return f"配置已保存并生效：{meta.label} → {shown}"
+
+    async def select_persona_profile(profile_id: str) -> str:
+        try:
+            profile = persona_profile(profile_id)
+        except ValueError as exc:
+            raise ConfigEditError(str(exc)) from exc
+        changes = profile_config_changes(profile.id)
+        old_values = {path: setting_value(path) for path, _value in changes}
+        try:
+            for path, value in changes:
+                _meta, applied = apply_runtime_config_edit(settings, path, value)
+                config_writer.write(path, applied)
+            await refresh_persona_settings()
+        except (ConfigEditError, ConfigWriteError, OSError, ValueError) as exc:
+            for path, old in old_values.items():
+                with contextlib.suppress(ConfigEditError, ConfigWriteError):
+                    _meta, applied = apply_runtime_config_edit(settings, path, old)
+                    config_writer.write(path, applied)
+            with contextlib.suppress(Exception):
+                await refresh_persona_settings()
+            raise ConfigEditError(f"切换人设失败：{exc}") from exc
+        return f"已切换到{profile.name}，Mia 的形象、音色和语音连接保持不变"
+
+    _USAGE = "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 电池数"
+
+    async def handle_line(line: str, *, as_live: bool = False) -> None:
         if not line.strip():
             return  # a bare Enter injects nothing and lectures nobody
         event = _parse_console_event(line, next(seq))
@@ -1043,21 +1303,15 @@ async def run_director(args: argparse.Namespace) -> int:
                 # The panel's inject box needs the same feedback the console gets.
                 hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": _USAGE})
             return
+        if as_live:
+            active_room_id = int(room_source.status().get("active_room_id") or 0)
+            event = _as_live_mock_event(event, active_room_id)
         label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
-        money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
+        amount = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
+        if event.kind is EventKind.GIFT and event.gift is not None:
+            amount = f"（{event.gift.total_battery} 电池）"
         body = f"：{event.text}" if event.text else ""
-        print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
-        if hub is not None:
-            hub.broadcast(
-                ServerEvent.EVENT_FEED,
-                {
-                    "kind": _FEED_KIND.get(event.kind, "danmaku"),
-                    "name": event.viewer.name,
-                    "text": event.text,
-                    "value_cny": event.value_cny,
-                    "injected": True,
-                },
-            )
+        print(f"[已注入 {label}] {event.viewer.name}{body}{amount}")
         await console.push(event)
 
     # Resources acquired below (UI server, endpoint file, the pet shell) must
@@ -1074,49 +1328,208 @@ async def run_director(args: argparse.Namespace) -> int:
         # ------------------------------------------------------------ UI server
 
         if hub is not None:
-            poke = PokeResponder(
-                clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
-            )
 
             def panel_state() -> dict[str, Any]:
                 speak = settings.interaction.speak
+                room_status = room_source.status()
                 return {
+                    "paused": runtime_paused,
                     "panicked": bool(scheduler.status().get("panicked")),
+                    "audio": {
+                        "input_enabled": audio_input.enabled,
+                        "output_enabled": speaker.enabled,
+                        "noise_sensitivity": audio_input.noise_sensitivity,
+                        "signal_level": audio_input.signal_level,
+                    },
                     "speak": {
                         name: bool(getattr(speak, name)) for name in type(speak).model_fields
                     },
+                    "interaction": {
+                        "chattiness": settings.interaction.chattiness.value,
+                        "reply_length": settings.interaction.reply_length.value,
+                        "danmaku_window_s": settings.interaction.danmaku.window_s,
+                        "gift_battery_medium": settings.interaction.gift_battery_medium,
+                        "gift_battery_high": settings.interaction.gift_battery_high,
+                        "entry_welcome": settings.interaction.entry_welcome.model_dump(),
+                    },
+                    "room": {
+                        "room_id": settings.room.room_id,
+                        "stream_intro": settings.room.stream_intro,
+                        "connected": bool(room_status.get("connected")),
+                        "requested_room_id": int(room_status.get("requested_room_id") or 0),
+                        "active_room_id": int(room_status.get("active_room_id") or 0),
+                        "error": str(room_status.get("error") or ""),
+                    },
+                    "persona": {
+                        "id": settings.persona.id,
+                        "name": settings.persona.display_name or settings.persona.id,
+                        "streamer_name": settings.persona.streamer_name,
+                    },
+                    "avatar": {
+                        "renderer": settings.avatar.renderer,
+                        "model_id": settings.avatar.model_id,
+                    },
+                    "assistants": assistant_snapshot(settings, config_path.parent),
                 }
 
             async def on_poke(_data: dict[str, Any]) -> None:
-                poke.poke()  # False = cooldown; the page animates either way
+                # The fixed, immediate quip is presentation-owned in main.js.
+                # Keeping the wire event preserves observability without filing
+                # a second model reply that would overwrite the promised text.
+                return
 
             async def on_panel_set(data: dict[str, Any]) -> None:
-                if "panic_mute" in data:
-                    if bool(data["panic_mute"]):
-                        scheduler.panic_mute()
-                        print("[面板] 紧急闭麦")
-                    else:
-                        scheduler.release_panic()
-                        print("[面板] 恢复说话")
+                nonlocal runtime_paused
 
                 def announce(line: str) -> None:
                     print(f"[面板] {line}")
                     if hub is not None:
                         hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
 
-                # Both write shapes (config tab, speak matrix) go through the
-                # one validated channel; this closure only adds the receipt and
-                # the reload hooks below.
-                for path in apply_panel_edits(settings, data, announce=announce):
-                    if path in _RELOG_ON_EDIT:
-                        relog()
+                paused = data.get("paused")
+                if isinstance(paused, bool) and paused != runtime_paused:
+                    if paused:
+                        runtime_paused = True
+                        assembly.set_event_input_enabled(False)
+                        audio_input.set_paused(True)
+                        audio_input.set_enabled(False)
+                        speaker.set_enabled(False)
+                        scheduler.panic_mute()
+                        await speech.suspend()
+                        announce("伴播已暂停：输入、事件和播报均已停止")
+                    else:
+                        try:
+                            await speech.resume()
+                        except (OSError, SessionRefused, websockets.WebSocketException) as exc:
+                            advice = _connect_advice(exc, provider, connect_url)
+                            announce(f"恢复失败，仍保持暂停：{advice}")
+                            return
+                        runtime_paused = False
+                        audio_input.set_paused(False)
+                        scheduler.release_panic()
+                        assembly.set_event_input_enabled(True)
+                        audio_input.set_enabled(settings.audio.input_enabled)
+                        speaker.set_enabled(settings.audio.output_enabled)
+                        announce("伴播已恢复")
+
+                edits: list[tuple[Any, Any]] = []
+                audio_patch = data.get("audio")
+                if isinstance(audio_patch, dict):
+                    for name, value in audio_patch.items():
+                        if name in {"input_enabled", "output_enabled", "noise_sensitivity"}:
+                            edits.append((f"audio.{name}", value))
+                        else:
+                            announce(f"未知音频配置 {name}，忽略")
+                speak_patch = data.get("speak")
+                if isinstance(speak_patch, dict):
+                    known_speak = speak_paths(settings)
+                    for name, value in speak_patch.items():
+                        path = known_speak.get(name)
+                        if path is None:
+                            announce(f"未知直播事件开关 {name}，忽略")
+                        else:
+                            edits.append((path, value))
+                config_patch = data.get("config")
+                if isinstance(config_patch, dict):
+                    edits.append((config_patch.get("path"), config_patch.get("value")))
+                room_patch = data.get("room")
+                if isinstance(room_patch, dict):
+                    room_action = room_patch.get("action")
+                    room_id_value = room_patch.get("room_id")
+                    if room_action == "disconnect":
+                        await room_source.disconnect()
+                        announce("已断开直播间事件流，语音输入保持原设置")
+                    elif room_action == "connect":
+                        if (
+                            not isinstance(room_id_value, int)
+                            or isinstance(room_id_value, bool)
+                            or room_id_value <= 0
+                        ):
+                            announce("直播间号必须是正整数")
+                        elif settings.room.room_id == room_id_value:
+                            try:
+                                await room_source.connect(room_id_value)
+                                announce(f"已连接直播间 {room_id_value}")
+                            except RoomConnectionError as exc:
+                                announce(str(exc))
+                        else:
+                            edits.append(("room.room_id", room_id_value))
+                    elif room_action == "save_info":
+                        streamer_name = room_patch.get("streamer_name")
+                        stream_intro = room_patch.get("stream_intro")
+                        if not isinstance(streamer_name, str) or not streamer_name.strip():
+                            announce("主播昵称不能为空")
+                        elif not isinstance(stream_intro, str):
+                            announce("直播主题简介必须是文字")
+                        else:
+                            edits.extend(
+                                [
+                                    ("persona.streamer_name", streamer_name.strip()),
+                                    ("room.stream_intro", stream_intro.strip()),
+                                ]
+                            )
+                    elif "room_id" in room_patch:
+                        edits.append(("room.room_id", room_id_value))
+
+                for path, value in edits:
+                    try:
+                        announce(await apply_runtime_edit(path, value))
+                    except ConfigEditError as exc:
+                        announce(str(exc))
+
+                assistant_patch = data.get("assistant")
+                if isinstance(assistant_patch, dict):
+                    action = assistant_patch.get("action")
+                    assistant_id = assistant_patch.get("id")
+                    profile_id = assistant_patch.get("profile")
+                    if assistant_id != "mia":
+                        announce("当前只支持 Mia 助手")
+                    elif not isinstance(profile_id, str):
+                        announce("人设方案 id 不合法")
+                    elif action == "select_profile":
+                        try:
+                            announce(await select_persona_profile(profile_id))
+                        except ConfigEditError as exc:
+                            announce(str(exc))
+                    elif action == "save":
+                        anchor_name = assistant_patch.get("anchor")
+                        text = assistant_patch.get("text")
+                        if anchor_name not in {"identity", "personality"} or not isinstance(
+                            text, str
+                        ):
+                            announce("人设保存参数不合法")
+                        else:
+                            try:
+                                if anchor_name == "identity":
+                                    saved = save_anchor(
+                                        settings,
+                                        config_path.parent,
+                                        profile_id,
+                                        "identity",
+                                        text,
+                                    )
+                                else:
+                                    saved = save_anchor(
+                                        settings,
+                                        config_path.parent,
+                                        profile_id,
+                                        "personality",
+                                        text,
+                                    )
+                                if profile_id == settings.persona.profile:
+                                    await refresh_persona_settings()
+                                announce(f"人设已保存并生效：{saved.name}")
+                            except (OSError, ValueError) as exc:
+                                announce(f"人设保存失败：{exc}")
+                    else:
+                        announce("未知助手操作，忽略")
                 if hub is not None:
                     hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
 
             async def on_console_line(data: dict[str, Any]) -> None:
                 text = data.get("text")
                 if isinstance(text, str):
-                    await handle_line(text)
+                    await handle_line(text, as_live=data.get("as_live") is True)
 
             async def on_test_run(data: dict[str, Any]) -> None:
                 case_id = data.get("case_id")
@@ -1140,7 +1553,10 @@ async def run_director(args: argparse.Namespace) -> int:
             async def on_test_stop(_data: dict[str, Any]) -> None:
                 await test_runner.stop()
 
+            live_mock_suspended_room = False
+
             async def on_live_mock_check(data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
                 raw_room_id = data.get("room_id")
                 capture = data.get("capture")
                 room = (
@@ -1152,18 +1568,66 @@ async def run_director(args: argparse.Namespace) -> int:
                     room_id=room,
                     capture=capture if isinstance(capture, dict) else {},
                 )
+                if live_mock.state().get("status") != "ready":
+                    return
+                try:
+                    if room_source.status().get("connected"):
+                        await room_source.disconnect()
+                    live_mock_suspended_room = True
+                    for path, value in _live_mock_config_edits(data):
+                        message = await apply_runtime_edit(
+                            path,
+                            value,
+                            reload_runtime=path != "room.room_id",
+                        )
+                        print(f"[直播 Mock] {message}")
+                except (ConfigEditError, RoomConnectionError) as exc:
+                    print(f"[直播 Mock] 配置覆盖失败：{exc}")
+                    if hub is not None:
+                        hub.broadcast(
+                            ServerEvent.EVENT_FEED,
+                            {"kind": "system", "text": f"直播 Mock 配置覆盖失败：{exc}"},
+                        )
+                    return
+                if hub is not None:
+                    hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
 
             async def on_live_mock_start(_data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
+                if room_source.status().get("connected"):
+                    await room_source.disconnect()
+                    live_mock_suspended_room = True
                 await live_mock.start()
+                if not live_mock.state().get("running") and live_mock_suspended_room:
+                    live_mock_suspended_room = False
+                    if settings.room.room_id:
+                        with contextlib.suppress(RoomConnectionError):
+                            await room_source.connect(settings.room.room_id)
 
             async def on_live_mock_stop(_data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
                 await live_mock.stop()
+                if live_mock_suspended_room:
+                    live_mock_suspended_room = False
+                    if settings.room.room_id:
+                        with contextlib.suppress(RoomConnectionError):
+                            await room_source.connect(settings.room.room_id)
 
             async def on_live_mock_capture_stop(_data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
                 await live_mock.capture_stopped()
+                if live_mock_suspended_room:
+                    live_mock_suspended_room = False
+                    if settings.room.room_id:
+                        with contextlib.suppress(RoomConnectionError):
+                            await room_source.connect(settings.room.room_id)
 
             async def on_audio_chunk(data: dict[str, Any]) -> None:
                 await live_mock.push_audio(data)
+
+            async def on_app_quit(_data: dict[str, Any]) -> None:
+                print("[桌宠] 收到退出确认，正在收尾…")
+                stop.set()
 
             def hello() -> dict[str, Any]:
                 return {
@@ -1173,7 +1637,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         "name": settings.persona.display_name or settings.persona.id,
                     },
                     "provider": provider.value,
-                    "room_connected": bool(room_id),
+                    "room_connected": bool(room_source.status().get("connected")),
                     "avatar": {
                         "renderer": settings.avatar.renderer,
                         "model_id": settings.avatar.model_id,
@@ -1215,6 +1679,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.LIVE_MOCK_STOP: on_live_mock_stop,
                         ClientEvent.LIVE_MOCK_CAPTURE_STOP: on_live_mock_capture_stop,
                         ClientEvent.AUDIO_CHUNK: on_audio_chunk,
+                        ClientEvent.APP_QUIT: on_app_quit,
                     },
                     hello=hello,
                     # <data home>/bilisama/skins — user-imported packs, shadowing
@@ -1390,7 +1855,7 @@ async def run_director(args: argparse.Namespace) -> int:
             f"已连接 {provider.value}（{connect_url.split('?')[0]}），director 模式：\n"
             f"  人设 {settings.persona.id}（persona list 可看全部）  "
             f"话痨度 {settings.interaction.chattiness.value}"
-            f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
+            f"（冷场 {thresholds().idle_threshold_s}s 起话题）\n"
             f"  生长层 relationship={settings.persona.growth.relationship.value} "
             f"voice={settings.persona.growth.voice.value}\n"
             "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
@@ -1407,9 +1872,7 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
             asyncio.create_task(proactive.run(), name="director:proactive"),
             asyncio.create_task(
-                assembly.run(
-                    [console, mock_source] + ([bili_source] if bili_source is not None else [])
-                ),
+                assembly.run([console, mock_source, room_source]),
                 name="director:assembly",
             ),
             asyncio.create_task(
@@ -1425,6 +1888,7 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(stdin_pump(), name="director:stdin"),
             asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
             asyncio.create_task(report_playback(), name="director:playback"),
+            asyncio.create_task(_watch_default_output(speaker), name="director:audio-output"),
         ]
         if hub is not None:
             live_hub = hub
@@ -1443,12 +1907,35 @@ async def run_director(args: argparse.Namespace) -> int:
                 # The fanout's third view (scheduler and director:play hold the
                 # other two); link_frames drops PCM before it can reach a browser.
                 async for ev in speech.events():
-                    for name, data in link_frames(ev):
+                    reply_context: dict[str, Any] | None = None
+                    if isinstance(ev, link.ReplyTextDelta | link.ReplyDone):
+                        intent = scheduler.reply_intent(ev.handle)
+                        if intent is not None:
+                            reply_context = {"source": intent.source}
+                            if intent.event is not None:
+                                reply_context["reference"] = live_event_payload(intent.event)
+                            elif intent.source in {
+                                "entry",
+                                "proactive",
+                                "background_result",
+                            }:
+                                reply_context["reference"] = {"kind": intent.source}
+                    for name, data in link_frames(ev, reply_context=reply_context):
                         live_hub.broadcast(name, data)
+
+            async def ui_audio_level() -> None:
+                last = -1
+                while True:
+                    level = audio_input.signal_level
+                    if level != last:
+                        last = level
+                        live_hub.broadcast(ServerEvent.AUDIO_LEVEL, {"level": level})
+                    await asyncio.sleep(0.1)
 
             tasks += [
                 asyncio.create_task(ui_feed(), name="director:ui-feed"),
                 asyncio.create_task(live_hub.run(read_signals), name="director:ui-state"),
+                asyncio.create_task(ui_audio_level(), name="director:ui-audio-level"),
             ]
         await stop.wait()
     finally:
@@ -1556,7 +2043,7 @@ async def run(args: argparse.Namespace) -> int:
 
     client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
     await _connect_or_exit(client, provider, url)
-    print(f"已连接 {provider.value}（{url.split("?")[0]}），说话即可，Ctrl-C 退出。")
+    print(f"已连接 {provider.value}（{url.split('?')[0]}），说话即可，Ctrl-C 退出。")
     if args.wav is None and not args.mute_while_speaking:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
     speaker: _Speaker | None = None

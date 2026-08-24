@@ -79,13 +79,23 @@ def _line_for(event: LiveEvent) -> str:
     name = neutralize_tags(event.viewer.name or event.viewer.identity)
     text = neutralize_tags(event.text)
     if event.kind is EventKind.SUPER_CHAT:
-        return f"[SC ¥{event.value_cny:.0f}] {name}: {text}"
+        return f"[SC] {name}: {text}"
     if event.kind is EventKind.GIFT and event.gift is not None:
         return f"[礼物 x{event.gift.num} {neutralize_tags(event.gift.name)}] {name}"
     if event.kind is EventKind.GUARD_BUY:
         return f"[上舰] {name}"
     if event.kind is EventKind.VIP_ENTER:
-        return f"[进房] {name}"
+        guard = {
+            "captain": "舰长",
+            "admiral": "提督",
+            "governor": "总督",
+        }.get(event.viewer.guard_level.value)
+        if guard is not None:
+            return f"[进房·{guard}] {name}"
+        medal = event.viewer.medal
+        if medal is not None and medal.is_this_room(event.room_id) and medal.level >= 5:
+            return f"[进房·本房粉丝牌 {medal.level} 级] {name}"
+        return f"[进房·重点观众] {name}"
     return f"[弹幕] {name}: {text}"
 
 
@@ -95,23 +105,23 @@ def intent_for(
     now: float,
     max_tokens: int = 120,
     protect_ms: int = 4000,
-    gift_gold_high: int = _TIER_DEFAULTS.gift_gold_high,
-    gift_gold_medium: int = _TIER_DEFAULTS.gift_gold_medium,
+    gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
+    gift_battery_medium: int = _TIER_DEFAULTS.gift_battery_medium,
 ) -> Intent | None:
     """Map one live event to an Intent, or None for kinds that never speak here.
 
-    Gifts are tiered by gold coin (N.E.K.O's HIGH/MEDIUM/LIGHT ladder,
-    plan section 5.3): a high-tier gift keeps the BIG_GIFT slot and its
+    Gifts are tiered by the frontend battery unit: a high-tier gift keeps the
+    BIG_GIFT slot and its
     protection; a medium one rides the VIP_ENTER rung — paid, requeued if
-    interrupted, but not protected; anything smaller (free gifts included)
+    interrupted, but not protected; anything smaller
     competes at danmaku priority and expires like one.
 
     Args:
         event: The normalised live event.
         now: The scheduler's clock, for created_at/expires_at.
         max_tokens: Reply length cap, derived from chattiness upstream.
-        gift_gold_high: Gold coins from which a gift outranks a guard buy.
-        gift_gold_medium: Gold coins from which a gift still counts as paid.
+        gift_battery_high: Batteries from which a gift outranks a guard buy.
+        gift_battery_medium: Batteries from which a gift still counts as paid.
 
     Returns:
         An Intent, or None when this kind has no speaking path here
@@ -124,22 +134,63 @@ def intent_for(
     paid = event.kind in _REQUEUE
     protected = paid
     if event.kind is EventKind.GIFT:
-        coins = (
-            event.gift.total_coin
-            if event.gift is not None and event.gift.coin_type == "gold"
-            else 0
-        )
-        if coins >= gift_gold_high:
+        batteries = event.gift.total_battery if event.gift is not None else 0
+        if batteries >= gift_battery_high:
             pass  # BIG_GIFT, protected — the tier the ladder already prices
-        elif coins >= gift_gold_medium:
+        elif batteries >= gift_battery_medium:
             priority = Priority.VIP_ENTER
             protected = False
         else:
             priority = Priority.DANMAKU
             paid = False
             protected = False
+    instruction = "挑最值得回应的内容，用角色口吻回应；回复长度遵循当前人设中的长度档位。"
+    if event.kind is EventKind.DANMAKU:
+        instruction = (
+            "开头先自然转述哪位观众问了什么，让只听音频的人知道你在接哪条弹幕；"
+            "再用你自己的判断和知识先给出有用回答，不要默认让主播回答。"
+            "只有确实无法从可靠上下文确认的主播私事、未公开计划或个人承诺，才说明未知并请主播补充；"
+            "不要反复强调自己是伴播，也不要说「我可不敢」「这得问主播」之类推卸责任的话。"
+        )
+    elif event.kind is EventKind.SUPER_CHAT:
+        instruction = (
+            "先感谢这条 SC 的支持，再回应正文；严禁说出或暗示金额。"
+            "涉及主播个人经历、选择、承诺或立场时，把问题交还主播。"
+        )
+    elif event.kind is EventKind.GIFT and event.gift is not None:
+        batteries = event.gift.total_battery
+        if batteries >= gift_battery_high:
+            intensity = "这是高额礼物，明确、真诚并带一点惊喜地感谢"
+        elif batteries >= gift_battery_medium:
+            intensity = "这是中额礼物，热情但不过度地感谢"
+        else:
+            intensity = "这是普通礼物，用一句轻松的话感谢"
+        instruction = f"{intensity}；严禁说出或暗示礼物的金额、电池数或价格。"
+    elif event.kind is EventKind.GUARD_BUY:
+        tier = {
+            "captain": "舰长",
+            "admiral": "提督",
+            "governor": "总督",
+        }.get(event.viewer.guard_level.value, "舰队用户")
+        instruction = f"欢迎对方成为{tier}，等级越高仪式感越强；严禁说出或暗示金额。"
+    elif event.kind is EventKind.VIP_ENTER:
+        guard = event.viewer.guard_level.value
+        if guard == "governor":
+            emotion = "这是总督进房，给出最高一档的重视感和仪式感，热烈但不要谄媚"
+        elif guard == "admiral":
+            emotion = "这是提督进房，给出明显的重视感和熟客欢迎"
+        elif guard == "captain":
+            emotion = "这是舰长进房，带着熟悉感欢迎对方回来"
+        else:
+            emotion = "这是本房五级以上粉丝牌观众进房，像欢迎常来互动的熟面孔一样自然"
+        instruction = (
+            f"{emotion}；结合# 直播简介和# 本场进展，说清现在正聊什么或在做什么，"
+            "让对方一进来就能接上；没有可靠共同经历时不要假装认识，也不要提消费记录。"
+        )
+    if "当前人设中的长度档位" not in instruction:
+        instruction += "回复长度遵循当前人设中的长度档位。"
     spec = ReplySpec(
-        instructions="挑最值得回应的内容，用角色口吻回应，不超过两句话。",
+        instructions=instruction,
         max_tokens=max_tokens,
         protected=protected,
         protect_ms=protect_ms,
@@ -171,7 +222,10 @@ def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> In
     makes chat/observe mode genuinely silent.
     """
     spec = ReplySpec(
-        instructions="刚进来一批新观众，用一句话热络地打个招呼，别逐个点名。",
+        instructions=(
+            "有新观众进房。结合# 直播简介和# 本场进展，用一句话自然欢迎并告诉新人现在正聊什么；"
+            "每次换一种说法，不逐个点名，也绝对不要播报、暗示或猜测进房人数。"
+        ),
         max_tokens=max_tokens,
     )
     return Intent(
@@ -180,9 +234,7 @@ def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> In
         # QUEUE behind an answer being spoken, never cut it off mid-sentence
         # (plan section 2.7: the L4 lanes preempt nobody).
         priority=Priority.DANMAKU,
-        injection=Injection(
-            reply=spec, item_text=wrap_events([f"[进房] 新观众 {count} 位刚进直播间"])
-        ),
+        injection=Injection(reply=spec, item_text=wrap_events(["[进房] 有新观众进入直播间"])),
         trusted=False,
         dedup_key=f"entry:burst:{now:.0f}",
         created_at=now,

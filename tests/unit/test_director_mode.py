@@ -19,7 +19,7 @@ import pytest
 from bilisama import dev_talk
 from bilisama.cli import main
 from bilisama.config.enums import ProviderName
-from bilisama.dev_talk import _Fanout, _parse_console_event
+from bilisama.dev_talk import _as_live_mock_event, _Fanout, _parse_console_event
 from bilisama.ingest.events import EventKind
 from bilisama.persona.loader import PersonaStore
 from bilisama.realtime import link
@@ -112,8 +112,17 @@ def test_console_super_chat_and_gift_carry_value() -> None:
     gift = _parse_console_event("/gift 老板 52", 2)
     assert gift is not None
     assert gift.kind is EventKind.GIFT
-    assert gift.value_cny == 52.0
-    assert gift.gift is not None and gift.gift.is_paid
+    assert gift.value_cny == 0.0
+    assert gift.gift is not None and gift.gift.total_battery == 52
+    assert gift.gift.is_paid
+
+
+def test_panel_mock_is_marked_as_a_live_room_event() -> None:
+    event = _parse_console_event("阿强:真实规则选我", 1)
+    assert event is not None and event.room_id == 0
+    mocked = _as_live_mock_event(event, 0)
+    assert mocked.room_id > 0
+    assert mocked.raw == {"manual_mock": True}
 
 
 @pytest.mark.parametrize("bad", ["", "/sc 阿强", "/gift 老板", "/sc 阿强 abc 话", "/unknown x"])

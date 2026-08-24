@@ -151,6 +151,11 @@ class Distiller:
         self._state.assistant_lines.append(line)
         del self._state.assistant_lines[:-_ASSISTANT_LINES_KEPT]
 
+    def replace_persona(self, persona: PersonaStore, growth: GrowthSwitches) -> None:
+        """Route future growth writes to the newly selected assistant."""
+        self._persona = persona
+        self._growth = growth
+
     # ------------------------------------------------------------ the two calls
 
     async def rolling_summary(self) -> DistillReport:

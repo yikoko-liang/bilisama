@@ -44,14 +44,17 @@ class DynamicContext:
     relationship: tuple[str, ...] = ()
     pinned: str = ""
     streamer_facts: str = ""
+    stream_intro: str = ""
     session_progress: str = ""
     regulars: str = ""
     clock_line: str = ""
 
 
-def static_prefix(anchors: PersonaAnchors, *, tool_block: str = "") -> str:
-    """Identity → personality → live rules → tools. Byte-stable per session."""
+def static_prefix(anchors: PersonaAnchors, *, event_rules: str = "", tool_block: str = "") -> str:
+    """Identity → personality → live rules → event rules → tools."""
     parts = [anchors.identity.strip(), anchors.personality.strip(), LIVE_RULES]
+    if event_rules:
+        parts.append(event_rules.strip())
     if tool_block:
         parts.append(tool_block.strip())
     return "\n\n".join(part for part in parts if part)
@@ -79,6 +82,8 @@ def dynamic_tail(ctx: DynamicContext) -> str:
         sections.append(_section("# 置顶记忆（主播让你记的，始终保留）", ctx.pinned.strip()))
     if ctx.streamer_facts:
         sections.append(_section("# 主播", ctx.streamer_facts.strip()))
+    if ctx.stream_intro:
+        sections.append(_section("# 直播简介", ctx.stream_intro.strip()))
     if ctx.session_progress:
         sections.append(_section("# 本场进展", ctx.session_progress.strip()))
     if ctx.regulars:

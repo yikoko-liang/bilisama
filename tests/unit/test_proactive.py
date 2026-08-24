@@ -91,7 +91,7 @@ async def test_dead_air_produces_exactly_one_topic() -> None:
         intent = intents[0]
         assert intent.priority is Priority.PROACTIVE
         assert intent.trusted is True
-        assert intent.injection.item_text is None
+        assert intent.injection.item_text == "[系统触发] 直播间持续冷场，请自然发起一个话题。"
         assert "新键盘" in (intent.injection.reply.instructions or "")
         assert intent.expires_at is not None, "a stale topic must die in the queue"
 

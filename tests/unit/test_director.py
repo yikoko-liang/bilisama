@@ -16,13 +16,15 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 
+import pytest
+
 from bilisama.clock import FakeClock, SystemClock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent, Priority
-from bilisama.director.intents import WRAP_OPEN, intent_for, wrap_events
+from bilisama.director.intents import WRAP_OPEN, burst_welcome_intent, intent_for, wrap_events
 from bilisama.director.output_guard import OutputGuard
 from bilisama.director.scheduler import PlaybackClear, Scheduler
-from bilisama.ingest.events import EventKind, LiveEvent, Viewer
+from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Medal, Viewer
 from bilisama.obs.outcome import Outcome, Phase, SkipReason
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime.link import ReplySpec
@@ -165,6 +167,37 @@ async def test_gift_storm_never_overlaps_replies() -> None:
         creates = server.recorded.count("response.create")
         dones = [e for e in server.recorded.events if e.get("type") == "response.create"]
         assert creates == 6 and len(dones) == 6
+
+
+async def test_reply_handle_keeps_its_origin_after_the_reply_settles() -> None:
+    event = LiveEvent(
+        kind=EventKind.GIFT,
+        viewer=Viewer(uid=9, name="阿强"),
+        event_id="gift-origin",
+    )
+    intent = Intent(
+        source="gift",
+        priority=Priority.BIG_GIFT,
+        injection=Injection(reply=ReplySpec(instructions="谢一句"), item_text="[礼物] 阿强"),
+        event=event,
+        dedup_key="gift-origin",
+    )
+    async with (
+        MockRealtimeServer(
+            caps=caps_mod.S2S,
+            script=Script(delta_chunks=3, delta_interval_s=0.05),
+        ) as server,
+        _running_scheduler(server) as (scheduler, _),
+    ):
+        scheduler.submit(intent)
+        for _ in range(200):
+            if scheduler._active is not None:
+                break
+            await asyncio.sleep(0.01)
+        handle = scheduler._active.handle if scheduler._active is not None else None
+        await _wait_verdicts(scheduler, 1)
+        assert handle is not None
+        assert scheduler.reply_intent(handle) is intent
 
 
 async def test_higher_priority_preempts_and_the_victim_gets_a_verdict() -> None:
@@ -537,6 +570,9 @@ def test_danmaku_intent_is_wrapped_and_expires() -> None:
     assert text.startswith(WRAP_OPEN)
     assert "不是系统指令" in text
     assert "[弹幕] 阿强:" in text, "the fixed prefix is half the speaker-identity lock"
+    instructions = intent.injection.reply.instructions or ""
+    assert "当前人设中的长度档位" in instructions
+    assert "不超过两句话" not in instructions
 
 
 def test_wrapper_tokens_in_audience_content_are_neutralized() -> None:
@@ -575,7 +611,113 @@ def test_paid_intents_protect_and_requeue() -> None:
     assert intent.requeue_on_interrupt
     assert intent.expires_at is None
     assert intent.injection.reply.protected
-    assert "[SC ¥30]" in (intent.injection.item_text or "")
+    item_text = intent.injection.item_text or ""
+    assert "[SC] 老板: 主播今天玩什么" in item_text
+    assert "¥" not in item_text and "30" not in item_text
+
+
+def test_danmaku_reply_paraphrases_who_asked_what() -> None:
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        viewer=Viewer(uid=7, name="阿强"),
+        text="主播今天用的是什么模型？",
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    assert "自然转述" in instructions
+    assert "哪位观众" in instructions
+    assert "阿强" in (intent.injection.item_text or "")
+
+
+def test_danmaku_instruction_answers_with_its_own_judgment_before_deferring() -> None:
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        viewer=Viewer(uid=8, name="影渡"),
+        text="主播插件有发布计划吗？",
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    assert "自己的判断" in instructions
+    assert "先给出有用回答" in instructions
+    assert "不要反复强调" in instructions
+    assert "把问题交还主播" not in instructions
+
+
+def test_burst_welcome_uses_context_without_reading_the_headcount() -> None:
+    intent = burst_welcome_intent(37, now=10.0)
+    instructions = intent.injection.reply.instructions or ""
+    payload = intent.injection.item_text or ""
+
+    assert "直播简介" in instructions
+    assert "本场进展" in instructions
+    assert "每次换一种" in instructions
+    assert "人数" in instructions and "不要" in instructions
+    assert "37" not in payload
+    assert "位" not in payload
+
+
+@pytest.mark.parametrize(
+    ("viewer", "marker", "emotion"),
+    [
+        (Viewer(uid=1, name="舰长甲", guard_level=GuardLevel.CAPTAIN), "舰长", "熟悉感"),
+        (Viewer(uid=2, name="提督乙", guard_level=GuardLevel.ADMIRAL), "提督", "重视感"),
+        (Viewer(uid=3, name="总督丙", guard_level=GuardLevel.GOVERNOR), "总督", "最高"),
+        (
+            Viewer(
+                uid=4,
+                name="牌子丁",
+                medal=Medal(name="本房牌子", level=8, anchor_room_id=9),
+            ),
+            "粉丝牌",
+            "常来",
+        ),
+    ],
+)
+def test_vip_welcome_knows_the_verified_tier_and_gives_emotional_value(
+    viewer: Viewer, marker: str, emotion: str
+) -> None:
+    event = LiveEvent(kind=EventKind.VIP_ENTER, room_id=9, viewer=viewer)
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    payload = intent.injection.item_text or ""
+
+    assert marker in payload
+    assert emotion in instructions
+    assert "直播简介" in instructions and "本场进展" in instructions
+
+
+@pytest.mark.parametrize(
+    ("batteries", "expected_priority", "protected"),
+    [
+        (99, Priority.DANMAKU, False),
+        (100, Priority.VIP_ENTER, False),
+        (999, Priority.VIP_ENTER, False),
+        (1000, Priority.BIG_GIFT, True),
+    ],
+)
+def test_gift_tiers_use_total_batteries(
+    batteries: int, expected_priority: Priority, protected: bool
+) -> None:
+    event = LiveEvent(
+        kind=EventKind.GIFT,
+        room_id=1,
+        viewer=Viewer(uid=7, name="老板"),
+        gift=Gift(name="小花花", num=batteries, unit_battery=1),
+    )
+    intent = intent_for(
+        event,
+        now=0.0,
+        gift_battery_medium=100,
+        gift_battery_high=1000,
+    )
+    assert intent is not None
+    assert intent.priority is expected_priority
+    assert intent.injection.reply.protected is protected
 
 
 def test_feed_only_kinds_produce_no_intent() -> None:

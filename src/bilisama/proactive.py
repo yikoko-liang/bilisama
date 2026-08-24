@@ -83,6 +83,28 @@ class ProactiveTopicLoop:
         """Anything happened — an event arrived, someone spoke. Resets idle."""
         self._last_activity = self._clock.monotonic()
 
+    def configure(
+        self,
+        *,
+        prompt: str | None = None,
+        idle_threshold_s: float | None = None,
+        wake_interval_s: float | None = None,
+        max_per_hour: int | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
+        """Apply control-centre settings to future topic work."""
+        if prompt is not None:
+            self._prompt = prompt
+            self._fingerprint = ""
+        if idle_threshold_s is not None:
+            self._idle_threshold_s = idle_threshold_s
+        if wake_interval_s is not None:
+            self._wake_interval_s = wake_interval_s
+        if max_per_hour is not None:
+            self._max_per_hour = max_per_hour
+        if max_tokens is not None:
+            self._max_tokens = max_tokens
+
     # ------------------------------------------------------------ the loop
 
     async def run(self) -> None:
@@ -138,7 +160,13 @@ class ProactiveTopicLoop:
                         ),
                         max_tokens=self._max_tokens,
                     ),
-                    item_text=None,
+                    # Hosted realtime endpoints reject response.create when a
+                    # fresh conversation has no user item yet. The trigger is
+                    # trusted product state, not audience text; putting this
+                    # small marker in history makes a first-ever cold-open a
+                    # valid turn without copying the side-model candidate into
+                    # user-controlled history.
+                    item_text="[系统触发] 直播间持续冷场，请自然发起一个话题。",
                 ),
                 trusted=True,
                 dedup_key=f"proactive:{int(now)}",

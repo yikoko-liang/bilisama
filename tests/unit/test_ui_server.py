@@ -156,14 +156,30 @@ def test_config_snapshot_covers_all_meta_and_serializes() -> None:
 def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
     rows = {row["path"]: row for row in config_snapshot(_settings())}
     editable = {path for path, row in rows.items() if row["editable"]}
-    # The 2026-08-14 consumer audit: speak.* is read at call time, runtime.log_*
-    # goes live through the dev-talk relog hook. Everything else snapshots at
-    # construction and must NOT offer an editor. Growing this set means wiring
-    # a consumer first, then flipping its ui_meta reload back to LIVE.
+    # The 2026-08-22 control-centre audit: every field below either has a
+    # call-time reader or an explicit dev-talk reload hook.
     speak = {
         f"interaction.speak.{name}" for name in _settings().interaction.speak.__class__.model_fields
     }
-    assert editable == speak | {"runtime.log_level", "runtime.log_viewer_content"}
+    assert editable == speak | {
+        "audio.input_enabled",
+        "audio.output_enabled",
+        "audio.noise_sensitivity",
+        "interaction.chattiness",
+        "interaction.reply_length",
+        "interaction.gift_battery_high",
+        "interaction.gift_battery_medium",
+        "interaction.danmaku.window_s",
+        "interaction.entry_welcome.ordinary",
+        "interaction.entry_welcome.naval",
+        "interaction.entry_welcome.ranking",
+        "persona.profile",
+        "persona.streamer_name",
+        "room.room_id",
+        "room.stream_intro",
+        "runtime.log_level",
+        "runtime.log_viewer_content",
+    }
     # Section headers stay read-only even when marked LIVE for grouping.
     assert rows["interaction.speak"]["editable"] is False
     # Editor facts ride along: the page renders controls without guessing.
@@ -217,9 +233,11 @@ def test_client_frames_reach_their_handlers() -> None:
         ws.receive_text()  # hello
         ws.send_text(json.dumps({"event": "pet.poke", "data": {}}))
         ws.send_text(json.dumps({"event": "panel.set", "data": {"panic_mute": True}}))
+        ws.send_text(json.dumps({"event": "app.quit", "data": {}}))
     assert calls == [
         (ClientEvent.PET_POKE, {}),
         (ClientEvent.PANEL_SET, {"panic_mute": True}),
+        (ClientEvent.APP_QUIT, {}),
     ]
 
 

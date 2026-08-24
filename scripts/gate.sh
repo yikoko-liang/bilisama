@@ -69,6 +69,8 @@ tmp = Path(os.environ["BILISAMA_GATE_WORK"]) / "profiles-check"
 (tmp / "profiles").mkdir(parents=True, exist_ok=True)
 for f in Path("config/profiles").glob("*.toml"):
     shutil.copy(f, tmp / "profiles" / f.name)
+if Path("config/safety").is_dir():
+    shutil.copytree("config/safety", tmp / "safety")
 base = Path("config/bilisama.toml").read_text(encoding="utf-8")
 
 expected = {"debug": "debug", "normal": "info", "hype": "info"}

@@ -8,6 +8,7 @@ forgot, green-lighting wiring the product no longer uses.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,7 @@ def build_assembly_kit(
     growth: GrowthSwitches | None = None,
     selector: DanmakuSelector | None = None,
     presence: PresenceWelcomer | None = None,
+    stream_intro: Callable[[], str] | None = None,
 ) -> AssemblyKit:
     """One Assembly, wired the way dev-talk wires it, on a FakeClock.
 
@@ -86,8 +88,9 @@ def build_assembly_kit(
         clock=clock,
         selector=selector,
         presence=presence,
-        gift_gold_high=interaction.gift_gold_high,
-        gift_gold_medium=interaction.gift_gold_medium,
+        stream_intro=stream_intro,
+        gift_battery_high=interaction.gift_battery_high,
+        gift_battery_medium=interaction.gift_battery_medium,
     )
     return AssemblyKit(
         assembly=assembly,

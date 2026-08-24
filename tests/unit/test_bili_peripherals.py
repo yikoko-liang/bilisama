@@ -83,7 +83,9 @@ async def test_five_entries_buy_one_welcome_at_default_switches(tmp_path: Path) 
         await assembly.on_event(_entry(uid))
     assert [i.source for i in intents] == ["entry"]
     assert intents[0].priority is Priority.DANMAKU, "a hello queues, it never preempts an answer"
-    assert "5 位" in (intents[0].injection.item_text or "")
+    payload = intents[0].injection.item_text or ""
+    assert "有新观众进入直播间" in payload
+    assert "5" not in payload and "位" not in payload
 
 
 async def test_entry_off_silences_the_burst_for_observe_mode(tmp_path: Path) -> None:
@@ -95,7 +97,7 @@ async def test_entry_off_silences_the_burst_for_observe_mode(tmp_path: Path) -> 
     assert store.viewer("uid:3") is not None, "memory still saw everyone"
 
 
-async def test_known_spender_walking_in_is_promoted_to_vip(tmp_path: Path) -> None:
+async def test_past_spending_does_not_define_current_vip_identity(tmp_path: Path) -> None:
     assembly, store, intents, _clock = _assembly(tmp_path)
     store.on_event(
         LiveEvent(
@@ -108,9 +110,9 @@ async def test_known_spender_walking_in_is_promoted_to_vip(tmp_path: Path) -> No
         )
     )
     await assembly.on_event(_entry(55))
-    assert [i.source for i in intents] == ["vip_enter"], "memory promoted the arrival"
+    assert intents == [], "historical spend must not promote the current entry"
     await assembly.on_event(_entry(56))
-    assert len(intents) == 1, "a stranger's entry stays feed-only"
+    assert intents == [], "a stranger's entry stays feed-only"
 
 
 async def test_presence_replay_one_hello_and_one_named_greeting(tmp_path: Path) -> None:
@@ -132,10 +134,10 @@ def _gift_event(coins: int, *, coin_type: str = "gold") -> LiveEvent:
     return gift_event(coin=coins, coin_type=coin_type)
 
 
-def test_gift_tiers_follow_the_gold_thresholds() -> None:
-    high = intent_for(_gift_event(20000), now=0.0)
-    medium = intent_for(_gift_event(5000), now=0.0)
-    light = intent_for(_gift_event(500), now=0.0)
+def test_gift_tiers_follow_the_battery_thresholds() -> None:
+    high = intent_for(_gift_event(100000), now=0.0)
+    medium = intent_for(_gift_event(10000), now=0.0)
+    light = intent_for(_gift_event(9900), now=0.0)
     free = intent_for(_gift_event(990, coin_type="silver"), now=0.0)
     assert high is not None and medium is not None and light is not None and free is not None
     assert high.priority is Priority.BIG_GIFT and high.injection.reply.protected
@@ -381,23 +383,12 @@ async def test_replayed_super_chat_is_deduped_at_the_assembly(tmp_path: Path) ->
     assert assembly.events_deduped == 1
 
 
-async def test_captain_by_tier_is_promoted_even_with_zero_gifts(tmp_path: Path) -> None:
-    """The scenario the upsert guard unblocks: tier recorded from danmaku,
-    wallet empty, and the ENTRY (which carries no guard field) must not wipe
-    the tier before the promotion reads it."""
+async def test_captain_identity_on_current_entry_is_promoted(tmp_path: Path) -> None:
+    """Current INTERACT identity, rather than stored history, controls VIP."""
     from bilisama.ingest.events import GuardLevel
 
-    assembly, store, intents, _clock = _assembly(tmp_path)
-    store.on_event(
-        LiveEvent(
-            kind=EventKind.DANMAKU,
-            room_id=777,
-            viewer=Viewer(uid=55, name="老舰长", guard_level=GuardLevel.CAPTAIN),
-            text="来了",
-            event_id="dm:seed",
-        )
-    )
-    await assembly.on_event(_entry(55))
+    assembly, _store, intents, _clock = _assembly(tmp_path)
+    await assembly.on_event(_entry(55, guard_level=GuardLevel.CAPTAIN))
     assert [i.source for i in intents] == ["vip_enter"]
 
 

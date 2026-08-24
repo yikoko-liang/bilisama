@@ -128,7 +128,7 @@ def test_priority_collision_fixture_pins_the_configured_ladder() -> None:
         return intent.priority
 
     assert priority("pc-dm-1") is Priority.DANMAKU
-    assert priority("pc-gift-free") is Priority.DANMAKU
+    assert priority("pc-gift-normal") is Priority.DANMAKU
     assert priority("pc-gift-medium") is Priority.VIP_ENTER
     assert priority("pc-vip-1") is Priority.VIP_ENTER
     assert priority("pc-guard-1") is Priority.GUARD_BUY

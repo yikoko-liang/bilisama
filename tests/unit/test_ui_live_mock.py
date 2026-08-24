@@ -7,8 +7,9 @@ import base64
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from bilisama.ingest.events import EventKind, LiveEvent, Viewer
-from bilisama.ui.live_mock import AudioInputSwitch, LiveMockController
+from bilisama.dev_talk import _live_mock_config_edits
+from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Medal, Viewer
+from bilisama.ui.live_mock import AudioInputSwitch, LiveMockController, _event_preview
 
 
 class _RoomSource:
@@ -54,6 +55,41 @@ def _capture(*, audio: bool = True, video: bool = True) -> dict[str, object]:
     }
 
 
+def test_event_preview_uses_the_full_latest_live_event_payload() -> None:
+    event = LiveEvent(
+        kind=EventKind.GIFT,
+        room_id=123,
+        viewer=Viewer(
+            uid=7,
+            name="老船长",
+            user_level=10,
+            wealth_level=3,
+            guard_level=GuardLevel.CAPTAIN,
+            medal=Medal(name="本房牌", level=8, anchor_room_id=123),
+        ),
+        gift=Gift(name="情书", num=2, unit_battery=52, total_coin=10_400),
+        value_cny=10.4,
+    )
+    preview = _event_preview(event)
+    assert preview["identity"] == "uid:7"
+    assert preview["guard_level"] == "captain"
+    assert preview["medal"] == {
+        "name": "本房牌",
+        "level": 8,
+        "up_name": "",
+        "this_room": True,
+    }
+    assert preview["gift"] == {
+        "name": "情书",
+        "num": 2,
+        "unit_battery": 52,
+        "total_battery": 104,
+        "combo_count": 0,
+        "aggregated_count": 1,
+    }
+    assert preview["value_cny"] == 10.4
+
+
 def test_audio_input_switch_never_mixes_microphone_and_browser() -> None:
     async def run() -> None:
         chunks: list[bytes] = []
@@ -70,6 +106,75 @@ def test_audio_input_switch_never_mixes_microphone_and_browser() -> None:
         await switch.push_browser_audio(b"browser-blocked")
         await switch.push_audio(b"mic-2")
         assert chunks == [b"mic-1", b"browser-1", b"mic-2"]
+
+    asyncio.run(run())
+
+
+def test_audio_input_switch_replaces_the_active_source_with_silence_when_paused() -> None:
+    async def run() -> None:
+        chunks: list[bytes] = []
+
+        async def sink(pcm: bytes) -> None:
+            chunks.append(pcm)
+
+        switch = AudioInputSwitch(sink)
+        switch.set_enabled(False)
+        await switch.push_audio(b"mic-voice")
+        switch.use_browser(True)
+        await switch.push_audio(b"blocked-mic")
+        await switch.push_browser_audio(b"browser-voice")
+        switch.set_enabled(True)
+        await switch.push_browser_audio(b"browser-resumed")
+
+        assert chunks == [
+            bytes(len(b"mic-voice")),
+            bytes(len(b"browser-voice")),
+            b"browser-resumed",
+        ]
+        assert switch.enabled is True
+        assert switch.silenced_frames == 2
+        assert switch.blocked_microphone_frames == 1
+
+    asyncio.run(run())
+
+
+def test_top_level_pause_sends_no_audio_to_a_closed_transport() -> None:
+    async def run() -> None:
+        chunks: list[bytes] = []
+
+        async def sink(pcm: bytes) -> None:
+            chunks.append(pcm)
+
+        switch = AudioInputSwitch(sink)
+        switch.set_paused(True)
+        await switch.push_audio(b"mic")
+        switch.use_browser(True)
+        await switch.push_browser_audio(b"browser")
+        assert chunks == []
+
+        switch.set_paused(False)
+        await switch.push_browser_audio(b"resumed")
+        assert chunks == [b"resumed"]
+
+    asyncio.run(run())
+
+
+def test_noise_sensitivity_gates_quiet_pcm_but_preserves_loud_speech() -> None:
+    async def run() -> None:
+        chunks: list[bytes] = []
+
+        async def sink(pcm: bytes) -> None:
+            chunks.append(pcm)
+
+        switch = AudioInputSwitch(sink, noise_sensitivity=0)
+        quiet = b"\x01\x00" * 160
+        loud = b"\x00@" * 160
+        await switch.push_audio(quiet)
+        await switch.push_audio(loud)
+
+        assert chunks == [bytes(len(quiet)), loud]
+        assert switch.signal_level > 50
+        assert switch.silenced_frames == 1
 
     asyncio.run(run())
 
@@ -165,7 +270,7 @@ def test_room_events_are_held_until_start_and_audio_reaches_the_existing_sink() 
             assert previews[-1]["kind"] == "danmaku"
             assert previews[-1]["name"] == "阿强"
 
-            pcm = b"\x01\x00\x02\x00"
+            pcm = b"\x00@\x00@"
             await controller.push_audio(
                 {
                     "sample_rate": 16_000,
@@ -214,3 +319,35 @@ def test_start_is_refused_when_room_preflight_failed() -> None:
             await controller.aclose()
 
     asyncio.run(run())
+
+
+def test_live_mock_preflight_owns_room_intro_and_event_switches() -> None:
+    edits = dict(
+        _live_mock_config_edits(
+            {
+                "room_id": 456,
+                "stream_intro": "  新房间的机器人演示  ",
+                "speak": {
+                    "danmaku": False,
+                    "gift": True,
+                    "super_chat": True,
+                    "guard_buy": False,
+                    "entry": True,
+                    "vip_enter": True,
+                    "follow": True,
+                    "unknown": True,
+                },
+            }
+        )
+    )
+
+    assert edits == {
+        "room.room_id": 456,
+        "room.stream_intro": "新房间的机器人演示",
+        "interaction.speak.danmaku": False,
+        "interaction.speak.gift": True,
+        "interaction.speak.super_chat": True,
+        "interaction.speak.guard_buy": False,
+        "interaction.speak.entry": True,
+        "interaction.speak.vip_enter": True,
+    }

@@ -11,6 +11,8 @@ import base64
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from bilisama.clock import FakeClock
 from bilisama.ingest.bilibili._vendor.blivedm.models import pb
 from bilisama.ingest.bilibili._vendor.blivedm.models import web as web_models
@@ -59,7 +61,7 @@ def test_masked_danmaku_keeps_the_event_and_falls_back_to_the_hash() -> None:
     assert event.viewer.medal is None
 
 
-def test_gold_gift_derives_cny_and_merges_on_tid() -> None:
+def test_gift_derives_frontend_battery_value_and_merges_on_tid() -> None:
     message = web_models.GiftMessage.from_command(_gift_data())
     event = event_from_gift(message, **_KW)
     assert event.kind is EventKind.GIFT
@@ -67,8 +69,38 @@ def test_gold_gift_derives_cny_and_merges_on_tid() -> None:
     assert event.event_id == "gift:tid-777", "tid is the V1/V2 merge key"
     assert event.ts_ms == 1755000123000, "gift timestamps are seconds, scaled to ms"
     assert event.gift is not None
+    assert event.gift.unit_battery == 52, "wire price=5200 is 52 batteries"
+    assert event.gift.total_battery == 260
     assert event.gift.combo_id == "uid:9:31036", "synthesised: same viewer, same gift"
     assert event.is_paid
+
+
+def test_blind_box_uses_original_box_battery_price() -> None:
+    message = web_models.GiftMessage.from_command(
+        _gift_data(
+            price=19900,
+            total_coin=1000,
+            blind_gift={"original_gift_name": "心动盲盒", "original_gift_price": 100},
+        )
+    )
+    event = event_from_gift(message, **_KW)
+    assert event.gift is not None
+    assert event.gift.unit_battery == 1, "盲盒按购买价，不按开出的礼物标价"
+
+
+@pytest.mark.parametrize(
+    ("gift_name", "wire_price", "batteries"),
+    [("小花花", 100, 1), ("打Call", 200, 2), ("情书", 5200, 52)],
+)
+def test_wire_gift_price_matches_frontend_battery_table(
+    gift_name: str, wire_price: int, batteries: int
+) -> None:
+    message = web_models.GiftMessage.from_command(
+        _gift_data(giftName=gift_name, price=wire_price, num=1, total_coin=wire_price)
+    )
+    event = event_from_gift(message, **_KW)
+    assert event.gift is not None
+    assert event.gift.unit_battery == batteries
 
 
 def test_silver_gift_is_worth_nothing_and_not_paid() -> None:
@@ -125,6 +157,28 @@ def test_legacy_guard_buy_maps_the_same_shape() -> None:
 def _interact_message(msg_type: int) -> object:
     raw = pb.InteractWordV2(uid=66, uname="路过", msg_type=msg_type, timestamp=1755000400).dumps()
     return web_models.InteractWordV2Message.from_command({"pb": base64.b64encode(raw).decode()})
+
+
+def test_interact_word_v2_maps_guard_and_current_room_medal() -> None:
+    raw = pb.InteractWordV2(
+        uid=66,
+        uname="老观众",
+        msg_type=1,
+        timestamp=1755000400,
+        fans_medal=pb.InteractWordV2FansMedalInfo(
+            medal_name="米娅",
+            medal_level=8,
+            anchor_roomid=777,
+            guard_level=3,
+        ),
+    ).dumps()
+    message = web_models.InteractWordV2Message.from_command({"pb": base64.b64encode(raw).decode()})
+    event = event_from_interact(message, **_KW)
+    assert event is not None
+    assert event.viewer.guard_level is GuardLevel.CAPTAIN
+    assert event.viewer.medal is not None
+    assert event.viewer.medal.level == 8
+    assert event.viewer.medal.is_this_room(777)
 
 
 def test_interact_word_v2_splits_by_msg_type_through_real_protobuf() -> None:

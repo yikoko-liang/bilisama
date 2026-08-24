@@ -77,6 +77,7 @@ class HostedLink:
         self._clock: Clock = clock or SystemClock()
         self._session_cap_s = max(0.0, (session_cap_min - rotate_margin_min) * 60.0)
         self._rotation: asyncio.Task[None] | None = None
+        self._suspended = False
 
     async def connect(self) -> None:
         """Open the socket, bootstrap the session, restore what we knew.
@@ -157,6 +158,37 @@ class HostedLink:
         if self._rotation is not None:
             self._rotation.cancel()
         await self._client.aclose()
+
+    @property
+    def suspended(self) -> bool:
+        return self._suspended
+
+    async def suspend(self) -> None:
+        """Close the idle session and suppress reconnect until resume."""
+        if self._suspended:
+            return
+        self._suspended = True
+        if self._rotation is not None:
+            self._rotation.cancel()
+            self._rotation = None
+        await self._client.aclose()
+
+    async def resume(self) -> None:
+        """Restore bootstrap and context onto a new speech session."""
+        if not self._suspended:
+            return
+        await self.connect()
+        self._suspended = False
+
+    async def reconfigure_session(
+        self, *, voice: str | None = None, turn: HostedTurnConfig | None = None
+    ) -> None:
+        """Change first-frame-only settings by rotating the socket."""
+        if voice is not None:
+            self._voice = voice
+        if turn is not None:
+            self._turn = turn
+        await self._client.rotate("settings_changed")
 
     async def set_context(self, instructions: str) -> None:
         # Kept locally too: per-response instructions REPLACE the session's on

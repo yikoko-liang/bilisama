@@ -64,14 +64,19 @@
                    placeholder="例如 123456" aria-label="B站房间号">
             <button id="check-button" class="primary" type="button">检测状态</button>
           </div>
+          <label class="room-topic-label" for="stream-intro">
+            <span>直播主题简介</span>
+            <small>检测通过后覆盖系统页配置；更换房间时留空会清除旧主题</small>
+          </label>
+          <textarea id="stream-intro" rows="3" maxlength="500"
+                    placeholder="例如：今晚演示机器人运动控制"></textarea>
           <fieldset class="event-switches">
             <legend>参与伴播的真实事件</legend>
             <label><input type="checkbox" data-speak="danmaku">普通弹幕</label>
             <label><input type="checkbox" data-speak="gift">礼物</label>
             <label><input type="checkbox" data-speak="super_chat">SC</label>
             <label><input type="checkbox" data-speak="guard_buy">上舰</label>
-            <label><input type="checkbox" data-speak="vip_enter">VIP 进房</label>
-            <label><input type="checkbox" data-speak="entry">批量欢迎</label>
+            <label><input type="checkbox" data-speak="entry">进房欢迎</label>
           </fieldset>
           <p class="event-note">关闭只是不让该事件触发说话，事件仍会进入记忆与监控。</p>
           <p id="form-error" class="form-error" role="alert"></p>

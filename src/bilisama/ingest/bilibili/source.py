@@ -160,6 +160,11 @@ def event_from_gift(message: Any, *, room_id: int, recv_at: float, generation: i
         num=message.num,
         coin_type=message.coin_type,
         total_coin=message.total_coin,
+        unit_battery=(
+            max(1, int(message.blind_price or message.price) // 100)
+            if message.coin_type == "gold"
+            else 0
+        ),
         combo_id=f"{viewer.identity}:{message.gift_id}",
     )
     value = cny_from_gold(message.total_coin) if message.coin_type == "gold" else 0.0
@@ -299,14 +304,25 @@ def event_from_interact(
 ) -> LiveEvent | None:
     """INTERACT_WORD_V2 → ENTRY / FOLLOW / SHARE / LIKE by msg_type.
 
-    The simplified upstream model carries no guard level, so promoting a
-    captain's arrival to VIP_ENTER is not decidable here — that upgrade reads
-    the store and lives at assembly level (stage-6 periphery batch).
+    The locally extended upstream model carries current guard and fan-medal
+    identity from INTERACT_WORD_V2, so the assembly can classify the arrival
+    without consulting historical spend.
     """
     kind = _INTERACT_KIND.get(message.msg_type)
     if kind is None:
         return None
-    viewer = Viewer(uid=message.uid, name=message.username, face_url=message.face)
+    viewer = Viewer(
+        uid=message.uid,
+        name=message.username,
+        face_url=message.face,
+        guard_level=GuardLevel.from_wire(message.guard_level),
+        medal=_medal(
+            message.medal_name,
+            message.medal_level,
+            "",
+            message.medal_room_id,
+        ),
+    )
     return LiveEvent(
         kind=kind,
         room_id=room_id,

@@ -20,6 +20,7 @@
   --z-corner: 30;
   --z-scrim: 40;
   --z-panel: 50;
+  --z-exit: 60;
 
   /* The pet scales with the window: full size in a browser tab; the 240x240
      shell window pins its own --pet-size in pet.css instead. */

@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="assets/css/theme-dark.css" media="(prefers-color-scheme: dark)">
   <link rel="stylesheet" href="assets/css/pet.css">
   <link rel="stylesheet" href="assets/css/bubble.css">
-  <link rel="stylesheet" href="assets/css/panel.css">
+  <link rel="stylesheet" href="assets/css/panel.css?v=2">
 </head>
 <body>
   <main id="stage" data-visual="offline">
@@ -23,94 +23,190 @@
     <div id="pet-mount" class="pet-mount"></div>
   </main>
 
-  <button id="corner" class="corner" title="面板" aria-label="打开面板">
-    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-      <g stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none">
-        <path d="M2 4.5h12"/><path d="M2 11.5h12"/>
-      </g>
-      <circle cx="10.2" cy="4.5" r="2" fill="var(--panel, #fff)"
-              stroke="currentColor" stroke-width="1.4"/>
-      <circle cx="5.8" cy="11.5" r="2" fill="var(--panel, #fff)"
-              stroke="currentColor" stroke-width="1.4"/>
-    </svg>
-  </button>
+  <div id="pet-controls" class="pet-controls" aria-label="伴播快捷控制">
+    <button id="voice-input-toggle" class="pet-control active" type="button"
+            title="点击关闭语音输入" data-tooltip="点击关闭语音输入"
+            aria-label="点击关闭语音输入" aria-pressed="true">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8" y="3" width="8" height="12" rx="4"/>
+        <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/>
+      </svg>
+      <span class="control-slash" aria-hidden="true"></span>
+    </button>
+    <button id="voice-output-toggle" class="pet-control active" type="button"
+            title="点击关闭语音播报" data-tooltip="点击关闭语音播报"
+            aria-label="点击关闭语音播报" aria-pressed="true">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 9v6h4l5 4V5L8 9H4Z"/>
+        <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>
+      </svg>
+      <span class="control-slash" aria-hidden="true"></span>
+    </button>
+    <button id="pause-toggle" class="pet-control" type="button"
+            title="暂停伴播助手" data-tooltip="暂停伴播助手"
+            aria-label="暂停伴播助手" aria-pressed="false">
+      <svg class="pause-glyph" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 5h4v14H7zM13 5h4v14h-4z"/>
+      </svg>
+      <svg class="resume-glyph" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m8 5 11 7-11 7z"/>
+      </svg>
+    </button>
+    <button id="corner" class="pet-control" type="button"
+            title="调整伴播助手" data-tooltip="调整伴播助手"
+            aria-label="调整伴播助手" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3A1.7 1.7 0 0 0 14 21v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14h-.2v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/>
+      </svg>
+    </button>
+  </div>
+
+  <div id="exit-dialog" class="exit-dialog" role="dialog" aria-modal="true"
+       aria-labelledby="exit-title" hidden>
+    <div class="exit-card">
+      <h2 id="exit-title">退出 BiliSama？</h2>
+      <p>确认后将关闭伴播助手，并完成本场收尾。</p>
+      <div class="exit-actions">
+        <button id="exit-cancel" type="button">取消</button>
+        <button id="exit-confirm" class="confirm" type="button">退出</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-dialog" class="exit-dialog" role="dialog" aria-modal="true"
+       aria-labelledby="confirm-title" hidden>
+    <div class="exit-card">
+      <h2 id="confirm-title">确认操作</h2>
+      <p id="confirm-message"></p>
+      <div class="exit-actions">
+        <button id="confirm-cancel" type="button">取消</button>
+        <button id="confirm-accept" class="confirm" type="button">确认</button>
+      </div>
+    </div>
+  </div>
 
   <div id="scrim" class="scrim" hidden></div>
 
   <aside id="panel" class="panel" aria-label="控制面板">
-    <header class="panel-top">
-      <div class="panel-id">
-        <span id="p-name" class="p-name">BiliSama</span>
-        <span id="p-state" class="capsule" data-visual="offline">连接中</span>
-      </div>
-      <button id="p-panic" class="panic" data-panicked="false" aria-pressed="false">紧急闭麦</button>
-    </header>
-
-    <nav class="tabs" role="tablist">
-      <button class="tab active" id="tab-btn-live" data-tab="live" role="tab"
-              aria-selected="true" aria-controls="tab-live">现场</button>
+    <nav class="tabs" role="tablist" aria-label="控制中心页面">
+      <div class="panel-brand"><span class="brand-mark">B</span><span>BiliSama</span></div>
+      <button class="tab active" id="tab-btn-system" data-tab="system" role="tab"
+              aria-selected="true" aria-controls="tab-system"><span>⚙</span>系统</button>
       <button class="tab" id="tab-btn-chat" data-tab="chat" role="tab"
-              aria-selected="false" aria-controls="tab-chat">对话</button>
-      <button class="tab" id="tab-btn-logs" data-tab="logs" role="tab"
-              aria-selected="false" aria-controls="tab-logs">日志</button>
+              aria-selected="false" aria-controls="tab-chat"><span>▣</span>聊天记录</button>
+      <button class="tab" id="tab-btn-assistants" data-tab="assistants" role="tab"
+              aria-selected="false" aria-controls="tab-assistants"><span>◇</span>助手市场</button>
       <button class="tab" id="tab-btn-tests" data-tab="tests" role="tab"
-              aria-selected="false" aria-controls="tab-tests">测试</button>
-      <button class="tab" id="tab-btn-config" data-tab="config" role="tab"
-              aria-selected="false" aria-controls="tab-config">配置</button>
+              aria-selected="false" aria-controls="tab-tests"><span>✓</span>测试</button>
+      <button class="tab" id="tab-btn-logs" data-tab="logs" role="tab"
+              aria-selected="false" aria-controls="tab-logs"><span>≡</span>运行日志</button>
+      <div class="nav-spacer"></div>
+      <div class="nav-status"><span id="p-state" class="capsule" data-visual="offline">连接中</span></div>
     </nav>
 
-    <section id="tab-live" class="tab-page active" role="tabpanel" aria-labelledby="tab-btn-live">
-      <div class="live-mock-launch">
-        <div>
-          <strong>直播 Mock</strong>
-          <p>共享浏览器音轨，接入真实直播间事件，检测通过后开始验证。</p>
+    <div class="panel-content">
+      <header class="panel-top">
+        <div class="panel-id">
+          <span id="p-name" class="p-name">BiliSama</span>
+          <span class="live-dot"></span><span class="live-copy">运行中</span>
         </div>
-        <button id="live-mock-open" type="button">打开</button>
-      </div>
-      <h4 class="sect">健康</h4>
-      <div id="health" class="cards"><p class="empty">面板打开时每 5 秒刷新</p></div>
-      <h4 class="sect">谁能让她开口</h4>
-      <div id="speak-matrix" class="matrix"></div>
-      <h4 class="sect">事件注入</h4>
-      <form id="inject" class="inject" autocomplete="off">
-        <input id="inject-input" aria-label="事件注入"
-               placeholder="弹幕直接打字 ｜ /sc 名字 金额 内容 ｜ /gift 名字 金额">
-        <button type="submit">注入</button>
-      </form>
-    </section>
+      </header>
 
-    <section id="tab-chat" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-chat">
-      <div id="timeline" class="timeline" aria-live="polite"><p class="empty">还没有对话</p></div>
-    </section>
+      <section id="tab-system" class="tab-page active" role="tabpanel" aria-labelledby="tab-btn-system">
+        <div class="page-heading"><h1>系统</h1><p>直播间、语音和互动策略都在这里调整，保存后立即生效。</p></div>
 
-    <section id="tab-logs" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-logs">
-      <div class="log-tools">
-        <select id="log-level" aria-label="日志级别过滤">
-          <option value="debug">全部</option>
-          <option value="info" selected>info 及以上</option>
-          <option value="warning">warning 及以上</option>
-          <option value="error">只看 error</option>
-        </select>
-        <button id="log-pause" type="button" data-paused="false">暂停滚动</button>
-      </div>
-      <div id="loglines" class="loglines"></div>
-    </section>
+        <article class="setting-card">
+          <div class="setting-head"><div><h2>麦克风检测</h2><p>确认声音能进来，并过滤环境底噪。</p></div>
+            <label class="check-line"><input id="audio-input-enabled" type="checkbox" checked> 打开语音输入</label>
+          </div>
+          <div class="signal-row"><span>语音信号</span><div class="signal-track"><i id="audio-signal-meter"></i></div><b id="audio-signal-value">0</b></div>
+          <label class="range-field"><span>环境噪音灵敏度 <b id="noise-value">50</b></span>
+            <input id="noise-sensitivity" type="range" min="0" max="100" value="50">
+            <small>数值低更抗噪，数值高更容易听见小声说话。</small>
+          </label>
+        </article>
 
-    <section id="tab-tests" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-tests">
-      <div id="test-set-switch" class="test-set-switch" role="tablist"
-           aria-label="测试集"></div>
-      <p id="test-description" class="test-description">测试集载入中…</p>
-      <div class="test-tools">
-        <select id="test-candidate" aria-label="主播过滤" hidden></select>
-        <span id="test-count" class="test-count"></span>
-        <button id="test-stop" class="test-stop" type="button" disabled>停止当前</button>
-      </div>
-      <div id="test-cases" class="test-cases"><p class="empty">测试集载入中…</p></div>
-    </section>
+        <article class="setting-card">
+          <div class="setting-head"><div><h2>直播事件回复</h2><p>关闭后仍会记录事件，只是不让助手开口。</p></div><span class="muted">默认配置</span></div>
+          <div id="speak-matrix" class="matrix"></div>
+        </article>
 
-    <section id="tab-config" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-config">
-      <div id="config-list" class="config-list"><p class="empty">载入中…</p></div>
-    </section>
+        <article class="setting-card room-card">
+          <div class="setting-head"><div><h2>直播间配置</h2><p>连接真实房间后，事件会实时进入正式调度链路。</p></div></div>
+          <div class="form-grid">
+            <label><span>直播间 ID</span><div class="inline-field"><input id="room-id" inputmode="numeric" placeholder="输入房间号"><button id="room-connect" type="button">检测并连接</button><button id="room-disconnect" class="secondary" type="button" disabled>断开连接</button></div></label>
+            <label><span>主播昵称</span><div class="inline-field"><input id="streamer-name" placeholder="期待助手怎么叫你"><button id="streamer-name-save" type="button" disabled>保存昵称</button></div></label>
+            <label class="wide-field"><span>直播主题简介</span><textarea id="stream-intro" rows="3" maxlength="500" placeholder="例如：今晚从零搭一个 ComfyUI 工作流，正在调试人物一致性"></textarea></label>
+            <div class="room-info-actions"><button id="room-info-save" class="primary" type="button" disabled>保存直播主题</button><span id="room-info-hint" class="muted">修改后保存，下一次回复起生效</span></div>
+          </div>
+          <p id="room-status" class="connection-status">尚未连接直播间</p>
+          <h3>直播间事件流水</h3>
+          <div id="room-events" class="room-events"><p class="empty">等待直播间事件…</p></div>
+        </article>
+
+        <article class="setting-card">
+          <div class="setting-head"><div><h2>回复策略</h2><p>这两项调整后，下一条回复起立即使用。</p></div></div>
+          <div class="form-grid two">
+            <label><span>话痨程度</span><select id="chattiness"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+            <label><span>回复长度</span><select id="reply-length"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+          </div>
+          <details class="advanced"><summary>高级配置</summary>
+            <div class="advanced-grid">
+              <label><span>弹幕整理间隔 <b id="danmaku-window-value">20s</b></span><input id="danmaku-window" type="range" min="1" max="300" step="1" value="20"></label>
+              <label><span>中额礼物门槛（电池）</span><input id="gift-medium" type="number" min="1" step="1"></label>
+              <label><span>高额礼物门槛（电池）</span><input id="gift-high" type="number" min="1" step="1"></label>
+            </div>
+            <fieldset class="entry-groups"><legend>入房欢迎</legend>
+              <label><input data-entry-group="ordinary" type="checkbox"> 普通用户</label>
+              <label><input data-entry-group="naval" type="checkbox"> 航海用户</label>
+              <label><input data-entry-group="ranking" type="checkbox"> 高等级粉丝牌用户</label>
+            </fieldset>
+          </details>
+        </article>
+
+        <details class="setting-card event-inject">
+          <summary><strong>手动事件 Mock</strong><span>展开后注入，按真实直播事件规则调度</span></summary>
+          <form id="inject" class="inject" autocomplete="off">
+            <input id="inject-input" aria-label="事件注入" placeholder="弹幕直接打字 ｜ /sc 名字 金额 内容 ｜ /gift 名字 金额">
+            <button type="submit">注入</button>
+          </form>
+        </details>
+        <div id="health" class="cards health-cards" hidden></div>
+      </section>
+
+      <section id="tab-chat" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-chat">
+        <div class="page-heading"><h1>聊天记录</h1><p>主播语音、直播事件和助手回复按时间排列。</p></div>
+        <div id="timeline" class="timeline" aria-live="polite"><p class="empty">还没有对话</p></div>
+      </section>
+
+      <section id="tab-assistants" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-assistants">
+        <div class="page-heading"><h1>助手市场</h1><p>Mia 的形象和音色固定，可在两套人设之间实时切换。</p></div>
+        <div id="assistant-cards" class="assistant-cards"></div>
+        <article id="assistant-editor" class="setting-card assistant-editor" hidden>
+          <div class="setting-head"><div><h2 id="assistant-editor-title">Mia · 人设配置</h2><p>选择后立即热更新当前会话；编辑保存后也实时生效，不重连语音服务。</p></div></div>
+          <div id="assistant-profile-switch" class="assistant-profile-switch" role="tablist" aria-label="Mia 人设方案"></div>
+          <label><span>身份设定（identity.md）</span><textarea id="assistant-identity" rows="10"></textarea></label>
+          <label><span>性格与说话方式（personality.md）</span><textarea id="assistant-personality" rows="12"></textarea></label>
+          <div class="assistant-actions"><span class="hot-apply-note">保存后立即生效</span><button id="assistant-save" class="primary" type="button" disabled>保存修改</button></div>
+        </article>
+      </section>
+
+      <section id="tab-tests" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-tests">
+        <div class="page-heading"><h1>测试</h1><p>逐条运行功能验收和主播业务场景。</p></div>
+        <div class="live-mock-launch"><div><strong>直播 Mock</strong><p>共享浏览器音轨，接入真实直播间事件，检测通过后开始验证。</p></div><button id="live-mock-open" type="button">打开</button></div>
+        <div id="test-set-switch" class="test-set-switch" role="tablist" aria-label="测试集"></div>
+        <p id="test-description" class="test-description">测试集载入中…</p>
+        <div class="test-tools"><select id="test-candidate" aria-label="主播过滤" hidden></select><span id="test-count" class="test-count"></span><button id="test-stop" class="test-stop" type="button" disabled>停止当前</button></div>
+        <div id="test-cases" class="test-cases"><p class="empty">测试集载入中…</p></div>
+      </section>
+
+      <section id="tab-logs" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-logs">
+        <div class="page-heading"><h1>运行日志</h1><p>连接、调度和异常信息按时间显示。</p></div>
+        <div class="log-tools"><select id="log-level" aria-label="日志级别过滤"><option value="debug">全部</option><option value="info" selected>info 及以上</option><option value="warning">warning 及以上</option><option value="error">只看 error</option></select><button id="log-pause" type="button" data-paused="false">暂停滚动</button></div>
+        <div id="loglines" class="loglines"></div>
+      </section>
+    </div>
   </aside>
 
   <script type="module" src="assets/js/main.js"></script>

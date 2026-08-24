@@ -67,6 +67,23 @@ async def test_speak_on_produces_an_intent(tmp_path: Path) -> None:
     assert intents[0].source == "danmaku"
 
 
+async def test_top_level_pause_drops_events_before_feed_memory_and_scheduling(
+    tmp_path: Path,
+) -> None:
+    assembly, store, _persona, intents, _pushed, _clock = _assembly(tmp_path)
+    assembly.set_event_input_enabled(False)
+    await assembly.on_event(_event("暂停期间"))
+    assert assembly.events_seen == 0
+    assert store.viewer("uid:1") is None
+    assert intents == []
+
+    assembly.set_event_input_enabled(True)
+    await assembly.on_event(_event("恢复之后"))
+    assert assembly.events_seen == 1
+    assert store.viewer("uid:1") is not None
+    assert [intent.source for intent in intents] == ["danmaku"]
+
+
 async def test_a_failed_paid_delivery_stays_retryable(tmp_path: Path) -> None:
     """The direct ring marked the key on the ATTEMPT, so a raise from submit
     burned it: the retry the selector's deliver-then-commit contract exists for
@@ -137,6 +154,13 @@ async def test_context_carries_anchors_rules_and_memory(tmp_path: Path) -> None:
     assert "今晚不聊工作" in text, "pinned memory"
     assert "编译器" in text
     assert "开播" in text, "the clock line"
+
+
+async def test_context_carries_the_live_editable_stream_intro(tmp_path: Path) -> None:
+    topic = "今晚先做 ComfyUI 工作流，再排查显存"
+    kit = build_assembly_kit(tmp_path, stream_intro=lambda: topic)
+
+    assert topic in kit.assembly.build_context()
 
 
 async def test_refresh_pushes_only_when_the_text_changed(tmp_path: Path) -> None:

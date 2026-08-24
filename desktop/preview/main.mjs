@@ -21,8 +21,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PET_WIDTH = 240;
 const PET_HEIGHT = 240;
-const PANEL_WIDTH = 420;
-const PANEL_HEIGHT = 680;
+const PANEL_WIDTH = 980;
+const PANEL_HEIGHT = 760;
 const POLL_MS = 2000;
 
 let petWindow = null;
@@ -125,6 +125,7 @@ function openPanelWindow() {
   if (!currentUrl) return;
   if (panelWindow && !panelWindow.isDestroyed()) {
     panelWindow.focus();
+    petWindow?.webContents.send("panel:state", true);
     return;
   }
   panelWindow = new BrowserWindow({
@@ -141,8 +142,10 @@ function openPanelWindow() {
     },
   });
   panelWindow.loadURL(`${currentUrl}#panel`);
+  petWindow?.webContents.send("panel:state", true);
   panelWindow.on("closed", () => {
     panelWindow = null;
+    petWindow?.webContents.send("panel:state", false);
   });
   harden(panelWindow);
 }
@@ -244,6 +247,10 @@ ipcMain.on("pet:drag-end", (event) => {
 
 ipcMain.on("pet:open-panel", (event) => {
   if (fromPet(event)) openPanelWindow();
+});
+
+ipcMain.on("pet:close-shell", (event) => {
+  if (fromPet(event)) app.quit();
 });
 
 ipcMain.on("shell:open-live-mock", (event) => {

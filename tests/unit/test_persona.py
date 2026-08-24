@@ -12,8 +12,15 @@ from pathlib import Path
 
 import pytest
 
+from bilisama.config.enums import Chattiness
+from bilisama.config.schema import PersonaConfig
 from bilisama.persona import growth as g
-from bilisama.persona.loader import PersonaAnchors, PersonaStore
+from bilisama.persona.loader import (
+    PersonaAnchors,
+    PersonaStore,
+    live_event_rules,
+    template_variables,
+)
 from bilisama.persona.prompt import (
     LIVE_RULES,
     DynamicContext,
@@ -183,6 +190,36 @@ def test_static_prefix_order_is_identity_personality_rules() -> None:
     ), "cache-boundary order is the contract"
 
 
+def test_static_prefix_can_include_rendered_live_event_rules() -> None:
+    prefix = static_prefix(_ANCHORS, event_rules="# 事件规则\n- 不播报金额")
+    assert prefix.index("直播规则") < prefix.index("事件规则")
+    assert "不播报金额" in prefix
+
+
+def test_live_event_rules_render_streamer_name_and_reply_length() -> None:
+    variables = template_variables(PersonaConfig(streamer_name="小梁"), reply_length=Chattiness.LOW)
+    rules = live_event_rules(TEMPLATE_ROOT.parent.parent, variables)
+    assert "小梁是真人主播" in rules
+    assert "短档" in rules
+    assert "不超过 20 个汉字" in rules
+    assert "{{username}}" not in rules and "{{replyLength}}" not in rules
+    assert "严禁输出" in rules
+
+
+def test_live_event_rules_require_useful_danmaku_answers_and_contextual_welcomes() -> None:
+    rules = live_event_rules(
+        TEMPLATE_ROOT.parent.parent,
+        template_variables(PersonaConfig(streamer_name="小梁"), reply_length=Chattiness.LOW),
+    )
+
+    assert "自己的认知直接回答" in rules
+    assert "不默认把问题推给" in rules
+    assert "我可不敢" in rules and "不要使用" in rules
+    assert "直播简介" in rules and "本场进展" in rules
+    assert "不播报人数" in rules or "不把人数" in rules
+    assert all(tier in rules for tier in ("舰长", "提督", "总督", "五级以上"))
+
+
 def test_static_prefix_is_byte_stable_across_calls() -> None:
     assert static_prefix(_ANCHORS) == static_prefix(_ANCHORS)
 
@@ -201,6 +238,7 @@ def test_dynamic_tail_orders_slowest_changing_first() -> None:
         relationship=("观众给主播起了外号",),
         pinned="今晚不聊工作",
         streamer_facts="主播在写编译器",
+        stream_intro="今晚演示 ComfyUI 节点工作流",
         session_progress="刚修完一个 bug",
         regulars="阿强（第 5 次来）",
         clock_line="开播 1 小时 47 分，现在 23:14，本周第 3 场",
@@ -211,6 +249,7 @@ def test_dynamic_tail_orders_slowest_changing_first() -> None:
         tail.index("外号"),
         tail.index("今晚不聊工作"),
         tail.index("编译器"),
+        tail.index("ComfyUI"),
         tail.index("修完"),
         tail.index("阿强"),
         tail.index("23:14"),
@@ -218,6 +257,11 @@ def test_dynamic_tail_orders_slowest_changing_first() -> None:
     assert order == sorted(
         order
     ), "voice → relationship → pinned → facts → progress → regulars → clock"
+
+
+def test_stream_intro_has_its_own_dynamic_context_section() -> None:
+    tail = dynamic_tail(DynamicContext(stream_intro="今晚拆解一个 Agent 的状态机"))
+    assert tail == "# 直播简介\n今晚拆解一个 Agent 的状态机"
 
 
 def test_empty_segments_leave_no_headers_behind() -> None:
@@ -244,7 +288,11 @@ def test_template_variables_come_from_config() -> None:
     from bilisama.persona.loader import template_variables
 
     cfg = PersonaConfig.model_validate({"id": "hanako", "streamer_name": "阿强"})
-    assert template_variables(cfg) == {"userName": "阿强", "agentName": "hanako"}
+    variables = template_variables(cfg)
+    assert variables["userName"] == "阿强"
+    assert variables["username"] == "阿强"
+    assert variables["agentName"] == "hanako"
+    assert "中档" in variables["replyLength"]
 
     # A persona keeping its own name is the normal case; display_name is for
     # when the spoken name should differ from the folder name, whatever the
@@ -254,7 +302,24 @@ def test_template_variables_come_from_config() -> None:
     assert template_variables(named)["userName"] == "主播", "the neutral default still works"
 
 
-@pytest.mark.parametrize("persona_id", ["mia", "hanako", "ming", "butter"])
+@pytest.mark.parametrize(
+    ("level", "marker"),
+    [("low", "短档"), ("medium", "中档"), ("high", "长档")],
+)
+def test_reply_length_variable_maps_all_frontend_levels(level: str, marker: str) -> None:
+    from bilisama.config.enums import Chattiness
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import template_variables
+
+    variables = template_variables(
+        PersonaConfig.model_validate({"id": "live"}),
+        reply_length=Chattiness(level),
+    )
+
+    assert marker in variables["replyLength"]
+
+
+@pytest.mark.parametrize("persona_id", ["mia", "hanako", "ming", "butter", "live"])
 def test_no_shipped_template_leaks_a_raw_placeholder(persona_id: str) -> None:
     """Every {{name}} any shipped persona uses must be one template_variables
     supplies. A missing key is silent: the raw {{agentName}} simply sits in the

@@ -1,8 +1,9 @@
 """Thresholds derived from the chattiness setting.
 
-These five numbers are deliberately absent from the TOML file. If the config
-pinned `window_s` and the slider also moved it, nothing would define which wins.
-The slider is the single writer; this table is the only mapping.
+The base table remains the CLI-visible product tuning. The control centre can
+override reply length and the danmaku collection window independently; the
+effective helper makes that precedence explicit instead of growing a second
+hidden table inside dev-talk.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ _CHATTINESS_TABLE: dict[Chattiness, DerivedThresholds] = {
         danmaku_window_s=30,
         score_threshold=0.55,
         cooldown_s=20,
-        max_output_tokens=70,
+        max_output_tokens=45,
     ),
     Chattiness.MEDIUM: DerivedThresholds(
         idle_threshold_s=90,
@@ -61,3 +62,24 @@ _CHATTINESS_TABLE: dict[Chattiness, DerivedThresholds] = {
 
 def derive(chattiness: Chattiness) -> DerivedThresholds:
     return _CHATTINESS_TABLE[chattiness]
+
+
+def effective_thresholds(
+    chattiness: Chattiness,
+    *,
+    reply_length: Chattiness,
+    danmaku_window_s: int,
+) -> DerivedThresholds:
+    """Return the runtime row after applying independent UI controls."""
+    base = derive(chattiness)
+    reply_tokens = {
+        Chattiness.LOW: 45,
+        Chattiness.MEDIUM: 120,
+        Chattiness.HIGH: 180,
+    }
+    return base.model_copy(
+        update={
+            "danmaku_window_s": danmaku_window_s,
+            "max_output_tokens": reply_tokens[reply_length],
+        }
+    )

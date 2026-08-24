@@ -104,9 +104,6 @@ fi
 [ "$#" -eq 0 ] || die "未知参数：$*"
 
 if backend_pid="$(running_backend_pid)"; then
-  if [ -n "$ROOM_ID" ]; then
-    die "BiliSama 后端已经在运行；房间号只在启动时生效。先在后端终端按 Ctrl-C，再重新启动。"
-  fi
   printf '检测到正在运行的 BiliSama（PID %s）。\n' "$backend_pid"
   start_pet_for_running_backend
   exit 0

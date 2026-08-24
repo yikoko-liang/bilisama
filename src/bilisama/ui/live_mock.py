@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import math
+import struct
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 
-from bilisama.ingest.events import EventKind, LiveEvent
+from bilisama.ingest.events import LiveEvent
 from bilisama.ingest.sources import EventSink
+from bilisama.ui.events import live_event_payload
 
 __all__ = ["AudioInputSwitch", "LiveMockController", "RoomSource"]
 
@@ -45,20 +48,88 @@ RoomSourceFactory = Callable[[int], RoomSource]
 class AudioInputSwitch:
     """Route exactly one uplink into the already-connected speech backend."""
 
-    def __init__(self, sink: AudioSink) -> None:
+    def __init__(self, sink: AudioSink, *, noise_sensitivity: int = 50) -> None:
         self._sink = sink
         self._browser_active = False
+        self._enabled = True
+        self._paused = False
+        self._noise_sensitivity = max(0, min(100, noise_sensitivity))
+        self._signal_level = 0
+        self._voice_hold_frames = 0
         self.microphone_frames = 0
         self.browser_frames = 0
         self.blocked_microphone_frames = 0
         self.blocked_browser_frames = 0
+        self.silenced_frames = 0
 
     @property
     def browser_active(self) -> bool:
         return self._browser_active
 
+    @property
+    def enabled(self) -> bool:
+        """Whether the active input may reach the speech backend."""
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Pause or resume user audio without changing the selected source."""
+        self._enabled = enabled
+
+    def set_paused(self, paused: bool) -> None:
+        """Gate all uplink traffic while the speech transport is closed."""
+        self._paused = paused
+
+    @property
+    def noise_sensitivity(self) -> int:
+        return self._noise_sensitivity
+
+    @property
+    def signal_level(self) -> int:
+        """Latest PCM RMS mapped to the UI's 0-100 meter."""
+        return self._signal_level
+
+    def set_noise_sensitivity(self, value: int) -> None:
+        self._noise_sensitivity = max(0, min(100, value))
+
+    def _noise_filtered(self, pcm: bytes) -> bytes:
+        """Gate background noise while preserving the provider audio clock."""
+        if len(pcm) < 2 or len(pcm) % 2:
+            return pcm
+        samples = struct.iter_unpack("<h", pcm)
+        total = 0
+        count = 0
+        for (sample,) in samples:
+            total += sample * sample
+            count += 1
+        rms = math.sqrt(total / max(1, count)) / 32768.0
+        dbfs = 20.0 * math.log10(max(rms, 1e-8))
+        self._signal_level = round(max(0.0, min(100.0, (dbfs + 60.0) / 0.6)))
+        # Sensitivity raises the acceptance of quiet speech: -28 dBFS at zero,
+        # -58 dBFS at one hundred. A short hold avoids chopping word endings.
+        threshold_dbfs = -28.0 - self._noise_sensitivity * 0.3
+        if dbfs >= threshold_dbfs:
+            self._voice_hold_frames = 8
+            return pcm
+        if self._voice_hold_frames > 0:
+            self._voice_hold_frames -= 1
+            return pcm
+        self.silenced_frames += 1
+        return bytes(len(pcm))
+
     def use_browser(self, enabled: bool) -> None:
         self._browser_active = enabled
+
+    async def _forward(self, pcm: bytes) -> None:
+        if self._paused:
+            return
+        if self._enabled:
+            await self._sink(self._noise_filtered(pcm))
+            return
+        # Keep the realtime provider's audio clock advancing while guaranteeing
+        # that no captured voice reaches it. Dropping frames entirely can leave
+        # an in-progress server-VAD turn frozen forever.
+        self.silenced_frames += 1
+        await self._sink(bytes(len(pcm)))
 
     async def push_audio(self, pcm: bytes) -> None:
         """Microphone-compatible method used by the existing audio pump."""
@@ -66,14 +137,14 @@ class AudioInputSwitch:
             self.blocked_microphone_frames += 1
             return
         self.microphone_frames += 1
-        await self._sink(pcm)
+        await self._forward(pcm)
 
     async def push_browser_audio(self, pcm: bytes) -> None:
         if not self._browser_active:
             self.blocked_browser_frames += 1
             return
         self.browser_frames += 1
-        await self._sink(pcm)
+        await self._forward(pcm)
 
 
 class LiveMockController:
@@ -353,14 +424,4 @@ class LiveMockController:
 
 
 def _event_preview(event: LiveEvent) -> dict[str, object]:
-    detail = event.text
-    if event.kind is EventKind.GIFT and event.gift is not None:
-        detail = f"{event.gift.name} ×{event.gift.num}"
-    return {
-        "kind": event.kind.value,
-        "name": event.viewer.name,
-        "text": detail,
-        "value_cny": event.value_cny,
-        "room_id": event.room_id,
-        "ts_ms": event.ts_ms,
-    }
+    return live_event_payload(event)

@@ -130,6 +130,9 @@ class Scheduler:
         self._queued_keys: set[str] = set()
         self._revoked: set[str] = set()
         self._active: _Active | None = None
+        # UI correlation survives settle: ReplyDone may reach the UI fanout
+        # after the scheduler has already cleared ``_active``.
+        self._reply_intents: dict[int, Intent] = {}
         self._dispatching = False
         self._panicked = False
         # Set between LinkDown and LinkUp. Work that arrives in that window is
@@ -222,6 +225,11 @@ class Scheduler:
         self._panicked = False
         self._wake.set()
 
+    def set_cooldown(self, seconds: float) -> None:
+        """Apply the next global cooldown without disturbing queued work."""
+        self._cooldown_s = max(0.0, seconds)
+        self._wake.set()
+
     @property
     def verdicts(self) -> list[Verdict]:
         """Verdicts collected by the default sink (tests read these)."""
@@ -236,6 +244,10 @@ class Scheduler:
             "active_source": active.intent.source if active else None,
             "dispatching": self._dispatching,
         }
+
+    def reply_intent(self, handle: link.ReplyHandle) -> Intent | None:
+        """Return the scheduled intent that owns a provider reply handle."""
+        return self._reply_intents.get(handle.handle_id)
 
     # ------------------------------------------------------------ the loop
 
@@ -358,6 +370,9 @@ class Scheduler:
             self._dispatching = False
 
         active = _Active(intent=intent, handle=handle)
+        self._reply_intents[handle.handle_id] = intent
+        if len(self._reply_intents) > 128:
+            self._reply_intents.pop(next(iter(self._reply_intents)))
         reply = intent.injection.reply
         if reply.protected:
             active.protected_until = self._clock.monotonic() + reply.protect_ms / 1000.0

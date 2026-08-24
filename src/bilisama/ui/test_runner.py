@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bilisama.clock import Clock
-from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Viewer
+from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Medal, Viewer
 from bilisama.ingest.sources import QueueSource
 from bilisama.obs.logging import get_logger
 
@@ -34,14 +34,30 @@ _EVENT_LABEL = {
 }
 
 
+class MockMedal(BaseModel):
+    """Current-room medal identity returned by the platform interface."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    level: int = Field(ge=0)
+    up_name: str = ""
+    anchor_room_id: int = Field(default=990000, ge=0)
+
+
 class MockViewer(BaseModel):
     """A deterministic viewer identity used by a mock event."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     uid: int = Field(ge=0)
+    uid_hash: str = ""
     name: str = Field(min_length=1)
+    user_level: int = Field(default=0, ge=0)
+    wealth_level: int = Field(default=0, ge=0)
     guard_level: GuardLevel = GuardLevel.NONE
+    is_admin: bool = False
+    medal: MockMedal | None = None
 
 
 class MockGift(BaseModel):
@@ -54,6 +70,7 @@ class MockGift(BaseModel):
     num: int = Field(default=1, ge=1)
     coin_type: Literal["", "silver", "gold"] = ""
     total_coin: int = Field(default=0, ge=0)
+    unit_battery: int = Field(default=1, ge=1)
     combo_id: str = ""
     combo_count: int = Field(default=0, ge=0)
     combo_end: bool | None = None
@@ -79,6 +96,12 @@ class MockEvent(BaseModel):
             raise ValueError("gift 事件必须提供 gift 字段")
         if self.kind is not EventKind.GIFT and self.gift is not None:
             raise ValueError("只有 gift 事件能提供 gift 字段")
+        if self.gift is not None:
+            expected_coin = self.gift.unit_battery * self.gift.num * 100
+            if self.gift.total_coin != expected_coin:
+                raise ValueError("gift.total_coin 必须与电池单价和数量一致")
+            if self.value_cny != expected_coin / 1000:
+                raise ValueError("value_cny 仅保留原始事件金额，必须与 total_coin 一致")
         return self
 
     def summary(self) -> str:
@@ -86,9 +109,8 @@ class MockEvent(BaseModel):
         label = _EVENT_LABEL[self.kind]
         detail = self.text
         if self.kind is EventKind.GIFT and self.gift is not None:
-            detail = f"{self.gift.name} ×{self.gift.num}"
-        if self.value_cny:
-            detail = f"{detail} ¥{self.value_cny:g}".strip()
+            batteries = self.gift.unit_battery * self.gift.num
+            detail = f"{self.gift.name} ×{self.gift.num} · {batteries} 电池"
         suffix = f"：{detail}" if detail else ""
         return f"{self.viewer.name} · {label}{suffix}"
 
@@ -116,6 +138,12 @@ class MockBurst(BaseModel):
             raise ValueError("gift 洪峰必须提供 gift 字段")
         if self.kind is not EventKind.GIFT and self.gift is not None:
             raise ValueError("只有 gift 洪峰能提供 gift 字段")
+        if self.gift is not None:
+            expected_coin = self.gift.unit_battery * self.gift.num * 100
+            if self.gift.total_coin != expected_coin:
+                raise ValueError("gift.total_coin 必须与电池单价和数量一致")
+            if self.value_cny != expected_coin / 1000:
+                raise ValueError("value_cny 仅保留原始事件金额，必须与 total_coin 一致")
         return self
 
     def expand(self) -> list[MockEvent]:
@@ -411,12 +439,18 @@ class MockTestRunner:
     ) -> LiveEvent:
         viewer = Viewer(
             uid=spec.viewer.uid,
+            uid_hash=spec.viewer.uid_hash,
             name=spec.viewer.name,
+            user_level=spec.viewer.user_level,
+            wealth_level=spec.viewer.wealth_level,
             guard_level=spec.viewer.guard_level,
+            is_admin=spec.viewer.is_admin,
+            medal=(Medal(**spec.viewer.medal.model_dump()) if spec.viewer.medal else None),
         )
         gift = None
         if spec.gift is not None:
-            gift = Gift(**spec.gift.model_dump())
+            gift_data = spec.gift.model_dump()
+            gift = Gift(**gift_data)
         return LiveEvent(
             kind=spec.kind,
             room_id=990000 if spec.route == "crowd" else 0,
