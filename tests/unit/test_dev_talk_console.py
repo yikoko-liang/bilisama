@@ -65,13 +65,15 @@ def test_a_late_transcript_still_prints_before_the_reply_it_explains(
     tell what caused what — and the first thing they suspect is the thing that
     is working.
     """
+    # The FIRST turn of the connection, which is the hard one: nothing has told
+    # us yet whether this provider transcribes at all.
+    #
     # Punctuated on purpose: the buffered printer flushes on a sentence end
     # (_SENTENCE_END), so a reply that finishes a sentence goes out the moment
     # it arrives — which is what put it ahead of the transcript on screen.
-    events = [
-        *_turn("先来一句。", transcript="第一句", late=False),
-        *_turn("这得看你在哪座城市啊，我这 AI 没长眼睛。", transcript="今天天气怎么样", late=True),
-    ]
+    events = _turn(
+        "这得看你在哪座城市啊，我这 AI 没长眼睛。", transcript="今天天气怎么样", late=True
+    )
     lines = _run(events, capsys)
     heard_at, said_at = _order(lines, "这得看你在哪座城市啊", "今天天气怎么样")
     assert heard_at < said_at, "回复排在了它要回答的那句话前面：\n" + "\n".join(lines)
@@ -90,34 +92,31 @@ def test_a_transcript_that_arrives_first_is_not_delayed(
     assert heard_at < said_at
 
 
-def test_a_provider_that_never_transcribes_streams_its_reply_as_before(
+def test_a_provider_that_never_transcribes_is_made_to_wait_exactly_once(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """s2s with `--stt none` sends no transcript, ever.
 
-    Waiting for one there would hold every reply until it ended, which is the
-    regression the sentence-at-a-time printing was built to avoid. So the wait
-    only arms once this provider has been seen to transcribe at least once.
+    Nothing announces that up front — no session field asks for transcription
+    and the client does not read session.updated — so the first turn waits and
+    finds out. That costs one turn of buffering per connection. What must not
+    happen is paying it twice: waiting on every turn would hold each reply to
+    its end, which is the lag the sentence-at-a-time printing exists to avoid.
     """
-    events: list[link.LinkEvent] = [
-        link.SpeechStopped(audio_ms=800),
-        link.ReplyTextDelta(_HANDLE, "她说的话。"),
-        link.ReplyDone(_HANDLE, ReplyStatus.COMPLETED, "她说的话。"),
-    ]
-    printed: list[str] = []
+    seen: list[str] = []
+    handle = link.ReplyHandle(handle_id=1)
 
-    async def watch() -> None:
-        async def feed() -> AsyncIterator[link.LinkEvent]:
-            yield events[0]
+    async def feed() -> AsyncIterator[link.LinkEvent]:
+        for turn in ("第一轮的回复。", "第二轮的回复。"):
+            yield link.SpeechStopped(audio_ms=800)
             await asyncio.sleep(0)
-            yield events[1]
+            yield link.ReplyTextDelta(handle, turn)
             await asyncio.sleep(0)
-            # Read the buffer with the reply still open: held text would not be
-            # here yet, and that is the whole difference being asserted.
-            printed.append(capsys.readouterr().out)
-            yield events[2]
+            # Sampled with the reply still open: held text is not here yet.
+            seen.append(capsys.readouterr().out)
+            yield link.ReplyDone(handle, ReplyStatus.COMPLETED, turn)
+            await asyncio.sleep(0)
 
-        await _consume_events(feed(), None, None, stream_text=False)
-
-    asyncio.run(watch())
-    assert "她说的话。" in printed[0], "没人会来的转写把这段回复卡住了"
+    asyncio.run(_consume_events(feed(), None, None, stream_text=False))
+    assert "第一轮的回复。" not in seen[0], "第一轮没等，转写迟到的 provider 第一轮就还是反的"
+    assert "第二轮的回复。" in seen[1], "问过一次已经知道它不转写，不该再等第二次"

@@ -583,12 +583,14 @@ async def _consume_events(
     # first suspicion falls on the part that is working. So her reply waits for
     # the transcript of the turn it belongs to.
     #
-    # Armed only once this provider has been seen to transcribe at all: s2s with
-    # `--stt none` never sends one, and waiting there would hold every reply to
-    # its end — the exact lag the sentence-at-a-time printing exists to avoid.
-    # The cost is that the first such turn of a session can still print
-    # reversed, which beats holding text that nothing will ever release.
-    transcribes = False
+    # Whether this provider transcribes at all is not knowable up front — we
+    # never ask for it (no session field sets it) and the client does not read
+    # session.updated — so the first turn guesses yes and finds out. Guessing
+    # yes costs a provider that never transcribes (s2s with `--stt none`) one
+    # turn of buffering per connection, after which it is never made to wait
+    # again; guessing no would cost the first turn's ORDER on every provider
+    # that does, and order is the thing being fixed.
+    transcribes: bool | None = None
     awaiting = False
     held: list[str] = []
 
@@ -644,8 +646,7 @@ async def _consume_events(
             if speaker is not None:
                 speaker.play(event.pcm)
         elif isinstance(event, link.SpeechStopped):
-            if transcribes:
-                awaiting = True
+            awaiting = transcribes is not False
         elif isinstance(event, link.SpeechStarted):
             # A new turn starting settles the last one either way: whatever it
             # was holding belongs on screen now, transcript or no transcript.
@@ -661,6 +662,8 @@ async def _consume_events(
                 flush_sentences(final=True)  # whatever the last sentence left
                 say(marker)
             # The transcript lost the race for good; nothing else will release.
+            if transcribes is None:
+                transcribes = False  # asked once, answered: never wait again
             release()
             if reply_wav is not None and collected:
                 with wave.open(str(reply_wav), "wb") as w:
