@@ -69,6 +69,11 @@ _AUDIO_QUEUE = 64
 # queued. Same word the control socket uses, so there is one name for one idea.
 _CLEAR_MARKER = json.dumps({"event": "playback.clear", "data": {}})
 
+# Blocks between two log lines about an uplink that keeps failing. They arrive
+# every 20 ms, so this is one line per outage plus one every five seconds while
+# it lasts — visible in the log without drowning it.
+_UPLINK_LOG_EVERY = 250
+
 
 # ------------------------------------------------------------ socket & files
 
@@ -350,6 +355,21 @@ def create_ui_app(
             # None through the queue is the pump's hang-up sentinel; reused
             # here so a displaced client is told to let go of its microphone
             # rather than left capturing into a socket nobody reads.
+            def close() -> None:
+                # The queue is bounded, and a page that stopped reading fills
+                # it — audio arrives faster than it plays, which is how this
+                # project once measured 106 seconds of unplayed sound inside
+                # 48 seconds of wall clock. Putting the sentinel without
+                # looking would raise QueueFull out of claim() at exactly the
+                # moment the devices change hands, leaving the broker pointing
+                # at a socket that is about to be closed and the local pair
+                # parked forever. Everything queued goes first: it belongs to a
+                # client that just lost the devices, and the new owner is
+                # already being fed the same reply.
+                while not outbound.empty():
+                    outbound.get_nowait()
+                outbound.put_nowait(None)
+
             def flush() -> None:
                 # Everything still queued belongs to the utterance that was
                 # just interrupted. The marker goes on afterwards, so by the
@@ -359,15 +379,22 @@ def create_ui_app(
                     outbound.get_nowait()
                 outbound.put_nowait(_CLEAR_MARKER)
 
-            if not await broker.claim(
-                who, send=send, close=lambda: outbound.put_nowait(None), flush=flush
-            ):
-                # Someone stronger has the devices. Say so and hang up rather
-                # than sit on a socket nobody feeds.
-                await ws.close(code=4409)
-                return
+            # None until claim() answers. A claim that fails partway has
+            # already pointed the broker at this socket (AudioBroker.claim
+            # swaps the owner over before anything that can raise), so "no
+            # answer" has to be treated like "granted" and the devices handed
+            # back. A plain False is the opposite case: someone else holds
+            # them, and releasing would take them out from under that client.
+            granted: bool | None = None
             pump: asyncio.Task[None] | None = None
+            dropped = 0
             try:
+                granted = await broker.claim(who, send=send, close=close, flush=flush)
+                if not granted:
+                    # Someone stronger has the devices. Say so and hang up
+                    # rather than sit on a socket nobody feeds.
+                    await ws.close(code=4409)
+                    return
                 pump = asyncio.create_task(_pump_audio(ws, outbound), name="ui:audio-out")
                 while True:
                     # Both kinds on one socket: PCM up, and the playback
@@ -383,7 +410,7 @@ def create_ui_app(
                     payload = message.get("bytes")
                     if payload is not None:
                         if on_audio is not None:
-                            await on_audio(payload)
+                            dropped = await _forward_uplink(on_audio, payload, dropped)
                         continue
                     text = message.get("text")
                     if text is not None:
@@ -391,7 +418,8 @@ def create_ui_app(
             except WebSocketDisconnect:
                 pass
             finally:
-                await broker.release(who)
+                if granted is not False:
+                    await broker.release(who)
                 if pump is not None:
                     pump.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -404,6 +432,54 @@ def create_ui_app(
         app.mount(prefix + "/skins", StaticFiles(directory=user_skins_root), name="skins")
     app.mount(prefix, create_health_app(registry), name="health")
     return app
+
+
+async def _forward_uplink(
+    on_audio: Callable[[bytes], Awaitable[None]], pcm: bytes, dropped: int
+) -> int:
+    """Hand one microphone block upstream. Never raises.
+
+    An exception escaping this call would reach the endpoint's finally, which
+    hands the devices back to sounddevice — PortAudio streams reopen with no
+    echo cancellation behind them, the page reconnects half a second later and
+    parks them again, and since the link's backoff is the slower of the two,
+    the next block hits the same failure. One link hiccup becomes a run of real
+    device churn. push_audio raises for as long as the link is between sockets
+    (RealtimeClient._send_raw), so this is ordinary weather, and dev-talk's
+    own microphone path already answered it the same way: a send that fails
+    while the link is down costs one block, not the session (dev-talk's
+    _uplink).
+
+    The net is deliberately wide. What push_audio raises belongs to the
+    transport — ConnectionError, a websockets error — and naming those here
+    would reach across a layer boundary to buy nothing: the rule at this end is
+    that NO failure of a caller-supplied handler may cost the devices. It is
+    not silent, and it does not go quiet on a fault that never clears: the
+    first failure of a run logs, so does every _UPLINK_LOG_EVERY after it, and
+    so does the recovery.
+
+    Args:
+        on_audio: Normally the link's push_audio.
+        pcm: One uplink block from the page.
+        dropped: How many blocks in a row have failed so far.
+
+    Returns:
+        The new run length: 0 once a block gets through.
+    """
+    try:
+        await on_audio(pcm)
+    except Exception as exc:
+        if dropped % _UPLINK_LOG_EVERY == 0:
+            log.warning(
+                "ui.uplink_dropped",
+                error=type(exc).__name__,
+                error_text=str(exc),
+                dropped=dropped + 1,
+            )
+        return dropped + 1
+    if dropped:
+        log.info("ui.uplink_resumed", dropped=dropped)
+    return 0
 
 
 async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | str | None]) -> None:

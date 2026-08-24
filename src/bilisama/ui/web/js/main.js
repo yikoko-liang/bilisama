@@ -196,6 +196,11 @@ const audio = panelOnly
       // devices comes back from the server, so both windows agree.
       onOwner: (owner, error) => {
         if (error) panel.setAudioOwner(owner, error);
+        // No error means this window has no bad news any more: it got its
+        // microphone, or it stood aside for something stronger. Either way the
+        // previous refusal must stop being reported against the window that
+        // holds the devices now.
+        else panel.forgetLocalMicTrouble();
       },
     });
 

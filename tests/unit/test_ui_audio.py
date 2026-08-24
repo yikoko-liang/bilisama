@@ -8,10 +8,12 @@ sounddevice pair keeps running exactly as it did before any of this existed.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 import struct
 
+from bilisama.clock import FakeClock
 from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
 
 
@@ -25,6 +27,29 @@ class _Local:
         self.calls.append("suspend")
 
     async def resume(self) -> None:
+        self.calls.append("resume")
+
+
+class _SlowLocal:
+    """A local pair whose resume only lands after the loop has been given away.
+
+    dev-talk's is exactly this shape: both halves wrap a blocking PortAudio
+    call in `asyncio.to_thread`, and the microphone task is started in the tail
+    AFTER that await returns (_LocalPair.resume). The tail is what a claim
+    arriving in the meantime can overtake.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.inside_resume = asyncio.Event()
+        self.let_resume_finish = asyncio.Event()
+
+    async def suspend(self) -> None:
+        self.calls.append("suspend")
+
+    async def resume(self) -> None:
+        self.inside_resume.set()
+        await self.let_resume_finish.wait()
         self.calls.append("resume")
 
 
@@ -199,6 +224,69 @@ async def test_the_first_claimant_is_not_hung_up_on() -> None:
     assert hung_up == []
 
 
+async def test_a_reload_cannot_wake_the_local_pair_behind_the_new_owner() -> None:
+    """页面重载：旧 socket 还给设备的同时，新 socket 已经在敲门。
+
+    Cmd-R 或者壳重启，两件事差几毫秒，而归还要等一次 to_thread 落地。没有互斥
+    的话新 claim 会在 resume 的尾巴之前跑完，尾巴再把本机麦克风拉起来——页面
+    拿着设备，sounddevice 那对同时活着，同一个物理设备上两条采集流，她的声音
+    还会从两个地方出来，而 sounddevice 那份不在 Chromium 的回声消除参考里。
+    """
+    local = _SlowLocal()
+    broker = AudioBroker(local=local)
+    assert await broker.claim("browser", send=lambda _pcm: None)
+
+    giving_back = asyncio.create_task(broker.release("browser"))
+    await local.inside_resume.wait()
+    taking_over = asyncio.create_task(broker.claim("shell", send=lambda _pcm: None))
+    for _ in range(8):
+        # Nothing but the mutex should be able to hold the claim here.
+        await asyncio.sleep(0)
+    local.let_resume_finish.set()
+    await giving_back
+    assert await taking_over
+
+    assert broker.owner == "shell"
+    assert not broker.local_is_live
+    assert local.calls == [
+        "suspend",
+        "resume",
+        "suspend",
+    ], f"归还和顶替交错了，本机那对最后是活的：{local.calls}"
+
+
+async def test_a_handover_says_the_queued_audio_no_longer_counts() -> None:
+    """The page that was going to play it is gone; the receipts never arrive.
+
+    PlaybackTally counts on the page reporting every segment back. A page that
+    loses the devices mid-reply reports nothing for what it had already queued,
+    the count never returns to zero, and the floor gate stays shut for the rest
+    of the session. The link layer solved the same shape once and left the note
+    (floor.on_link_lost).
+    """
+    cancelled: list[int] = []
+    broker = AudioBroker(on_handoff=lambda: cancelled.append(1))
+
+    await broker.claim("browser", send=lambda _pcm: None)
+    assert cancelled == [], "第一个来的没有前任，没什么要作废"
+    await broker.claim("shell", send=lambda _pcm: None)
+    assert cancelled == [1], "顶替时排队的段落没作废"
+    await broker.release("shell")
+    assert cancelled == [1, 1], "还回设备时排队的段落没作废"
+
+
+async def test_nothing_is_written_off_while_the_devices_stay_put() -> None:
+    """A refused claim and a loser's late release both change nothing."""
+    cancelled: list[int] = []
+    broker = AudioBroker(on_handoff=lambda: cancelled.append(1))
+    await broker.claim("shell", send=lambda _pcm: None)
+
+    assert not await broker.claim("browser", send=lambda _pcm: None)
+    await broker.release("browser")  # the tab that lost, hanging up afterwards
+    assert broker.owner == "shell"
+    assert cancelled == [], "设备没易主，正在播的段落不该被作废"
+
+
 # ------------------------------------------------------------ hearing herself
 
 
@@ -211,85 +299,242 @@ def _tone(seconds: float, rate: int, amp: int = 9000, hz: int = 220) -> bytes:
     )
 
 
-def _converse(probe: EchoProbe, *, leak: float, lag_s: float = 0.3, seed: int = 7) -> None:
-    """Drive both streams the way a live session does: interleaved, in step.
+_TICK_S = 0.02
 
-    The speaking pattern is deliberately irregular. A regular one correlates
-    with itself at every multiple of its period, which would let a broken
-    probe look right.
+
+def _syllables(rnd: random.Random, ticks: int, level: int) -> list[int]:
+    """An irregular speech envelope: one amplitude held for a syllable at a time.
+
+    Irregular on purpose. A regular pattern correlates with itself at every
+    multiple of its period, which lets a probe that looks at the wrong lag —
+    or at no lag at all — come out right by accident.
+    """
+    out: list[int] = []
+    while len(out) < ticks:
+        out += [rnd.choice([level // 3, level // 2, level * 3 // 4, level])] * rnd.randint(3, 8)
+    return out[:ticks]
+
+
+async def _converse(
+    probe: EchoProbe,
+    clock: FakeClock,
+    *,
+    leak: float,
+    room: float = 0.12,
+    gap_s: float = 1.0,
+    lag_s: float = 0.3,
+    turns: int = 6,
+    seed: int = 7,
+) -> None:
+    """Drive both streams the way a live session does — on the clock.
+
+    The production shape is not the obvious one, and getting it wrong is what
+    hid two envelopes drifting apart:
+
+    - The microphone feeds every 20 ms for as long as the page holds the
+      devices, silence included (dev-talk's uplink).
+    - The downlink exists only while she is actually speaking: dev-talk calls
+      note_played on a ReplyAudioDelta and on nothing else, so the pause
+      between two replies reaches the probe as no calls at all.
+
+    Args:
+        probe: The probe under test.
+        clock: Moved forward 20 ms per block, so both sides land on real time.
+        leak: How much of her own voice comes back through the mic, 0..1.
+        room: The streamer and the room, as a share of her level. Never zero
+            in a real room — and a microphone that IS zero short-circuits the
+            correlation, which is how a probe that never correlated anything
+            passed six tests.
+        gap_s: Silence between two replies. Nothing is sent during it.
+        lag_s: The trip through the air, back into the microphone.
+        turns: How many replies.
+        seed: Fixes the speech pattern.
     """
     rnd = random.Random(seed)
-    plan = [(rnd.choice([0.18, 0.31, 0.47, 0.62]), rnd.random() < 0.65) for _ in range(30)]
-    down, up = bytearray(), bytearray()
-    for duration, speaking in plan:
-        down += _tone(duration, 24000, amp=9000 if speaking else 0)
-        up += _tone(duration, 16000, amp=int(9000 * leak) if speaking else 0)
-    up = bytearray(_tone(lag_s, 16000, amp=0)) + up  # the trip through the air
+    her: list[int] = []
+    for _ in range(turns):
+        her += _syllables(rnd, int(rnd.choice([0.6, 0.9, 1.3, 1.8]) / _TICK_S), 9000)
+        her += [0] * int(gap_s / _TICK_S)
+    room_noise = _syllables(rnd, len(her), max(1, int(9000 * room))) if room else [0] * len(her)
 
-    step_down, step_up = 24000 * 2 * 20 // 1000, 16000 * 2 * 20 // 1000
-    for k in range(max(len(down) // step_down, len(up) // step_up)):
-        probe.note_played(bytes(down[k * step_down : (k + 1) * step_down]))
-        probe.note_captured(bytes(up[k * step_up : (k + 1) * step_up]))
+    lag_ticks = int(lag_s / _TICK_S)
+    for k, level in enumerate(her):
+        if level:
+            # No delta, no call — the pauses reach the probe as nothing.
+            probe.note_played(_tone(_TICK_S, 24000, amp=level))
+        echo = int(her[k - lag_ticks] * leak) if k >= lag_ticks else 0
+        probe.note_captured(_tone(_TICK_S, 16000, amp=min(32767, echo + room_noise[k])))
+        await clock.advance(_TICK_S)
 
 
-def test_a_clean_session_reports_no_echo() -> None:
-    """Cancellation working, or headphones on: the mic never hears her."""
-    probe = EchoProbe()
-    _converse(probe, leak=0.0)
+async def test_a_clean_session_is_not_reported_as_a_leak() -> None:
+    """Cancellation working, or headphones on: the mic never hears her.
+
+    The microphone is far from silent — the streamer is talking, the room is
+    there. That is the point: a probe that answered 「麦克风不静音就是漏了」
+    would pass every other test in this file and fail this one.
+
+    Not「ok」on the nose, and that is honest rather than sloppy: a search for
+    the best of a hundred lags has a floor, and two unrelated speech envelopes
+    over one window land anywhere up to about 0.45 (measured over 30 seeds of
+    this same setup). Which is exactly why suspect counts as healthy — see the
+    card test below.
+    """
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
+    await _converse(probe, clock, leak=0.0, room=0.8)
     reading = probe.reading()
     assert reading is not None
-    assert reading.verdict == "ok", reading
+    assert reading.verdict != "leaking", reading
+    assert probe.status()["ok"] is True
 
 
-def test_her_voice_coming_back_is_caught() -> None:
+async def test_her_voice_coming_back_is_caught() -> None:
     """The case Chromium cannot report: her reply reaches the microphone by a
     route its canceller never saw — OBS monitoring it back out, most likely.
     Nothing errors, the panel says cancellation is on, and turn detection
     starts firing on her own voice."""
-    probe = EchoProbe()
-    _converse(probe, leak=1.0)
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
+    await _converse(probe, clock, leak=1.0)
     reading = probe.reading()
     assert reading is not None
     assert reading.verdict == "leaking", reading
 
 
-def test_a_faint_echo_counts_the_same_as_a_loud_one() -> None:
+async def test_the_pauses_between_her_replies_do_not_lose_the_echo() -> None:
+    """她回一句、停几秒、再回一句——这是每一场的样子。
+
+    下行只在她说话时才有数据，上行一刻不停。两条包络要是各按「来了多少块」
+    走，每一段停顿都会把它们错开停顿那么长，误差按轮累积、没有上界，两秒的
+    延迟搜索补不回来。满强度的回声于是被判成健康——这个模块存在的唯一理由
+    就此失效，而症状看起来像判停器坏了。
+    """
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
+    await _converse(probe, clock, leak=1.0, gap_s=3.0, turns=5)
+    reading = probe.reading()
+    assert reading is not None
+    assert reading.verdict == "leaking", reading
+
+
+async def test_the_trip_through_the_air_shows_up_as_a_delay() -> None:
+    """A hint, not a measurement — but it has to move with the real delay.
+
+    It is how a direct acoustic path is told from one routed through another
+    application, and a search that always returned lag 0 would still call the
+    leak a leak.
+    """
+    clock = FakeClock()
+    near = EchoProbe(clock=clock)
+    await _converse(near, clock, leak=1.0, lag_s=0.06)
+    close_by = near.reading()
+
+    clock = FakeClock()
+    far = EchoProbe(clock=clock)
+    await _converse(far, clock, leak=1.0, lag_s=0.5)
+    across_the_room = far.reading()
+
+    assert close_by is not None and across_the_room is not None
+    assert close_by.lag_ms < 200, close_by
+    assert across_the_room.lag_ms > 400, across_the_room
+
+
+async def test_a_faint_echo_counts_the_same_as_a_loud_one() -> None:
     """Amplitude-blind on purpose. A quiet leak false-triggers turn detection
-    just as well, so 「any of her voice is coming back」 is the question."""
-    probe = EchoProbe()
-    _converse(probe, leak=0.15)
+    just as well, so 「any of her voice is coming back」 is the question.
+
+    Her voice comes back at a tenth of the level she went out at, no louder
+    than the room around the microphone.
+    """
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
+    await _converse(probe, clock, leak=0.12, room=0.12)
     reading = probe.reading()
     assert reading is not None
     assert reading.verdict == "leaking", reading
 
 
-def test_silence_is_not_evidence() -> None:
-    """She has not spoken, so the mic has no echo of hers to contain. Reporting
-    「ok」 off that would be a clean bill of health nobody earned."""
-    probe = EchoProbe()
+async def test_silence_is_not_evidence() -> None:
+    """她那一路在送，送的全是静音（供应商补的空档就是这个样子）。
+
+    窗口里没有她的声音，麦克风再吵也没有可比对的东西。这时候报「ok」是一张
+    没人挣来的健康证明。
+    """
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
     for _ in range(400):
-        probe.note_played(_tone(0.02, 24000, amp=0))
-        probe.note_captured(_tone(0.02, 16000, amp=3000))
+        probe.note_played(_tone(_TICK_S, 24000, amp=0))
+        probe.note_captured(_tone(_TICK_S, 16000, amp=3000))
+        await clock.advance(_TICK_S)
     assert probe.reading() is None
+    assert "开口" in str(probe.status()["state"]), probe.status()
 
 
-def test_too_little_history_says_nothing() -> None:
-    probe = EchoProbe()
-    _converse(probe, leak=1.0)
-    fresh = EchoProbe()
-    fresh.note_played(_tone(0.1, 24000))
+async def test_a_reply_from_ten_minutes_ago_is_not_evidence_about_now() -> None:
+    """她十分钟没说话了，卡还拿那时候的回复跟现在的麦克风做相关。
+
+    下行收不到静音，包络就永远停在她最后一句上。「她还没开口」这道门于是只
+    在第一次回复之前拦得住一次，之后再也不触发。
+    """
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
+    await _converse(probe, clock, leak=1.0)
+    assert probe.reading() is not None
+
+    await clock.advance(600)
+    for _ in range(50):  # the mic is still running; she simply has not spoken
+        probe.note_captured(_tone(_TICK_S, 16000, amp=4000))
+        await clock.advance(_TICK_S)
+    assert probe.reading() is None, "拿十分钟前那段回复当现在的证据"
+    # The microphone is fine — she just has not spoken. Two different reasons
+    # for「判断不了」, and the card has to say which.
+    assert "开口" in str(probe.status()["state"]), probe.status()
+
+
+async def test_a_page_that_handed_the_devices_back_stops_being_judged() -> None:
+    """页面把设备还回去，麦克风那条就断了，下行还在。
+
+    _captured 停在页面走的那一刻，_played 继续换新，卡片于是拿当前的回复跟
+    早就没了的麦克风做相关，读数是随机的。而且这一刻恰恰是最不能装懂的时候：
+    声音回到了本机 sounddevice，那条路压根没有回声消除（docs/runbook.md:262）。
+    """
+    clock = FakeClock()
+    probe = EchoProbe(clock=clock)
+    await _converse(probe, clock, leak=1.0)
+    assert probe.reading() is not None, "页面还拿着设备的时候本来就该判"
+
+    for _ in range(400):  # 8 秒：她还在说，麦克风那一路没人喂了
+        probe.note_played(_tone(_TICK_S, 24000, amp=9000))
+        await clock.advance(_TICK_S)
+
+    assert probe.reading() is None, "拿冻住的麦克风包络继续下结论"
+    card = probe.status()
+    assert card["ok"] is True
+    assert "麦克风" in str(card["state"]), card
+
+
+async def test_too_little_history_says_nothing() -> None:
+    clock = FakeClock()
+    fresh = EchoProbe(clock=clock)
+    for _ in range(5):
+        fresh.note_played(_tone(_TICK_S, 24000))
+        fresh.note_captured(_tone(_TICK_S, 16000))
+        await clock.advance(_TICK_S)
     assert fresh.reading() is None, "刚开始就下结论，等于拿噪声当证据"
 
 
-def test_the_health_card_stays_calm_about_a_suspicion() -> None:
+async def test_the_health_card_stays_calm_about_a_suspicion() -> None:
     """Only an outright leak marks the card unhealthy. The streamer answering
     her produces genuine correlation, and a card that cries wolf gets ignored."""
-    quiet = EchoProbe()
-    _converse(quiet, leak=0.0)
+    clock = FakeClock()
+    quiet = EchoProbe(clock=clock)
+    await _converse(quiet, clock, leak=0.0, room=0.8)
     assert quiet.status()["ok"] is True
 
-    loud = EchoProbe()
-    _converse(loud, leak=1.0)
+    clock = FakeClock()
+    loud = EchoProbe(clock=clock)
+    await _converse(loud, clock, leak=1.0)
     card = loud.status()
     assert card["ok"] is False
     assert "漏" in str(card["state"]), card

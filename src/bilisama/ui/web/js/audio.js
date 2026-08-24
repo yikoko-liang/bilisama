@@ -40,6 +40,9 @@ export function createAudio({ onOwner }) {
   let playedMs = 0; // of the current utterance, for playback.cancelled
   let analyser = null; // input level, for the panel's meter
   let wantedInput = undefined; // deviceId the streamer picked, if any
+  // Bumped by every stopCapture(), so a getUserMedia still in flight can tell
+  // on the way back that the chain it was opening is no longer wanted.
+  let captureGen = 0;
 
   const role = window.bilisamaShell ? "shell" : "browser";
   const url =
@@ -47,14 +50,31 @@ export function createAudio({ onOwner }) {
 
   const open = () => {
     if (closed) return;
-    socket = new WebSocket(url);
-    socket.binaryType = "arraybuffer";
-    socket.onopen = () => {
+    // One open() is one connection, whoever called. The backoff timer and
+    // retry() used to fire independently — the server releases the devices a
+    // millisecond after the page's own close and broadcasts audio.owner{null},
+    // retry() takes the second socket, and then the timer nobody cancelled
+    // opened a third that the server refused (4409). Measured: 3 sockets from
+    // one plain disconnect.
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    // Local, not the module binding: every callback below belongs to THIS
+    // connection. A stale one running the shared teardown is how a refused
+    // third socket used to stop the second one's microphone.
+    const ws = new WebSocket(url);
+    socket = ws;
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => {
+      if (socket !== ws) {
+        ws.close(); // superseded while connecting; do not leave it half-alive
+        return;
+      }
       attempt = 0;
       onOwner(role);
       startCapture();
     };
-    socket.onmessage = (message) => {
+    ws.onmessage = (message) => {
+      if (socket !== ws) return;
       if (typeof message.data === "string") {
         // A stop, ordered behind every sample it is meant to stop. The control
         // socket says the same thing, but that is a different connection —
@@ -71,7 +91,11 @@ export function createAudio({ onOwner }) {
       }
       schedule(new Int16Array(message.data));
     };
-    socket.onclose = (event) => {
+    ws.onclose = (event) => {
+      // Only for the connection we are actually on. stopCapture() is shared,
+      // and running it for a socket that was already replaced tears down the
+      // live one's capture chain.
+      if (socket !== ws) return;
       stopCapture();
       onOwner(null);
       if (closed) return;
@@ -86,13 +110,27 @@ export function createAudio({ onOwner }) {
       attempt += 1;
       retryTimer = setTimeout(open, delay);
     };
-    socket.onerror = () => socket.close();
+    ws.onerror = () => ws.close();
   };
 
   async function startCapture() {
     if (capture) return;
+    // `if (capture) return` cannot hold across the two awaits below: capture is
+    // only assigned on the last line, and getUserMedia alone runs from tens of
+    // milliseconds on a warm device to seconds on a Bluetooth headset changing
+    // profile or a first permission prompt. Anything that happened meanwhile —
+    // a 4409 refusal, a second use_input, a dropped socket — moves the
+    // generation on, and this attempt hands its microphone back instead of
+    // leaving a live capture nobody can reach (the invariant AudioBroker.claim
+    // states for its `close` argument, ui/audio.py) or a second chain feeding
+    // the same socket.
+    const mine = (captureGen += 1);
+    const superseded = () =>
+      captureGen !== mine || socket === null || socket.readyState !== WebSocket.OPEN;
+    const letGo = (granted) => granted.getTracks().forEach((track) => track.stop());
+    let granted = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      granted = await navigator.mediaDevices.getUserMedia({
         audio: {
           ...(wantedInput ? { deviceId: { exact: wantedInput } } : {}),
           // The whole reason this file exists. Noise suppression and gain
@@ -106,13 +144,26 @@ export function createAudio({ onOwner }) {
     } catch (err) {
       // Denied, or no device. Say so once and stay silent: the reply audio
       // still plays, and the local sounddevice pair is not coming back while
-      // this socket holds the claim.
+      // this socket holds the claim. A superseded attempt says nothing: the
+      // window that replaced it is the one with news.
+      if (superseded()) return null;
       console.warn("拿不到麦克风：", err);
       onOwner(role, String(err));
-      return;
+      // Handed back rather than thrown: the other caller is ws.onopen, where a
+      // rejection has nowhere to land. useInput() turns it into a throw.
+      return err;
+    }
+    if (superseded()) {
+      letGo(granted);
+      return null;
     }
     context = context ?? new AudioContext();
     await context.audioWorklet.addModule(new URL("./capture-worklet.js", import.meta.url));
+    if (superseded()) {
+      letGo(granted);
+      return;
+    }
+    stream = granted;
     const node = new AudioWorkletNode(context, "bilisama-capture");
     node.port.onmessage = (message) => {
       if (socket && socket.readyState === WebSocket.OPEN) socket.send(message.data);
@@ -134,9 +185,12 @@ export function createAudio({ onOwner }) {
     analyser.fftSize = 32;
     source.connect(analyser);
     capture = { node, source, mute };
+    return null;
   }
 
   function stopCapture() {
+    // Anything still being granted belongs to a chain nobody wants now.
+    captureGen += 1;
     capture?.source.disconnect();
     capture?.node.disconnect();
     capture?.mute.disconnect();
@@ -273,7 +327,12 @@ export function createAudio({ onOwner }) {
     async useInput(deviceId) {
       wantedInput = deviceId || undefined;
       stopCapture();
-      await startCapture();
+      const failure = await startCapture();
+      // Rethrown so command()'s catch runs. Without this the panel got a plain
+      // device list back, put the dropdown on the microphone it had asked for,
+      // and said nothing — while nothing was being captured at all. Picking a
+      // device that is gone or blocked is the ordinary way in.
+      if (failure) throw failure;
     },
     /** Move playback to a different speaker.
      *

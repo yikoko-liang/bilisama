@@ -10,25 +10,28 @@ through. If a uvicorn upgrade moves the hook, that test goes red first.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import signal
 import socket
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, MutableMapping
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from bilisama.clock import FakeClock
 from bilisama.config.schema import Settings
 from bilisama.obs.health import HealthRegistry
-from bilisama.ui.audio import AudioBroker
+from bilisama.ui.audio import AudioBroker, AudioOwner
 from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import (
+    _AUDIO_QUEUE,
     UiServer,
     bind_ui_socket,
     config_snapshot,
@@ -46,6 +49,8 @@ def _settings(**overrides: Any) -> Settings:
 
 def _build(
     settings: Settings | None = None,
+    *,
+    broker: AudioBroker | None = None,
 ) -> tuple[TestClient, UiHub, list[tuple[ClientEvent, dict[str, Any]]]]:
     hub = UiHub(FakeClock())
     registry = HealthRegistry()
@@ -66,6 +71,7 @@ def _build(
         origin=_ORIGIN,
         handlers={event: _recorder(event) for event in ClientEvent},
         hello=lambda: {"persona": {"id": "mia", "name": "米娅"}},
+        broker=broker,
     )
     return TestClient(app), hub, calls
 
@@ -308,11 +314,24 @@ async def test_bind_ui_socket_reports_a_taken_port() -> None:
 # ------------------------------------------------------------ the audio socket
 
 
-def _audio_app(broker: AudioBroker) -> tuple[TestClient, list[bytes]]:
-    """An app with the audio socket mounted, plus what the mic sent upstream."""
+def _audio_ui(
+    broker: AudioBroker, *, uplink_raises: Exception | None = None
+) -> tuple[FastAPI, list[bytes]]:
+    """An app with the audio socket mounted, plus what the mic sent upstream.
+
+    Args:
+        broker: Who gets the devices.
+        uplink_raises: Raised by the FIRST uplink chunk and only that one —
+            the shape of push_audio during a link reconnect (it raises
+            ConnectionError while the socket is gone, RealtimeClient._send_raw).
+    """
     heard: list[bytes] = []
+    pending = [uplink_raises]
 
     async def on_audio(chunk: bytes) -> None:
+        boom, pending[0] = pending[0], None
+        if boom is not None:
+            raise boom
         heard.append(chunk)
 
     app = create_ui_app(
@@ -326,6 +345,13 @@ def _audio_app(broker: AudioBroker) -> tuple[TestClient, list[bytes]]:
         broker=broker,
         on_audio=on_audio,
     )
+    return app, heard
+
+
+def _audio_app(
+    broker: AudioBroker, *, uplink_raises: Exception | None = None
+) -> tuple[TestClient, list[bytes]]:
+    app, heard = _audio_ui(broker, uplink_raises=uplink_raises)
     return TestClient(app), heard
 
 
@@ -416,3 +442,187 @@ def test_a_barge_in_drops_queued_audio_and_stops_the_page_in_order() -> None:
                 break
         assert seen[0] == json.dumps({"event": "playback.clear", "data": {}}), seen
         assert seen[1] == b"\x33" * 8, seen
+
+
+def test_a_failing_uplink_costs_one_chunk_not_the_devices() -> None:
+    """链路重连的那几百毫秒里，push_audio 必抛（RealtimeClient._send_raw）。
+
+    裸着调它，异常会穿过 endpoint 把音频 socket 掀掉，finally 顺手把设备还给
+    sounddevice——本机麦克风和扬声器重新开流（没有回声消除），页面退避半秒又
+    连回来再把它们停掉。链路退避比页面慢，所以下一块还打在同一个错上，一抖就
+    是一串真实的设备开关。本机麦克风那条路早就为同一件事加过护栏
+    （dev_talk.py 的 _uplink：一次发送失败的代价是一个块，不是一整场）。
+    """
+    broker = AudioBroker()
+    client, heard = _audio_app(broker, uplink_raises=ConnectionError("还没连接"))
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        ws.send_bytes(b"\x01\x01")  # lands inside the reconnect window
+        ws.send_bytes(b"\x02\x02")  # the link is back
+        broker.play(b"\xaa\xbb")
+        assert ws.receive_bytes() == b"\xaa\xbb", "一次发送失败把整条 socket 掀了"
+        assert broker.owner == "shell", "设备被一次上行失败还了回去"
+    assert heard == [b"\x02\x02"], "丢的应该只有出事的那一块"
+
+
+class _StuckPage:
+    """A page that never reads a frame, driven straight at the ASGI app.
+
+    TestClient cannot express this: the frames the app sends land in an
+    unbounded queue, so the pump never blocks and the downlink queue never
+    fills. Backpressure is the entire precondition here, so this one speaks
+    ASGI itself.
+    """
+
+    def __init__(self) -> None:
+        self.accepted = asyncio.Event()
+        self._forever = asyncio.Event()
+        self._connected = False
+
+    async def receive(self) -> MutableMapping[str, Any]:
+        if not self._connected:
+            self._connected = True
+            return {"type": "websocket.connect"}
+        await self._forever.wait()  # holds the socket open, says nothing
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(self, message: MutableMapping[str, Any]) -> None:
+        if message["type"] == "websocket.accept":
+            self.accepted.set()
+            return
+        await self._forever.wait()  # nothing is ever read off the wire
+
+
+def _audio_scope(role: str) -> dict[str, Any]:
+    path = f"/{_TOKEN}/audio"
+    return {
+        "type": "websocket",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "scheme": "ws",
+        "server": ("127.0.0.1", 7777),
+        "client": ("127.0.0.1", 54321),
+        "root_path": "",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": f"role={role}".encode(),
+        "headers": [],
+        "subprotocols": [],
+        "state": {},
+    }
+
+
+async def test_displacing_a_page_whose_queue_is_full_still_hands_the_devices_over() -> None:
+    """壳来顶替一个已经压满的标签页。
+
+    页面卡住或者音频来得比实时快（这个项目量过 48 秒墙钟里堆出 106 秒没放的
+    音频），下行队列就满了。哨兵要是不管满不满硬塞，顶替会在 claim 里炸出
+    QueueFull：新连接没建泵、finally 的 release 也没跑，broker 从此认定一个
+    死 socket 拿着设备，本机那对再也不 resume——整场既听不见也说不出。
+    """
+    broker = AudioBroker()
+    app, _heard = _audio_ui(broker)
+    page = _StuckPage()
+    holder = asyncio.create_task(app(_audio_scope("browser"), page.receive, page.send))
+    try:
+        await asyncio.wait_for(page.accepted.wait(), timeout=2.0)
+        held_by = broker.owner
+        assert held_by == "browser"
+        for _ in range(_AUDIO_QUEUE + 2):
+            broker.play(b"\x00" * 960)
+
+        assert await broker.claim("shell", send=lambda _pcm: None), "壳该顶掉标签页"
+        assert broker.owner == "shell"
+    finally:
+        holder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await holder
+    assert broker.owner == "shell", "被顶掉的页面收摊时把设备从壳手里抢走了"
+
+
+class _HalfDeadBroker(AudioBroker):
+    """A claim that fails AFTER it has already pointed the broker at the caller.
+
+    Real shape: claim swaps owner, _send and _close over first and only then
+    touches anything that can fail — the displaced client's close callback and
+    the local pair's suspend, which is a blocking PortAudio call in a thread.
+    """
+
+    __slots__ = ()
+
+    async def claim(
+        self,
+        who: AudioOwner,
+        *,
+        send: Callable[[bytes], None],
+        close: Callable[[], None] | None = None,
+        flush: Callable[[], None] | None = None,
+    ) -> bool:
+        await super().claim(who, send=send, close=close, flush=flush)
+        raise RuntimeError("PortAudio 没关掉")
+
+
+def test_a_claim_that_blows_up_hands_the_devices_back() -> None:
+    """否则 broker 认定一个不存在的持有者，本机那对再也不会回来。"""
+    broker = _HalfDeadBroker()
+    client, _heard = _audio_app(broker)
+    with (
+        pytest.raises(RuntimeError),
+        client.websocket_connect(f"/{_TOKEN}/audio?role=shell"),
+    ):
+        pass
+    assert broker.owner is None, "claim 半路炸了，设备不能算在它头上"
+
+
+# ------------------------------------------------------------ the panel relay
+
+
+def _drain(queue: asyncio.Queue[str | None]) -> list[dict[str, Any]]:
+    """Everything the hub has for one client right now, parsed."""
+    frames: list[dict[str, Any]] = []
+    while True:
+        try:
+            line = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return frames
+        if line is not None:
+            frames.append(json.loads(line))
+
+
+def test_the_panel_reaches_whoever_holds_the_devices() -> None:
+    """面板和设备持有者是壳的两个窗口，请求得过一趟服务端。"""
+    client, hub, calls = _build(broker=AudioBroker())
+    # The panel is just another client of the same hub. Watching from here
+    # instead of through a second socket keeps a missing relay a fast failure
+    # rather than a test that blocks forever on a frame nobody will send.
+    _replay, panel = hub.attach()
+    with client.websocket_connect(f"/{_TOKEN}/ws", headers={"origin": _ORIGIN}) as ws:
+        ws.receive_text()  # hello
+        ws.send_text(json.dumps({"event": "audio.ask", "data": {"kind": "devices"}}))
+    seen = _drain(panel)
+    assert [item["event"] for item in seen] == [ServerEvent.AUDIO_COMMAND.value], seen
+    # The hub stamps every frame with a ts; the ask itself must arrive intact.
+    assert seen[0]["data"]["kind"] == "devices"
+    # Chained, not overridden: the caller's own handler still sees the event.
+    assert calls == [(ClientEvent.AUDIO_ASK, {"kind": "devices"})]
+
+
+def test_the_holders_answer_comes_back_to_the_panel() -> None:
+    """设备列表和电平都是持有者报上来、服务端播回去的。"""
+    client, hub, calls = _build(broker=AudioBroker())
+    _replay, panel = hub.attach()
+    devices = {"kind": "devices", "inputs": [{"id": "a", "label": "内建麦克风"}]}
+    with client.websocket_connect(f"/{_TOKEN}/ws", headers={"origin": _ORIGIN}) as ws:
+        ws.receive_text()  # hello
+        ws.send_text(json.dumps({"event": "audio.report", "data": devices}))
+        ws.send_text(json.dumps({"event": "audio.report", "data": {"kind": "level", "rms": 0.4}}))
+        # A kind nobody serves is dropped rather than broadcast under some
+        # other name.
+        ws.send_text(json.dumps({"event": "audio.report", "data": {"kind": "no.such.thing"}}))
+    seen = _drain(panel)
+    assert [item["event"] for item in seen] == [
+        ServerEvent.AUDIO_DEVICES.value,
+        ServerEvent.AUDIO_LEVEL.value,
+    ], seen
+    assert seen[0]["data"]["inputs"] == devices["inputs"]
+    assert seen[1]["data"]["rms"] == 0.4
+    assert [event for event, _data in calls] == [ClientEvent.AUDIO_REPORT] * 3

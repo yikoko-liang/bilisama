@@ -58,6 +58,11 @@ export function createPanel({ send }) {
   // Everything goes over the wire, which is the same path in both.
   let ask = null;
   let levelTimer = null;
+  let audioOwner = null; // whichever window the server says holds the devices
+  // Local knowledge, and the only piece of it here: no audio.owner broadcast
+  // can say 「this window asked for the microphone and was refused」, so once
+  // heard it has to outlive the broadcasts that follow.
+  let localMicError = null;
   const timelineEl = document.getElementById("timeline");
   const loglinesEl = document.getElementById("loglines");
   const levelSel = document.getElementById("log-level");
@@ -120,6 +125,9 @@ export function createPanel({ send }) {
     scrim.hidden = false;
     requestAnimationFrame(() => scrim.classList.add("open"));
     startHealth();
+    // The meter belongs to the visible panel exactly like health does; see
+    // startLevelMeter for what it costs while nobody is looking.
+    startLevelMeter();
     // force: the tab is only as trustworthy as its last fetch, and switches
     // move from the live tab, from another window, and across sessions.
     loadConfig(true);
@@ -134,6 +142,7 @@ export function createPanel({ send }) {
       if (!isOpen) scrim.hidden = true;
     }, 200);
     stopHealth();
+    stopLevelMeter();
     // Nothing to repaint while closed; open() refetches anyway.
     clearTimeout(configReloadTimer);
     clearTimeout(configRetryTimer);
@@ -548,6 +557,13 @@ export function createPanel({ send }) {
         select.append(option);
       }
       select.value = previous; // survives a re-enumeration after a hot-plug
+      // Unless what was selected is gone — unplugged, or renamed by the driver.
+      // The value setter cancels every option when none matches, which lands
+      // selectedIndex on -1 and shows a blank box: no 「跟随系统」, no name of
+      // whatever is actually recording now. Falling back is what the frame
+      // handler already promises for this case ("put the dropdown back on what
+      // is really playing", panel.js's audio.devices arm).
+      if (select.selectedIndex < 0) select.value = "";
     };
     fill(audioInEl, "audioinput");
     fill(audioOutEl, "audiooutput");
@@ -559,6 +575,17 @@ export function createPanel({ send }) {
 
   function startLevelMeter() {
     if (levelTimer || !audioLevelEl) return;
+    // Only while someone can see the bar. The trigger is the audio.owner
+    // broadcast, which every client gets, so without this every window polls —
+    // including the shell's pet window, whose drawer never opens at all (the
+    // corner spawns a separate #panel window). And every ask fans out to every
+    // client twice — once as the command, once as the answer (server.py's
+    // audio relay) — so the cost multiplies by windows rather than adding up.
+    if (!isOpen) return;
+    // Nothing to read: no holder, or a holder whose microphone this window was
+    // refused — a bar frozen at 0% reads as 「she is silent」 rather than
+    // 「there is no meter」.
+    if (!audioOwner || localMicError) return;
     // 10 Hz over the wire: fast enough to read as live, and small enough that
     // it costs nothing next to the voice-state poll already running.
     levelTimer = setInterval(() => request("level"), 100);
@@ -578,24 +605,51 @@ export function createPanel({ send }) {
     setAudioOwner(owner, error) {
       if (!audioOwnerEl) return;
       if (error) {
+        localMicError = error;
         audioOwnerEl.textContent = `拿不到麦克风：${error}`;
         stopLevelMeter();
         return;
       }
+      audioOwner = owner ?? null;
       if (!owner) {
+        // Devices free again, so the last refusal stops being news: a window
+        // that stood aside re-claims from here (audio.js's retry), and whether
+        // the microphone comes back is answered by THAT attempt.
+        localMicError = null;
         audioOwnerEl.textContent = "还没有窗口接管声音，走的是本机播放。";
         stopLevelMeter();
         return;
       }
-      // What we can honestly say: the browser accepted the request. Whether
-      // the echo is actually gone depends on where the sound comes out — the
-      // canceller only subtracts Chromium's own playback, so OBS monitoring,
-      // a game or background music go straight into the microphone no matter
-      // what this line says. Claiming 「回声消除已开」 outright was a promise
-      // this window has no way to keep.
-      audioOwnerEl.textContent = "麦克风和扬声器已接管（回声消除已请求）。";
+      if (localMicError) {
+        // audio.owner is sticky and replays into every attach, so before this
+        // the first broadcast after a refusal painted over 「拿不到麦克风」 with
+        // 「已接管」 and left it there: the streamer was told the microphone was
+        // live while not one word reached the server.
+        audioOwnerEl.textContent = `已接管，但本窗口拿不到麦克风：${localMicError}`;
+      } else {
+        // What we can honestly say: the browser accepted the request. Whether
+        // the echo is actually gone depends on where the sound comes out — the
+        // canceller only subtracts Chromium's own playback, so OBS monitoring,
+        // a game or background music go straight into the microphone no matter
+        // what this line says. Claiming 「回声消除已开」 outright was a promise
+        // this window has no way to keep.
+        audioOwnerEl.textContent = "麦克风和扬声器已接管（回声消除已请求）。";
+      }
       request("devices");
       startLevelMeter();
+    },
+    /** This window stopped being the one with bad news about a microphone.
+     *
+     * Either it just got one, or something stronger took the devices. Both
+     * mean the last refusal has stopped describing whoever is holding them
+     * now: a window displaced by a healthy one used to go on saying
+     * 「本窗口拿不到麦克风」 until every window let go, which reads as a fault
+     * in the shell that is actually capturing perfectly well.
+     */
+    forgetLocalMicTrouble() {
+      if (!localMicError) return;
+      localMicError = null;
+      if (audioOwner) this.setAudioOwner(audioOwner);
     },
     handleFrame(event, data) {
       if (event === "audio.owner") {

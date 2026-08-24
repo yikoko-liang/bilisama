@@ -30,11 +30,13 @@ import os
 import signal
 import sys
 import threading
+import traceback
 import wave
 import zlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import parse_qsl, urlencode
 
 import websockets
 
@@ -110,24 +112,88 @@ def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
             return
         exc = finished.exception()
         if exc is not None:
-            log.exception("dev_talk.task_died", task=finished.get_name(), error_text=str(exc))
+            # NOT log.exception here: it reads sys.exc_info(), and a done
+            # callback runs with no active exception — so the formatter's exc
+            # field (_JsonFormatter.format in obs/logging.py) came out as the
+            # string "NoneType: None", and the one line about a task's death
+            # said nothing about the death. The traceback comes off the
+            # exception object instead, which this callback definitely has.
+            log.error(
+                "dev_talk.task_died",
+                task=finished.get_name(),
+                error_type=type(exc).__name__,
+                error_text=str(exc),
+                traceback="".join(traceback.format_exception(exc)),
+            )
+            # And once on the terminal, because the log is not a channel to
+            # the person in front of the stream. Ten of the eleven tasks have
+            # no other way to reach them at all: a scheduler that stopped
+            # dispatching, or an assembly that stopped assembling, looks
+            # exactly like a quiet chat.
+            print(
+                f"[后台] {finished.get_name()} 挂了（{type(exc).__name__}: {exc}）。"
+                "这部分这场不会再工作了，重启 dev-talk 才能恢复。",
+                file=sys.stderr,
+            )
 
     task.add_done_callback(done)
     return task
 
 
-def _with_model(url: str, model: str) -> str:
+def _with_model(url: str, model: str, *, explicit: bool = False) -> str:
     """Name the model in the query string, the way hosted endpoints expect.
 
     Deciding WHICH model, and which address, moved to resolve_endpoint — this
     only joins the two. Idempotent because an address may arrive already
     finished: someone can paste a complete URL into config or --url, and
     stapling a second ?model= on would make it unroutable.
+
+    That idempotence used to be absolute, and it silently ate `--model`. The
+    hosted address shape carries the model in its query, so the endpoint line
+    a streamer pastes into bilisama.toml usually already has one; the flag
+    ranks FIRST in resolve_endpoint (realtime/providers/__init__.py:117-119)
+    and then lost right here. `explicit` is that ranking, carried down one
+    level: a model the command line asked for replaces the address's, and a
+    model that merely fell out of the config or the registry default does not
+    — between two config-level answers the more specific one should win.
+
+    Args:
+        url: The resolved address, with or without a query.
+        model: The resolved model name; "" for a provider that has none.
+        explicit: Whether `--model` supplied it.
     """
-    if not model or "model=" in url:
+    if not model:
         return url
-    joiner = "&" if "?" in url else "?"
-    return f"{url}{joiner}model={model}"
+    base, question, query = url.partition("?")
+    named = parse_qsl(query, keep_blank_values=True)
+    # Whole parameter names, not a substring: "model=" in url also matched
+    # llm_model= and submodel=, and then refused to add the model actually
+    # asked for.
+    if not any(key == "model" for key, _ in named):
+        return f"{url}{'&' if question else '?'}model={model}"
+    if not explicit:
+        return url
+    kept = [(key, value) for key, value in named if key != "model"]
+    kept.append(("model", model))
+    return f"{base}?{urlencode(kept)}"
+
+
+def _endpoint_line(url: str) -> str:
+    """Where we dial and which model, for the start banner.
+
+    The query never goes on screen — an address can carry a credential — and
+    on a hosted provider the model lives in exactly that query, so it is named
+    on its own instead. Read out of the finished address rather than off
+    Endpoint.model: those two can disagree (an address may name a model no
+    layer of config mentions), and a banner naming the loser is what let a
+    swallowed --model go unnoticed.
+
+    Args:
+        url: The address as it will be dialed, model already joined on.
+    """
+    where, _, query = url.partition("?")
+    model = dict(parse_qsl(query, keep_blank_values=True)).get("model", "")
+    return f"{where}，模型 {model}" if model else where
 
 
 def _session_frame(provider: ProviderName, voice: str = "") -> dict[str, Any] | None:
@@ -164,7 +230,17 @@ def _connect_advice(exc: BaseException, provider: ProviderName, url: str) -> str
         return "s2s 只有一个会话槽，被别的客户端占着：关掉其他 dev-talk，或重启 serve 终端。"
     if isinstance(exc, ConnectionRefusedError) and provider is ProviderName.S2S:
         return f"{where} 上没有 s2s 服务：先按 runbook 起 serve。"
-    return f"连不上 {where}：{exc}"
+    # str(exc) is empty for an exception instance built with no arguments, and
+    # asyncio raises exactly one of those on a path this hits: a TLS handshake
+    # that gets EOF instead of a record ends as a bare ConnectionResetError()
+    # (asyncio/sslproto.py:467,571) — which is what wss:// against a plaintext
+    # port produces. "连不上 X：" with nothing after the colon told the streamer
+    # strictly less than the class name would have.
+    reason = str(exc) or type(exc).__name__
+    return (
+        f"连不上 {where}：{reason}。"
+        "核对 bilisama.toml 里的这行地址：协议（ws/wss）、端口、路径要和对面服务对得上。"
+    )
 
 
 async def _connect_or_exit(target: _Connects, provider: ProviderName, url: str) -> None:
@@ -914,8 +990,6 @@ async def run_director(args: argparse.Namespace) -> int:
         settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
     )
     provider = endpoint.provider
-    print(f"[语音] {provider.value} @ {endpoint.url.split('?')[0]}（来自{endpoint.source}）")
-
     inner: link.SpeechLink
     connect_url: str = endpoint.url
     if provider is ProviderName.S2S:
@@ -936,7 +1010,7 @@ async def run_director(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
-        connect_url = _with_model(connect_url, endpoint.model)
+        connect_url = _with_model(connect_url, endpoint.model, explicit=bool(args.model))
         inner = HostedLink(
             connect_url,
             ProviderName.DASHSCOPE,
@@ -946,6 +1020,12 @@ async def run_director(args: argparse.Namespace) -> int:
         )
     else:
         raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
+    # After the branch, not before it: only here is connect_url the address
+    # that will actually be dialed, model and all. Printed earlier the line
+    # could only guess which model wins — and a banner that guesses is how a
+    # swallowed --model stayed invisible. The three exits above each carry
+    # their own fix action, so none of them needed this line.
+    print(f"[语音] {provider.value} @ {_endpoint_line(connect_url)}（来自{endpoint.source}）")
     speech = _Fanout(inner)
     await _connect_or_exit(speech, provider, connect_url)
     speech.start()
@@ -1118,6 +1198,22 @@ async def run_director(args: argparse.Namespace) -> int:
         def __init__(self) -> None:
             self.mic: asyncio.Task[None] | None = None
             self.start_mic: Any = None
+            self._retired = False
+
+        def stop_reviving(self) -> None:
+            """The session is ending: whoever lets go now, stay let go.
+
+            release() runs from uvicorn's own task (the audio endpoint's
+            finally, ui/server.py:422), which keeps being scheduled while
+            teardown waits on its gather — so a page still holding the
+            devices at Ctrl-C hands them back INSIDE
+            the shutdown, and resume() would take a fresh microphone and a
+            fresh output stream that nothing left cancels or closes. What the
+            streamer sees is the recording indicator coming back on after
+            下播 and staying on through distillation (待验证: reasoned from
+            the RawInputStream path, not observed on a device).
+            """
+            self._retired = True
 
         async def suspend(self) -> None:
             task, self.mic = self.mic, None
@@ -1127,6 +1223,11 @@ async def run_director(args: argparse.Namespace) -> int:
             await asyncio.to_thread(speaker.suspend)
 
         async def resume(self) -> None:
+            if self._retired:
+                # Before the speaker, not after: resume() reopens the output
+                # device first, and that one would then stay open until the
+                # very last step of teardown.
+                return
             await asyncio.to_thread(speaker.resume)
             if self.start_mic is not None and self.mic is None:
                 self.mic = self.start_mic()
@@ -1183,9 +1284,6 @@ async def run_director(args: argparse.Namespace) -> int:
             poke = PokeResponder(
                 clock, submit=scheduler.submit, max_tokens=thresholds.max_output_tokens
             )
-            # create_ui_app wires the announcement and the panel relay; the
-            # only thing this end owns is which devices get parked.
-            broker = AudioBroker(local=local_pair)
             # The one question Chromium cannot answer: is she hearing herself?
             # Its canceller only removes what the shell played, so a reply
             # routed back out by OBS — the very setup this product's config
@@ -1201,6 +1299,23 @@ async def run_director(args: argparse.Namespace) -> int:
             # real receipts. Counting segments rather than watching the last
             # one is the whole point — see PlaybackTally (ledger #41).
             tally = PlaybackTally(on_playback=floor.on_playback, notify=scheduler.notify)
+            # Built after the tally, not before, so on_handoff can name it
+            # outright: a late-bound closure would work at runtime and hide the
+            # dependency, and this file already has enough of those.
+            #
+            # create_ui_app wires the announcement and the panel relay; the
+            # only thing this end owns is which devices get parked — and that
+            # the count goes with them. Every receipt the tally lives on is
+            # sent by the page (ui/web/js/audio.js:248): a page that leaves
+            # mid-sentence never sends the `ended` half — that one goes out on
+            # a socket already closed and is dropped silently (audio.js:24) —
+            # and the count keeps the offset for the rest of the session.
+            # First the floor gate is stuck shut and she stops talking; then,
+            # once something else happens to clear queued_audio, the same
+            # offset stops the gate CLOSING, and the backlog PlaybackTally
+            # exists to prevent comes back. Devices changing hands is exactly
+            # "whatever was queued no longer counts".
+            broker = AudioBroker(local=local_pair, on_handoff=tally.cancelled)
 
             async def on_playback_started(_data: dict[str, Any]) -> None:
                 tally.started()
@@ -1600,6 +1715,11 @@ async def run_director(args: argparse.Namespace) -> int:
             ]
         await stop.wait()
     finally:
+        # First of all, and before anything is cancelled: from here on nobody
+        # gets the devices back. The page's release lands during the gather
+        # below, and a microphone started there is in no list and is cancelled
+        # by nothing.
+        local_pair.stop_reviving()
         # local_pair.mic separately: the broker may have replaced the microphone
         # task after this list was built, and the replacement is not in it.
         current_mic = local_pair.mic
@@ -1719,9 +1839,9 @@ async def run(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
-        url = _with_model(url, endpoint.model)
+        url = _with_model(url, endpoint.model, explicit=bool(args.model))
         headers = {"Authorization": f"Bearer {key}"}
-    print(f"[语音] {provider.value} @ {url.split('?')[0]}（来自{endpoint.source}）")
+    print(f"[语音] {provider.value} @ {_endpoint_line(url)}（来自{endpoint.source}）")
 
     client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
     await _connect_or_exit(client, provider, url)

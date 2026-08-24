@@ -515,10 +515,23 @@ async def test_the_page_takes_the_devices_and_the_microphone_reaches_the_server(
             break
         await asyncio.sleep(0.02)
     assert harness.uplink, "麦克风没有把帧送上来"
-    # 20ms of 16 kHz mono s16 — the frame size section 3.2 asks for. A frame of
-    # another length means the worklet resampled to the wrong rate, which is
-    # the failure that makes the streamer sound slow to the server.
+    # 20ms of 16 kHz mono s16 — the frame size section 3.2 asks for. This pins
+    # the frame SIZE and the byte-for-byte forwarding under it (server.py
+    # relays the payload untouched, and nothing on the way re-frames it). It
+    # says nothing about the sample rate: capture-worklet.js:19 posts at a
+    # constant FRAME = 320 whatever this.ratio is, so a worklet resampling to
+    # the wrong rate would still hand over 640-byte frames.
     assert len(harness.uplink[0]) == 640, len(harness.uplink[0])
+    # The rate shows up in HOW OFTEN the frames come, which is the assertion
+    # this test was missing: 16 kHz in 320-sample frames is 50 a second. Ship
+    # the 48 kHz samples unresampled and it is 150 — the failure that makes the
+    # streamer sound three times too slow to the server.
+    before = len(harness.uplink)
+    started = asyncio.get_running_loop().time()
+    await asyncio.sleep(1.5)  # long enough that one late frame cannot swing it
+    span = asyncio.get_running_loop().time() - started
+    rate = (len(harness.uplink) - before) / span
+    assert 35 <= rate <= 70, f"每秒 {rate:.1f} 帧，不是 16 kHz 该有的 50 帧"
 
 
 @pytest.mark.ui_browser
@@ -557,12 +570,19 @@ async def test_a_barge_in_stops_playback_and_says_how_much_was_heard(
         await asyncio.sleep(0.02)
     assert harness.broker is not None
     assert harness.broker.owner is not None, "页面还没拿到设备"
-    harness.broker.play(b"\x00\x00" * 48000)  # two seconds
+    # Two segments, and the short one is the point. Barging in on a single long
+    # buffer reports played_ms=0 — audio.js only counts a segment once its
+    # onended fires, so the piece cut mid-flight contributes nothing — and a
+    # test written that way passes just as happily against a played_ms that is
+    # hard-wired to zero.
+    harness.broker.play(b"\x00\x00" * 7200)  # 0.3s at 24 kHz, plays out whole
+    harness.broker.play(b"\x00\x00" * 48000)  # 2s, cut in the middle
 
     for _ in range(400):
-        if any(c[0] == ClientEvent.PLAYBACK_STARTED for c in harness.calls):
+        if any(c[0] == ClientEvent.PLAYBACK_ENDED for c in harness.calls):
             break
         await asyncio.sleep(0.02)
+    assert any(c[0] == ClientEvent.PLAYBACK_ENDED for c in harness.calls), "第一段没播完"
     harness.hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": "test"})
 
     for _ in range(400):
@@ -572,7 +592,12 @@ async def test_a_barge_in_stops_playback_and_says_how_much_was_heard(
         await asyncio.sleep(0.02)
     cancelled = [c for c in harness.calls if c[0] == ClientEvent.PLAYBACK_CANCELLED]
     assert cancelled, "打断之后没有回执"
-    assert "played_ms" in cancelled[0][1], cancelled[0][1]
+    heard = cancelled[0][1].get("played_ms")
+    # 阶段 5 要拿这个数去裁记忆（ui/events.py 里那条注释），所以断言它的**值**：
+    # 第一段 300ms 播完了，第二段一刀切在中间。落在这个区间之外只有两种可能——
+    # 要么把没播的算进去了，要么把播过的丢了。
+    assert isinstance(heard, (int, float)), cancelled[0][1]
+    assert 250 <= heard <= 500, f"播完的是 300ms，回执说 {heard}ms"
 
 
 @pytest.mark.ui_browser
@@ -596,5 +621,236 @@ async def test_the_panel_names_the_devices_once_the_microphone_is_granted(
     # playback, so OBS monitoring or a game goes into the microphone whatever
     # this line says.
     assert "回声消除已开" not in text, f"别把「答应了」说成「做到了」：{text}"
-    options = await audio_page.locator("#audio-in option").count()
-    assert options >= 1, "麦克风下拉是空的"
+    # 断言列表是**重画过**的，不是出厂那一个占位 option。index.html 里就写着
+    # `<option value="">读取中…</option>`，所以「至少有一个 option」这条老断言
+    # 在 renderDevices 一次都不被调用时照样绿——它验收不了「面板永远停在读取中」
+    # 这个真出过的故障。
+    read_options = "[...document.querySelectorAll('#audio-in option')].map(o => [o.value, o.text])"
+    options: list[list[str]] = []
+    for _ in range(200):  # 列表是一次 request("devices") 往返之后才回来的
+        options = await audio_page.evaluate(read_options)
+        if options and options[0] == ["", "跟随系统"]:
+            break
+        await asyncio.sleep(0.02)
+    assert options, "麦克风下拉是空的"
+    assert options[0] == ["", "跟随系统"], f"第一项该是「跟随系统」：{options}"
+    assert not any(label == "读取中…" for _, label in options), f"下拉还停在读取中：{options}"
+    # 至少一个真设备，而且带名字：标签要等麦克风授权之后才有，这正是面板不在
+    # 加载时就 enumerate 的原因。
+    named = [(value, label) for value, label in options[1:] if value and label != "（未命名设备）"]
+    assert named, f"没有一个能选的具名麦克风：{options}"
+
+
+def _level_asks(harness: Harness) -> int:
+    """How many times the panel has asked the device holder for the input level."""
+    return sum(
+        1
+        for event, data in harness.calls
+        if event is ClientEvent.AUDIO_ASK and data.get("what") == "level"
+    )
+
+
+@pytest.mark.ui_browser
+async def test_a_denied_microphone_outlives_the_owner_broadcast(
+    browser: Browser, harness: Harness
+) -> None:
+    """「这个窗口拿不到麦克风」是只有这个窗口知道的事。
+
+    服务端广播的 audio.owner 说的是「谁持有设备」，说不了「持有的那个窗口其实
+    一个字都录不上去」。而 audio.owner 是 sticky 帧，每次 attach 都会重放一遍，
+    所以只要它能盖掉本地那条错误，主播看到的就永远是「已接管」——面板说麦克风
+    活着，实际什么都没传上去。
+    """
+    context = await browser.new_context(bypass_csp=True)
+    # 相当于在浏览器里点了「拒绝」。--use-fake-ui-for-media-stream 会自动同意，
+    # 所以要按住 getUserMedia 才拿得到这条真实路径。
+    await context.add_init_script(
+        "navigator.mediaDevices.getUserMedia = () =>"
+        " Promise.reject(new DOMException('拒绝了', 'NotAllowedError'));"
+    )
+    denied = await context.new_page()
+    try:
+        await denied.goto(harness.url)
+        await _wait(
+            denied,
+            "document.getElementById('audio-owner').textContent.includes('拿不到麦克风')",
+        )
+        # 一次重连、或者别的窗口 claim/release，服务端就再广播一遍这一帧。
+        harness.hub.broadcast(ServerEvent.AUDIO_OWNER, {"owner": "browser"})
+        await asyncio.sleep(0.4)
+        text = await denied.locator("#audio-owner").inner_text()
+        assert "拿不到麦克风" in text, f"广播把本地那条事实盖掉了：{text}"
+        # 也不该顺手把电平表开起来：这个窗口没有麦克风，那条进度条只会恒定 0%。
+        await denied.click("#corner")
+        await _wait(denied, "document.getElementById('panel').classList.contains('open')")
+        await asyncio.sleep(0.6)
+        assert _level_asks(harness) == 0, f"没有麦克风还在问电平：{_level_asks(harness)} 次"
+    finally:
+        await context.close()
+
+
+@pytest.mark.ui_browser
+async def test_unplugging_the_selected_microphone_falls_back_to_the_system_default(
+    audio_page: Page, harness: Harness
+) -> None:
+    """拔掉正在用的设备之后，下拉框要回到「跟随系统」，不能变成空白。
+
+    HTML 的 value setter 碰到没有 option 匹配时，会把所有 option 取消选中，
+    selectedIndex 掉到 -1，读回来是空串——面板既不显示「跟随系统」也不显示真正
+    在录的那个设备，主播不知道现在用的是哪个麦克风。
+    """
+    await audio_page.click("#corner")
+    # 先等持有方那份真实列表落地：它是 setAudioOwner 里 request("devices") 的
+    # 回包，只在接管时来一次。等它先来，后面两帧才是这条用例自己的。
+    await _wait(
+        audio_page,
+        "[...document.querySelectorAll('#audio-in option')].some(o => o.value !== '')",
+    )
+    harness.hub.broadcast(
+        ServerEvent.AUDIO_DEVICES,
+        {"devices": [{"id": "usb-mic", "kind": "audioinput", "label": "USB 麦克风"}]},
+    )
+    await _wait(
+        audio_page,
+        "[...document.querySelectorAll('#audio-in option')].some(o => o.value === 'usb-mic')",
+    )
+    # 直接写 value，不走 select_option：后者会真发一次 use_input，持有方回的是
+    # chromium 的假设备列表、里面没有 usb-mic，那一趟往返自己就先把下拉打成 -1
+    # 了——测的就不是「拔设备」这一帧了。
+    await audio_page.evaluate("document.getElementById('audio-in').value = 'usb-mic'")
+    # 设备还在的那次重新枚举，选择要留住——这是回落不能踩坏的正常路径。
+    harness.hub.broadcast(
+        ServerEvent.AUDIO_DEVICES,
+        {
+            "devices": [
+                {"id": "builtin", "kind": "audioinput", "label": "内建麦克风"},
+                {"id": "usb-mic", "kind": "audioinput", "label": "USB 麦克风"},
+            ]
+        },
+    )
+    await asyncio.sleep(0.3)
+    kept = await audio_page.evaluate("document.getElementById('audio-in').value")
+    assert kept == "usb-mic", f"设备还在，选择却被换掉了：{kept}"
+    # 拔掉：下一份列表里没有它。
+    harness.hub.broadcast(
+        ServerEvent.AUDIO_DEVICES,
+        {"devices": [{"id": "builtin", "kind": "audioinput", "label": "内建麦克风"}]},
+    )
+    await asyncio.sleep(0.4)
+    picked: dict[str, Any] = await audio_page.evaluate(
+        "(() => { const s = document.getElementById('audio-in');"
+        " return { index: s.selectedIndex, value: s.value,"
+        " text: s.selectedIndex < 0 ? null : s.options[s.selectedIndex].text }; })()"
+    )
+    assert picked["index"] >= 0, f"下拉变成空白了：{picked}"
+    assert picked["text"] == "跟随系统", picked
+
+
+@pytest.mark.ui_browser
+async def test_the_level_meter_polls_only_while_the_panel_is_open(
+    audio_page: Page, harness: Harness
+) -> None:
+    """10 Hz 的电平轮询要跟着面板开合走，跟「谁持有设备」无关。
+
+    轮询是 audio.owner 广播启动的，而那一帧发给所有客户端：一个从没点开过面板、
+    只看着桌宠的标签页照样每秒问 10 次，壳里两个窗口各起一份表。每次 ask 还要经
+    服务端按客户端数扇出 audio.command 和 audio.level。健康轮询在同一个文件里就是
+    跟着面板可见性走的（startHealth / stopHealth），电平表漏了这一条。
+    """
+    for _ in range(300):
+        if harness.broker is not None and harness.broker.owner is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert harness.broker is not None
+    assert harness.broker.owner is not None, "页面还没拿到设备"
+
+    await asyncio.sleep(0.8)  # 8 个轮询周期，够了
+    assert _level_asks(harness) == 0, f"面板没打开就在问电平：{_level_asks(harness)} 次"
+
+    await audio_page.click("#corner")
+    await _wait(audio_page, "document.getElementById('panel').classList.contains('open')")
+    await asyncio.sleep(0.8)
+    while_open = _level_asks(harness)
+    assert while_open >= 4, f"面板开着反而不刷新电平：{while_open} 次"
+    # 回包也要真的走完一圈，落到那条进度条上——只发不收等于表还是坏的。
+    await _wait(audio_page, "document.getElementById('audio-level').style.width !== ''")
+
+    await audio_page.keyboard.press("Escape")
+    await _wait(audio_page, "!document.getElementById('panel').classList.contains('open')")
+    settled = _level_asks(harness)
+    await asyncio.sleep(0.8)
+    assert (
+        _level_asks(harness) == settled
+    ), f"面板关上之后还在问：{_level_asks(harness) - settled} 次"
+
+    # 没有窗口持有设备时，面板重新打开也没什么可读——问了也只能问到自己。
+    harness.hub.broadcast(ServerEvent.AUDIO_OWNER, {"owner": None})
+    await _wait(
+        audio_page, "document.getElementById('audio-owner').textContent.includes('本机播放')"
+    )
+    await audio_page.click("#corner")
+    await _wait(audio_page, "document.getElementById('panel').classList.contains('open')")
+    idle = _level_asks(harness)
+    await asyncio.sleep(0.6)
+    assert _level_asks(harness) == idle, f"没人持有设备还在问电平：{_level_asks(harness) - idle} 次"
+
+
+@pytest.mark.ui_browser
+async def test_the_panel_only_window_keeps_its_meter(audio_page: Page, harness: Harness) -> None:
+    """壳里的面板窗口（#panel）没有「收起」这一说：整扇窗就是面板，open() 永远
+    不会被调用。把电平轮询绑到面板可见性上，不能把这扇窗连坐了。"""
+    for _ in range(300):
+        if harness.broker is not None and harness.broker.owner is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert harness.broker is not None
+    assert harness.broker.owner is not None, "页面还没拿到设备"
+    # 设备在桌宠那扇窗，面板窗自己不 claim——两扇窗抢同一个麦克风是另一个故障。
+    panel_window = await audio_page.context.new_page()
+    try:
+        await panel_window.goto(f"{harness.url}#panel")
+        await _wait(panel_window, "document.body.classList.contains('panel-only')")
+        before = _level_asks(harness)
+        await asyncio.sleep(0.8)
+        asked = _level_asks(harness) - before
+        assert asked >= 4, f"面板窗口的电平表没转起来：0.8 秒问了 {asked} 次"
+    finally:
+        await panel_window.close()
+
+
+@pytest.mark.ui_browser
+async def test_a_denied_window_stops_blaming_itself_once_something_stronger_takes_over(
+    browser: Browser, harness: Harness
+) -> None:
+    """被顶掉之后，这条「本窗口拿不到麦克风」就不再是关于当前持有者的话。
+
+    上一条测试要的是「广播盖不掉本地事实」。反过来也得成立：本窗口一旦不再争抢
+    设备——被壳顶掉，或者自己终于拿到了麦克风——那条旧的拒绝就不该继续挂在新持有者
+    头上。否则壳明明录得好好的，面板还在报一个属于别人的故障。
+    """
+    assert harness.broker is not None
+    context = await browser.new_context(bypass_csp=True)
+    await context.add_init_script(
+        "navigator.mediaDevices.getUserMedia = () =>"
+        " Promise.reject(new DOMException('拒绝了', 'NotAllowedError'));"
+    )
+    denied = await context.new_page()
+    try:
+        await denied.goto(harness.url)
+        await _wait(
+            denied,
+            "document.getElementById('audio-owner').textContent.includes('拿不到麦克风')",
+        )
+        # 壳来了。走生产那条路：broker.claim 自己去调前任登记的 close。
+        await harness.broker.claim(
+            "shell", send=lambda pcm: None, close=lambda: None, flush=lambda: None
+        )
+        harness.hub.broadcast(ServerEvent.AUDIO_OWNER, {"owner": "shell"})
+        await _wait(
+            denied,
+            "!document.getElementById('audio-owner').textContent.includes('拿不到麦克风')",
+        )
+        text = await denied.locator("#audio-owner").inner_text()
+        assert "拿不到麦克风" not in text, f"壳在好好录音，面板还在报本窗口的旧账：{text}"
+    finally:
+        await context.close()
