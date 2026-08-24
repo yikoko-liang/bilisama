@@ -586,9 +586,15 @@ async def test_the_panel_names_the_devices_once_the_microphone_is_granted(
     owner = audio_page.locator("#audio-owner")
     await owner.wait_for(state="visible")
     for _ in range(400):
-        if "回声消除已开" in (await owner.inner_text()):
+        if "已接管" in (await owner.inner_text()):
             break
         await asyncio.sleep(0.02)
-    assert "回声消除已开" in (await owner.inner_text())
+    text = await owner.inner_text()
+    assert "已接管" in text, text
+    # "Requested", not "on". The browser accepting the constraint is all this
+    # window can honestly report: the canceller only subtracts Chromium's own
+    # playback, so OBS monitoring or a game goes into the microphone whatever
+    # this line says.
+    assert "回声消除已开" not in text, f"别把「答应了」说成「做到了」：{text}"
     options = await audio_page.locator("#audio-in option").count()
     assert options >= 1, "麦克风下拉是空的"

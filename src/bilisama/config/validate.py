@@ -91,11 +91,13 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
             )
         )
 
-    # Nothing in the pipeline does acoustic echo cancellation. Without either a
-    # virtual output device or the local energy gate, the assistant's own voice
-    # re-enters the mic and false-triggers turn detection continuously — which
-    # looks like a broken endpointer and sends people tuning VAD thresholds that
-    # were never the problem.
+    # Acoustic echo cancellation exists since 2026-08-24, but it only covers
+    # what the shell itself plays: anything another process renders — OBS
+    # monitoring, background music, a game — still reaches the mic and
+    # false-triggers turn detection, which looks like a broken endpointer and
+    # sends people tuning VAD thresholds that were never the problem.
+    #
+    # Neither field below has a runtime reader; this advice is all they do.
     if s.audio.output_route == "direct" and s.audio.echo_guard == "off":
         problems.append(
             ConfigProblem(

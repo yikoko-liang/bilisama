@@ -532,6 +532,11 @@ export function createPanel({ send }) {
   function renderDevices(devices) {
     if (!audioInEl) return;
     const fill = (select, kind) => {
+      // The placeholder carries value="" so this survives the first render:
+      // without it `previous` was the literal 「读取中…」, nothing matched on
+      // the way back, and selectedIndex fell to -1 — both dropdowns came up
+      // blank instead of 「跟随系统」, which is what sent people clicking at
+      // them in the first place.
       const previous = select.value;
       select.replaceChildren();
       const auto = el("option", null, "跟随系统");
@@ -582,7 +587,13 @@ export function createPanel({ send }) {
         stopLevelMeter();
         return;
       }
-      audioOwnerEl.textContent = "麦克风和扬声器已接管，回声消除已开。";
+      // What we can honestly say: the browser accepted the request. Whether
+      // the echo is actually gone depends on where the sound comes out — the
+      // canceller only subtracts Chromium's own playback, so OBS monitoring,
+      // a game or background music go straight into the microphone no matter
+      // what this line says. Claiming 「回声消除已开」 outright was a promise
+      // this window has no way to keep.
+      audioOwnerEl.textContent = "麦克风和扬声器已接管（回声消除已请求）。";
       request("devices");
       startLevelMeter();
     },
@@ -596,7 +607,11 @@ export function createPanel({ send }) {
       }
       if (event === "audio.devices") {
         renderDevices(data.devices ?? []);
-        if (data.moved === false) {
+        if (data.error) {
+          // Usually the selected device was unplugged. Say so, and let the
+          // re-rendered list put the dropdown back on what is really playing.
+          audioOwnerEl.textContent = `切换设备没成功：${data.error}`;
+        } else if (data.moved === false) {
           audioOwnerEl.textContent = "这个浏览器不支持切换扬声器，用系统默认。";
           audioOutEl.value = "";
         }

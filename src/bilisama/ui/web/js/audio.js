@@ -211,26 +211,38 @@ export function createAudio({ onOwner }) {
      * wire and the answer goes back the same way.
      */
     async command(request, reply) {
+      // Every path answers, and nothing here is allowed to reject. The caller
+      // is a frame dispatcher with nowhere to put an error, so a throw used to
+      // land as an unhandled rejection: the reply never went out, the dropdown
+      // sat on a device that was not playing anything, and the panel said
+      // nothing at all. Unplugging a selected device is the ordinary way in.
       const what = request?.what;
-      if (what === "devices") {
-        let list = [];
-        try {
-          list = await this.devices();
-        } catch (err) {
-          console.warn("读不到音频设备：", err);
+      try {
+        if (what === "devices") {
+          reply({ kind: "devices", devices: await this.devices() });
+        } else if (what === "use_input") {
+          await this.useInput(request.id);
+          reply({ kind: "devices", devices: await this.devices() });
+        } else if (what === "use_output") {
+          const moved = await this.useOutput(request.id);
+          reply({ kind: "devices", moved, devices: await this.devices() });
+        } else if (what === "test") {
+          await this.test();
+        } else if (what === "level") {
+          reply({ kind: "level", level: this.level() });
         }
-        reply({ kind: "devices", devices: list });
-        return;
+      } catch (err) {
+        console.warn("音频命令失败：", what, err);
+        // Say what broke AND re-send the list, so the panel can put the
+        // dropdown back on whatever is actually playing.
+        let devices = [];
+        try {
+          devices = await this.devices();
+        } catch {
+          // Enumeration is failing too; an empty list still beats silence.
+        }
+        reply({ kind: "devices", devices, error: String(err) });
       }
-      if (what === "use_input") return this.useInput(request.id);
-      if (what === "use_output") {
-        const moved = await this.useOutput(request.id);
-        reply({ kind: "devices", moved, devices: await this.devices() });
-        return;
-      }
-      if (what === "test") return this.test();
-      if (what === "level") reply({ kind: "level", level: this.level() });
-      return undefined;
     },
     /** Ask again after standing aside; ignored while already connected.
      *
@@ -265,10 +277,18 @@ export function createAudio({ onOwner }) {
     },
     /** Move playback to a different speaker.
      *
-     * Worth knowing before reaching for it: the echo canceller references the
-     * output the browser considers current, so sending playback somewhere else
-     * can quietly cost the cancellation this whole file exists for. The panel
-     * says as much next to the control.
+     * This does NOT cost the echo cancellation, which is the opposite of what
+     * an earlier version of this comment claimed. Chromium moves the AEC
+     * reference along with the sink: setSinkId marks the destination, and its
+     * next start calls SetOutputDeviceForAec with the new id
+     * (realtime_audio_destination_handler.cc:419-441, read at tag
+     * 150.0.7871.224 — the Chromium inside Electron 43.4.0). Older write-ups
+     * say otherwise because it used to be true; crbug 40252911 is the fix.
+     *
+     * What the canceller genuinely cannot subtract is audio some OTHER process
+     * renders — the reference is Chromium's own playback to one device
+     * (media_switches.cc:506-509). OBS monitoring, a game, background music:
+     * none of it is in there, whatever this control is set to.
      */
     async useOutput(deviceId) {
       context = context ?? new AudioContext();

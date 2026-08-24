@@ -150,8 +150,20 @@ class CustomTTSConfig(BaseModel):
 class AudioConfig(BaseModel):
     """Mitigations for the biggest operational risk.
 
-    Nothing in the pipeline cancels acoustic echo. If the assistant's own voice
-    reaches the mic, turn detection false-triggers continuously.
+    The pipeline DOES cancel acoustic echo since 2026-08-24 — the shell is
+    Chromium and audio runs inside it, so getUserMedia's canceller has both the
+    microphone and the reference signal. This docstring said the opposite until
+    that landed.
+
+    It only covers what the shell itself plays, though. OBS monitoring,
+    background music and game audio reach the microphone untouched, and the
+    symptom is turn detection false-triggering — which reads as a broken VAD
+    (plan section 11) rather than as a routing problem.
+
+    None of the four fields below has a runtime reader: the panel's device
+    dropdowns are what actually decides where sound goes, and output_route is
+    a plan for a virtual cable that nothing implements yet (backlog #35's
+    family). config/validate.py is the only consumer, and only for advice.
     """
 
     model_config = {"extra": "forbid"}
