@@ -577,6 +577,33 @@ async def _consume_events(
     collected: list[bytes] = []
     said: list[str] = []
     buffered: list[str] = []  # printed a sentence at a time when not streaming
+    # Recognition runs BESIDE generation, not before it, so the line saying what
+    # the streamer said can land after the reply answering it — printed in
+    # arrival order the log reads as if she answered first, and the reader's
+    # first suspicion falls on the part that is working. So her reply waits for
+    # the transcript of the turn it belongs to.
+    #
+    # Armed only once this provider has been seen to transcribe at all: s2s with
+    # `--stt none` never sends one, and waiting there would hold every reply to
+    # its end — the exact lag the sentence-at-a-time printing exists to avoid.
+    # The cost is that the first such turn of a session can still print
+    # reversed, which beats holding text that nothing will ever release.
+    transcribes = False
+    awaiting = False
+    held: list[str] = []
+
+    def say(text: str, *, end: str = "\n") -> None:
+        if awaiting:
+            held.append(text + end)
+            return
+        print(text, end=end, flush=end == "")
+
+    def release() -> None:
+        nonlocal awaiting
+        awaiting = False
+        if held:
+            print("".join(held), end="", flush=True)
+            held.clear()
 
     def flush_sentences(*, final: bool = False) -> None:
         text = "".join(buffered)
@@ -591,15 +618,20 @@ async def _consume_events(
         else:
             buffered.clear()
         if text:
-            print(text)
+            say(text)
 
     async for event in events:
         if isinstance(event, link.UserTranscriptDone):
+            transcribes = True
+            # Out from under the hold first, so this line lands ahead of the
+            # reply it explains rather than joining the queue behind it.
+            awaiting = False
             print(f"你说：{event.text}")
+            release()
         elif isinstance(event, link.ReplyTextDelta):
             said.append(event.text)
             if stream_text:
-                print(event.text, end="", flush=True)
+                say(event.text, end="")
             else:
                 buffered.append(event.text)
                 flush_sentences()
@@ -611,17 +643,25 @@ async def _consume_events(
             collected.append(event.pcm)
             if speaker is not None:
                 speaker.play(event.pcm)
+        elif isinstance(event, link.SpeechStopped):
+            if transcribes:
+                awaiting = True
         elif isinstance(event, link.SpeechStarted):
+            # A new turn starting settles the last one either way: whatever it
+            # was holding belongs on screen now, transcript or no transcript.
+            release()
             if speaker is not None:
                 speaker.flush()  # the local half of playback.clear
         elif isinstance(event, link.ReplyDone):
             said.clear()
             marker = f"—— 回复结束（{event.status}）——"
             if stream_text:
-                print(f"\n{marker}")
+                say(f"\n{marker}")
             else:
                 flush_sentences(final=True)  # whatever the last sentence left
-                print(marker)
+                say(marker)
+            # The transcript lost the race for good; nothing else will release.
+            release()
             if reply_wav is not None and collected:
                 with wave.open(str(reply_wav), "wb") as w:
                     w.setnchannels(1)
@@ -632,6 +672,7 @@ async def _consume_events(
                 return
             collected.clear()
         elif isinstance(event, link.LinkDown):
+            release()  # a dropped link owes the reader whatever it was holding
             tail = "，正在自动重连…" if event.retrying else "，已放弃重连。"
             print(f"[链路] 断了（{event.reason}）{tail}", file=sys.stderr)
         elif isinstance(event, link.LinkUp):

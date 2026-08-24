@@ -413,7 +413,7 @@ async def test_user_transcript_reaches_l3_as_the_streamer() -> None:
         linkobj = S2SLink(server.url)
         await linkobj.connect()
         try:
-            await server.send(dia.ServerEvent.USER_TRANSCRIPT_DONE, transcript="主播说了这句话")
+            await server.user_transcript("主播说了这句话")
             got = await _next_event(linkobj.events(), link.UserTranscriptDone)
             assert isinstance(got, link.UserTranscriptDone)
             assert got.text == "主播说了这句话"

@@ -411,6 +411,27 @@ class MockRealtimeServer:
             item_id=f"item_user_{self._user_item_seq}",
         )
 
+    async def user_transcript(self, text: str) -> None:
+        """What the recogniser decided the streamer said.
+
+        Deliberately a separate call rather than something speech_stopped emits,
+        because on a real endpoint recognition runs BESIDE generation instead of
+        ahead of it: this lands before the reply, in the middle of its text, or
+        after response.done, and a test that wants the ugly order has to be able
+        to ask for it. Modelling it as always-first is how the terminal came to
+        print her answer above the question it answered, with every test green.
+
+        Nothing here emits it on its own — a provider may not transcribe at all
+        (s2s with `--stt none` never does), and a mock that always did would hide
+        the code paths that have to cope without one.
+        """
+        await self.send(
+            dia.ServerEvent.USER_TRANSCRIPT_DONE,
+            item_id=f"item_user_{self._user_item_seq}",
+            content_index=0,
+            transcript=text,
+        )
+
     async def barge_in(self, *, gap_s: float = 0.0) -> None:
         """Simulate the streamer talking over the assistant.
 
