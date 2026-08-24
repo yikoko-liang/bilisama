@@ -57,6 +57,20 @@ _VIEWER_CONTENT: Final[frozenset[str]] = frozenset({"text", "danmaku", "message"
 # still cannot carry a credential out.
 _DIAGNOSTIC: Final[frozenset[str]] = frozenset({"error_text", "detail", "advice"})
 
+# The namespace this formatter owns. Reserved whether or not the key happens to
+# be present on a given line, because these names MEAN something here: `turn_id`
+# is the correlation id bound around the call, not a field, and `exc` is the
+# traceback. A caller's field of the same name is a different thing, and letting
+# it sit in that slot would have anything grouping by turn_id group the wrong
+# lines together.
+#
+# Being unconditional also removes a trap: `record.exc_info` is not a reliable
+# "is there an exception" test. logging fills it from sys.exc_info(), which
+# outside an except block is the tuple (None, None, None) — truthy.
+_OWNED_KEYS: Final[frozenset[str]] = frozenset(
+    {"ts", "level", "event", "logger", "turn_id", "intent_id", "job_id", "exc"}
+)
+
 # Trailing words that describe a sensitive field instead of carrying it:
 # `token_count` and `text_len` are metrics, `content_type` is a label.
 _DESCRIPTOR_SUFFIXES: Final[frozenset[str]] = frozenset(
@@ -151,19 +165,27 @@ class _JsonFormatter(logging.Formatter):
 
         extra = getattr(record, "fields", None)
         if isinstance(extra, dict):
-            # A field may be named like a key this formatter writes, and the
-            # collision loses data in whichever direction it happens: `event`
-            # and `logger` would overwrite the two keys every consumer groups
-            # by, while `exc` lands after the fields and would overwrite the
-            # caller's. Prefixed rather than dropped — dropping is the same
+            # A field named like a key this formatter owns loses data in
+            # whichever direction the collision happens: `event` and `logger`
+            # would overwrite the two keys every consumer groups by, while
+            # `exc` lands after the fields and would be overwritten by the
+            # traceback. Prefixed rather than dropped — dropping is the same
             # silent-loss shape that folding `error_text` into `<N chars>`
-            # turned out to be. Only on a real collision, so an explicit
-            # turn_id with nothing bound still reads as `turn_id`.
-            taken = set(payload) | ({"exc"} if record.exc_info else set())
+            # turned out to be.
+            #
+            # Values all survive; NAMES do not round-trip. A caller writing
+            # both `ts` and `field_ts` gets one of them under `field_ts` and
+            # the other under `field_field_ts`, decided by kwargs order.
+            # Accepted: nothing is lost, and the alternative is an escaping
+            # scheme nobody reading a log line would thank us for.
+            taken = set(payload) | _OWNED_KEYS
             for key, value in extra.items():
-                # Scrubbed under the name the caller wrote: every redaction
-                # rule reads field names, so judging a renamed key would let a
-                # collision walk a credential straight past them.
+                # Scrubbed under the name the CALLER wrote, before any rename.
+                # Every redaction rule reads field names, and `_matches` splits
+                # on word boundaries: `bili_jct` is redacted by exact match,
+                # while `field_bili_jct` splits into three words that match
+                # nothing. Judging the renamed key would walk that credential
+                # straight out.
                 scrubbed = _scrub(key, value, log_viewer_content=self._log_viewer_content)
                 name = key
                 while name in taken:
@@ -171,7 +193,11 @@ class _JsonFormatter(logging.Formatter):
                 taken.add(name)
                 payload[name] = scrubbed
 
-        if record.exc_info:
+        # Not `if record.exc_info:` — logging fills it from sys.exc_info(),
+        # which outside an except block is the tuple (None, None, None), and a
+        # tuple is truthy. Formatting that produced `exc: NoneType: None`: a
+        # line that says nothing and reads like a swallowed error.
+        if record.exc_info is not None and record.exc_info[0] is not None:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
@@ -193,10 +219,12 @@ class EventLogger:
     # is load-bearing. As a normal parameter it reserved `event` (and `level`
     # on _emit) as field names, so the natural way to record WHICH event failed
     # — log.exception("scheduler.event_failed", event=frame) — raised TypeError
-    # instead of logging. It was found inside an except block in
-    # director/scheduler.py, where the TypeError killed the very task the
-    # handler existed to keep alive: a swallowed field would have been a lost
-    # line, this was a dead event loop.
+    # instead of logging. It surfaced while writing the catch-all in
+    # director/scheduler.py (d34b750), which renamed its field to `frame` to get
+    # past it. What makes it worth a slash rather than a note: the natural place
+    # to write that call is inside an except block, where a TypeError would take
+    # down the handler meant to keep the task alive. Never observed in
+    # production — the call was fixed before it ran.
 
     def _emit(self, level: int, event: str, /, **fields: Any) -> None:
         self._logger.log(level, event, extra={"fields": fields})

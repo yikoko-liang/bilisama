@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 import pytest
 
+from bilisama.obs import logging as obs_logging
 from bilisama.obs.logging import EventLogger, bind, get_logger, setup
 
 _QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn")
@@ -439,58 +440,96 @@ def test_a_field_called_level_does_not_blow_up_the_call() -> None:
     assert payload["entries"] == 12
 
 
-@pytest.mark.parametrize("name", ["ts", "logger"])
-def test_a_field_never_overwrites_a_key_the_formatter_always_writes(name: str) -> None:
-    """Renamed rather than dropped, on purpose.
+@pytest.mark.parametrize(
+    "name", ["ts", "level", "event", "logger", "turn_id", "intent_id", "job_id", "exc"]
+)
+def test_the_formatter_keeps_its_namespace_whether_or_not_the_key_is_present(
+    name: str,
+) -> None:
+    """Renamed rather than dropped, and unconditionally.
 
     Dropping would lose whatever the caller thought was worth recording, and
-    silently — the same shape as the scrub that ate `error_text`. Overwriting
-    is worse still: `event` and `logger` are how every downstream consumer
-    groups these lines, in the file and on the panel alike.
+    silently — the same shape as the scrub that ate `error_text`. Overwriting is
+    worse: `event` and `logger` are how every consumer groups these lines.
+
+    Unconditional because these names mean something here. `turn_id` is the
+    correlation id bound around the call; a field of that name is a different
+    thing, and letting it occupy the slot on the lines where nothing is bound
+    would have anything grouping by turn_id group the wrong lines together.
     """
     log, stream = _capture()
     log.info("some.event", **{name: "调用方给的值"})
     payload = _one(stream)
     assert payload[f"field_{name}"] == "调用方给的值"
-    assert payload[name] != "调用方给的值"
+    assert payload.get(name) != "调用方给的值"
 
 
-@pytest.mark.parametrize("name", ["turn_id", "intent_id", "job_id"])
-def test_an_unbound_correlation_id_leaves_its_name_to_the_caller(name: str) -> None:
-    """Renaming is for collisions, not for reserved words.
+def test_scrubbing_judges_the_name_the_caller_wrote_not_the_renamed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order inside the loop, pinned — a rename that ran first would leak.
 
-    With nothing bound there is no second value to protect, and moving the
-    field to `field_turn_id` would cost the one name every other line in the
-    file is grouped by, for nothing.
+    The example has to be a MULTI-word name matched exactly, because that is
+    where a prefix flips the verdict: `_matches` tries the whole key first, then
+    splits on word boundaries. `bili_jct` is redacted by the exact match, while
+    `field_bili_jct` splits into three words that are each harmless — the real
+    credential this would walk out. A single-word name survives prefixing (its
+    word is still in there), so testing with one proves nothing.
+
+    No owned key is sensitive today, so the collision cannot be built out of
+    real names; the marker set is widened to `turn_id` instead, which tests the
+    ordering rather than today's coincidence.
     """
     log, stream = _capture()
-    log.info("some.event", **{name: "调用方给的值"})
+    monkeypatch.setattr(obs_logging, "_REDACTED", frozenset(obs_logging._REDACTED | {"turn_id"}))
+    log.info("some.event", turn_id="sk-REAL-CREDENTIAL")
     payload = _one(stream)
-    assert payload[name] == "调用方给的值"
-    assert f"field_{name}" not in payload
+    assert payload["field_turn_id"] == "***", "改名走在了脱敏前面，凭证漏出去了"
 
 
-def test_a_field_called_exc_keeps_its_name_when_there_is_no_traceback() -> None:
-    """`exc` only collides on the exception path; elsewhere it is an ordinary
-    field name and gets left alone."""
+def test_a_field_needing_two_prefixes_does_not_land_on_top_of_the_first() -> None:
+    """The `while`, not an `if`.
+
+    One prefix is enough for almost everything, which is exactly why an `if`
+    looks sufficient and is not. Order matters: with `field_event` claimed
+    first, the later `event` prefixes once onto a name already taken and has to
+    go round again. Stopping after one round writes it over the other field.
+    """
     log, stream = _capture()
-    log.info("link.retry_scheduled", exc="ConnectionError")
+    log.info("real.event", **{"field_event": "先到的这份", "event": "后到的这份"})
     payload = _one(stream)
-    assert payload["exc"] == "ConnectionError"
-    assert "field_exc" not in payload
+    assert payload["field_event"] == "先到的这份"
+    assert payload["field_field_event"] == "后到的这份"
 
 
-def test_a_field_called_exc_survives_the_traceback() -> None:
-    """`exc` collides in the other direction: it is written AFTER the fields,
-    so the traceback used to eat the caller's value rather than the reverse."""
+def test_a_three_way_collision_keeps_all_three_values() -> None:
+    """Values all survive a pile-up, however deep it goes."""
     log, stream = _capture()
-    try:
-        raise RuntimeError("原始故障")
-    except RuntimeError:
-        log.exception("link.send_failed", exc="调用方自己记的那一份")
+    log.info("e", **{"event": "A", "field_event": "B", "field_field_event": "C"})
     payload = _one(stream)
-    assert "RuntimeError: 原始故障" in payload["exc"]
-    assert payload["field_exc"] == "调用方自己记的那一份"
+    assert {
+        payload["field_event"],
+        payload["field_field_event"],
+        payload["field_field_field_event"],
+    } == {
+        "A",
+        "B",
+        "C",
+    }
+
+
+def test_exception_outside_an_except_block_does_not_invent_a_traceback() -> None:
+    """`record.exc_info` is not an "is there an exception" test.
+
+    logging fills it from sys.exc_info(), which outside an except block is the
+    tuple (None, None, None) — truthy. Formatting that produced a line reading
+    `exc: NoneType: None`, which says nothing and looks like a swallowed error.
+    """
+    log, stream = _capture()
+    log.exception("link.retry_scheduled", exc="ConnectionError")
+    payload = _one(stream)
+    assert "exc" not in payload, f"凭空造了一条 traceback：{payload.get('exc')!r}"
+    assert payload["field_exc"] == "ConnectionError"
 
 
 def test_an_explicit_correlation_id_does_not_shadow_the_bound_one() -> None:
