@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Callable, Iterator
 
 from bilisama.clock import FakeClock, SystemClock
 from bilisama.director.floor import SpeakingFloor
@@ -25,7 +26,17 @@ from bilisama.director.scheduler import PlaybackClear, Scheduler
 from bilisama.ingest.events import EventKind, LiveEvent, Viewer
 from bilisama.obs.outcome import Outcome, Phase, SkipReason
 from bilisama.realtime import capabilities as caps_mod
-from bilisama.realtime.link import ReplySpec
+from bilisama.realtime.link import (
+    LinkDown,
+    LinkEvent,
+    ReplyDone,
+    ReplyHandle,
+    ReplySpec,
+    ReplyStatus,
+    ReplyTextDelta,
+    SpeechStarted,
+    SpeechStopped,
+)
 from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
 
@@ -400,6 +411,238 @@ async def test_output_guard_hit_cancels_and_claws_back() -> None:
             await _wait_verdicts(scheduler, 1)
         verdict = scheduler.verdicts[0]
         assert verdict.reason is SkipReason.OUTPUT_BLOCKED
+
+
+# ------------------------------------------------------------ the event loop
+
+
+class _ScriptedLink:
+    """A SpeechLink fed frame by frame, whose cancel can be told to fail.
+
+    The mock server cannot produce this interleaving. On a healthy s2s the
+    provider cancels first (done(cancelled) then speech_started), so _on_done
+    has already settled the reply and _barge_in returns early. The reachable
+    shape is a protected reply: its own dispatch disarms the server's
+    interrupt gate, so speech_started arrives alone and the scheduler is the
+    only one cancelling.
+    """
+
+    def __init__(self, *, cancel_error: Exception | None = None, item_failures: int = 0) -> None:
+        self.feed: asyncio.Queue[LinkEvent] = asyncio.Queue()
+        self.items: list[str] = []
+        self.replies: list[ReplySpec] = []
+        self.cancels: list[ReplyHandle] = []
+        self._cancel_error = cancel_error
+        self._item_failures = item_failures
+
+    async def connect(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+    async def set_context(self, instructions: str) -> None:
+        return None
+
+    async def push_audio(self, pcm: bytes) -> None:
+        return None
+
+    async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        if self._item_failures > 0:
+            self._item_failures -= 1
+            raise ConnectionError("还没连接")
+        self.items.append(text)
+
+    async def request_reply(self, spec: ReplySpec) -> ReplyHandle:
+        self.replies.append(spec)
+        return ReplyHandle()
+
+    async def cancel(self, handle: ReplyHandle) -> None:
+        self.cancels.append(handle)
+        if self._cancel_error is not None:
+            raise self._cancel_error
+
+    async def end_protection(self) -> None:
+        return None
+
+    def events(self) -> AsyncIterator[LinkEvent]:
+        return self._drain()
+
+    async def _drain(self) -> AsyncIterator[LinkEvent]:
+        while True:
+            yield await self.feed.get()
+
+
+@contextlib.asynccontextmanager
+async def _scheduler_on(
+    speech: _ScriptedLink,
+    *,
+    guard: Callable[[str], bool] | None = None,
+    quiet_after_speech_s: float = 1.1,
+) -> AsyncIterator[Scheduler]:
+    clock = SystemClock()
+    scheduler = Scheduler(
+        speech,
+        SpeakingFloor(clock),
+        clock,
+        guard=guard,
+        quiet_after_speech_s=quiet_after_speech_s,
+    )
+    runner = asyncio.create_task(scheduler.run())
+    try:
+        yield scheduler
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+
+
+async def _until(what: Callable[[], bool], why: str, *, timeout: float = 5.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if what():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(why)
+
+
+@contextlib.contextmanager
+def _capture_scheduler_logs(into: list[str]) -> Iterator[None]:
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            into.append(f"{record.getMessage()} {getattr(record, 'fields', {})}")
+
+    logger = logging.getLogger("bilisama.director.scheduler")
+    sink = _Sink()
+    logger.addHandler(sink)
+    try:
+        yield
+    finally:
+        logger.removeHandler(sink)
+
+
+async def test_a_failing_cancel_does_not_take_the_event_loop_with_it() -> None:
+    """The one bare await left on the interruption path.
+
+    `cancel` writes straight to the socket, and the window between the peer's
+    close frame and _recv_loop noticing is real enough that the client's own
+    watchdog suppresses the same send (client.py:294-295). Raised from inside
+    the event loop it used to kill the ONLY consumer of link events: the
+    LinkDown one frame behind was never read, the floor stayed shut, and every
+    later intent sat in the heap with no verdict at all.
+    """
+    speech = _ScriptedLink(cancel_error=ConnectionError("还没连接"))
+    records: list[str] = []
+    with _capture_scheduler_logs(records):
+        async with _scheduler_on(speech) as scheduler:
+            scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1"))
+            await _until(lambda: scheduler._active is not None, "没派发出去")
+
+            speech.feed.put_nowait(SpeechStarted(audio_ms=0))
+            await _until(lambda: bool(speech.cancels), "打断时没有取消回复")
+
+            # The link dies right behind the barge-in — the frame nobody was
+            # left alive to read.
+            speech.feed.put_nowait(LinkDown("connection_closed:1011", retrying=False))
+            await _until(lambda: scheduler._link_down, "链路事件没人消费了")
+
+            scheduler.submit(_intent(dedup="dan_late"))
+    late = [v for v in scheduler.verdicts if v.intent_id == "dan_late"]
+    assert late and late[0].reason is SkipReason.LINK_DOWN, [str(v) for v in scheduler.verdicts]
+    assert any("还没连接" in line for line in records), f"取消失败被吞掉了：{records}"
+
+
+async def test_a_broken_guard_is_reported_and_the_loop_keeps_consuming() -> None:
+    """The backstop under the whole handler, not just under cancel.
+
+    Anything that raises while handling one frame — a guard bug here — must
+    cost that frame and nothing more. Losing the consumer costs every verdict
+    for the rest of the session (module docstring's last promise).
+    """
+
+    def explode(_: str) -> bool:
+        raise RuntimeError("过滤器炸了")
+
+    speech = _ScriptedLink()
+    records: list[str] = []
+    with _capture_scheduler_logs(records):
+        async with _scheduler_on(speech, guard=explode) as scheduler:
+            scheduler.submit(_intent(dedup="dan_1"))
+            await _until(lambda: scheduler._active is not None, "没派发出去")
+            active = scheduler._active
+            assert active is not None
+
+            speech.feed.put_nowait(ReplyTextDelta(active.handle, "喂"))
+            await _until(
+                lambda: any("scheduler.event_failed" in line for line in records),
+                f"没记下事件处理失败：{records}",
+            )
+
+            speech.feed.put_nowait(LinkDown("connection_closed:1011", retrying=False))
+            await _until(lambda: scheduler._link_down, "链路事件没人消费了")
+    assert any("过滤器炸了" in line for line in records), records
+
+
+async def test_barge_in_clears_playback_and_cancels_the_live_reply() -> None:
+    """The normal path, unchanged: clear first (section 2.5 sequence 3), then
+    cancel the reply the streamer just talked over."""
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1"))
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        active = scheduler._active
+        assert active is not None
+
+        speech.feed.put_nowait(SpeechStarted(audio_ms=0))
+        clear = await asyncio.wait_for(scheduler.controls.get(), timeout=3.0)
+        assert clear.reason == "barge_in"
+        await _until(lambda: speech.cancels == [active.handle], "没有取消正在说的那条")
+
+
+async def test_a_requeued_intent_writes_its_history_line_only_once() -> None:
+    """An interrupted SC must not become several SCs in the conversation.
+
+    Paid work requeues on interruption (section 4.2), and the redispatch used
+    to write item_text again — add_context_item dedups nothing (s2s.py:126-142)
+    — so a thank-you the streamer talked over twice reached the model as three
+    identical `[SC ¥30] 金主: 加油` lines. What it sees then is one viewer
+    spamming, which is exactly the reply we do not want.
+    """
+    text = "[SC ¥30] 金主: 加油"
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech, quiet_after_speech_s=0.05) as scheduler:
+        scheduler.submit(
+            _intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True, text=text)
+        )
+        await _until(lambda: scheduler._active is not None, "没派发出去")
+        first = scheduler._active
+        assert first is not None
+
+        # The streamer talks over the thank-you: barge-in cancels it, the
+        # provider's done settles the books, and the paid work requeues.
+        speech.feed.put_nowait(SpeechStarted(audio_ms=0))
+        speech.feed.put_nowait(ReplyDone(first.handle, ReplyStatus.CANCELLED, text=""))
+        speech.feed.put_nowait(SpeechStopped(audio_ms=1))
+
+        await _until(lambda: len(speech.replies) == 2, "重排队之后没有再说一次")
+    assert speech.items == [text], f"会话历史里这条被写了 {len(speech.items)} 遍"
+
+
+async def test_a_failed_history_write_is_retried_on_the_requeue() -> None:
+    """The other half: only a line that ACTUALLY landed may be skipped.
+
+    When add_context_item is what failed, the conversation never got the line,
+    so the requeue has to carry it again — otherwise the reply is generated
+    against an SC the model cannot see.
+    """
+    text = "[SC ¥30] 金主: 加油"
+    speech = _ScriptedLink(item_failures=1)
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(
+            _intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True, text=text)
+        )
+        await _until(lambda: len(speech.replies) == 1, "重试没把这条重新派发出去")
+    assert speech.items == [text], "写失败的那条没有补写"
 
 
 # ------------------------------------------------------------ the guard alone

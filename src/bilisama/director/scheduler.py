@@ -40,7 +40,7 @@ from typing import Any, Literal, Protocol, cast
 
 from bilisama.clock import Clock
 from bilisama.director.floor import SpeakingFloor
-from bilisama.director.intent import Intent
+from bilisama.director.intent import Injection, Intent
 from bilisama.obs.logging import get_logger
 from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
 from bilisama.realtime import link
@@ -250,35 +250,59 @@ class Scheduler:
 
     async def _event_loop(self) -> None:
         async for event in self._speech.events():
-            if isinstance(event, link.SpeechStarted):
-                self._floor.on_speech_started()
-                await self._barge_in()
-            elif isinstance(event, link.SpeechStopped):
-                self._floor.on_speech_stopped(quiet_s=self._quiet_after_speech_s)
-            elif isinstance(event, link.ReplyStarted):
-                # A reply we never dispatched is the provider's implicit turn:
-                # hold the floor for its whole life, or a queued intent lands
-                # in the rule-5 shared-response-id trap (A2).
-                if self._active is None or event.handle is not self._active.handle:
-                    self._floor.on_implicit(True)
-            elif isinstance(event, link.ReplyTextDelta):
-                self._on_delta(event)
-            elif isinstance(event, link.ReplyDone):
-                if self._active is None or event.handle is not self._active.handle:
-                    self._floor.on_implicit(False)
-                self._on_done(event)
-            elif isinstance(event, link.LinkDown):
-                # The transport already settled every record (FAILED dones are
-                # on their way). Reset every flag this link was feeding, or the
-                # floor stays shut forever, and drain the queue: holding work
-                # for a link that may be gone for good just produces stale
-                # replies later.
-                self._link_down = True
-                self._floor.on_link_lost()
-                self._drain_queue(SkipReason.LINK_DOWN)
-            elif isinstance(event, link.LinkUp):
-                self._link_down = False
+            try:
+                self._handle_event(event)
+            except Exception as exc:
+                # This task is the only consumer of link events, so one bad
+                # frame must cost that frame and nothing else. When it died
+                # here instead, the LinkDown behind it was never read: the
+                # floor stayed shut and every later intent sat in the heap
+                # without a verdict, against the module docstring's contract.
+                #
+                # The field is `frame`, not `event`: EventLogger takes the
+                # event NAME as its first parameter, so a field called `event`
+                # raises TypeError inside the handler meant to keep us alive.
+                log.exception(
+                    "scheduler.event_failed",
+                    frame=type(event).__name__,
+                    error_text=str(exc)[:200],
+                )
             self._wake.set()
+
+    def _handle_event(self, event: link.LinkEvent) -> None:
+        """React to one link event.
+
+        Synchronous on purpose: every reply-killing send below is spawned, so
+        nothing here can stall — or take down — the stream's only consumer.
+        """
+        if isinstance(event, link.SpeechStarted):
+            self._floor.on_speech_started()
+            self._barge_in()
+        elif isinstance(event, link.SpeechStopped):
+            self._floor.on_speech_stopped(quiet_s=self._quiet_after_speech_s)
+        elif isinstance(event, link.ReplyStarted):
+            # A reply we never dispatched is the provider's implicit turn:
+            # hold the floor for its whole life, or a queued intent lands
+            # in the rule-5 shared-response-id trap (A2).
+            if self._active is None or event.handle is not self._active.handle:
+                self._floor.on_implicit(True)
+        elif isinstance(event, link.ReplyTextDelta):
+            self._on_delta(event)
+        elif isinstance(event, link.ReplyDone):
+            if self._active is None or event.handle is not self._active.handle:
+                self._floor.on_implicit(False)
+            self._on_done(event)
+        elif isinstance(event, link.LinkDown):
+            # The transport already settled every record (FAILED dones are
+            # on their way). Reset every flag this link was feeding, or the
+            # floor stays shut forever, and drain the queue: holding work
+            # for a link that may be gone for good just produces stale
+            # replies later.
+            self._link_down = True
+            self._floor.on_link_lost()
+            self._drain_queue(SkipReason.LINK_DOWN)
+        elif isinstance(event, link.LinkUp):
+            self._link_down = False
 
     async def _dispatch_loop(self) -> None:
         while True:
@@ -328,9 +352,11 @@ class Scheduler:
         while the sends were in flight (A1) and turning a failed send into a
         verdict instead of a dead scheduler (A8)."""
         self._dispatching = True
+        wrote_item = False
         try:
             if intent.injection.item_text is not None:
                 await self._speech.add_context_item(intent.injection.item_text)
+                wrote_item = True
             handle = await self._speech.request_reply(intent.injection.reply)
         except Exception as exc:
             log.warning(
@@ -342,7 +368,7 @@ class Scheduler:
                 # audience watched them pay. Same rule as barge-in (section
                 # 4.2): back in the queue, and the key was freed above so the
                 # resubmission is not eaten as a duplicate.
-                self._requeue(intent)
+                self._requeue(intent, item_written=wrote_item)
                 return
             self._verdict_sink(
                 Verdict(
@@ -456,15 +482,22 @@ class Scheduler:
             else:
                 self._settle_active(Outcome.FAILED, Phase.GENERATING)
 
-    async def _barge_in(self) -> None:
+    def _barge_in(self) -> None:
         """The streamer opened their mouth while a reply is still booked.
 
         On s2s this rarely runs with an active reply: the provider sends
         done(cancelled) BEFORE speech_started, so _on_done has already cleared
-        and requeued by the time we get here. This path covers shapes that send
-        started first — cancel now, and let the done settle the books. A reply
-        inside its protection window is left alone: only panic outranks paid
+        and requeued by the time we get here. It does run for a PROTECTED
+        reply, whose dispatch disarmed the server's own axe — then this is the
+        only code that cancels. This path also covers shapes that send started
+        first: cancel now, and let the done settle the books. A reply inside
+        its protection window is left alone; only panic outranks paid
         protection (section 2.7).
+
+        The cancel is spawned like the other five in this file: a send that
+        raises — the socket may be halfway through closing, which is why the
+        client's watchdog suppresses the same one (client.py:294-295) — costs
+        one task, not the event loop.
         """
         active = self._active
         if active is None:
@@ -473,7 +506,7 @@ class Scheduler:
             return
         active.cleared = True
         self.controls.put_nowait(PlaybackClear(reason="barge_in"))
-        await self._speech.cancel(active.handle)
+        self._spawn(self._speech.cancel(active.handle), name="scheduler:barge-cancel")
 
     # ------------------------------------------------------------ protection
 
@@ -533,18 +566,30 @@ class Scheduler:
             entry = heapq.heappop(self._heap)
             self._drop_queued(entry.intent, reason)
 
-    def _requeue(self, intent: Intent) -> None:
+    def _requeue(self, intent: Intent, *, item_written: bool) -> None:
         """Put one intent back at the end of its priority band.
 
         A fresh Intent rather than the original so nothing downstream can hold
         a stale reference; the dedup key must already be freed by the caller,
         or submit() eats this as a duplicate.
+
+        `item_written` drops the history half. That line is already in the
+        conversation and add_context_item dedups nothing (s2s.py:126-142), so
+        rewriting it on every requeue turned one Super Chat the streamer talked
+        over three times into four identical lines — the model then reads a
+        viewer spamming the same paid message. It stays when the write itself
+        is what failed. A reconnect needs no special case: LinkDown drains the
+        queue, so nothing requeued here is ever dispatched into the empty
+        history of a fresh session.
         """
+        injection = intent.injection
+        if item_written and injection.item_text is not None:
+            injection = Injection(reply=injection.reply)
         self.submit(
             Intent(
                 source=intent.source,
                 priority=intent.priority,
-                injection=intent.injection,
+                injection=injection,
                 trusted=intent.trusted,
                 event=intent.event,
                 dedup_key=intent.dedup_key,
@@ -575,7 +620,10 @@ class Scheduler:
             # Paid messages must not vanish silently (section 4.2): back into
             # the queue they go, same priority, new place in line. The dedup
             # key was freed above, so the resubmission is not eaten (A15).
-            self._requeue(intent)
+            # An active reply means dispatch got past both sends, so its
+            # history line is already written — carrying it again would say
+            # the same paid message arrived twice.
+            self._requeue(intent, item_written=True)
             return
         self._verdict_sink(
             Verdict(
@@ -622,6 +670,21 @@ class Scheduler:
         task.set_name(name)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(_report_failure)
+
+
+def _report_failure(task: asyncio.Task[Any]) -> None:
+    """Say what a spawned task died of.
+
+    Nobody awaits these, so without this the reason surfaces — if at all — as
+    asyncio's "exception was never retrieved" whenever the task is collected,
+    with no event name anyone can search the log for.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("scheduler.task_failed", task=task.get_name(), error_text=str(exc)[:200])
 
 
 def _as_stream_guard(

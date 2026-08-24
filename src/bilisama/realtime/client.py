@@ -179,16 +179,26 @@ class RealtimeClient:
                 code=str(error.get("type") or first.get("type") or "unknown"),
                 detail=str(error.get("message") or ""),
             )
+        if self._recv_task is not None and not self._recv_task.done():
+            # Whatever this socket replaces must stop being read. An orphaned
+            # recv task keeps dispatching a dead session's frames into the
+            # shared queue, and its own death would run _on_disconnect against
+            # the socket we are opening right now — failing ITS records and
+            # nulling _ws. Cancelling is enough: _recv_loop treats cancellation
+            # as a deliberate teardown and reports nothing.
+            self._recv_task.cancel()
         self._recv_task = asyncio.create_task(self._recv_loop(), name="realtime:recv")
 
     async def aclose(self) -> None:
         self._closing = True
-        if self._reconnect_task is not None:
-            self._reconnect_task.cancel()
-        for task in (self._recv_task, *self._tasks):
-            if task is not None:
-                task.cancel()
-        pending = [t for t in (self._recv_task, *self._tasks) if t is not None]
+        # The reconnect loop waits with the rest: cancelling without awaiting
+        # left a ladder still climbing after aclose returned, which at process
+        # exit is a socket nobody owns.
+        pending = [
+            t for t in (self._reconnect_task, self._recv_task, *self._tasks) if t is not None
+        ]
+        for task in pending:
+            task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         if self._ws is not None:
@@ -236,7 +246,15 @@ class RealtimeClient:
                 await self._send_raw(frame)
             except Exception:
                 # A create that never left must not hold the slot for 25 s.
-                self._awaiting_created.remove(record)
+                # The record may already be gone: a send on a closing socket
+                # waits for the close to finish before raising (websockets
+                # asyncio/connection.py:873-876), and _on_disconnect settles
+                # and clears the books inside that wait. Removing it blindly
+                # raised ValueError OVER the real ConnectionClosed, so the
+                # scheduler logged "list.remove(x): x not in list" where it
+                # should have said the link went down. Same guard as _settle.
+                if record in self._awaiting_created:
+                    self._awaiting_created.remove(record)
                 self._slot_free.set()
                 raise
         watchdog = asyncio.create_task(self._watchdog(record), name="realtime:watchdog")
@@ -345,6 +363,16 @@ class RealtimeClient:
             if cls is ErrorClass.FATAL:
                 log.error("link.fatal", error_text=describe(cls, reason))
             return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            # A ladder is already climbing, and this drop is most likely ITS
+            # own fresh socket dying inside the resume window (_reconnect_loop
+            # reopens, then replays the session). A second loop would race the
+            # first: two sockets against one set of books, and whichever dies
+            # later settles the survivor's records and nulls _ws, leaving a
+            # live session aclose cannot reach. The running loop notices the
+            # socket is gone and keeps climbing.
+            log.debug("link.reconnect_already_running", reason=reason)
+            return
         self._reconnect_task = asyncio.create_task(
             self._reconnect_loop(), name="realtime:reconnect"
         )
@@ -405,6 +433,16 @@ class RealtimeClient:
                     return
                 # A busy backend deserves a longer wait than a dropped packet.
                 delay = min(delay * (4.0 if cls is ErrorClass.BACKOFF else 2.0), 30.0)
+                continue
+            if self._ws is None:
+                # The socket we just opened died again without raising here —
+                # its recv task ran _on_disconnect, which deferred to this loop
+                # instead of starting a second one. Announcing success now
+                # would leave the link down with nobody climbing. No await
+                # between the check and the LinkUp below, so this cannot race
+                # a drop into the gap.
+                log.warning("link.reconnect_died_on_arrival", attempt=attempt)
+                delay = min(delay * 2.0, 30.0)
                 continue
             log.info("link.reconnected", attempt=attempt)
             self._events.put_nowait(link.LinkUp(attempts=attempt))

@@ -48,6 +48,15 @@ _REDACTED: Final[frozenset[str]] = frozenset(
 # Audience-authored content. Logged as a length unless explicitly enabled.
 _VIEWER_CONTENT: Final[frozenset[str]] = frozenset({"text", "danmaku", "message", "content"})
 
+# Operator-facing diagnostics: whatever these carry, it was written by the
+# code, not by the audience. `error_text` ends in `text`, so the viewer check
+# below folded all nineteen call sites that log a failure reason under that
+# name (client.py:346, sources.py:126, scheduler.py:337 …) down to
+# `<N chars>` — deleting the only field that answers "why", in the log file and
+# on the panel alike (ui/hub.py:70-83). Redaction runs first, so a name in here
+# still cannot carry a credential out.
+_DIAGNOSTIC: Final[frozenset[str]] = frozenset({"error_text", "detail", "advice"})
+
 # Trailing words that describe a sensitive field instead of carrying it:
 # `token_count` and `text_len` are metrics, `content_type` is a label.
 _DESCRIPTOR_SUFFIXES: Final[frozenset[str]] = frozenset(
@@ -112,6 +121,8 @@ def _scrub(key: str, value: Any, *, log_viewer_content: bool) -> Any:
     """
     if _matches(key, _REDACTED):
         return "***"
+    if key.lower() in _DIAGNOSTIC:
+        return value
     if not log_viewer_content and _matches(key, _VIEWER_CONTENT):
         if value is None:
             return None

@@ -261,16 +261,18 @@ def cmd_persona_review(args: argparse.Namespace) -> int:
         print(f"已合并进 personality.md：{entry}")
     elif args.drop:
         layer, entry = _pick(args.drop)
-        rows = store.growth_entries(layer)
-        try:
-            rows.remove(entry)
-        except ValueError as exc:
-            print(
-                "这条已经不在生长层里了（可能刚被蒸馏改写），重新跑一遍看最新列表。",
-                file=sys.stderr,
-            )
-            raise SystemExit(2) from exc
-        store.write_growth(layer, rows)
+        # Under the lock for the whole read-modify-write: listing above is
+        # unlocked, so the distiller may have rewritten the file since, and a
+        # read-then-write would put the stale list back (D11, B7).
+        with store.growth_update(layer) as rows:
+            try:
+                rows.remove(entry)
+            except ValueError as exc:
+                print(
+                    "这条已经不在生长层里了（可能刚被蒸馏改写），重新跑一遍看最新列表。",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2) from exc
         print(f"已删掉：{entry}")
     else:
         print("用法：--promote r1 把那条合并进 personality.md；--drop v2 划掉不喜欢的。")

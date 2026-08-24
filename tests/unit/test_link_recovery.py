@@ -29,6 +29,7 @@ from bilisama.director.floor import SpeakingFloor
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
+from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.errors import ErrorClass, classify_error
 from bilisama.realtime.providers.hosted import HostedLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
@@ -139,6 +140,157 @@ async def test_rotation_retires_the_socket_before_the_cap() -> None:
             assert isinstance(up, link.LinkUp)
         finally:
             await hosted.aclose()
+
+
+def _live_tasks(name: str) -> list[asyncio.Task[object]]:
+    return [t for t in asyncio.all_tasks() if t.get_name() == name and not t.done()]
+
+
+async def test_a_drop_during_recovery_does_not_open_a_second_reconnect_loop() -> None:
+    """One shaky line, two ladders climbing it.
+
+    The reconnect loop reopens the socket and replays the session only after
+    (client.py:389-391). The line that dropped us once is quite capable of
+    dropping the fresh socket inside that window, and its recv task then runs
+    _on_disconnect — which used to start a second loop while the first was
+    still climbing. Two loops reconnect twice: the server holds two sessions,
+    we remember one. The one that hurts comes later, when the orphan dies and
+    ITS _on_disconnect fails the healthy socket's records and nulls _ws, so
+    even aclose can no longer reach the session left open.
+    """
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        client = RealtimeClient(
+            server.url,
+            caps=caps_mod.DASHSCOPE,
+            codec=dia.BETA,
+            clock=clock,
+            auto_reconnect=True,
+            reconnect_backoff_s=1.0,
+        )
+        drops_left = 1
+
+        async def resume() -> None:
+            # What HostedLink._resume_session does: send the bootstrap frame.
+            # The first time round the line takes the new socket down first.
+            nonlocal drops_left
+            if drops_left:
+                drops_left -= 1
+                await server.drop_connection()
+                for _ in range(20):
+                    await asyncio.sleep(0)  # let the recv task see the close
+            await client.send_command({"type": "session.update", "session": {}})
+
+        client.on_resume = resume
+        events = client.events()
+        await client.connect()
+        try:
+            await server.drop_connection()
+            await _next_event(events, link.LinkDown)  # the drop that starts the loop
+            await clock.advance(1.5)  # walk the backoff: reopen, then resume kills it
+            await _next_event(events, link.LinkDown)  # the fresh socket's own death
+
+            climbing = _live_tasks("realtime:reconnect")
+            assert len(climbing) == 1, f"同时有 {len(climbing)} 条重连回路在爬"
+            assert len(_live_tasks("realtime:recv")) <= 1, "上一条 socket 的读任务还活着"
+
+            # And the one loop left has to finish the job: deferring to it must
+            # not mean nobody climbs. Its own success check sees the socket it
+            # opened is gone and keeps going.
+            for _ in range(20):
+                await asyncio.sleep(0)
+            await clock.advance(3.0)
+            up = await _next_event(events, link.LinkUp)
+            assert isinstance(up, link.LinkUp)
+            assert client._ws is not None, "回来了却没有 socket"
+        finally:
+            await client.aclose()
+        assert not _live_tasks("realtime:reconnect"), "aclose 关不掉的重连回路还在跑"
+
+
+async def test_a_socket_that_dies_during_a_silent_resume_keeps_the_ladder_climbing() -> None:
+    """The trap on the other side of "only one loop".
+
+    Not every resume sends something: a hosted link built without turn config
+    replays neither frame while the context is still empty (hosted.py:113-119).
+    So the fresh socket can die inside the resume window without anything
+    raising, and its _on_disconnect now defers to this very loop. Calling that
+    attempt a success would announce LinkUp over no socket at all, with nobody
+    left climbing — silence for the rest of the stream.
+    """
+    clock = FakeClock()
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        client = RealtimeClient(
+            server.url,
+            caps=caps_mod.DASHSCOPE,
+            codec=dia.BETA,
+            clock=clock,
+            auto_reconnect=True,
+            reconnect_backoff_s=1.0,
+        )
+        drops_left = 1
+
+        async def resume() -> None:
+            nonlocal drops_left
+            if drops_left:
+                drops_left -= 1
+                await server.drop_connection()
+                for _ in range(20):
+                    await asyncio.sleep(0)
+
+        client.on_resume = resume
+        events = client.events()
+        await client.connect()
+        try:
+            await server.drop_connection()
+            await _next_event(events, link.LinkDown)
+            await clock.advance(1.5)  # attempt 1: opens, and dies while resuming
+            await _next_event(events, link.LinkDown)
+            for _ in range(20):
+                await asyncio.sleep(0)
+            await clock.advance(3.0)  # attempt 2
+            up = await _next_event(events, link.LinkUp)
+            assert isinstance(up, link.LinkUp)
+            assert client._ws is not None, "宣布连上了，socket 却已经没了"
+        finally:
+            await client.aclose()
+
+
+async def test_a_create_that_dies_mid_send_reports_the_link_not_a_list_error() -> None:
+    """The error the streamer would have had to debug from.
+
+    `await ws.send()` on a closing connection waits for the close to finish and
+    THEN raises (websockets/asyncio/connection.py:873-876), and _on_disconnect
+    runs inside that wait — it clears _awaiting_created (client.py:336). The
+    failure path then removed a record that was already gone, so what reached
+    the scheduler was `list.remove(x): x not in list`, and dispatch_failed plus
+    verdict.detail recorded that instead of a 1011 close.
+    """
+    import websockets
+
+    closed = websockets.ConnectionClosedError(None, None)
+
+    class _ClosingSocket:
+        """Sends the way websockets does while the peer is closing."""
+
+        def __init__(self, owner: RealtimeClient) -> None:
+            self._owner = owner
+
+        async def send(self, payload: str) -> None:
+            self._owner._on_disconnect("connection_closed:1011", closed)
+            raise closed
+
+        async def close(self) -> None:
+            return None
+
+    client = RealtimeClient("ws://unused", caps=caps_mod.S2S, codec=dia.GA)
+    client._ws = _ClosingSocket(client)
+    with pytest.raises(websockets.ConnectionClosed):
+        await client.request_reply({"type": "response.create"})
+    # And the books stay usable: the slot is free and the drop was announced.
+    down = await _next_event(client.events(), link.LinkDown)
+    assert isinstance(down, link.LinkDown)
+    assert down.reason == "connection_closed:1011"
 
 
 def test_a_drop_mid_utterance_does_not_wedge_the_floor() -> None:

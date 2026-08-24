@@ -8,13 +8,15 @@ in test_distill.py; here it is pinned at the store level.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
 from bilisama.persona import growth as g
 from bilisama.persona import loader
-from bilisama.persona.loader import PersonaAnchors, PersonaStore
+from bilisama.persona.loader import GrowthLayer, PersonaAnchors, PersonaStore
 from bilisama.persona.prompt import (
     LIVE_RULES,
     DynamicContext,
@@ -109,6 +111,70 @@ def test_store_reads_never_create_or_touch_anchor_files(
     assert {p: p.read_bytes() for p in TEMPLATE_ROOT.glob("*.md")} == before
     assert not (tmp_path / "live" / "identity.md").exists()
     assert not (tmp_path / "live" / "personality.md").exists()
+
+
+def test_a_growth_read_never_catches_the_file_mid_write(store: PersonaStore) -> None:
+    """The reader takes no lock, so the write must never be observable.
+
+    `Path.write_text` opens with "w": truncate first, write after. The context
+    ticker re-reads the growth files every ten seconds (app.py:288) while
+    `persona review` or the end-of-stream distillation may be rewriting them,
+    and the file is small enough that the window only ever shows an EMPTY
+    file, never half of one. Measured before the swap: 384 empty reads out of
+    7516. An empty voice layer is her verbal habits gone for a whole refresh.
+    """
+    import threading
+
+    entries = ["这把稳了", "蚌埠住了"]
+    store.write_growth("voice", entries)
+    stop = threading.Event()
+    seen: list[list[str]] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            seen.append(store.growth_entries("voice"))
+
+    watcher = threading.Thread(target=reader, daemon=True)
+    watcher.start()
+    try:
+        for _ in range(500):
+            store.write_growth("voice", entries)
+    finally:
+        stop.set()
+        watcher.join(timeout=5.0)
+
+    torn = [got for got in seen if got != entries]
+    assert seen, "读线程一次都没跑起来，这条什么都没验证"
+    assert not torn, f"{len(torn)}/{len(seen)} 次读到的不是完整的生长层，例如 {torn[:3]}"
+
+
+def test_a_write_that_dies_leaves_the_previous_growth_file_intact(
+    store: PersonaStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Crash safety rides along with the swap.
+
+    A truncate-then-write interrupted partway leaves an empty file — several
+    streams' worth of collected habits gone, and runbook.md:172 promises the
+    opposite. With the swap the damage lands on the temp file.
+    """
+    import os
+
+    store.write_growth("voice", ["这把稳了"])
+
+    def full_disk(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", full_disk)
+    with pytest.raises(OSError):
+        store.write_growth("voice", ["蚌埠住了"])
+    assert store.growth_entries("voice") == ["这把稳了"], "写失败把原来的口癖层弄没了"
+
+
+def test_a_growth_write_leaves_no_scratch_file_behind(store: PersonaStore, tmp_path: Path) -> None:
+    """The swap's temp file is an implementation detail; it must not become
+    litter the streamer finds in their persona directory."""
+    store.write_growth("voice", ["这把稳了"])
+    assert sorted(p.name for p in (tmp_path / "live").iterdir()) == [".growth.lock", "voice.md"]
 
 
 # ------------------------------------------------------------ promotion
@@ -379,3 +445,53 @@ def test_a_contended_growth_lock_says_so_before_it_waits(tmp_path: Path) -> None
         released.set()
         holder.join(timeout=2.0)
         logging.getLogger("bilisama.persona.loader").removeHandler(sink)
+
+
+def test_growth_update_keeps_the_lock_across_the_read_and_the_write(
+    store: PersonaStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lost-update window sits between reading and writing, so both belong
+    inside one lock. `persona review` and the end-of-stream distillation run at
+    the same moment by design; whoever read first used to write its stale list
+    back and quietly undo the other."""
+    store.write_growth("voice", ["旧的一条"])
+    trace: list[str] = []
+    real_lock = store._growth_lock
+    real_read = store._growth_entries_unlocked
+    real_write = store._write_growth_unlocked
+
+    @contextlib.contextmanager
+    def traced_lock() -> Iterator[None]:
+        trace.append("lock:enter")
+        with real_lock():
+            yield
+        trace.append("lock:exit")
+
+    def traced_read(layer: GrowthLayer) -> list[str]:
+        trace.append("read")
+        return real_read(layer)
+
+    def traced_write(layer: GrowthLayer, entries: Sequence[str]) -> None:
+        trace.append("write")
+        real_write(layer, entries)
+
+    monkeypatch.setattr(store, "_growth_lock", traced_lock)
+    monkeypatch.setattr(store, "_growth_entries_unlocked", traced_read)
+    monkeypatch.setattr(store, "_write_growth_unlocked", traced_write)
+
+    with store.growth_update("voice") as rows:
+        rows.append("新的一条")
+
+    assert trace == ["lock:enter", "read", "write", "lock:exit"]
+    assert store.growth_entries("voice") == ["旧的一条", "新的一条"]
+
+
+def test_growth_update_writes_nothing_when_the_caller_gives_up(store: PersonaStore) -> None:
+    """`persona review --drop` raises SystemExit when the entry it was told to
+    remove has already gone. The file must be left exactly as it is, not
+    rewritten with the list the streamer happened to be looking at."""
+    store.write_growth("voice", ["蒸馏刚写进来的一条"])
+    with pytest.raises(SystemExit), store.growth_update("voice") as rows:
+        rows.clear()
+        raise SystemExit(2)
+    assert store.growth_entries("voice") == ["蒸馏刚写进来的一条"]

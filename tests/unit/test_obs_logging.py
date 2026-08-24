@@ -169,6 +169,30 @@ def test_viewer_content_none_stays_none() -> None:
     assert _field("user_text", None) is None
 
 
+@pytest.mark.parametrize("name", ["error_text", "detail", "advice"])
+def test_operator_diagnostics_are_never_folded_as_viewer_content(name: str) -> None:
+    """`error_text` says WHY something failed; it is not audience text.
+
+    Nineteen call sites log the reason under this name (client.py:346,
+    sources.py:126, scheduler.py:337, distill.py:177, …), and folding it to
+    `<N chars>` erased the reason from the log file AND from the panel, which
+    formats through the same handler (ui/hub.py:70-83).
+    """
+    reason = "语音服务拒绝连接，重试也没用：HTTP 401"
+    assert _field(name, reason) == reason
+
+
+def test_the_diagnostic_allowlist_does_not_free_audience_text() -> None:
+    """Exempting a field must not exempt whatever ends in the same word."""
+    assert _field("danmaku_text", "主播好帅") == "<4 chars>"
+    assert _field("text", "主播好帅") == "<4 chars>"
+
+
+def test_a_diagnostic_field_carrying_a_credential_is_still_redacted() -> None:
+    """Redaction outranks the allowlist: a token is a token wherever it rides."""
+    assert _field("error_token", "sk-live-abcdef") == "***"
+
+
 def test_opt_in_logs_viewer_content_but_never_secrets() -> None:
     """The debug switch opens the audience gate only, never the credential gate."""
     log, stream = _capture(log_viewer_content=True)

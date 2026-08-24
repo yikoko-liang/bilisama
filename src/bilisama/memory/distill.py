@@ -307,17 +307,22 @@ class Distiller:
             entries.append(entry)
         if not entries:
             return
+        # growth_update, not growth_entries + write_growth: `persona review`
+        # runs in its own process right after a stream, which is when this
+        # fires, and an unlocked read-modify-write brings back whatever the
+        # streamer just struck out (loader.growth_update explains the collision).
         if layer == "relationship":
             date = logical_date(self._clock.wall()).date().isoformat()
             fresh = [f"{date} {entry}" for entry in entries]
-            existing = self._persona.growth_entries("relationship")
-            merged = merge_relationship(existing, fresh)
-            self._warn_trimmed(layer, existing, fresh, merged)
-            self._persona.write_growth("relationship", merged)
+            with self._persona.growth_update("relationship") as rows:
+                existing = list(rows)
+                merged = merge_relationship(existing, fresh)
+                self._warn_trimmed(layer, existing, fresh, merged)
+                rows[:] = merged
         else:
-            existing = self._persona.growth_entries("voice")
-            merged = merge_voice(existing, entries)
-            self._persona.write_growth("voice", merged)
+            with self._persona.growth_update("voice") as rows:
+                merged = merge_voice(list(rows), entries)
+                rows[:] = merged
 
     @staticmethod
     def _flatten(text: str) -> str:

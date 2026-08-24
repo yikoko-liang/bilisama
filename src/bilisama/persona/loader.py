@@ -131,6 +131,30 @@ def _exclusive(handle: IO[str]) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Put new contents in place in one step (same shape as ui/server.py:103-116).
+
+    `Path.write_text` opens with "w": it truncates, then writes. The growth
+    files are re-read without a lock by the context ticker every ten seconds
+    (app.py:288), and inside that window the reader sees a file that exists and
+    is empty — which assembles into a persona with no verbal habits at all,
+    not into an error anyone would notice. Small files never tear in half, so
+    the swap is enough; os.replace is atomic on POSIX and on Windows alike.
+
+    It also makes the write crash-safe: an interrupted one costs the scratch
+    file rather than a whole stream's collected habits.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        # A half-written scratch file is nobody's business but ours, and the
+        # streamer browses this directory by hand.
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 @dataclass(frozen=True, slots=True)
 class PersonaAnchors:
     """The two anchor texts, variables already substituted."""
@@ -222,6 +246,14 @@ class PersonaStore:
         return self._data_dir / f"{layer}.md"
 
     def growth_entries(self, layer: GrowthLayer) -> list[str]:
+        """Read one growth layer. Takes no lock, on purpose.
+
+        The live reader is the context ticker, which runs on the event loop
+        (app.py:288); _growth_lock is synchronous and waits, so taking it here
+        would stall microphone, scheduler and panel together for as long as
+        `persona review` holds it. Writers swap the file in atomically
+        (_atomic_write_text), which is what makes reading it lock-free safe.
+        """
         path = self.growth_path(layer)
         if not path.is_file():
             return []
@@ -234,10 +266,31 @@ class PersonaStore:
         with self._growth_lock():
             self._write_growth_unlocked(layer, entries)
 
+    @contextlib.contextmanager
+    def growth_update(self, layer: GrowthLayer) -> Iterator[list[str]]:
+        """Read-modify-write one growth layer, holding the lock across both.
+
+        growth_entries() reads without the lock on purpose, which is right for
+        the ticker and wrong for anyone about to write back what they read.
+        Distillation and `persona review` collide by design — the streamer
+        opens review right after a stream, which is exactly when the
+        end-of-stream distillation writes (B7) — and two unlocked
+        read-modify-writes silently resurrect what the other just removed.
+
+        The list yielded is the caller's to mutate in place; whatever it holds
+        on exit is what lands. Raising inside the block writes nothing, so a
+        caller that finds its entry already gone leaves the file untouched.
+        """
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        with self._growth_lock():
+            rows = self._growth_entries_unlocked(layer)
+            yield rows
+            self._write_growth_unlocked(layer, rows)
+
     def _write_growth_unlocked(self, layer: GrowthLayer, entries: Sequence[str]) -> None:
         body = "\n".join(f"- {entry}" for entry in entries)
         text = f"{_GROWTH_HEADERS[layer]}\n{body}\n" if body else f"{_GROWTH_HEADERS[layer]}\n"
-        self.growth_path(layer).write_text(text, encoding="utf-8")
+        _atomic_write_text(self.growth_path(layer), text)
 
     def _growth_entries_unlocked(self, layer: GrowthLayer) -> list[str]:
         return self.growth_entries(layer)
