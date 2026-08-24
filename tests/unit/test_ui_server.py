@@ -148,10 +148,23 @@ def test_config_snapshot_covers_all_meta_and_serializes() -> None:
     rows = config_snapshot(_settings())
     from bilisama.config.ui_meta import UI_META
 
-    assert {row["path"] for row in rows} == set(UI_META)
+    # Everything except the fields belonging to a provider this session is not
+    # using — showing both sets is how the panel came to list two endpoints and
+    # two voices, only one of each doing anything.
+    active = _settings().speech.provider.value
+    expected = {
+        path
+        for path, meta in UI_META.items()
+        if not meta.provider_scoped or meta.provider_scoped == active
+    }
+    assert {row["path"] for row in rows} == expected
+    assert expected != set(UI_META), "没有任何字段被 provider 过滤掉，这条断言就没在测东西"
     # JSONResponse runs allow_nan=False; the inf default in the s2s turn
     # section must have been stringified by the snapshot.
     json.dumps(rows, allow_nan=False)
+    paths = {row["path"] for row in rows}
+    assert "speech.s2s.endpoint" in paths, "当前 provider 的字段被过滤掉了"
+    assert "speech.dashscope.voice" not in paths, "别的 provider 的字段还在铺"
     sample = {row["path"]: row for row in rows}["avatar.renderer"]
     assert sample["label"] == "形象类型"
     assert sample["value"] == "tofu"

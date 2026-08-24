@@ -36,6 +36,13 @@ class OpenAICompatSideModel:
         self._base_url = cfg.base_url.rstrip("/")
         self._model = cfg.model
         self._api_key = api_key
+        # Plan section 4.7 pins both off for every background call. The prompt
+        # says so too (distill.py:44), but a sentence is a request and a field
+        # is a rule — a model that ignores the sentence still cannot answer with
+        # a tool call it was never offered. `thinking` has no field in the
+        # OpenAI shape and differs per vendor, so it stays prompt-side; the
+        # config value is kept honest by its Literal["off"].
+        self._tool_choice = cfg.tool_choice
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
         self._session: aiohttp.ClientSession | None = None
 
@@ -51,6 +58,7 @@ class OpenAICompatSideModel:
             ],
             "max_tokens": max_tokens,
             "stream": False,
+            "tool_choice": self._tool_choice,
         }
         try:
             async with self._session.post(

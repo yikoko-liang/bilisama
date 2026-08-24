@@ -20,6 +20,9 @@ const bubble = createBubble(document.getElementById("bubble"));
 
 const state = { connected: false, voice: "idle" };
 let renderer = null;
+// Bumped when a frame changes shape. ui/events.py stamps the server half.
+const PROTOCOL = 1;
+
 let rendererWanted = null; // the avatar config from hello, mounted lazily
 let mountChain = Promise.resolve(); // mounts run one at a time, never overlapped
 let everConnected = false;
@@ -149,6 +152,17 @@ function applyVisual() {
 
 const handlers = {
   "hello": (data) => {
+    // The one thing a page cannot work out for itself: whether the code it is
+    // running still matches the server that answered. The shell does not hot
+    // reload its main process, so a stale window looks completely normal while
+    // speaking a vocabulary the server has moved on from — and the symptom is
+    // a feature that silently does nothing.
+    if (typeof data.protocol === "number" && data.protocol !== PROTOCOL) {
+      panel.notice(
+        `页面和后端版本对不上（页面 ${PROTOCOL}，后端 ${data.protocol}）。刷新一下；` +
+          `如果是桌宠壳，关掉重开——它不会自己热更新。`,
+      );
+    }
     panel.setHello(data);
     document.title = `${data.persona?.name ?? "BiliSama"} · BiliSama`;
     // Remount only when the avatar actually changed (reconnects keep it).

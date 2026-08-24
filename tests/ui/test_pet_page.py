@@ -56,14 +56,19 @@ class Harness:
     uplink: list[bytes] = field(default_factory=list)
     _sock_port: int = 0
 
+    hello_override: dict[str, Any] = field(default_factory=dict)
+
     def hello(self) -> dict[str, Any]:
         return {
-            "protocol": 1,
-            "persona": {"id": "mia", "name": "米娅"},
-            "provider": "s2s",
-            "room_connected": False,
-            "avatar": self.avatar,
-            "panel": {"panicked": False, "speak": {"danmaku": True, "gift": False}},
+            **{
+                "protocol": 1,
+                "persona": {"id": "mia", "name": "米娅"},
+                "provider": "s2s",
+                "room_connected": False,
+                "avatar": self.avatar,
+                "panel": {"panicked": False, "speak": {"danmaku": True, "gift": False}},
+            },
+            **self.hello_override,
         }
 
 
@@ -991,5 +996,42 @@ async def test_a_denied_window_stops_blaming_itself_once_something_stronger_take
         )
         text = await denied.locator("#audio-owner").inner_text()
         assert "拿不到麦克风" not in text, f"壳在好好录音，面板还在报本窗口的旧账：{text}"
+    finally:
+        await context.close()
+
+
+@pytest.mark.ui_browser
+async def test_a_page_older_than_its_server_says_so_instead_of_failing_quietly(
+    browser: Browser, harness: Harness
+) -> None:
+    """hello carries a protocol number, and until now nobody read it.
+
+    A page cannot work out for itself whether its code still matches the server
+    that answered. The shell does not hot reload its main process — this session
+    hit exactly that, a stale window looking completely normal while the thing
+    being tested had moved on. The symptom of a vocabulary mismatch is a feature
+    that silently does nothing, which is the worst kind to debug.
+    """
+    harness.hello_override = {"protocol": 99}
+    # bypass_csp like every other browser test here: our own default-src 'self'
+    # correctly refuses Playwright's wait_for_function, and the header itself is
+    # pinned by test_ui_server rather than by leaving it on in these.
+    context = await browser.new_context(bypass_csp=True)
+    page = await context.new_page()
+    try:
+        await page.goto(harness.url)
+        await _wait(page, "document.getElementById('panel') !== null")
+        # notice() writes into the log pane, which is not the tab the panel
+        # opens on — so read the DOM rather than the visible text, and check the
+        # tab flag that exists to point at it.
+        await _wait(
+            page,
+            "document.getElementById('loglines').textContent.includes('页面和后端版本对不上')",
+        )
+        line = await page.locator("#loglines").text_content()
+        assert line is not None and "99" in line and "刷新" in line, f"提示没说清：{line}"
+        await page.click("#corner")
+        flagged = await page.locator("[data-tab='logs']").get_attribute("data-alert")
+        assert flagged == "1", "版本对不上却没给日志页签打提醒角标"
     finally:
         await context.close()

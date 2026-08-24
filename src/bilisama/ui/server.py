@@ -172,6 +172,13 @@ def config_snapshot(settings: Settings) -> list[dict[str, Any]]:
                 value = str(value)
             elif not isinstance(value, str | int | float | bool | None):
                 value = str(value)
+        if meta.provider_scoped and meta.provider_scoped != settings.speech.provider.value:
+            # A field that belongs to a provider this session is not using.
+            # Showing them all is how the panel came to list two sets of
+            # endpoints and voices, only one of which does anything — and the
+            # metadata that says which was sitting there with no reader
+            # (ui_meta.FieldMeta.provider_scoped, 14 declarations).
+            continue
         rows.append(
             {
                 "path": path,
