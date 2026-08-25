@@ -31,6 +31,7 @@ def test_server_vocabulary_is_pinned() -> None:
         "audio.level",
         "live_mock.state",
         "live_mock.event",
+        "app.exiting",
     ]
 
 

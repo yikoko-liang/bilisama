@@ -1328,6 +1328,7 @@ async def run_director(args: argparse.Namespace) -> int:
         # ------------------------------------------------------------ UI server
 
         if hub is not None:
+            active_hub = hub
 
             def panel_state() -> dict[str, Any]:
                 speak = settings.interaction.speak
@@ -1627,6 +1628,11 @@ async def run_director(args: argparse.Namespace) -> int:
 
             async def on_app_quit(_data: dict[str, Any]) -> None:
                 print("[桌宠] 收到退出确认，正在收尾…")
+                active_hub.broadcast(ServerEvent.APP_EXITING, {})
+                # Give the local WebSocket pump a moment to deliver the close
+                # acknowledgement. The shell disappears before the slower
+                # distillation and resource teardown start.
+                await asyncio.sleep(0.05)
                 stop.set()
 
             def hello() -> dict[str, Any]:

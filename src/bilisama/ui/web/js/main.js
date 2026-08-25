@@ -290,6 +290,17 @@ const handlers = {
     // Already mirrored into event.feed by the server; the stage shows nothing
     // extra for it today.
   },
+  "app.exiting": () => {
+    socket.close();
+    if (window.bilisamaShell?.close) {
+      window.bilisamaShell.close();
+      return;
+    }
+    // A normal browser tab cannot always close itself. Leaving the served
+    // page still removes the waiting UI and prevents a reconnect loop while
+    // the backend finishes distillation in the background.
+    location.replace("about:blank");
+  },
 };
 
 const socket = connect({

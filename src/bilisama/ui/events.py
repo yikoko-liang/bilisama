@@ -42,6 +42,7 @@ class ServerEvent(StrEnum):
     AUDIO_LEVEL = "audio.level"
     LIVE_MOCK_STATE = "live_mock.state"
     LIVE_MOCK_EVENT = "live_mock.event"
+    APP_EXITING = "app.exiting"
 
 
 class ClientEvent(StrEnum):

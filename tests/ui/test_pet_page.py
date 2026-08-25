@@ -215,6 +215,14 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
             )
 
         handlers[ClientEvent.PANEL_SET] = panel_set
+
+        record_app_quit = handlers[ClientEvent.APP_QUIT]
+
+        async def app_quit(data: dict[str, Any]) -> None:
+            await record_app_quit(data)
+            hub.broadcast(ServerEvent.APP_EXITING, {})
+
+        handlers[ClientEvent.APP_QUIT] = app_quit
     app = create_ui_app(
         hub=hub,
         registry=registry,
@@ -530,6 +538,7 @@ async def test_pet_right_click_requires_confirmation_before_quit(
             break
         await asyncio.sleep(0.05)
     assert any(event is ClientEvent.APP_QUIT for event, _ in harness.calls)
+    await page.wait_for_url("about:blank")
 
 
 async def test_test_console_runs_one_case_and_records_manual_judgment(
