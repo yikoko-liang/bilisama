@@ -18,8 +18,15 @@ import pytest
 
 from bilisama import dev_talk
 from bilisama.cli import main
+from bilisama.config import load
 from bilisama.config.enums import ProviderName
-from bilisama.dev_talk import _as_live_mock_event, _Fanout, _parse_console_event
+from bilisama.dev_talk import (
+    _as_live_mock_event,
+    _director_session_overrides,
+    _Fanout,
+    _parse_console_event,
+    _should_persist_panel_edit,
+)
 from bilisama.ingest.events import EventKind
 from bilisama.persona.loader import PersonaStore
 from bilisama.realtime import link
@@ -27,6 +34,37 @@ from tests.fakes.mock_realtime import Fault, MockRealtimeServer, Script
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 GLOBAL_PROACTIVE = CONFIG_DIR / "prompts" / "proactive.md"
+
+
+def test_director_session_defaults_ignore_previous_room_and_audio_state(tmp_path: Path) -> None:
+    config = tmp_path / "bilisama.toml"
+    profile = tmp_path / "profiles" / "normal.toml"
+    profile.parent.mkdir()
+    config.write_text('active_profile = "normal"\n', encoding="utf-8")
+    profile.write_text(
+        "[audio]\ninput_enabled = false\noutput_enabled = false\n"
+        "[room]\nroom_id = 123456\n"
+        '[persona]\nstreamer_name = "上次的主播"\n',
+        encoding="utf-8",
+    )
+
+    settings = load(config, overrides=_director_session_overrides(), strict=False)
+
+    assert settings.audio.input_enabled is True
+    assert settings.audio.output_enabled is True
+    assert settings.room.room_id == 0
+    assert settings.persona.streamer_name == ""
+
+
+def test_session_only_panel_fields_are_not_written_back() -> None:
+    for path in (
+        "audio.input_enabled",
+        "audio.output_enabled",
+        "room.room_id",
+        "persona.streamer_name",
+    ):
+        assert not _should_persist_panel_edit(path)
+    assert _should_persist_panel_edit("interaction.reply_length")
 
 
 # ------------------------------------------------------------ ported personas

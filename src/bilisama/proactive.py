@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import deque
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.director.intents import neutralize_tags
@@ -39,6 +39,8 @@ log = get_logger(__name__)
 _TICK_S = 1.0
 _TOPIC_TTL_S = 30.0  # a topic that waited half a minute is stale, drop it
 _CANDIDATE_MAX_TOKENS = 80
+_DIALOGUE_LINES_KEPT = 12
+_DIALOGUE_LINE_MAX_CHARS = 200
 
 
 class ProactiveTopicLoop:
@@ -74,6 +76,9 @@ class ProactiveTopicLoop:
         self._last_activity = clock.monotonic()
         self._last_refresh = -wake_interval_s  # first refresh happens on tick one
         self._submitted: deque[float] = deque()
+        self._dialogue: deque[tuple[Literal["streamer", "assistant"], str]] = deque(
+            maxlen=_DIALOGUE_LINES_KEPT
+        )
         self._refresh_task: asyncio.Task[None] | None = None
         self._topics_produced = 0
 
@@ -82,6 +87,14 @@ class ProactiveTopicLoop:
     def note_activity(self) -> None:
         """Anything happened — an event arrived, someone spoke. Resets idle."""
         self._last_activity = self._clock.monotonic()
+
+    def note_dialogue(self, role: Literal["streamer", "assistant"], text: str) -> None:
+        """Keep bounded, completed dialogue as topic-candidate material."""
+        line = " ".join(text.split())[:_DIALOGUE_LINE_MAX_CHARS]
+        if not line:
+            return
+        self._dialogue.append((role, line))
+        self.note_activity()
 
     def configure(
         self,
@@ -192,7 +205,10 @@ class ProactiveTopicLoop:
         events = self._store.recent_events(limit=20)
         rows = self._store.facts("stream", str(self._store.stream_id))
         summary = rows[-1].text if rows else ""
-        fingerprint = hashlib.sha256("\n".join([summary, *events]).encode()).hexdigest()
+        dialogue = [
+            f"{'主播' if role == 'streamer' else 'Miya'}：{text}" for role, text in self._dialogue
+        ]
+        fingerprint = hashlib.sha256("\n".join([summary, *events, *dialogue]).encode()).hexdigest()
         if fingerprint == self._fingerprint:
             return
         try:
@@ -200,6 +216,7 @@ class ProactiveTopicLoop:
                 system=self._prompt,
                 user=(
                     f"本场进展：{summary or '（刚开播，还没有进展）'}\n"
+                    f"最近主播与 Miya 的对话：\n{chr(10).join(dialogue) or '（还没有）'}\n"
                     f"最近弹幕和事件：\n{chr(10).join(events) or '（还没有）'}"
                 ),
                 max_tokens=_CANDIDATE_MAX_TOKENS,

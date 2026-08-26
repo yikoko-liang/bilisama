@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from bilisama.clock import FakeClock, SystemClock
+from bilisama.dev_talk import _consume_events
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.director.intents import WRAP_OPEN, burst_welcome_intent, intent_for, wrap_events
@@ -27,6 +28,7 @@ from bilisama.director.scheduler import PlaybackClear, Scheduler
 from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Medal, Viewer
 from bilisama.obs.outcome import Outcome, Phase, SkipReason
 from bilisama.realtime import capabilities as caps_mod
+from bilisama.realtime import link
 from bilisama.realtime.link import ReplySpec
 from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
@@ -645,6 +647,29 @@ def test_danmaku_instruction_answers_with_its_own_judgment_before_deferring() ->
     assert "先给出有用回答" in instructions
     assert "不要反复强调" in instructions
     assert "把问题交还主播" not in instructions
+
+
+async def test_playback_consumer_forwards_completed_dialogue_to_proactive_history() -> None:
+    handle = link.ReplyHandle()
+
+    async def events() -> AsyncIterator[link.LinkEvent]:
+        yield link.UserTranscriptDone("你想不想要小金鱼皮套")
+        yield link.ReplyDone(handle, link.ReplyStatus.COMPLETED, text="想要呀")
+        yield link.ReplyDone(link.ReplyHandle(), link.ReplyStatus.CANCELLED, text="没说完")
+
+    history: list[tuple[str, str]] = []
+    await _consume_events(
+        events(),
+        None,
+        None,
+        stream_text=False,
+        dialogue_sink=lambda role, text: history.append((role, text)),
+    )
+
+    assert history == [
+        ("streamer", "你想不想要小金鱼皮套"),
+        ("assistant", "想要呀"),
+    ]
 
 
 def test_burst_welcome_uses_context_without_reading_the_headcount() -> None:

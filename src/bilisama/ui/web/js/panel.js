@@ -314,7 +314,7 @@ export function createPanel({ send, onOpenChange = () => {} }) {
   const refreshRoomInfoDirty = () => {
     const streamerDirty = streamerName.value.trim() !== roomInfoOriginal.streamerName;
     const introDirty = streamIntro.value.trim() !== roomInfoOriginal.streamIntro;
-    streamerNameSave.disabled = !streamerDirty || !streamerName.value.trim() || streamerNamePending;
+    streamerNameSave.disabled = !streamerDirty || streamerNamePending;
     roomInfoSave.disabled = !introDirty || streamIntroPending;
     if (streamerNamePending || streamIntroPending) roomInfoHint.textContent = "正在保存…";
     else if (streamerDirty || introDirty) roomInfoHint.textContent = "有未保存修改";
@@ -324,10 +324,6 @@ export function createPanel({ send, onOpenChange = () => {} }) {
   streamIntro.addEventListener("input", refreshRoomInfoDirty);
   const saveRoomInfo = ({ saveStreamer = false, saveIntro = false } = {}) => {
     const streamer = streamerName.value.trim();
-    if (!streamer) {
-      roomInfoHint.textContent = "主播昵称不能为空";
-      return;
-    }
     if (saveStreamer) streamerNamePending = true;
     if (saveIntro) streamIntroPending = true;
     refreshRoomInfoDirty();

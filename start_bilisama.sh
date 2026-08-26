@@ -115,6 +115,7 @@ launch_args=(
   --provider dashscope
   --model "$MODEL"
   --input-device "$INPUT_DEVICE"
+  --mute-while-speaking
 )
 if [ -n "$ROOM_ID" ]; then
   launch_args+=(--room "$ROOM_ID")

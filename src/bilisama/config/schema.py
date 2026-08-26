@@ -303,9 +303,10 @@ class PersonaConfig(BaseModel):
     # the shipped templates under config/personas/ carry only the two anchors.
     data_dir: str = Field("auto")
     # What the persona calls the streamer — every template's {{userName}}.
-    # "主播" is the neutral default; a real name is what makes it sound like
-    # someone sitting next to you rather than a service announcement.
-    streamer_name: str = Field("主播")
+    # Empty keeps the control-centre field blank on every new session. Prompt
+    # rendering maps it to the neutral "主播" so templates never lose their
+    # addressee; a real name is a run-scoped override from the panel.
+    streamer_name: str = Field("")
     # What the persona calls itself in its templates ({{agentName}}). Empty
     # falls back to `id`, the filesystem-safe folder name. Set this only when
     # the spoken name should differ from the folder — a nickname, different

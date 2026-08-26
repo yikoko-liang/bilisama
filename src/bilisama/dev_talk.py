@@ -33,9 +33,9 @@ import sys
 import threading
 import wave
 import zlib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import websockets
 
@@ -85,6 +85,42 @@ _MANUAL_MOCK_ROOM_ID = 1
 _LIVE_MOCK_SPEAK_KEYS = frozenset(
     {"danmaku", "gift", "super_chat", "guard_buy", "entry", "vip_enter"}
 )
+_SESSION_ONLY_PANEL_PATHS = frozenset(
+    {
+        "audio.input_enabled",
+        "audio.output_enabled",
+        "room.room_id",
+        "persona.streamer_name",
+    }
+)
+
+
+def _director_session_overrides(
+    *,
+    room_id: int | None = None,
+    persona_id: str | None = None,
+    skin: str | None = None,
+) -> dict[str, Any]:
+    """Fresh desktop-session state, above saved profile preferences."""
+    overrides: dict[str, Any] = {
+        "audio": {"input_enabled": True, "output_enabled": True},
+        "room": {"room_id": room_id if room_id is not None else 0},
+        "persona": {"streamer_name": ""},
+    }
+    if persona_id:
+        overrides["persona"]["id"] = persona_id
+    if skin:
+        overrides["avatar"] = (
+            {"renderer": "tofu", "model_id": ""}
+            if skin == "tofu"
+            else {"renderer": "sprite", "model_id": skin}
+        )
+    return overrides
+
+
+def _should_persist_panel_edit(path: str) -> bool:
+    """Whether a hot edit is a preference rather than current-session state."""
+    return path not in _SESSION_ONLY_PANEL_PATHS
 
 
 def _live_mock_config_edits(data: Mapping[str, object]) -> list[tuple[str, object]]:
@@ -480,6 +516,7 @@ async def _consume_events(
     reply_wav: Path | None,
     *,
     stream_text: bool = True,
+    dialogue_sink: Callable[[Literal["streamer", "assistant"], str], None] | None = None,
 ) -> None:
     """Print what she says and play what she sends.
 
@@ -518,6 +555,8 @@ async def _consume_events(
     async for event in events:
         if isinstance(event, link.UserTranscriptDone):
             print(f"你说：{event.text}")
+            if dialogue_sink is not None and event.text.strip():
+                dialogue_sink("streamer", event.text)
         elif isinstance(event, link.ReplyTextDelta):
             said.append(event.text)
             if stream_text:
@@ -533,6 +572,12 @@ async def _consume_events(
             if speaker is not None:
                 speaker.flush()  # the local half of playback.clear
         elif isinstance(event, link.ReplyDone):
+            if (
+                dialogue_sink is not None
+                and event.status is link.ReplyStatus.COMPLETED
+                and event.text.strip()
+            ):
+                dialogue_sink("assistant", event.text)
             said.clear()
             marker = f"—— 回复结束（{event.status}）——"
             if stream_text:
@@ -784,17 +829,12 @@ async def run_director(args: argparse.Namespace) -> int:
         # load() treats a missing path as "all defaults", which silently ignores
         # a typo'd --config — the one case where defaults are a lie (D6).
         raise SystemExit(f"找不到配置文件：{config_path}")
-    overrides: dict[str, Any] = {}
-    if args.persona:
-        overrides["persona"] = {"id": args.persona}
-    if args.skin:
-        # A run-scoped override, same layer as --persona: nothing touches the
-        # tracked toml. "tofu" selects the built-in robot explicitly.
-        if args.skin == "tofu":
-            overrides["avatar"] = {"renderer": "tofu", "model_id": ""}
-        else:
-            overrides["avatar"] = {"renderer": "sprite", "model_id": args.skin}
-    settings = load(config_path, overrides=overrides or None, strict=False)
+    overrides = _director_session_overrides(
+        room_id=args.room,
+        persona_id=args.persona,
+        skin=args.skin,
+    )
+    settings = load(config_path, overrides=overrides, strict=False)
     # strict=False keeps a half-configured dev box usable, but the problems
     # still get said out loud instead of silently shaping behaviour (D6).
     for problem in check(settings, config_dir=config_path.parent):
@@ -1247,7 +1287,7 @@ async def run_director(args: argparse.Namespace) -> int:
             )
 
     async def apply_runtime_edit(path: Any, value: Any, *, reload_runtime: bool = True) -> str:
-        """Validate, hot-apply and durably save one visible panel field."""
+        """Validate and hot-apply one visible panel field; save preferences only."""
         try:
             old = setting_value(path) if isinstance(path, str) else None
         except AttributeError as exc:
@@ -1259,7 +1299,8 @@ async def run_director(args: argparse.Namespace) -> int:
         try:
             if reload_runtime:
                 await run_reload_hook(str(path))
-            config_writer.write(str(path), applied)
+            if _should_persist_panel_edit(str(path)):
+                config_writer.write(str(path), applied)
         except (ConfigWriteError, RoomConnectionError, OSError) as exc:
             apply_runtime_config_edit(settings, path, old)
             if reload_runtime:
@@ -1267,7 +1308,9 @@ async def run_director(args: argparse.Namespace) -> int:
                     await run_reload_hook(str(path))
             raise ConfigEditError(str(exc)) from exc
         shown = "开" if applied is True else "关" if applied is False else str(applied)
-        return f"配置已保存并生效：{meta.label} → {shown}"
+        if _should_persist_panel_edit(str(path)):
+            return f"配置已保存并生效：{meta.label} → {shown}"
+        return f"本场已生效，重启恢复默认：{meta.label} → {shown}"
 
     async def select_persona_profile(profile_id: str) -> str:
         try:
@@ -1458,8 +1501,8 @@ async def run_director(args: argparse.Namespace) -> int:
                     elif room_action == "save_info":
                         streamer_name = room_patch.get("streamer_name")
                         stream_intro = room_patch.get("stream_intro")
-                        if not isinstance(streamer_name, str) or not streamer_name.strip():
-                            announce("主播昵称不能为空")
+                        if not isinstance(streamer_name, str):
+                            announce("主播昵称必须是文字")
                         elif not isinstance(stream_intro, str):
                             announce("直播主题简介必须是文字")
                         else:
@@ -1887,7 +1930,13 @@ async def run_director(args: argparse.Namespace) -> int:
             ),
             asyncio.create_task(
                 # stream_text off under the prompt: see _consume_events.
-                _consume_events(speech.events(), speaker, None, stream_text=not use_prompt),
+                _consume_events(
+                    speech.events(),
+                    speaker,
+                    None,
+                    stream_text=not use_prompt,
+                    dialogue_sink=proactive.note_dialogue,
+                ),
                 name="director:play",
             ),
             asyncio.create_task(drain_controls(), name="director:controls"),

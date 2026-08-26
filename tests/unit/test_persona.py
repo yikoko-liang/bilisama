@@ -302,6 +302,16 @@ def test_template_variables_come_from_config() -> None:
     assert template_variables(named)["userName"] == "主播", "the neutral default still works"
 
 
+def test_blank_streamer_name_keeps_the_field_empty_but_prompts_use_the_neutral_name() -> None:
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import template_variables
+
+    cfg = PersonaConfig(streamer_name="")
+    assert cfg.streamer_name == ""
+    assert template_variables(cfg)["userName"] == "主播"
+    assert template_variables(cfg)["username"] == "主播"
+
+
 @pytest.mark.parametrize(
     ("level", "marker"),
     [("low", "短档"), ("medium", "中档"), ("high", "长档")],

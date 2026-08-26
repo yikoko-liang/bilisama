@@ -105,7 +105,7 @@ class Harness:
                     "active_room_id": 0,
                     "error": "",
                 },
-                "persona": {"id": "mia", "name": "米娅", "streamer_name": "主播"},
+                "persona": {"id": "mia", "name": "米娅", "streamer_name": ""},
                 "assistants": [
                     {
                         "id": "mia",
@@ -804,6 +804,31 @@ async def test_system_page_exposes_only_the_requested_voice_and_strategy_control
         "document.getElementById('room-events').textContent.includes('等待新直播间事件')",
     )
     assert "旧房间弹幕" not in (await page.text_content("#room-events"))  # type: ignore[operator]
+
+
+async def test_stream_topic_can_be_saved_while_the_nickname_field_is_blank(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('米娅')")
+    await page.click("#corner")
+    assert await page.input_value("#streamer-name") == ""
+    await page.fill("#stream-intro", "本场测试默认配置")
+    await page.click("#room-info-save")
+    wanted = (
+        ClientEvent.PANEL_SET,
+        {
+            "room": {
+                "action": "save_info",
+                "streamer_name": "",
+                "stream_intro": "本场测试默认配置",
+            }
+        },
+    )
+    for _ in range(100):
+        if wanted in harness.calls:
+            break
+        await asyncio.sleep(0.05)
+    assert wanted in harness.calls
 
 
 async def test_system_page_sends_every_runtime_control_to_the_backend(

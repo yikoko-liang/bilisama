@@ -87,9 +87,10 @@ def template_variables(
     system prompt for the model to read aloud. Reply length comes from the same
     validated setting that controls the provider token cap.
     """
+    streamer_name = cfg.streamer_name.strip() or "主播"
     return {
-        "userName": cfg.streamer_name,
-        "username": cfg.streamer_name,
+        "userName": streamer_name,
+        "username": streamer_name,
         "agentName": cfg.display_name or cfg.id,
         "replyLength": _REPLY_LENGTH_INSTRUCTIONS[reply_length],
     }
