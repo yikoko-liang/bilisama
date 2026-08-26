@@ -65,12 +65,9 @@ NOT_GATED: dict[str, str] = {
 # them separately is what makes the difference visible, and removing a name from
 # here is the chore that lands the day somebody writes the first test.
 EMPTY_TIERS: dict[str, str] = {
-    "provider_a": (
-        "ledger #37: plan section 10.5 owes this tier and nothing carries the marker "
-        "yet. Kept registered rather than deleted, because the tier is planned — "
-        "unlike `manual`, whose probe files were never committed and whose marker "
-        "was therefore removed."
-    ),
+    # provider_a 于 2026-08-25 落地第一条（tests/integration/test_hosted_contract.py，
+    # 台账 #68），所以它从这里摘掉了。空着的层一个都不剩——下一个注册 marker 却不写
+    # 测试的人，会被上面那条检查当场拦住。
 }
 
 # Where speech-to-speech gets installed. Three files have to agree on this: the
@@ -379,7 +376,8 @@ def test_an_excused_marker_that_no_test_carries_is_named_as_such() -> None:
 
 def test_a_marker_nothing_carries_is_the_thing_that_check_looks_for() -> None:
     """The planted violation, so the check above is known to bite."""
-    assert "provider_a" not in markers_tests_carry(_TESTS)
+    # provider_a 现在有测试了（#68），拿 ui_browser 之外任一不存在的名字当靶子。
+    assert "no_such_tier" not in markers_tests_carry(_TESTS)
     assert "integration" in markers_tests_carry(_TESTS), (
         "the scan found no @pytest.mark.integration anywhere — it is reading the "
         "wrong thing, and every marker would look empty"
