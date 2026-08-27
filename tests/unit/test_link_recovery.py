@@ -57,7 +57,7 @@ async def test_a_dropped_socket_comes_back_and_the_session_is_restored() -> None
         await hosted.connect()
         try:
             events = hosted.events()
-            await hosted.set_context("你是米娅。")
+            await hosted.set_context("你是豆腐。")
             before = server.recorded.count("session.update")
 
             await server.drop_connection()
@@ -75,7 +75,7 @@ async def test_a_dropped_socket_comes_back_and_the_session_is_restored() -> None
             assert after >= before + 2, f"session not restored: {before} → {after}"
             patches = [f for f in server.recorded.events if f.get("type") == "session.update"]
             assert any(
-                (f.get("session") or {}).get("instructions") == "你是米娅。" for f in patches[-2:]
+                (f.get("session") or {}).get("instructions") == "你是豆腐。" for f in patches[-2:]
             ), "the persona was not replayed"
 
             # And it can speak again.
@@ -113,7 +113,7 @@ async def test_a_replay_says_what_it_pushed_back() -> None:
             await hosted.connect()
             try:
                 events = hosted.events()
-                await hosted.set_context("你是米娅。")
+                await hosted.set_context("你是豆腐。")
                 await server.drop_connection()
                 await _next_event(events, link.LinkDown)
                 await clock.advance(1.5)
@@ -132,7 +132,7 @@ async def test_a_replay_says_what_it_pushed_back() -> None:
     ), "a dropped voice is inaudible until someone asks"
     assert len(replays) == 2, replays
     assert replays[0]["context_len"] == 0, "nothing had been pushed yet on the first connect"
-    assert replays[-1]["context_len"] == len("你是米娅。")
+    assert replays[-1]["context_len"] == len("你是豆腐。")
     assert replays[-1]["bootstrapped"] is True
     assert replays[-1]["provider"] == "dashscope"
 
@@ -177,7 +177,7 @@ async def test_rotation_retires_the_socket_before_the_cap() -> None:
         await hosted.connect()
         try:
             events = hosted.events()
-            await hosted.set_context("你是米娅。")
+            await hosted.set_context("你是豆腐。")
 
             await clock.advance(116 * 60)  # short of 117 — nothing yet
             await asyncio.sleep(0)

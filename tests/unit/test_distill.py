@@ -24,7 +24,7 @@ from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
 from bilisama.side import SideModelError
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
 
 
 class FakeSide:

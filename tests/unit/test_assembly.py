@@ -30,7 +30,7 @@ from bilisama.persona.loader import PersonaStore
 from bilisama.proactive import ProactiveTopicLoop
 from tests.unit.conftest import build_assembly_kit
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
 
 
 def _event(text: str = "你好", kind: EventKind = EventKind.DANMAKU, uid: int = 1) -> LiveEvent:
@@ -147,7 +147,7 @@ async def test_context_carries_anchors_rules_and_memory(tmp_path: Path) -> None:
     store.replace_facts("streamer", "", [("主播在写编译器", "")])
 
     text = assembly.build_context()
-    assert "米娅" in text, "identity anchor"
+    assert "伴播" in text, "identity anchor"
     assert "直播规则" in text
     assert "今晚不聊工作" in text, "pinned memory"
     assert "编译器" in text

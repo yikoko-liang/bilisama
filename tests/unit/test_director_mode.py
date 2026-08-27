@@ -2,7 +2,7 @@
 
 The persona ports are checked as data: all four load through the store, the
 variables substitute, and each hanako port carries its own proactive prompt
-(the adapted yuan) while mia falls back to the global one.
+(the adapted yuan) while tofu falls back to the global one.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ GLOBAL_PROACTIVE = CONFIG_DIR / "prompts" / "proactive.md"
 # ------------------------------------------------------------ ported personas
 
 
-@pytest.mark.parametrize("pid", ["mia", "hanako", "ming", "butter"])
+@pytest.mark.parametrize("pid", ["tofu", "hanako", "ming", "butter"])
 def test_every_shipped_persona_loads_and_substitutes(tmp_path: Path, pid: str) -> None:
     store = PersonaStore(tmp_path / "live", CONFIG_DIR / "personas" / pid)
     anchors = store.anchors({"userName": "主播", "agentName": pid})
@@ -68,7 +68,7 @@ def test_each_port_thinks_topics_in_its_own_scaffold(
 
 
 def test_mia_falls_back_to_the_global_proactive_prompt(tmp_path: Path) -> None:
-    store = PersonaStore(tmp_path / "live", CONFIG_DIR / "personas" / "mia")
+    store = PersonaStore(tmp_path / "live", CONFIG_DIR / "personas" / "tofu")
     prompt = store.proactive_prompt(GLOBAL_PROACTIVE)
     assert "主动话题" in prompt
     assert "MOOD" not in prompt
@@ -280,6 +280,6 @@ def test_persona_list_shows_all_and_marks_the_active_one(tmp_path: Path) -> None
         assert main(["persona", "list", "--config", str(config)]) == 0
     text = out.getvalue()
     assert "＊ hanako" in text
-    for pid in ("mia", "ming", "butter"):
+    for pid in ("tofu", "ming", "butter"):
         assert pid in text
     assert "专属话题提示词" in text and "话题提示词用全局默认" in text

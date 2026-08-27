@@ -73,7 +73,7 @@ def _build(
         token=_TOKEN,
         origin=_ORIGIN,
         handlers={event: _recorder(event) for event in ClientEvent},
-        hello=lambda: {"persona": {"id": "mia", "name": "米娅"}},
+        hello=lambda: {"persona": {"id": "tofu", "name": "豆腐"}},
         broker=broker,
     )
     return TestClient(app), hub, calls
@@ -208,7 +208,7 @@ def test_ws_with_our_origin_gets_hello_then_replay() -> None:
     with client.websocket_connect(f"/{_TOKEN}/ws", headers={"origin": _ORIGIN}) as ws:
         hello = json.loads(ws.receive_text())
         assert hello["event"] == "hello"
-        assert hello["data"]["persona"]["name"] == "米娅"
+        assert hello["data"]["persona"]["name"] == "豆腐"
         replayed = json.loads(ws.receive_text())
         assert replayed["event"] == "voice.state"
         assert replayed["data"]["state"] == "idle"

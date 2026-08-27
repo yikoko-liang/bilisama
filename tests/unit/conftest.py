@@ -23,7 +23,7 @@ from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
 from bilisama.proactive import ProactiveTopicLoop
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
 
 
 @dataclass

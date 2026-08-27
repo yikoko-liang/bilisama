@@ -37,7 +37,7 @@ from tests.fakes.mock_realtime import MockRealtimeServer, Script
 from tests.fakes.replay import fixture, read_fixture
 from tests.unit.test_distill import FakeSide, _batch_reply
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
 
 
 @contextlib.asynccontextmanager

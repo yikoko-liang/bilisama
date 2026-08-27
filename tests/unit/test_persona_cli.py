@@ -15,11 +15,11 @@ from bilisama.persona.loader import PersonaStore
 @pytest.fixture()
 def config_tree(tmp_path: Path) -> Path:
     """A minimal but strictly loadable config with its own persona templates."""
-    (tmp_path / "personas" / "mia").mkdir(parents=True)
-    (tmp_path / "personas" / "mia" / "identity.md").write_text(
+    (tmp_path / "personas" / "tofu").mkdir(parents=True)
+    (tmp_path / "personas" / "tofu" / "identity.md").write_text(
         "# 我是谁\n测试人设", encoding="utf-8"
     )
-    (tmp_path / "personas" / "mia" / "personality.md").write_text(
+    (tmp_path / "personas" / "tofu" / "personality.md").write_text(
         "# 性格\n- 爱接梗", encoding="utf-8"
     )
     config = tmp_path / "bilisama.toml"
@@ -29,7 +29,7 @@ def config_tree(tmp_path: Path) -> Path:
                 "[speech.s2s]",
                 'llm_model = "test-model"',
                 "[persona]",
-                'id = "mia"',
+                'id = "tofu"',
                 f'data_dir = "{tmp_path / "live"}"',
             ]
         ),
@@ -39,7 +39,7 @@ def config_tree(tmp_path: Path) -> Path:
 
 
 def _store(config: Path) -> PersonaStore:
-    return PersonaStore(config.parent / "live", config.parent / "personas" / "mia")
+    return PersonaStore(config.parent / "live", config.parent / "personas" / "tofu")
 
 
 def _run(*argv: str) -> str:

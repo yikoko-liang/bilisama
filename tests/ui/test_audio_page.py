@@ -97,7 +97,7 @@ class Harness:
 def _hello() -> dict[str, Any]:
     return {
         "protocol": 1,
-        "persona": {"id": "mia", "name": "米娅"},
+        "persona": {"id": "tofu", "name": "豆腐"},
         "provider": "s2s",
         "room_connected": False,
         "avatar": {"renderer": "tofu", "model_id": ""},

@@ -349,7 +349,7 @@ class GrowthSwitches(BaseModel):
 class PersonaConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    id: str = Field("mia")
+    id: str = Field("tofu")
     # auto = <data home>/personas/<id>. Live copies of all four persona files;
     # the shipped templates under config/personas/ carry only the two anchors.
     data_dir: str = Field("auto")

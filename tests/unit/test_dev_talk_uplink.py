@@ -783,13 +783,13 @@ def _director_config(root: Path) -> Path:
     (root / "safety" / "wordlist.txt").write_text("测试敏感词\n", encoding="utf-8")
     (root / "prompts").mkdir(exist_ok=True)
     (root / "prompts" / "proactive.md").write_text("随便聊点什么。\n", encoding="utf-8")
-    shutil.copytree(repo / "config" / "personas" / "mia", root / "personas" / "mia")
+    shutil.copytree(repo / "config" / "personas" / "tofu", root / "personas" / "tofu")
     path = root / "bilisama.toml"
     path.write_text(
         "config_version = 1\n"
         '[speech.s2s]\nllm_model = "our-s2t-v1"\n'
         '[interaction]\nchattiness = "low"\n'
-        '[persona]\nid = "mia"\n',
+        '[persona]\nid = "tofu"\n',
         encoding="utf-8",
     )
     return path
@@ -928,7 +928,7 @@ async def test_the_start_banner_is_a_structured_line_too(
     started = [line for line in logged if line["event"] == "dev_talk.session_started"]
     assert len(started) == 1, f"启动横幅没有对应的日志：{captured.err}"
     assert started[0]["provider"] == "s2s"
-    assert started[0]["persona"] == "mia"
+    assert started[0]["persona"] == "tofu"
     assert started[0]["chattiness"] == "low"
     # No room in this config, and no credential to go with it.
     assert started[0]["room_id"] == 0

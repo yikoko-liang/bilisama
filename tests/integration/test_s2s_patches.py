@@ -100,11 +100,11 @@ def test_patch_b_stops_the_injected_tail() -> None:
         "from bilisama_s2s_shim.patches import apply_patches\n"
         "apply_patches(['raw_instructions'])\n"
         "from speech_to_speech.LLM import base_openai_compatible_language_model as m\n"
-        "persona = '我是米娅。'\n"
+        "persona = '我是豆腐。'\n"
         "print(json.dumps({'out': m.build_voice_system_prompt(persona),"
         " 'tail_len': len(tail), 'bans_action_text': '*laughs*' in tail}))\n"
     )
-    assert out["out"] == "我是米娅。", "the persona prompt was rewritten"
+    assert out["out"] == "我是豆腐。", "the persona prompt was rewritten"
     # This is why the patch exists: that constraint is hard, and a VTuber persona
     # uses action text constantly.
     assert out["bans_action_text"] is True

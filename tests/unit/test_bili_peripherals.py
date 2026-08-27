@@ -36,7 +36,7 @@ from tests.fakes.replay import FIXTURE_DIR, replay_driving_clock
 from tests.unit.conftest import build_assembly_kit
 
 REPO = Path(__file__).resolve().parent.parent.parent
-TEMPLATE_ROOT = REPO / "config" / "personas" / "mia"
+TEMPLATE_ROOT = REPO / "config" / "personas" / "tofu"
 
 
 # ------------------------------------------------------------------ presence

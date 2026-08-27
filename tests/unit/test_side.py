@@ -170,7 +170,7 @@ async def test_a_call_is_visible_in_the_log_without_the_prompt_leaking() -> None
         model = _model(base_url)
         with _capturing() as seen:
             try:
-                assert await model.complete(system="你是米娅", user=prompt) == "好的话题"
+                assert await model.complete(system="你是豆腐", user=prompt) == "好的话题"
             finally:
                 await model.aclose()
 
@@ -180,7 +180,7 @@ async def test_a_call_is_visible_in_the_log_without_the_prompt_leaking() -> None
     assert {level for _, level, _ in seen} == {"info"}, "a healthy call is not a warning"
 
     assert started[0]["model"] == "test-model"
-    assert started[0]["system_len"] == len("你是米娅")
+    assert started[0]["system_len"] == len("你是豆腐")
     assert started[0]["user_len"] == len(prompt)
     assert finished[0]["status"] == 200
     assert finished[0]["reply_chars"] == len("好的话题")
@@ -188,7 +188,7 @@ async def test_a_call_is_visible_in_the_log_without_the_prompt_leaking() -> None
 
     flat = repr(seen)
     assert prompt not in flat, "the danmaku the prompt quotes must not reach the log"
-    assert "你是米娅" not in flat, "the persona is not a log field either"
+    assert "你是豆腐" not in flat, "the persona is not a log field either"
 
 
 async def test_a_failing_call_warns_with_the_reason_intact() -> None:

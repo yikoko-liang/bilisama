@@ -106,12 +106,12 @@ async def test_the_persona_goes_under_the_key_its_model_generation_reads(
     and ignored — she connects, sounds fine, and has no persona at all."""
     async with MockVolcanoServer() as server:
         volcano = VolcanoLink(server.url, app_id="a", access_key="k", config=_cfg(model=model))
-        await volcano.set_context("你是米娅，主播的AI搭子。")
+        await volcano.set_context("你是豆腐，主播的AI搭子。")
         await volcano.connect()
         await server.wait_ready()
         try:
             dialog = server.recorded.body_for(wire.ClientEvent.START_SESSION)["dialog"]
-            assert dialog[key] == "你是米娅，主播的AI搭子。"
+            assert dialog[key] == "你是豆腐，主播的AI搭子。"
             other = {"system_role", "character_manifest"} - {key}
             assert not (other & set(dialog)), f"人设同时写进了两个键：{sorted(dialog)}"
             # The version rides along, because the key alone does not say which
@@ -186,14 +186,14 @@ async def test_the_persona_is_not_resent_with_every_query() -> None:
     turn would be waste dressed up as safety."""
     async with MockVolcanoServer() as server:
         volcano = VolcanoLink(server.url, app_id="a", access_key="k", config=_cfg())
-        await volcano.set_context("你是米娅，说话短促爱接梗。")
+        await volcano.set_context("你是豆腐，说话短促爱接梗。")
         await volcano.connect()
         await server.wait_ready()
         try:
             await volcano.request_reply(link.ReplySpec(instructions="说句话"))
             await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
             content = server.recorded.body_for(wire.ClientEvent.CHAT_TEXT_QUERY)["content"]
-            assert "米娅" not in content, "人设跟着每一轮又发了一遍"
+            assert "豆腐" not in content, "人设跟着每一轮又发了一遍"
             assert content == "说句话"
         finally:
             await volcano.aclose()
@@ -596,24 +596,24 @@ async def test_a_genuinely_new_reply_after_a_timeout_still_gets_through() -> Non
 
 
 async def test_the_name_travels_as_its_own_field_on_the_o_generation() -> None:
-    """The persona says 「我叫米娅」 in its first line and that is not enough.
+    """The persona says 「我叫豆腐」 in its first line and that is not enough.
 
     dialog.bot_name defaults to 豆包, and against our real 557-character
     persona it wins: probed 2026-08-28, three answers out of three were
-    「豆包」 without this field and 「米娅」 with it. A 31-character persona
+    「豆包」 without this field and 「豆腐」 with it. A 31-character persona
     saying the same thing DID win on its own, which is exactly why the gap
     survived early testing.
     """
     async with MockVolcanoServer() as server:
         volcano = VolcanoLink(
-            server.url, api_key="k", config=_cfg(model="1.2.1.1"), bot_name="米娅"
+            server.url, api_key="k", config=_cfg(model="1.2.1.1"), bot_name="豆腐"
         )
-        await volcano.set_context("我叫米娅，是这个直播间的 AI 伴播。")
+        await volcano.set_context("我叫豆腐，是这个直播间的 AI 伴播。")
         await volcano.connect()
         await server.wait_ready()
         try:
             dialog = server.recorded.body_for(wire.ClientEvent.START_SESSION)["dialog"]
-            assert dialog["bot_name"] == "米娅"
+            assert dialog["bot_name"] == "豆腐"
             assert dialog["system_role"], "名字有了，人设别丢了"
         finally:
             await volcano.aclose()
@@ -626,9 +626,9 @@ async def test_the_sc_generation_takes_its_name_from_the_manifest_instead() -> N
     assumes does something."""
     async with MockVolcanoServer() as server:
         volcano = VolcanoLink(
-            server.url, api_key="k", config=_cfg(model="2.2.0.0"), bot_name="米娅"
+            server.url, api_key="k", config=_cfg(model="2.2.0.0"), bot_name="豆腐"
         )
-        await volcano.set_context("你叫米娅，直播间的 AI 伴播。")
+        await volcano.set_context("你叫豆腐，直播间的 AI 伴播。")
         await volcano.connect()
         await server.wait_ready()
         try:

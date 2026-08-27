@@ -26,7 +26,7 @@ from bilisama.persona.prompt import (
     static_prefix,
 )
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
 
 
 @pytest.fixture()
@@ -46,9 +46,14 @@ def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]
 
 def test_template_backs_an_empty_data_dir(store: PersonaStore) -> None:
     """Fresh install: no live copies exist, the shipped template answers."""
-    anchors = store.anchors({"userName": "主播"})
-    assert "米娅" in anchors.identity
-    assert "{{userName}}" not in anchors.identity, "variables must be substituted"
+    anchors = store.anchors({"userName": "主播", "agentName": "豆腐"})
+    assert "伴播" in anchors.identity, "identity anchor"
+    # Both variables, not just one. The name used to be written into the
+    # template and this asserted on the literal; it goes through {{agentName}}
+    # now, the way the other three personas already did it, so an unsubstituted
+    # placeholder would otherwise reach the model to be read aloud.
+    assert "豆腐" in anchors.identity, "{{agentName}} must be substituted"
+    assert "{{" not in anchors.identity, "还有变量没替换"
     assert "性格" in anchors.personality
 
 
@@ -71,7 +76,9 @@ def test_a_blank_live_copy_falls_back_instead_of_erasing_the_persona(
     live.mkdir(parents=True)
     (live / "identity.md").write_text("   \n", encoding="utf-8")
 
-    assert "米娅" in store.anchor("identity")
+    # The raw template, no substitution — so the marker has to be prose, not
+    # the name, which lives in {{agentName}} now.
+    assert "伴播" in store.anchor("identity")
 
 
 def test_missing_template_reports_the_path_in_chinese(tmp_path: Path) -> None:
@@ -424,7 +431,7 @@ def test_template_variables_come_from_config() -> None:
     assert template_variables(named)["userName"] == "主播", "the neutral default still works"
 
 
-@pytest.mark.parametrize("persona_id", ["mia", "hanako", "ming", "butter"])
+@pytest.mark.parametrize("persona_id", ["tofu", "hanako", "ming", "butter"])
 def test_no_shipped_template_leaks_a_raw_placeholder(persona_id: str) -> None:
     """Every {{name}} any shipped persona uses must be one template_variables
     supplies. A missing key is silent: the raw {{agentName}} simply sits in the

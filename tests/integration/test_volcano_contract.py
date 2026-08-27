@@ -303,12 +303,12 @@ async def test_a_persona_pushed_after_connect_actually_takes_effect() -> None:
     """
     async for volcano in _link():
         await _drain(volcano, 5.0, until=link.LinkUp)
-        await volcano.set_context("你叫米娅。有人问你叫什么，你只回答「米娅」两个字。")
+        await volcano.set_context("你叫豆腐。有人问你叫什么，你只回答「豆腐」两个字。")
         await asyncio.sleep(1.0)
         await volcano.request_reply(link.ReplySpec(instructions="你叫什么？"))
         got = await _drain(volcano, 25.0, until=link.ReplyDone)
         said = "".join(e.text for e in got if isinstance(e, link.ReplyTextDelta))
-        assert "米娅" in said, (
+        assert "豆腐" in said, (
             f"人设没生效，她说的是「{said}」——" "UpdateConfig 被收下然后忽略了，人设得改走别的路"
         )
 
@@ -393,7 +393,7 @@ async def test_she_answers_to_the_name_the_persona_gives_her() -> None:
     Uses the real persona rather than a one-liner for exactly that reason.
     """
     persona = (
-        "# 我是谁\n\n我叫米娅，是这个直播间的 AI 伴播——坐在主播旁边一起看直播的搭子。\n"
+        "# 我是谁\n\n我叫豆腐，是这个直播间的 AI 伴播——坐在主播旁边一起看直播的搭子。\n"
         "主播闷头写代码或打游戏的时候，我负责接住弹幕、陪主播说话，把场子撑住。\n"
         "我知道自己是 AI，不装人类，但说话像个真的在场的人。\n\n"
         "# 性格与边界\n\n- 语速偏快，句子短，像聊天不像播音。\n- 爱接梗，接不住就老实说接不住。\n"
@@ -401,7 +401,7 @@ async def test_she_answers_to_the_name_the_persona_gives_her() -> None:
         "- 不说教，不总结陈词，不喊口号。\n- 一次只说一两句，不抢主播的话头。\n"
     )
     url, key = _credentials()
-    volcano = VolcanoLink(url, api_key=key, config=_config(), bot_name="米娅")
+    volcano = VolcanoLink(url, api_key=key, config=_config(), bot_name="豆腐")
     await volcano.connect()
     try:
         await _drain(volcano, 5.0, until=link.LinkUp)
@@ -410,7 +410,7 @@ async def test_she_answers_to_the_name_the_persona_gives_her() -> None:
         await volcano.request_reply(link.ReplySpec(instructions="你叫什么名字？就答名字。"))
         got = await _drain(volcano, 25.0, until=link.ReplyDone)
         said = "".join(e.text for e in got if isinstance(e, link.ReplyTextDelta))
-        assert "米娅" in said, f"她自称「{said}」——bot_name 没到，人设里那句名字压不过服务端默认"
+        assert "豆腐" in said, f"她自称「{said}」——bot_name 没到，人设里那句名字压不过服务端默认"
         assert "豆包" not in said
     finally:
         await volcano.aclose()

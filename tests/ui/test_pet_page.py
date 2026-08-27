@@ -62,7 +62,7 @@ class Harness:
         return {
             **{
                 "protocol": 1,
-                "persona": {"id": "mia", "name": "米娅"},
+                "persona": {"id": "tofu", "name": "豆腐"},
                 "provider": "s2s",
                 "room_connected": False,
                 "avatar": self.avatar,
@@ -232,13 +232,13 @@ async def _wait(page: Page, expr: str, *, timeout_ms: int = 5000) -> None:
 
 
 async def test_hello_names_the_persona_and_mounts_the_tofu(page: Page, harness: Harness) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     # The built-in skin rides the sprite pipeline: a canvas, not CSS divs.
     await _wait(page, "document.querySelector('#pet-mount canvas') !== null")
 
 
 async def test_voice_state_drives_the_stage(page: Page, harness: Harness) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "thinking"})
     await _wait(page, "document.getElementById('stage').dataset.visual === 'thinking'")
     harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "speaking"})
@@ -249,7 +249,7 @@ async def test_voice_state_drives_the_stage(page: Page, harness: Harness) -> Non
 
 
 async def test_bubble_streams_then_lingers_then_hides(page: Page, harness: Harness) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "speaking"})
     harness.hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "今晚"})
     harness.hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "打两把"})
@@ -264,7 +264,7 @@ async def test_a_new_reply_replaces_the_lingering_one(page: Page, harness: Harne
     """The bubble outlives its text stream on purpose, so a reply arriving
     inside that linger window used to be APPENDED to the previous one — on a
     busy stream every reply concatenated until a quiet gap finally cleared it."""
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "speaking"})
     harness.hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "第一句"})
     harness.hub.broadcast(ServerEvent.REPLY_DONE, {"status": "completed", "text": "第一句"})
@@ -283,7 +283,7 @@ async def test_a_reply_right_after_a_shatter_still_shows(page: Page, harness: Ha
     """The regression the review found: the shatter animation ends invisible,
     and voice-state noise inside its window used to cancel the cleanup —
     freezing the bubble transparent through the NEXT reply."""
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     harness.hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "这句会被掐断"})
     await _wait(page, "!document.getElementById('bubble').hidden")
     harness.hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": "barge_in"})
@@ -302,7 +302,7 @@ async def test_a_reply_right_after_a_shatter_still_shows(page: Page, harness: Ha
 
 
 async def test_panel_tabs_switch_with_aria(page: Page, harness: Harness) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     await page.click("#corner")
     await _wait(page, "document.getElementById('panel').classList.contains('open')")
     await page.click("[data-tab='chat']")
@@ -315,7 +315,7 @@ async def test_panel_tabs_switch_with_aria(page: Page, harness: Harness) -> None
 
 
 async def test_panic_state_flips_the_button(page: Page, harness: Harness) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     harness.hub.broadcast(ServerEvent.PANEL_STATE, {"panicked": True, "speak": {"danmaku": True}})
     await _wait(
         page,
@@ -338,7 +338,7 @@ async def test_pet_click_sends_a_poke(page: Page, harness: Harness) -> None:
 async def test_config_tab_offers_editors_for_live_and_badges_for_frozen(
     page: Page, harness: Harness
 ) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     await page.click("#corner")
     await page.click("[data-tab='config']")
     # A live field renders a control...
@@ -357,7 +357,7 @@ async def test_config_tab_offers_editors_for_live_and_badges_for_frozen(
 
 
 async def test_config_edit_round_trips_to_the_settings_object(page: Page, harness: Harness) -> None:
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     await page.click("#corner")
     await page.click("[data-tab='config']")
     box = "[data-path='interaction.speak.danmaku'] input[type=checkbox]"
@@ -399,7 +399,7 @@ async def test_config_edit_round_trips_to_the_settings_object(page: Page, harnes
 async def test_reconnect_does_not_double_the_panel(page: Page, harness: Harness) -> None:
     """The server replays its rings on every attach; the page must clear the
     timeline first, or every reconnect doubles the history."""
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     for n in range(3):
         harness.hub.broadcast(
             ServerEvent.EVENT_FEED, {"kind": "danmaku", "name": "阿强", "text": f"第{n}条"}
@@ -438,7 +438,7 @@ async def test_dark_mode_follows_the_system(browser: Browser, harness: Harness) 
     dark_page = await context.new_page()
     try:
         await dark_page.goto(harness.url)
-        await _wait(dark_page, "document.title.includes('米娅')")
+        await _wait(dark_page, "document.title.includes('豆腐')")
         bg = await dark_page.evaluate("getComputedStyle(document.body).backgroundColor")
         assert bg == "rgb(31, 30, 29)"  # --page in theme-dark.css (Claude Code charcoal)
     finally:
@@ -529,7 +529,7 @@ async def test_a_renderer_this_build_cannot_mount_says_so_instead_of_degrading_q
     it without a word is not. The streamer edits the config, the pet looks
     identical, and nothing anywhere says the setting did not take.
     """
-    harness.avatar = {"renderer": "live2d", "model_id": "mia"}
+    harness.avatar = {"renderer": "live2d", "model_id": "hiyori"}
     context = await browser.new_context(bypass_csp=True)
     page = await context.new_page()
     try:
@@ -549,7 +549,7 @@ async def test_the_panel_window_hears_about_it_too(browser: Browser, harness: Ha
     all, so a notice raised by the mount would never reach it. The one thing
     both windows do get is hello — which is where the configured renderer
     comes from — so this notice is driven from there."""
-    harness.avatar = {"renderer": "live2d", "model_id": "mia"}
+    harness.avatar = {"renderer": "live2d", "model_id": "hiyori"}
     context = await browser.new_context(bypass_csp=True)
     panel_window = await context.new_page()
     try:
@@ -586,7 +586,7 @@ async def test_one_notice_does_not_pile_up_across_reconnects(page: Page, harness
     reconnect. A notice that re-added itself per hello without the wipe would
     grow a stack of identical lines; one that never re-added itself would
     vanish at the first reconnect."""
-    harness.avatar = {"renderer": "live2d", "model_id": "mia"}
+    harness.avatar = {"renderer": "live2d", "model_id": "hiyori"}
     await page.reload()
     await _wait(page, "document.querySelectorAll('#loglines .logline').length > 0")
     harness.hub.broadcast(ServerEvent.HELLO, harness.hello())
@@ -1045,7 +1045,7 @@ async def test_the_panic_button_says_what_it_actually_does(page: Page, harness: 
     already spoken for by `--mute-while-speaking`, which really does mute the
     microphone. One word, two opposite meanings, in one program.
     """
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     label = await page.locator("#p-panic").inner_text()
     assert label == "紧急叫停", f"按钮文案又变回去了：{label}"
     assert "闭麦" not in label
@@ -1078,7 +1078,7 @@ async def test_an_empty_log_pane_explains_itself(page: Page, harness: Harness) -
     sessions measured one JSON line each against 14 to 99 printed ones. A blank
     box reads as a broken feature; this one says where to look instead.
     """
-    await _wait(page, "document.title.includes('米娅')")
+    await _wait(page, "document.title.includes('豆腐')")
     empty = await page.locator("#loglines .empty").inner_text()
     assert "「对话」页" in empty, f"空状态没指路：{empty}"
 

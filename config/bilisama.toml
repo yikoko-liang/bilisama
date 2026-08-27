@@ -135,10 +135,10 @@ write_batch_ms = 0                      # 0=来一条落一条；事件洪峰的
 clock_granularity_min = 5               # 推给模型的时间按几分钟取整；粒度越粗，安静时的上下文推送越少
 
 [persona]
-id = "mia"
+id = "tofu"
 data_dir = "auto"                       # auto = 用户数据目录/personas/<id>，四个人设文件的活副本在这
 streamer_name = "主播"                  # AI 怎么称呼你。填真名它就会叫你名字，比一口一个「主播」亲切
-display_name = "米娅"                     # 它自称什么。也会作为火山的 bot_name 发过去——
+display_name = "豆腐"                     # 它自称什么。也会作为火山的 bot_name 发过去——
                                         # 那边留空的话名字来自服务端默认（豆包），人设里写的名字压不过它
 
 # 生长层三态：off 不长 | collect 只攒进文件、不进提示词 | on 攒并注入（§4.6）。

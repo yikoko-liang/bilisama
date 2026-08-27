@@ -105,8 +105,8 @@ class VolcanoLink:
         access_key: The older pair's second half, an Access Token.
         bot_name: What she calls herself. Its own field because on this
             protocol the NAME does not reliably come from the persona text:
-            probed 2026-08-28, our real 557-character persona opens with
-            「我叫米娅」 and she answered 「豆包」 three times out of three,
+            probed 2026-08-28, our real 557-character persona opens by naming
+            her and she answered 「豆包」 three times out of three,
             because dialog.bot_name defaults to 豆包 and a structured document
             dilutes the one sentence that names her. A 31-character persona
             saying the same thing DID win, which is why this looked fine in

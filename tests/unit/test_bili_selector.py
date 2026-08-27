@@ -88,7 +88,7 @@ def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]
     ]
 
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
+TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
 
 _ROOM = 777
 

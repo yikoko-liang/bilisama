@@ -89,7 +89,7 @@ async def test_reply_instructions_carry_the_session_persona_s2s() -> None:
         s2s = S2SLink(server.url, text_replies=False)
         await s2s.connect()
         try:
-            await s2s.set_context("你是米娅，主播的AI搭子。")
+            await s2s.set_context("你是豆腐，主播的AI搭子。")
             await s2s.request_reply(link.ReplySpec(instructions="谢谢阿强的SC，一句话。"))
             for _ in range(50):
                 if server.recorded.count("response.create"):
@@ -98,9 +98,9 @@ async def test_reply_instructions_carry_the_session_persona_s2s() -> None:
             creates = [e for e in server.recorded.events if e.get("type") == "response.create"]
             assert creates, "no response.create reached the server"
             sent = creates[0]["response"]["instructions"]
-            assert "你是米娅" in sent, "the persona must survive a per-turn instruction"
+            assert "你是豆腐" in sent, "the persona must survive a per-turn instruction"
             assert "谢谢阿强的SC" in sent
-            assert sent.index("你是米娅") < sent.index("谢谢阿强的SC"), "persona comes first"
+            assert sent.index("你是豆腐") < sent.index("谢谢阿强的SC"), "persona comes first"
         finally:
             await s2s.aclose()
 
@@ -115,7 +115,7 @@ async def test_reply_without_instructions_stays_bare_s2s() -> None:
         s2s = S2SLink(server.url, text_replies=False)
         await s2s.connect()
         try:
-            await s2s.set_context("你是米娅，主播的AI搭子。")
+            await s2s.set_context("你是豆腐，主播的AI搭子。")
             await s2s.request_reply(link.ReplySpec())
             for _ in range(50):
                 if server.recorded.count("response.create"):
@@ -136,7 +136,7 @@ async def test_reply_instructions_carry_the_session_persona_hosted() -> None:
         hosted = HostedLink(server.url, ProviderName.DASHSCOPE)
         await hosted.connect()
         try:
-            await hosted.set_context("你是米娅，主播的AI搭子。")
+            await hosted.set_context("你是豆腐，主播的AI搭子。")
             await hosted.request_reply(link.ReplySpec(instructions="谢谢阿强的SC，一句话。"))
             for _ in range(50):
                 if server.recorded.count("response.create"):
@@ -145,7 +145,7 @@ async def test_reply_instructions_carry_the_session_persona_hosted() -> None:
             creates = [e for e in server.recorded.events if e.get("type") == "response.create"]
             assert creates
             sent = creates[0]["response"]["instructions"]
-            assert "你是米娅" in sent
+            assert "你是豆腐" in sent
             assert "谢谢阿强的SC" in sent
         finally:
             await hosted.aclose()
@@ -392,7 +392,7 @@ async def test_the_s2s_replay_line_survives_the_scrubber() -> None:
             s2s = S2SLink(server.url, text_replies=True)
             await s2s.connect()
             try:
-                await s2s.set_context("你是米娅。")
+                await s2s.set_context("你是豆腐。")
             finally:
                 await s2s.aclose()
 
