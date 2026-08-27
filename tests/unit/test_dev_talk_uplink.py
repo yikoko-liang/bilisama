@@ -806,6 +806,22 @@ def director_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
 
     monkeypatch.setattr(dev_talk, "_pump_mic", _no_mic)
     monkeypatch.setattr(s2s_module, "S2SLink", _FakeLink)
+    # The side model is built straight from the environment (dev_talk.py:1182-1205),
+    # so on a machine that has sourced path.sh this fixture's promise was false:
+    # teardown distillation made a REAL network call to a REAL model, this test
+    # asserted 「ran=False」 and failed, and the run took 36 seconds longer.
+    # Which meant the gate was green or red depending on whether the developer
+    # happened to have credentials exported — and unit tests were spending money.
+    for name in (
+        "openai_compatible_url",
+        "side_model_name",
+        "ali_api_key",
+        "base_url",
+        "model_name",
+        "api_key",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
     # persona.loader.default_data_dir reads this, so the memory db and the live
     # persona copies land in tmp instead of the developer's real data home.
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
