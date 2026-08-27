@@ -65,7 +65,12 @@ class MessageKind(IntEnum):
 
 class _Flag(IntEnum):
     """Low nibble of byte 1. Only EVENT is used by the dialogue API; the
-    sequence bits are decoded anyway so a frame carrying them still parses."""
+    sequence bits are decoded anyway so a frame carrying them still parses.
+
+    SEQUENCE is the only one of the two that means a sequence field is THERE.
+    LAST_NO_SEQ says the opposite — last frame, and no number with it — so the
+    combination 0b0011 carries one (it sets SEQUENCE too) and 0b0010 does not.
+    """
 
     SEQUENCE = 0b0001
     LAST_NO_SEQ = 0b0010
@@ -297,13 +302,19 @@ def decode(raw: bytes) -> Frame:
     # decoder that ignores it breaks on the first frame that uses it.
     offset = header_size
 
-    if flags & (_Flag.SEQUENCE | _Flag.LAST_NO_SEQ):
+    if flags & _Flag.SEQUENCE:
         # Unused by the dialogue API, read so a frame carrying it still parses.
-        _, offset = _take(raw, offset, 4, "sequence")
+        #
+        # SEQUENCE alone, and only it: 0b0011 is this bit plus LAST_NO_SEQ and
+        # does carry one, while LAST_NO_SEQ ON ITS OWN means 「最后一帧，不带
+        # 序列号」 — reading four bytes for that shifted the event, the session
+        # id and the payload length four bytes late, so the length came out of
+        # the payload and a perfectly good frame was dropped as truncated.
+        _, offset = _take(raw, offset, 4, "序列号")
 
     event: int | None = None
     if flags & _Flag.EVENT:
-        chunk, offset = _take(raw, offset, 4, "event")
+        chunk, offset = _take(raw, offset, 4, "事件号")
         event = struct.unpack(">i", chunk)[0]
 
     session_id = ""
@@ -324,7 +335,7 @@ def decode(raw: bytes) -> Frame:
 
     error_code: int | None = None
     if kind is MessageKind.ERROR:
-        chunk, offset = _take(raw, offset, 4, "error code")
+        chunk, offset = _take(raw, offset, 4, "错误码")
         error_code = struct.unpack(">I", chunk)[0]
 
     chunk, offset = _take(raw, offset, 4, "payload 长度")

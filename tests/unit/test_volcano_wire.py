@@ -33,6 +33,13 @@ from bilisama.realtime.providers.volcano_wire import (
 _SESSION_ID = "3c791a7d-227a-4446-993b-24f9e302cc98"
 _DOC_AUDIO_BODY = b"OggS" + b"\x00" * 2040
 
+# The low nibble of byte 1, spelled out here rather than imported: these tests
+# build frames by hand on purpose, so they must not inherit the decoder's own
+# idea of what the bits mean.
+_SEQUENCE = 0b0001
+_LAST_NO_SEQ = 0b0010
+_EVENT = 0b0100
+
 
 def _doc_frame() -> bytes:
     return (
@@ -161,6 +168,47 @@ def test_a_broken_frame_is_a_protocol_error_not_a_crash(name: str, raw: bytes) -
     reading the log nothing about the wire."""
     with pytest.raises(VolcanoProtocolError):
         decode(raw)
+
+
+def test_the_last_message_flag_does_not_carry_a_sequence_number() -> None:
+    """0b0010 is 「最后一帧，不带序列号」. Reading four bytes for it shifts the
+    event, the session id and the payload length all four bytes late, and the
+    payload length then comes out of the payload — 帧被截断 on a frame that was
+    never broken. The vendor's sample frame has flags 0b0100, so it could
+    never have caught this; only a frame that actually sets the bit can.
+    """
+    raw = (
+        bytes((17, (MessageKind.FULL_SERVER << 4) | _EVENT | _LAST_NO_SEQ, 0b0001_0000, 0))
+        + struct.pack(">i", ServerEvent.TTS_ENDED)
+        + struct.pack(">I", len(_SESSION_ID))
+        + _SESSION_ID.encode()
+        + struct.pack(">I", 0)
+    )
+
+    frame = decode(raw)
+
+    assert frame.event == ServerEvent.TTS_ENDED
+    assert frame.session_id == _SESSION_ID
+
+
+def test_the_sequence_flag_still_carries_one() -> None:
+    """The other half of the pair: 0b0001 (and 0b0011, which is 0b0001 plus the
+    last-message bit) really do put four bytes there, and skipping them would
+    shift everything the same way in the other direction."""
+    for flags in (_SEQUENCE, _SEQUENCE | _LAST_NO_SEQ):
+        raw = (
+            bytes((17, (MessageKind.FULL_SERVER << 4) | _EVENT | flags, 0b0001_0000, 0))
+            + struct.pack(">i", 7)  # the sequence number itself
+            + struct.pack(">i", ServerEvent.TTS_ENDED)
+            + struct.pack(">I", len(_SESSION_ID))
+            + _SESSION_ID.encode()
+            + struct.pack(">I", 0)
+        )
+
+        frame = decode(raw)
+
+        assert frame.event == ServerEvent.TTS_ENDED, f"flags 0b{flags:04b}"
+        assert frame.session_id == _SESSION_ID, f"flags 0b{flags:04b}"
 
 
 def test_a_payload_that_is_not_json_says_so_rather_than_pretending() -> None:
