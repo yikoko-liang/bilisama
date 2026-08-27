@@ -4,8 +4,7 @@ Plan §7.7 asks for this before the first format change rather than after it: th
 alternative is a streamer whose settings silently mean something else, and by
 then the only fix is asking them what they used to have.
 
-The table is empty today because there has only ever been one version. The
-machinery is not — it is exercised against planted steps in
+The machinery is also exercised against planted steps in
 `tests/unit/test_config_loader.py`, because a migration path nobody has walked
 is not a path.
 
@@ -34,8 +33,37 @@ __all__ = ["CURRENT_VERSION", "MIGRATIONS", "Step", "migrate"]
 # handle shapes the current schema would refuse.
 Step = Callable[[dict[str, Any]], dict[str, Any]]
 
+# The shipped persona was renamed, English and Chinese both, and the old
+# directory went with it. Without this step an existing config still saying
+# `id = "mia"` dies at startup on `FileNotFoundError: 人设文件缺失`, which is
+# a rename presented as a missing file.
+_RENAMED_PERSONAS = {"mia": "tofu"}
+
+
+def _v1_rename_personas(raw: dict[str, Any]) -> dict[str, Any]:
+    persona = raw.get("persona")
+    if not isinstance(persona, dict):
+        return raw
+    new = _RENAMED_PERSONAS.get(str(persona.get("id", "")))
+    if new is None:
+        return raw
+    return {**raw, "persona": {**persona, "id": new}}
+
+
 # from-version -> the step that produces from-version + 1.
-MIGRATIONS: dict[int, Step] = {}
+MIGRATIONS: dict[int, Step] = {1: _v1_rename_personas}
+
+# What each step is worth saying out loud. A silent rewrite of somebody's
+# persona id is the kind of help that reads as a bug — and the half this
+# cannot do for them is the grown files, which live under the data home by the
+# OLD name and would otherwise just stop being read.
+_NOTES: dict[int, str] = {
+    1: (
+        "人设 mia 已改名 tofu（中文叫豆腐），配置里已经自动跟上。"
+        "如果你攒过共同经历或口癖，它们还在数据目录的 personas/mia/ 下面，"
+        "把那个目录改名成 personas/tofu/ 就能接着用。"
+    )
+}
 
 
 def migrate(
@@ -85,7 +113,12 @@ def migrate(
         raw = step(raw)
         version += 1
         raw["config_version"] = version
-        notes.append(f"配置已从 v{version - 1} 升到 v{version}")
+        # Still one note per step. `_NOTES` describes the SHIPPED steps, so a
+        # test's planted table gets the plain line rather than borrowing the
+        # explanation of a migration it is not running.
+        detail = _NOTES.get(version - 1) if steps is None else None
+        line = f"配置已从 v{version - 1} 升到 v{version}"
+        notes.append(f"{line}。{detail}" if detail else line)
     if "config_version" not in raw:
         # An older file predates the key. Recording it costs nothing and makes
         # the next migration's starting point explicit rather than implied.

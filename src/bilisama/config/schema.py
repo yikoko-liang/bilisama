@@ -18,7 +18,7 @@ from bilisama.config.enums import Chattiness, GrowthMode, ProviderName
 # The config shape this build reads. It lives here rather than in `migrate`
 # because both of that module's neighbours need it and neither may import it:
 # `validate` refuses a file from the future, `migrate` walks an old one forward.
-CURRENT_VERSION: Final[int] = 1
+CURRENT_VERSION: Final[int] = 2
 
 
 class TurnConfig(BaseModel):

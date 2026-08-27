@@ -10,7 +10,7 @@
 #
 # config/s2s/bilisama-s2s.json 是从 [speech.s2s] 渲染出来的产物，不要手改。
 
-config_version = 1
+config_version = 2                       # v1→v2：随包人设 mia 改名成 tofu，旧配置会自动跟上
 active_profile = "normal"
 
 [room]

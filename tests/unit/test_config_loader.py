@@ -246,3 +246,55 @@ def test_a_non_integer_version_is_left_for_the_schema_to_report() -> None:
     raw, notes = migrate({"config_version": "2"})
     assert raw["config_version"] == "2"
     assert notes == ()
+
+
+def test_the_renamed_persona_still_loads(tmp_path: Path) -> None:
+    """The shipped persona was renamed mia→tofu and the old directory went with
+    it, so an existing config still naming mia died at startup on
+    `FileNotFoundError: 人设文件缺失` — a rename presented as a missing file.
+
+    This is the migration table's first real entry, and it is exactly the case
+    plan §7.7 wanted the machinery in place for before the first format change
+    rather than after it.
+    """
+    path = tmp_path / "bilisama.toml"
+    path.write_text(
+        'config_version = 1\n[persona]\nid = "mia"\n[speech.s2s]\nllm_model = "m"\n',
+        encoding="utf-8",
+    )
+
+    settings = load(path, strict=False)
+
+    assert settings.persona.id == "tofu"
+    assert settings.config_version == CURRENT_VERSION
+
+
+def test_a_persona_nobody_renamed_is_left_alone(tmp_path: Path) -> None:
+    """A rename table that rewrites more than it was given is worse than none."""
+    path = tmp_path / "bilisama.toml"
+    path.write_text(
+        'config_version = 1\n[persona]\nid = "hanako"\n[speech.s2s]\nllm_model = "m"\n',
+        encoding="utf-8",
+    )
+
+    assert load(path, strict=False).persona.id == "hanako"
+
+
+def test_the_rename_says_where_the_grown_files_went(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The half a config migration cannot do for anyone: the relationship and
+    voice files live under the data home by the OLD name, and would just stop
+    being read. Silence there reads as "the AI forgot everything"."""
+    path = tmp_path / "bilisama.toml"
+    path.write_text(
+        'config_version = 1\n[persona]\nid = "mia"\n[speech.s2s]\nllm_model = "m"\n',
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("INFO"):
+        load(path, strict=False)
+
+    said = "\n".join(record.getMessage() for record in caplog.records)
+    assert "personas/mia" in said
+    assert "personas/tofu" in said
