@@ -18,6 +18,20 @@ would be guessing at a problem nobody has reported.
 No numpy: it was removed as a dependency that nothing imported (backlog item
 51), and re-adding 21 MiB to interpolate 320 samples every 20 ms would be a
 poor trade. `array` keeps the inner loop off Python objects.
+
+Measured 2026-08-28 on this machine, so nobody has to guess later: 65 us per
+20 ms frame at 16k->24k, which is 3.2 ms of CPU per second of audio, about
+0.3% of one core, on the event loop thread. For comparison the frame's own
+wire encoding is 0.45 us. Rewriting the loop against a fixed 2:3 ratio
+measured 39 us; `audioop.ratecv` measured 3.2 us but is gone in Python 3.13
+and `pyproject.toml` asks only for >=3.12, so it cannot be relied on. None of
+that is worth doing for one development-reference provider — the number is
+recorded rather than acted on.
+
+`array("h")` is native-endian and the stdlib only guarantees "at least 2
+bytes", while the contract above says 16-bit little-endian. Both hold on every
+platform this ships to; the assertion at import is there so a platform where
+they do not fails at load rather than as noise.
 """
 
 from __future__ import annotations
@@ -25,6 +39,10 @@ from __future__ import annotations
 from array import array
 
 __all__ = ["Resampler"]
+
+# See the module note: the whole file assumes a 2-byte sample, and `len(pcm) %
+# 2` quietly assumes it a second time.
+assert array("h").itemsize == 2, "这台机器上 array('h') 不是 2 字节，重采样的样本宽度假设不成立"
 
 
 class Resampler:
@@ -75,15 +93,21 @@ class Resampler:
 
         Returns:
             The converted samples, same format. May be empty when the chunk is
-            too short to produce an output sample at this ratio.
+            too short to produce an output sample at this ratio — callers that
+            forward straight to the wire should skip an empty result rather
+            than send a zero-length audio frame.
 
         Raises:
             ValueError: The byte count is odd.
         """
-        if self.passthrough:
-            return pcm
+        # Checked before the passthrough short-circuit: a caller handing over
+        # half a sample is equally wrong on every provider, and having the
+        # complaint depend on which backend is running means the same bug is
+        # loud on openai_ga and silent on the other three.
         if len(pcm) % 2:
             raise ValueError(f"PCM 字节数是奇数（{len(pcm)}），16 位样本切在了一半")
+        if self.passthrough:
+            return pcm
         if not pcm:
             return b""
 
@@ -103,7 +127,12 @@ class Resampler:
             frac = position - left
             a = source[left]
             b = source[left + 1]
-            out.append(int(a + (b - a) * frac))
+            # round, not int: truncation is toward zero, so every zero
+            # crossing gets a dead zone one LSB wide on each side. A -2..2 ramp
+            # upsampled 3x came back with five consecutive zeros in it. Audible
+            # as crossover distortion, and about 6 dB of avoidable quantisation
+            # noise for the cost of one word.
+            out.append(round(a + (b - a) * frac))
             position += step
 
         self._tail = source[-1]

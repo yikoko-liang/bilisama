@@ -179,3 +179,25 @@ def test_ragged_chunks_at_an_uneven_ratio_keep_their_length() -> None:
     assert total_out == pytest.approx(
         expected, rel=0.002
     ), f"{total_in} 个样本重采样后是 {total_out}，应当接近 {expected:.0f}"
+
+
+def test_a_half_sample_is_refused_on_every_provider() -> None:
+    """The guard used to sit behind the passthrough short-circuit, so the same
+    caller bug raised on openai_ga and returned the bytes unchanged on the
+    other three. A check that depends on which backend is running is not a
+    check."""
+    for source, target in ((16000, 16000), (16000, 24000)):
+        with pytest.raises(ValueError, match="奇数"):
+            Resampler(source_rate=source, target_rate=target).feed(b"\x01\x02\x03")
+
+
+def test_interpolation_rounds_instead_of_truncating() -> None:
+    """`int()` truncates toward zero, so every zero crossing got a dead zone
+    one LSB wide on each side — audible as crossover distortion, and about
+    6 dB of quantisation noise nobody had to pay for."""
+    ramp = array("h", [-2, -1, 0, 1, 2]).tobytes()
+    out = array("h")
+    out.frombytes(Resampler(source_rate=1, target_rate=3).feed(ramp))
+
+    assert out.count(0) <= 3, f"过零点被压平了：{list(out)}"
+    assert list(out)[:3] == [-2, -2, -1], list(out)
