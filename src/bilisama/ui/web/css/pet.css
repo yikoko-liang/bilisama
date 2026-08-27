@@ -1,0 +1,534 @@
+/* The stage and the built-in robot. All state looks key off
+   #stage[data-visual="..."], which main.js keeps current — the fallback skin has
+   no JS animation loop of its own beyond the blink timer. */
+
+#stage {
+  position: relative;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+/* Inside the desktop shell the window itself is transparent; painting --page
+   here would put an opaque slab on the desktop — the pet floats, nothing else.
+   The shell window is a compact 240x240 square, so the pet anchors to the
+   floor and the bubble gets the headroom, sized to fit. */
+body.shell {
+  background: transparent;
+  --pet-size: 104px;
+}
+
+body.shell #stage {
+  align-items: end;
+  padding-bottom: 16px;
+}
+
+body.shell .bubble {
+  bottom: calc(var(--pet-size) * var(--pet-aspect, 1.18) + 20px);
+  max-width: calc(100vw - 24px);
+  font-size: 13px;
+  /* The WINDOW grows to fit the bubble (main.js re-fits on every size change),
+     so this cap is only the point past which even a taller window would be
+     silly — three lines used to hide most of a normal reply. */
+  max-height: calc(1.5em * 12 + 16px);
+  line-height: 1.5;
+}
+
+.pet-mount {
+  position: relative;
+  width: var(--pet-size);
+  /* --pet-aspect is the mounted skin's natural height/width, set by main.js
+     after every mount; 1.18 keeps the CSS-robot proportions as the default. */
+  height: calc(var(--pet-size) * var(--pet-aspect, 1.18));
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+
+body.shell .pet-mount {
+  cursor: grab;
+}
+
+body.shell .pet-mount.dragging {
+  cursor: grabbing;
+}
+
+/* ------------------------------------------------------------ the robot */
+
+.robot {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 16% 56% 22%;
+  justify-items: center;
+  animation: float 3.2s ease-in-out infinite;
+  transform-origin: 50% 100%;
+}
+
+/* antenna */
+.robot .antenna {
+  position: relative;
+  width: 3px;
+  height: 100%;
+}
+
+.robot .stem {
+  position: absolute;
+  inset: 22% 0 0 0;
+  background: var(--pet-shell-deep);
+  border-radius: 2px;
+}
+
+.robot .tip {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--pet-glow);
+  box-shadow: 0 0 8px 1px var(--pet-glow);
+  animation: tip-breathe 2.8s ease-in-out infinite;
+}
+
+/* head with a screen face */
+.robot .head {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(165deg, var(--pet-shell), var(--pet-shell-deep));
+  border-radius: 30% / 34%;
+  box-shadow:
+    inset 0 -4px 8px rgb(0 0 0 / 0.06),
+    0 6px 16px rgb(0 0 0 / 0.12);
+  display: grid;
+  place-items: center;
+  transition: transform var(--dur-fast) ease;
+}
+
+.robot .screen {
+  position: relative;
+  width: 74%;
+  height: 62%;
+  background: var(--pet-screen);
+  border-radius: 22% / 30%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  box-shadow: inset 0 2px 6px rgb(0 0 0 / 0.5);
+}
+
+/* eyes */
+.robot .eye {
+  position: absolute;
+  top: 38%;
+  width: 14%;
+  height: 26%;
+  border-radius: 40%;
+  background: var(--pet-glow);
+  box-shadow: 0 0 6px var(--pet-glow);
+  transition: transform 70ms ease, height var(--dur-fast) ease, background var(--dur-fast) ease;
+}
+
+.robot .eye-l { left: 24%; }
+.robot .eye-r { right: 24%; }
+
+.robot.blink .eye {
+  transform: scaleY(0.12);
+}
+
+/* thinking dots + scan line, hidden by default */
+.robot .think {
+  position: absolute;
+  bottom: 16%;
+  display: flex;
+  gap: 9%;
+  width: 40%;
+  justify-content: center;
+  opacity: 0;
+}
+
+.robot .think i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pet-glow-think);
+}
+
+.robot .scan {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  height: 2px;
+  top: -4px;
+  background: linear-gradient(90deg, transparent, var(--pet-glow-think), transparent);
+  opacity: 0;
+}
+
+/* speaking equalizer, hidden by default */
+.robot .eq {
+  position: absolute;
+  bottom: 14%;
+  display: flex;
+  gap: 10%;
+  width: 34%;
+  height: 22%;
+  justify-content: center;
+  align-items: flex-end;
+  opacity: 0;
+}
+
+.robot .eq i {
+  width: 4px;
+  height: 30%;
+  border-radius: 2px;
+  background: var(--pet-glow);
+}
+
+/* torso */
+.robot .torso {
+  width: 56%;
+  height: 88%;
+  background: linear-gradient(170deg, var(--pet-shell), var(--pet-shell-deep));
+  border-radius: 34% 34% 40% 40% / 60% 60% 46% 46%;
+  box-shadow: inset 0 -3px 6px rgb(0 0 0 / 0.07);
+}
+
+/* listening sound ring at the feet */
+.ring {
+  position: absolute;
+  bottom: -4%;
+  left: 50%;
+  width: 74%;
+  aspect-ratio: 3 / 1;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  border: 2px solid var(--pet-glow-listen);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* zzz for offline */
+.robot .zzz {
+  position: absolute;
+  top: 4%;
+  right: 6%;
+  font-size: 14px;
+  color: var(--ink-dim);
+  opacity: 0;
+}
+
+/* ------------------------------------------------------------ states */
+
+[data-visual="listening"] .robot .head { transform: rotate(-3deg); }
+[data-visual="listening"] .robot .eye { height: 32%; background: var(--pet-glow-listen); box-shadow: 0 0 7px var(--pet-glow-listen); }
+[data-visual="listening"] .robot .tip { background: var(--pet-glow-listen); box-shadow: 0 0 10px 2px var(--pet-glow-listen); animation: none; }
+[data-visual="listening"] .ring { animation: ring 1.4s ease-out infinite; }
+
+[data-visual="thinking"] .robot .eye { transform: translate(6%, -30%) scale(0.8); opacity: 0.55; }
+[data-visual="thinking"] .robot .think { opacity: 1; }
+[data-visual="thinking"] .robot .think i { animation: think-dot 1.4s ease-in-out infinite; }
+[data-visual="thinking"] .robot .think i:nth-child(2) { animation-delay: 0.22s; }
+[data-visual="thinking"] .robot .think i:nth-child(3) { animation-delay: 0.44s; }
+[data-visual="thinking"] .robot .scan { opacity: 0.5; animation: scan 2.4s linear infinite; }
+
+[data-visual="speaking"] .robot { animation: float 3.2s ease-in-out infinite, bob 0.56s ease-in-out infinite; }
+[data-visual="speaking"] .robot .eq { opacity: 1; }
+[data-visual="speaking"] .robot .eq i { animation: eq 0.52s ease-in-out infinite; }
+[data-visual="speaking"] .robot .eq i:nth-child(2) { animation-delay: 0.16s; }
+[data-visual="speaking"] .robot .eq i:nth-child(3) { animation-delay: 0.30s; }
+[data-visual="speaking"] .robot .tip { animation: tip-breathe 0.8s ease-in-out infinite; }
+
+[data-visual="offline"] .robot {
+  filter: grayscale(0.75);
+  opacity: 0.82;
+  animation: none;
+}
+[data-visual="offline"] .robot .eye { height: 6%; box-shadow: none; }
+[data-visual="offline"] .robot .tip { animation: none; box-shadow: none; background: var(--ink-faint); }
+[data-visual="offline"] .robot .zzz { opacity: 1; animation: zzz 2.6s ease-in-out infinite; }
+
+/* poke reaction: squash & stretch + antenna boing */
+.robot.poked {
+  animation: float 3.2s ease-in-out infinite, poke 0.42s var(--ease-pop);
+}
+.robot.poked .antenna {
+  animation: boing 0.5s var(--ease-pop);
+  transform-origin: bottom center;
+}
+
+/* click sparks, spawned by fallback.js at the click point */
+.spark {
+  position: absolute;
+  color: var(--pet-glow);
+  font-size: 13px;
+  pointer-events: none;
+  animation: spark 0.55s ease-out forwards;
+  z-index: 2;
+}
+
+/* ------------------------------------------------------------ quick controls */
+
+.pet-controls {
+  position: fixed;
+  left: calc(50% + var(--pet-size) / 2 + 14px);
+  top: 50%;
+  z-index: var(--z-corner);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transform: translateY(-50%);
+}
+
+body.shell .pet-controls {
+  top: auto;
+  bottom: 16px;
+  transform: none;
+}
+
+.pet-control {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--panel-edge);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: var(--ink-dim);
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition:
+    color var(--dur-fast) ease,
+    background var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
+}
+
+.pet-control svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pet-control .resume-glyph { display: none; }
+.pet-control#pause-toggle.active .pause-glyph { display: none; }
+.pet-control#pause-toggle.active .resume-glyph { display: block; }
+
+.pet-control.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  box-shadow: 0 3px 14px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.pet-control:hover,
+.pet-control:focus-visible {
+  transform: translateY(-1px);
+  outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 2px;
+}
+
+.pet-control:active {
+  transform: translateY(0) scale(0.95);
+}
+
+.pet-control::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 9px);
+  width: max-content;
+  max-width: 180px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ink) 92%, transparent);
+  color: var(--panel);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(3px, -50%);
+  transition: opacity var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.pet-control:hover::after,
+.pet-control:focus-visible::after {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+.control-slash {
+  position: absolute;
+  width: 22px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 1;
+  transform: rotate(-45deg) scaleX(1);
+  transition: opacity var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.pet-control.active .control-slash {
+  opacity: 0;
+  transform: rotate(-45deg) scaleX(0.4);
+}
+
+/* ------------------------------------------------------------ exit dialog */
+
+.exit-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-exit);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: var(--scrim);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.exit-dialog[hidden] {
+  display: none;
+}
+
+.exit-card {
+  width: min(320px, 100%);
+  padding: 20px;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+}
+
+.exit-card h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.exit-card p {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.exit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.exit-actions button {
+  min-width: 68px;
+  padding: 7px 12px;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.exit-actions .confirm {
+  border-color: var(--err-strong);
+  background: var(--err-strong);
+  color: #fff;
+}
+
+/* ------------------------------------------------------------ keyframes */
+
+@keyframes float {
+  0%, 100% { translate: 0 2px; }
+  50% { translate: 0 -2px; }
+}
+
+@keyframes bob {
+  0%, 100% { translate: 0 1px; }
+  50% { translate: 0 -1.5px; }
+}
+
+@keyframes tip-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@keyframes ring {
+  0% { transform: translateX(-50%) scale(0.6); opacity: 0.7; }
+  100% { transform: translateX(-50%) scale(1.3); opacity: 0; }
+}
+
+@keyframes think-dot {
+  0%, 100% { opacity: 0.2; translate: 0 0; }
+  50% { opacity: 1; translate: 0 -2px; }
+}
+
+@keyframes scan {
+  0% { top: -4px; }
+  100% { top: 104%; }
+}
+
+@keyframes eq {
+  0%, 100% { height: 26%; }
+  50% { height: 92%; }
+}
+
+@keyframes zzz {
+  0%, 100% { translate: 0 0; opacity: 0.4; }
+  50% { translate: 2px -4px; opacity: 1; }
+}
+
+@keyframes poke {
+  0% { scale: 1 1; }
+  30% { scale: 1.12 0.86; }
+  62% { scale: 0.94 1.06; }
+  100% { scale: 1 1; }
+}
+
+@keyframes boing {
+  0% { rotate: 0deg; }
+  30% { rotate: -14deg; }
+  60% { rotate: 9deg; }
+  100% { rotate: 0deg; }
+}
+
+@keyframes spark {
+  0% { opacity: 1; transform: translate(0, 0) scale(0.7) rotate(0deg); }
+  100% { opacity: 0; transform: translate(var(--sx, 8px), -22px) scale(1.15) rotate(40deg); }
+}
+
+/* Reduced motion: the loops stop, the blink stays (a still creature that
+   blinks reads alive; a bobbing one reads busy). The poke squash and the
+   sparks are collapsed to near-instant rather than removed — a spark with
+   animation:none would never fire animationend, and its cleanup hangs off
+   that event. */
+@media (prefers-reduced-motion: reduce) {
+  .robot,
+  [data-visual="speaking"] .robot,
+  .robot .tip,
+  [data-visual="speaking"] .robot .tip,
+  [data-visual="listening"] .ring,
+  [data-visual="thinking"] .robot .think i,
+  [data-visual="thinking"] .robot .scan,
+  [data-visual="speaking"] .robot .eq i,
+  [data-visual="offline"] .robot .zzz {
+    animation: none;
+  }
+
+  .robot.poked,
+  .robot.poked .antenna,
+  .spark {
+    animation-duration: 1ms;
+  }
+}

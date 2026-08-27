@@ -70,6 +70,16 @@ def parse_line(raw: dict[str, Any], *, room_id: int = 0) -> LiveEvent:
             num=int(g.get("num", 1)),
             coin_type=str(g.get("coin_type", "")),
             total_coin=total_coin,
+            unit_battery=int(
+                g.get(
+                    "unit_battery",
+                    (
+                        total_coin // max(1, int(g.get("num", 1))) // 100
+                        if str(g.get("coin_type", "")) == "gold"
+                        else 0
+                    ),
+                )
+            ),
             combo_id=str(g.get("combo_id", "")),
             combo_count=int(g.get("combo_count", 0)),
             combo_end=g.get("combo_end"),

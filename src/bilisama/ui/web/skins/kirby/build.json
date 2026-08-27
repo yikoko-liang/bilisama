@@ -1,0 +1,16 @@
+{
+  "_comment": "Rebuild recipe: python tools/skin_pack.py --frames-dir <shimeji img dir> --mapping build.json --out src/bilisama/ui/web/skins/kirby",
+  "animations": {
+    "idle": {"frames": [{"file": "shime30.png"}, {"file": "shime31.png"}], "fps": 0.8},
+    "waiting": {"frames": [{"file": "shime15.png"}, {"file": "shime26.png"}], "fps": 1.0},
+    "review": {"frames": [{"file": "shime39.png"}, {"file": "shime45.png"}], "fps": 1.0},
+    "waving": {"frames": [{"file": "shime32.png"}, {"file": "shime33.png"}], "fps": 3.0},
+    "jumping": {"frames": [{"file": "shime22.png"}, {"file": "shime40.png"}, {"file": "shime33.png"}], "fps": 5.0, "loop": false},
+    "failed": {"frames": [{"file": "shime38.png"}, {"file": "shime19.png"}], "fps": 0.5},
+    "running-left": {"frames": [{"file": "shime3.png"}, {"file": "shime1.png"}, {"file": "shime2.png"}, {"file": "shime1.png"}], "fps": 6.0},
+    "running-right": {"frames": [{"file": "shime3.png", "flip": true}, {"file": "shime1.png", "flip": true}, {"file": "shime2.png", "flip": true}, {"file": "shime1.png", "flip": true}], "fps": 6.0},
+    "running": {"frames": [{"file": "shime3.png"}, {"file": "shime1.png"}, {"file": "shime2.png"}, {"file": "shime1.png"}], "fps": 8.0},
+    "working": {"frames": [{"file": "shime3.png"}, {"file": "shime1.png"}, {"file": "shime2.png"}, {"file": "shime1.png"}], "fps": 6.0},
+    "attention": {"frames": [{"file": "shime17.png"}, {"file": "shime29.png"}], "fps": 2.0}
+  }
+}

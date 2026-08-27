@@ -89,6 +89,13 @@ class HostedConfig(BaseModel):
     endpoint: str = Field("")
     model: str = Field("")
     api_key_ref: str = Field("")
+    # Which voice the provider speaks in. Empty means "whatever the server
+    # picks", and that default is not a neutral choice: on DashScope it is
+    # longanqian, measured at 343 Hz against the 180-260 Hz of an ordinary
+    # adult female voice. It reads as shrill, and until this field existed
+    # there was no way to say otherwise. Names are the provider's own; ask for
+    # a wrong one and the server answers with the list it accepts.
+    voice: str = Field("")
     turn: HostedTurnConfig = Field(default_factory=HostedTurnConfig)
 
 
@@ -153,6 +160,11 @@ class AudioConfig(BaseModel):
     output_device: str = Field("auto")
     output_route: Literal["virtual", "direct"] = Field("virtual")
     echo_guard: Literal["duck", "off"] = Field("duck")
+    input_enabled: bool = Field(True)
+    output_enabled: bool = Field(True)
+    # 0 favours noise rejection; 100 admits quieter speech. This is a local
+    # PCM gate because smart_turn does not accept server-VAD thresholds.
+    noise_sensitivity: int = Field(50, ge=0, le=100)
 
 
 class SafetyConfig(BaseModel):
@@ -198,29 +210,40 @@ class ProactiveConfig(BaseModel):
 
 
 class DanmakuConfig(BaseModel):
-    """Danmaku-lane knobs. Window length and score threshold are derived from
-    chattiness (derive.py) — single-writer rule — so only the per-viewer
-    cooldown lives here."""
+    """Danmaku-lane knobs exposed under the advanced panel fold."""
 
     model_config = {"extra": "forbid"}
 
     # Seconds before the same viewer can win the danmaku window again. Armed
     # by the reply, not the attempt (safety.PerUidCooldown).
     per_uid_cooldown_s: int = Field(60, ge=0, le=600)
+    window_s: int = Field(20, ge=1, le=300)
+
+
+class EntryWelcomeConfig(BaseModel):
+    """Which entry groups may receive a welcome."""
+
+    model_config = {"extra": "forbid"}
+
+    ordinary: bool = True
+    naval: bool = True
+    ranking: bool = True
 
 
 class InteractionConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     chattiness: Chattiness = Field(Chattiness.MEDIUM)
+    reply_length: Chattiness = Field(Chattiness.LOW)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
     sc_protect_ms: int = Field(4000, ge=0, le=15000)
-    gift_gold_high: int = Field(10000, ge=0)
-    gift_gold_medium: int = Field(1000, ge=0)
+    gift_battery_high: int = Field(1000, ge=1)
+    gift_battery_medium: int = Field(100, ge=1)
     burst_uniques: int = Field(5, ge=1)
     burst_window_s: int = Field(45, ge=5)
     burst_cooldown_s: int = Field(90, ge=0)
     danmaku: DanmakuConfig = Field(default_factory=DanmakuConfig)
+    entry_welcome: EntryWelcomeConfig = Field(default_factory=EntryWelcomeConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
 
 
@@ -249,6 +272,10 @@ class RoomConfig(BaseModel):
     room_id: int = Field(0, ge=0)
     platform: Literal["bilibili"] = Field("bilibili")
     credential_ref: str = Field("")
+    # A short, streamer-authored description of the current show. It is
+    # injected into the live prompt, so welcomes can tell newcomers what is
+    # happening without guessing from a room title or screen content.
+    stream_intro: str = Field("", max_length=500)
 
 
 class GrowthSwitches(BaseModel):
@@ -269,13 +296,17 @@ class PersonaConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     id: str = Field("mia")
+    # Mia stays the same assistant; this only selects which editable anchor
+    # pair supplies its live prompt.
+    profile: Literal["default", "modified"] = Field("modified")
     # auto = <data home>/personas/<id>. Live copies of all four persona files;
     # the shipped templates under config/personas/ carry only the two anchors.
     data_dir: str = Field("auto")
     # What the persona calls the streamer — every template's {{userName}}.
-    # "主播" is the neutral default; a real name is what makes it sound like
-    # someone sitting next to you rather than a service announcement.
-    streamer_name: str = Field("主播")
+    # Empty keeps the control-centre field blank on every new session. Prompt
+    # rendering maps it to the neutral "主播" so templates never lose their
+    # addressee; a real name is a run-scoped override from the panel.
+    streamer_name: str = Field("")
     # What the persona calls itself in its templates ({{agentName}}). Empty
     # falls back to `id`, the filesystem-safe folder name. Set this only when
     # the spoken name should differ from the folder — a nickname, different
@@ -288,7 +319,16 @@ class PersonaConfig(BaseModel):
 class AvatarConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    renderer: Literal["live2d", "pngtuber"] = Field("live2d")
+    # tofu = the built-in pixel robot (named for the missing-glyph box — the
+    # tofu Noto set out to eliminate, here alive with a face), sprite =
+    # pet.json spritesheet skin pack, live2d = stage 5. The default must be
+    # renderable today, which is why it is tofu and not live2d. model_id is
+    # whatever asset the chosen renderer loads: tofu ignores it, sprite reads
+    # it as a skin-pack directory name, live2d will read it as a model
+    # directory. One field on purpose — a separate skin field would allow
+    # renderer=sprite to dangle next to a live2d model id with nothing to
+    # catch it.
+    renderer: Literal["tofu", "sprite", "live2d"] = Field("tofu")
     model_id: str = Field("")
     expression_source: Literal["tag", "lexicon", "tool_call"] = Field("tag")
 

@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from bilisama.config import Chattiness, ConfigError, load
+from bilisama.config import Chattiness, ConfigError, Settings, load
+
+PROJECT_CONFIG = Path(__file__).resolve().parent.parent.parent / "config" / "bilisama.toml"
 
 BASE = """\
 active_profile = "normal"
@@ -127,6 +129,25 @@ def test_no_file_falls_back_to_packaged_defaults(tmp_path: Path) -> None:
         assert s.active_profile == "normal"
         assert s.interaction.chattiness is Chattiness.MEDIUM
         assert s.room.room_id == 0
+
+
+def test_fresh_install_defaults_to_short_replies_and_no_room() -> None:
+    settings = Settings()
+
+    assert settings.interaction.chattiness is Chattiness.MEDIUM
+    assert settings.interaction.reply_length is Chattiness.LOW
+    assert settings.room.room_id == 0
+    assert settings.room.stream_intro == ""
+    assert settings.persona.streamer_name == ""
+
+
+def test_shipped_normal_profile_keeps_the_requested_restart_defaults() -> None:
+    settings = load(PROJECT_CONFIG, strict=False)
+
+    assert settings.interaction.chattiness is Chattiness.MEDIUM
+    assert settings.interaction.reply_length is Chattiness.LOW
+    assert settings.audio.input_enabled is True
+    assert settings.audio.output_enabled is True
 
 
 def test_malformed_toml_is_not_swallowed(tmp_path: Path) -> None:

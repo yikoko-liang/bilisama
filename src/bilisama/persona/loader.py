@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from bilisama.config.enums import Chattiness
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -35,6 +37,7 @@ __all__ = [
     "PersonaAnchors",
     "PersonaStore",
     "default_data_dir",
+    "live_event_rules",
     "template_variables",
 ]
 
@@ -50,6 +53,16 @@ _GROWTH_HEADERS: dict[GrowthLayer, str] = {
 # personality and promoted habits stay visually separate for the streamer.
 _PROMOTED_HEADER = "## 长出来的性格（persona review 合并）"
 
+_REPLY_LENGTH_INSTRUCTIONS: dict[Chattiness, str] = {
+    Chattiness.LOW: (
+        "短档：只说一个短句，通常不超过 20 个汉字；" "只保留最直接的反应或结论，不解释、不铺垫。"
+    ),
+    Chattiness.MEDIUM: "中档：通常说一到两句，先回应重点，再补一条必要说明或接话点。",
+    Chattiness.HIGH: (
+        "长档：通常说两到四句，复杂问题可以多解释一层，" "但仍保持口语化，不写成长篇文章。"
+    ),
+}
+
 
 def default_data_dir(persona_id: str) -> Path:
     """The live persona directory: `<data home>/bilisama/personas/<id>`.
@@ -62,17 +75,35 @@ def default_data_dir(persona_id: str) -> Path:
     return root / "bilisama" / "personas" / persona_id
 
 
-def template_variables(cfg: PersonaConfig) -> dict[str, str]:
+def template_variables(
+    cfg: PersonaConfig,
+    *,
+    reply_length: Chattiness = Chattiness.MEDIUM,
+) -> dict[str, str]:
     """Every {{name}} a persona template may use, resolved from config.
 
     One place decides this mapping so no caller can supply half of it: a
-    missing key is not an error, it leaves the raw `{{agentName}}` sitting in
-    the system prompt for the model to read aloud.
+    missing key is not an error, it leaves the raw placeholder sitting in the
+    system prompt for the model to read aloud. Reply length comes from the same
+    validated setting that controls the provider token cap.
     """
+    streamer_name = cfg.streamer_name.strip() or "主播"
     return {
-        "userName": cfg.streamer_name,
+        "userName": streamer_name,
+        "username": streamer_name,
         "agentName": cfg.display_name or cfg.id,
+        "replyLength": _REPLY_LENGTH_INSTRUCTIONS[reply_length],
     }
+
+
+def live_event_rules(config_dir: Path, variables: Mapping[str, str]) -> str:
+    """Load and render the shared live-event response contract."""
+    path = config_dir / "personas" / "live" / "event_responses.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FileNotFoundError(f"直播事件回复规则缺失：{path}") from exc
+    return _substitute(text, variables)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +190,17 @@ class PersonaStore:
             identity=self.anchor("identity", variables),
             personality=self.anchor("personality", variables),
         )
+
+    def write_anchor(self, name: AnchorName, text: str) -> Path:
+        """Persist a human edit to the live anchor copy atomically."""
+        if not text.strip():
+            raise ValueError("人设文件不能保存为空")
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        target = self._data_dir / f"{name}.md"
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text.rstrip() + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+        return target
 
     # ------------------------------------------------------------ growth
 

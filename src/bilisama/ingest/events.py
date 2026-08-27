@@ -31,7 +31,7 @@ class EventKind(StrEnum):
     GIFT = "gift"
     SUPER_CHAT = "super_chat"
     GUARD_BUY = "guard_buy"
-    VIP_ENTER = "vip_enter"  # member, top-spender or past gifter walking in
+    VIP_ENTER = "vip_enter"  # current guard or level-5+ current-room medal
     ENTRY = "entry"  # ordinary arrival, high volume
     FOLLOW = "follow"
     LIKE = "like"
@@ -120,6 +120,7 @@ class Gift:
     num: int = 1
     coin_type: str = ""  # gold | silver | ""; only gold is real money
     total_coin: int = 0  # 1000 gold == CNY 1
+    unit_battery: int = 0  # frontend gift value; wire price 100 == 1 battery
     combo_id: str = ""
     combo_count: int = 0
     combo_end: bool | None = None
@@ -127,7 +128,12 @@ class Gift:
 
     @property
     def is_paid(self) -> bool:
-        return self.coin_type == "gold" and self.total_coin > 0
+        return self.total_battery > 0 or (self.coin_type == "gold" and self.total_coin > 0)
+
+    @property
+    def total_battery(self) -> int:
+        """Frontend gift value used by product tiers."""
+        return self.unit_battery * self.num
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,10 +168,21 @@ class LiveEvent:
         Falls back to identity plus content plus a one-second bucket when the
         platform gives us no id, which is what stops a reconnect from replaying
         the same reaction.
+
+        Gifts carry their own discriminator in that fallback. Their text is
+        always empty, so identity plus a one-second bucket collapsed a whole
+        blind-box batch — SEND_GIFT_V2 can arrive with neither tid nor rnd
+        (tests/unit/test_bili_translate.py:202) — into one key, and every gift
+        after the first was dropped as a duplicate before the aggregator ever
+        saw it. Paid events must not be deduplicated by a coincidence of
+        timing.
         """
         if self.event_id:
             return f"{self.kind}:{self.event_id}"
-        return f"{self.kind}:{self.viewer.identity}:{self.text[:32]}:{self.ts_ms // 1000}"
+        mark = ""
+        if self.gift is not None:
+            mark = f":{self.gift.gift_id}:{self.gift.num}:{self.value_cny:.4f}"
+        return f"{self.kind}:{self.viewer.identity}:{self.text[:32]}{mark}:{self.ts_ms // 1000}"
 
     @property
     def is_paid(self) -> bool:
@@ -198,19 +215,20 @@ def cny_from_gold(total_coin: int) -> float:
     return total_coin / 1000.0
 
 
-def is_vip_entry(viewer: Viewer, *, lifetime_gift_cny: float = 0.0) -> bool:
+def is_vip_entry(viewer: Viewer, *, room_id: int = 0) -> bool:
     """Whether this arrival deserves a greeting by name.
 
-    Members and anyone who has spent money before go into the paid lane; ordinary
-    arrivals are high-volume and stay silent by default, surfacing only in the
-    batched welcome.
+    Current guards and viewers wearing a level-5-or-higher medal for this room
+    go into the named welcome lane. Historical spending is deliberately not an
+    identity signal.
 
     Args:
         viewer: The person who just walked in.
-        lifetime_gift_cny: What they have spent across all past streams, looked up
-            from memory.
+        room_id: The active room, used to reject medals worn for another room.
 
     Returns:
         True when they are worth greeting individually.
     """
-    return viewer.guard_level.is_patron or lifetime_gift_cny > 0
+    medal = viewer.medal
+    high_local_medal = medal is not None and medal.level >= 5 and medal.is_this_room(room_id)
+    return viewer.guard_level.is_patron or high_local_medal

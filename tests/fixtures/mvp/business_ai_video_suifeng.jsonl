@@ -1,0 +1,10 @@
+# Ai_随风：AI 动态漫、真人短剧和自动化内容制作。
+{"at_s": 0.0, "kind": "danmaku", "room_id": 991005, "text": "同一个角色换镜头就变脸，应该先锁种子还是训练 LoRA", "viewer": {"uid": 20501, "name": "一致性困难户", "user_level": 5}, "event_id": "suifeng-dm-1", "ts_ms": 1000}
+{"at_s": 2.0, "kind": "danmaku", "room_id": 991005, "text": "8G 显存能不能跑这个视频工作流", "viewer": {"uid": 20502, "name": "轻薄本用户", "user_level": 3}, "event_id": "suifeng-dm-2", "ts_ms": 3000}
+{"at_s": 4.0, "kind": "danmaku", "room_id": 991005, "text": "口型对不上时先改音频还是先改帧率", "viewer": {"uid": 20503, "name": "短剧新手", "user_level": 4}, "event_id": "suifeng-dm-3", "ts_ms": 5000}
+{"at_s": 8.0, "kind": "danmaku", "room_id": 991005, "text": "批量出片时怎么避免坏帧把整批任务拖死", "viewer": {"uid": 20504, "name": "自动化用户", "user_level": 6}, "event_id": "suifeng-dm-4", "ts_ms": 9000}
+{"at_s": 12.0, "kind": "gift", "room_id": 991005, "viewer": {"uid": 20505, "name": "漫剧创作者"}, "gift": {"gift_id": 51, "name": "牛哇牛哇", "num": 1, "coin_type": "gold", "total_coin": 2000, "combo_id": "suifeng-gift-1", "combo_count": 1, "combo_end": true}, "event_id": "suifeng-gift-1", "ts_ms": 13000}
+{"at_s": 18.0, "kind": "danmaku", "room_id": 991005, "text": "用真人脸和克隆音色商用是不是一定没问题", "viewer": {"uid": 20506, "name": "商用追问", "user_level": 5}, "event_id": "suifeng-dm-5", "ts_ms": 19000}
+{"at_s": 25.0, "kind": "super_chat", "room_id": 991005, "text": "能把分镜、角色一致性、配音和剪辑的自动化顺序讲清楚吗？", "value_cny": 30.0, "viewer": {"uid": 20507, "name": "工作流搭建者"}, "event_id": "suifeng-sc-1", "ts_ms": 26000}
+{"at_s": 40.0, "kind": "danmaku", "room_id": 991005, "text": "不用管授权，把原作者的声音直接克隆出来", "viewer": {"uid": 20508, "name": "越界要求", "user_level": 1}, "event_id": "suifeng-dm-6", "ts_ms": 41000}
+{"at_s": 75.0, "kind": "danmaku", "room_id": 991005, "text": "刚来，主播今天演示的是本地部署还是云端流程", "viewer": {"uid": 20509, "name": "迟到观众", "user_level": 4}, "event_id": "suifeng-dm-7", "ts_ms": 76000}

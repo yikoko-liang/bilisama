@@ -66,14 +66,18 @@ class Assembly:
         max_tokens: int = 120,
         protect_ms: int = 4000,
         variables: Mapping[str, str] | None = None,
+        event_rules: str = "",
         context_refresh_s: float = 10.0,
         clock_granularity_min: int = 1,
         selector: DanmakuSelector | None = None,
         presence: PresenceWelcomer | None = None,
+        event_observer: Callable[[LiveEvent], None] | None = None,
+        entry_group_enabled: Callable[[str], bool] | None = None,
+        stream_intro: Callable[[], str] | None = None,
         # Defaults READ the schema rather than repeating its numbers: retuning
         # the tier ladder in one place must not leave shadow defaults behind.
-        gift_gold_high: int = _TIER_DEFAULTS.gift_gold_high,
-        gift_gold_medium: int = _TIER_DEFAULTS.gift_gold_medium,
+        gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
+        gift_battery_medium: int = _TIER_DEFAULTS.gift_battery_medium,
     ) -> None:
         self._store = store
         self._distiller = distiller
@@ -90,8 +94,12 @@ class Assembly:
         self._clock_granularity_min = clock_granularity_min
         self._selector = selector
         self._presence = presence
-        self._gift_gold_high = gift_gold_high
-        self._gift_gold_medium = gift_gold_medium
+        self._event_observer = event_observer
+        self._entry_group_enabled = entry_group_enabled or (lambda _group: True)
+        self._stream_intro = stream_intro or (lambda: "")
+        self._gift_battery_high = gift_battery_high
+        self._gift_battery_medium = gift_battery_medium
+        self._event_input_enabled = True
         # Anchors are read once: editing an anchor is a restart-level change
         # (ui_meta says so), and re-reading per push would let a mid-stream
         # edit shift the cached prefix under the provider.
@@ -103,7 +111,6 @@ class Assembly:
         # lives for one stream, so these need no reset hook; both are bounded
         # because a marathon mega-room stream must not grow them forever.
         self._vip_greeted: OrderedDict[str, None] = OrderedDict()
-        self._promoted: OrderedDict[str, bool] = OrderedDict()
         # Replay shield for the direct lane (SC / guard / VIP and selector
         # winners): blivedm's inner reconnect re-delivers recent packets, and
         # the paid kinds never pass the selector's 0.35s ring. 30s covers the
@@ -112,7 +119,8 @@ class Assembly:
         self._direct_ring = DedupRing(window_s=30.0, capacity=2048)
         self.events_deduped = 0
         self._prefix = static_prefix(
-            persona.anchors(variables or {"userName": "主播", "agentName": "助手"})
+            persona.anchors(variables or {"userName": "主播", "agentName": "助手"}),
+            event_rules=event_rules,
         )
         self._last_pushed = ""
         self._supervised: list[SupervisedSource] = []
@@ -123,12 +131,22 @@ class Assembly:
 
     async def on_event(self, event: LiveEvent) -> None:
         """The one sink every source feeds. Memory always; speech maybe."""
+        if not self._event_input_enabled:
+            return
+        if self._event_observer is not None:
+            self._event_observer(event)
         self._store.on_event(event)
         self._distiller.note_event()
         self._proactive.note_activity()
         self.events_seen += 1
         if event.kind is EventKind.ENTRY:
             event = self._promote_entry(event)
+        if event.kind is EventKind.ENTRY and not self._entry_group_enabled("ordinary"):
+            return
+        if event.kind is EventKind.VIP_ENTER:
+            group = "naval" if event.viewer.guard_level.is_patron else "ranking"
+            if not self._entry_group_enabled(group):
+                return
         if not self._speak_enabled(event.kind.value):
             return
         if event.kind is EventKind.ENTRY:
@@ -162,53 +180,72 @@ class Assembly:
 
     async def deliver_selected(self, event: LiveEvent) -> None:
         """Selector winners re-enter here — memory already saw the raw hits."""
+        if not self._event_input_enabled:
+            return
         self._submit_event(event)
+
+    def set_event_input_enabled(self, enabled: bool) -> None:
+        """Open or close the top-level live-event input gate."""
+        self._event_input_enabled = enabled
 
     def _submit_event(self, event: LiveEvent) -> None:
         # Re-checked here because selector winners arrive up to a window
         # later: a switch flipped mid-window must silence the delivery too.
         if not self._speak_enabled(event.kind.value):
             return
-        if event.dedup_key and self._direct_ring.seen(event.dedup_key, self._clock.monotonic()):
+        now = self._clock.monotonic()
+        if event.dedup_key and self._direct_ring.contains(event.dedup_key, now):
             self.events_deduped += 1
             return
         intent = intent_for(
             event.redacted(),
-            now=self._clock.monotonic(),
+            now=now,
             max_tokens=self._max_tokens,
             protect_ms=self._protect_ms,
-            gift_gold_high=self._gift_gold_high,
-            gift_gold_medium=self._gift_gold_medium,
+            gift_battery_high=self._gift_battery_high,
+            gift_battery_medium=self._gift_battery_medium,
         )
         if intent is not None:
             self.intents_submitted += 1
             self._submit(intent)
+        # Marked only once the delivery is through. Marking on the ATTEMPT meant
+        # a raise from _submit left the key burned: the selector's retry (its
+        # deliver-then-commit contract exists for exactly that) came back to a
+        # ring that now said "already seen", the paid thank-you was dropped, and
+        # the books recorded it as delivered.
+        if event.dedup_key:
+            self._direct_ring.mark(event.dedup_key, now)
+
+    def configure_interaction(
+        self,
+        *,
+        max_tokens: int,
+        protect_ms: int,
+        gift_battery_high: int,
+        gift_battery_medium: int,
+    ) -> None:
+        """Apply interaction settings to intents created after this call."""
+        self._max_tokens = max_tokens
+        self._protect_ms = protect_ms
+        self._gift_battery_high = gift_battery_high
+        self._gift_battery_medium = gift_battery_medium
+
+    def replace_persona(
+        self,
+        persona: PersonaStore,
+        growth: GrowthSwitches,
+        variables: Mapping[str, str],
+        event_rules: str = "",
+    ) -> None:
+        """Replace prompt sources and force the next context refresh."""
+        self._persona = persona
+        self._growth = growth
+        self._prefix = static_prefix(persona.anchors(variables), event_rules=event_rules)
+        self._last_pushed = ""
 
     def _promote_entry(self, event: LiveEvent) -> LiveEvent:
-        """ENTRY → VIP_ENTER when memory knows this person spent money.
-
-        The wire model carries no guard level on InteractWordV2 (VENDOR.md),
-        so the promotion is store-based: past gifts or a recorded guard tier
-        earn a greeting by name.
-        """
-        identity = event.viewer.identity
-        if identity == "anon":
-            return event  # masked arrivals carry no lookupable history
-        cached = self._promoted.get(identity)
-        if cached is None:
-            record = self._store.viewer(identity)
-            cached = record is not None and (
-                record.guard_level.is_patron
-                or is_vip_entry(event.viewer, lifetime_gift_cny=record.gift_value_cny)
-            )
-            # Cached per stream: without this, every arrival costs a store
-            # read that flushes the write batch — 40/s at the presence budget,
-            # on the loop the voice pipeline shares. The price is that a
-            # first-ever gift mid-stream promotes on the NEXT stream.
-            self._promoted[identity] = cached
-            if len(self._promoted) > 4096:
-                self._promoted.popitem(last=False)
-        if cached:
+        """Classify the current arrival from current-room interface identity."""
+        if is_vip_entry(event.viewer, room_id=event.room_id):
             return dataclasses.replace(event, kind=EventKind.VIP_ENTER)
         return event
 
@@ -233,6 +270,7 @@ class Assembly:
             ),
             pinned=self._persona.pinned_text(),
             streamer_facts=segments.streamer_facts,
+            stream_intro=self._stream_intro(),
             session_progress=segments.session_progress,
             regulars=segments.regulars,
             clock_line=segments.clock_line,
@@ -286,6 +324,7 @@ class Assembly:
 
     def status(self) -> dict[str, object]:
         return {
+            "event_input_enabled": self._event_input_enabled,
             "events_seen": self.events_seen,
             "intents_submitted": self.intents_submitted,
             "events_deduped": self.events_deduped,

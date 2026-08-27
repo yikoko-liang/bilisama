@@ -31,9 +31,11 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src" / "bilisama"
 
-# §10.6 names these four. They are src/bilisama/tools, not the repo-root tools/ —
-# that one holds the speech-to-speech shim, whose whole job is to speak protocol.
-GUARDED = ("director", "persona", "memory", "tools")
+# §10.6 names the first four. They are src/bilisama/tools, not the repo-root
+# tools/ — that one holds the speech-to-speech shim, whose whole job is to speak
+# protocol. ui joined with the desktop-pet preview (§15.12): it talks its own
+# vocabulary (ui/events.py) and the normalised link events, never the wire.
+GUARDED = ("director", "persona", "memory", "tools", "ui")
 
 # The adapter layer. §3.7: provider differences live in Capabilities and in one
 # providers/<name>.py, nowhere else.

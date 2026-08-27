@@ -56,6 +56,8 @@ class SkipReason(StrEnum):
     COOLDOWN = "gate.cooldown"
     PREEMPTED = "scheduler.preempted"
     RESULT_EXPIRED = "background.result_expired"
+    LINK_DOWN = "link.down"
+    """Nothing could be sent: the speech link was down when this came up."""
     PANIC_MUTE = "policy.panic_mute"
     OUTPUT_BLOCKED = "safety.output_blocked"
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat

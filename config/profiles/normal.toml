@@ -2,3 +2,30 @@
 
 [interaction]
 chattiness = "medium"
+
+reply_length = "low"
+[audio]
+output_enabled = true
+
+input_enabled = true
+[persona]
+profile = "modified"
+streamer_name = ""
+
+[room]
+room_id = 0
+stream_intro = ""
+
+[interaction.danmaku]
+window_s = 5
+
+[interaction.entry_welcome]
+ordinary = true
+
+[interaction.speak]
+gift = true
+entry = true
+danmaku = true
+vip_enter = true
+super_chat = true
+guard_buy = true

@@ -1,4 +1,4 @@
-# UPSTREAM: xfgryujk/blivedm @ 0da0c10fc50ed0ccd3e68c65f6a503cf3ca4198b (dev branch, vendored 2026-08-13, unmodified)
+# UPSTREAM: xfgryujk/blivedm @ 0da0c10fc50ed0ccd3e68c65f6a503cf3ca4198b (dev branch, vendored 2026-08-13; local INTERACT_WORD_V2 identity fields)
 # -*- coding: utf-8 -*-
 import dataclasses
 import enum
@@ -31,6 +31,15 @@ class InteractWordV2UserInfo(pb_msg.BaseMessage):
 
 
 @dataclasses.dataclass
+class InteractWordV2FansMedalInfo(pb_msg.BaseMessage):
+    target_id: Annotated[int, pb_anno.Field(1)] = 0
+    medal_level: Annotated[int, pb_anno.Field(2)] = 0
+    medal_name: Annotated[str, pb_anno.Field(3)] = ''
+    guard_level: Annotated[int, pb_anno.Field(9)] = 0
+    anchor_roomid: Annotated[int, pb_anno.Field(12)] = 0
+
+
+@dataclasses.dataclass
 class InteractWordV2(pb_msg.BaseMessage):
     uid: Annotated[int, pb_anno.Field(1)] = 0
     uname: Annotated[str, pb_anno.Field(2)] = ''
@@ -38,6 +47,7 @@ class InteractWordV2(pb_msg.BaseMessage):
     # msg_type: Annotated[InteractWordV2MsgType, pb_anno.Field(5)] = InteractWordV2MsgType.Unknown
     msg_type: Annotated[int, pb_anno.Field(5)] = 0
     timestamp: Annotated[int, pb_anno.Field(7)] = 0
+    fans_medal: Annotated[InteractWordV2FansMedalInfo, pb_anno.Field(9)] = dataclasses.field(default_factory=InteractWordV2FansMedalInfo)
     uinfo: Annotated[InteractWordV2UserInfo, pb_anno.Field(22)] = dataclasses.field(default_factory=InteractWordV2UserInfo)
 
 

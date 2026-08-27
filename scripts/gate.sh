@@ -69,6 +69,8 @@ tmp = Path(os.environ["BILISAMA_GATE_WORK"]) / "profiles-check"
 (tmp / "profiles").mkdir(parents=True, exist_ok=True)
 for f in Path("config/profiles").glob("*.toml"):
     shutil.copy(f, tmp / "profiles" / f.name)
+if Path("config/safety").is_dir():
+    shutil.copytree("config/safety", tmp / "safety")
 base = Path("config/bilisama.toml").read_text(encoding="utf-8")
 
 expected = {"debug": "debug", "normal": "info", "hype": "info"}
@@ -112,8 +114,49 @@ else
   printf '  要跑：scripts/smoke_provider_b.sh install\n'
 fi
 
-if [ "$integration_ran" = yes ]; then
-  printf '\033[32m全部通过（含集成层）\033[0m\n'
+# The browser tier: real chromium driving the real pet page (tests/ui). Same
+# contract as the s2s tier above — needs a one-time browser download, so it
+# cannot run unconditionally, and a skip is said out loud instead of passing
+# silently. The manual remainder lives in CONTRIBUTING「界面改动的人工验收」.
+ui_ran=no
+# Probe the BROWSER, not just the pip package: with playwright installed but
+# chromium missing, every test skips itself, pytest exits 0, and keying on the
+# import alone would let the final line claim a tier that ran nothing — the
+# quiet pass this tier exists to prevent. Same shape as the s2s check above,
+# which keys on the installed artifact.
+if $PY - <<'PROBE' 2>/dev/null
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+try:
+    with sync_playwright() as play:
+        # Raises (or points at nothing) when `playwright install` never ran.
+        found = Path(play.chromium.executable_path).exists()
+except Exception:
+    found = False
+raise SystemExit(0 if found else 1)
+PROBE
+then
+  step "界面测试（浏览器驱动）"
+  $PY -m pytest tests/ui -m ui_browser -q --no-header
+  ui_ran=yes
+elif [ "${BILISAMA_GATE_REQUIRE_UI:-0}" != 0 ]; then
+  printf '\033[31m✗ 界面测试跑不了：playwright 或 chromium 没装\033[0m\n' >&2
+  printf '  这台机器要求必须跑。先装：uv pip install playwright && %s -m playwright install chromium\n' "$PY" >&2
+  exit 1
 else
-  printf '\033[32m单元层全部通过\033[0m\033[33m，集成层没跑（见上）\033[0m\n'
+  printf '\033[33m▸ 界面测试：跳过 —— playwright 或 chromium 没装\033[0m\n'
+  printf '  这一层开真浏览器验桌宠页面（气泡、面板、降级、暗色），本机这次没验过。\n'
+  printf '  要跑：uv pip install playwright && %s -m playwright install chromium\n' "$PY"
+fi
+
+if [ "$integration_ran" = yes ] && [ "$ui_ran" = yes ]; then
+  printf '\033[32m全部通过（含集成层与界面层）\033[0m\n'
+elif [ "$integration_ran" = yes ]; then
+  printf '\033[32m通过\033[0m\033[33m，界面层没跑（见上）\033[0m\n'
+elif [ "$ui_ran" = yes ]; then
+  printf '\033[32m通过\033[0m\033[33m，集成层没跑（见上）\033[0m\n'
+else
+  printf '\033[32m单元层全部通过\033[0m\033[33m，集成层与界面层没跑（见上）\033[0m\n'
 fi

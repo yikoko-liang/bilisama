@@ -21,7 +21,7 @@ not have to track it.
 from __future__ import annotations
 
 from bilisama.config._ui import Audience, Reload
-from bilisama.config.derive import DerivedThresholds, derive
+from bilisama.config.derive import DerivedThresholds, derive, effective_thresholds
 from bilisama.config.enums import Chattiness, ProviderName
 from bilisama.config.loader import load
 from bilisama.config.schema import (
@@ -73,5 +73,6 @@ __all__ = [
     "TurnConfig",
     "check",
     "derive",
+    "effective_thresholds",
     "load",
 ]

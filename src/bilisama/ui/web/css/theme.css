@@ -1,0 +1,54 @@
+/* Light theme. Every color the page uses is named here; theme-dark.css
+   overrides the same names and nothing else.
+
+   Chrome palette follows Claude Code (user decision 2026-08-14): warm paper
+   page, warm-black ink, crail/coral as THE interactive accent. Bili pink
+   stays the pet's emotion color — coral is the tool, pink is her. */
+
+:root {
+  color-scheme: light;
+
+  --bg: transparent; /* the shell window is transparent; browsers paint --page */
+  --page: #faf9f5;
+  --panel: #ffffff;
+  --panel-edge: rgb(0 0 0 / 0.08);
+  --ink: #3d3d3a;
+  --ink-dim: #73726c;
+  --ink-faint: #c9c6bc;
+  --accent: #c96442;
+  /* Solid button fills carrying white text; darker than the plain accents so
+     the text clears WCAG contrast in both themes. */
+  --accent-strong: #a84b2f;
+  --err-strong: #b03a29;
+
+  /* Depth belongs to the theme: dark mode needs a heavier shadow, so the
+     value lives here, not in tokens.css. */
+  --shadow-1: 0 2px 10px rgb(0 0 0 / 0.1), 0 8px 32px rgb(0 0 0 / 0.08);
+
+  /* The robot */
+  --pet-shell: #f7f4ec;
+  --pet-shell-deep: #e3ded2;
+  --pet-screen: #23272d;
+  --pet-glow: #5fd6c4; /* idle/speaking teal */
+  --pet-glow-listen: #7cc7ff;
+  --pet-glow-think: #c5a8ff;
+  --pet-blush: #f5b8a9;
+
+  /* Semantic colors, one per event family (section 6.6). --c-reply tracks
+     the accent: her words carry the interactive color. */
+  --c-sc: #d99a1f;
+  --c-gift: #d9679a;
+  --c-danmaku: #7a90a8;
+  --c-reply: #c96442;
+  --c-ok: #4caf7d;
+  --c-warn: #d9903f;
+  --c-err: #d95f4d;
+
+  --scrim: rgb(20 20 18 / 0.32);
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+}

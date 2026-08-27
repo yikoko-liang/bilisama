@@ -13,6 +13,7 @@ from bilisama.ingest.events import (
     Gift,
     GuardLevel,
     LiveEvent,
+    Medal,
     Viewer,
     cny_from_gold,
     is_vip_entry,
@@ -104,6 +105,29 @@ def test_dedup_key_falls_back_without_event_id() -> None:
     assert a.dedup_key != c.dedup_key
 
 
+def test_dedup_key_separates_idless_gifts_sent_in_the_same_second() -> None:
+    """A gift's text is always empty, so identity plus a one-second bucket made
+    a whole blind-box batch one key — SEND_GIFT_V2 can arrive with neither tid
+    nor rnd — and every gift after the first was dropped as a duplicate before
+    the aggregator saw it. Paid events must not dedup on a timing coincidence."""
+    v = Viewer(uid=7)
+
+    def gift_key(gift_id: int, num: int, value: float) -> str:
+        return LiveEvent(
+            kind=EventKind.GIFT,
+            viewer=v,
+            gift=Gift(gift_id=gift_id, name="小心心", num=num),
+            value_cny=value,
+            ts_ms=1500,
+        ).dedup_key
+
+    same = gift_key(1, 1, 0.1)
+    assert gift_key(1, 1, 0.1) == same, "同一份礼物重放仍要被去重"
+    assert gift_key(2, 1, 0.1) != same, "不同礼物"
+    assert gift_key(1, 5, 0.5) != same, "同礼物不同数量"
+    assert gift_key(1, 1, 30.0) != same, "同礼物不同金额"
+
+
 def _danmaku_key(*, text: str = "666", ts_ms: int = 1000) -> str:
     """dedup_key for one viewer's danmaku, so only the varied part can move it."""
     return LiveEvent(kind=EventKind.DANMAKU, viewer=Viewer(uid=7), text=text, ts_ms=ts_ms).dedup_key
@@ -164,9 +188,21 @@ def test_guard_makes_a_vip_entry() -> None:
     assert not is_vip_entry(Viewer(uid=1))
 
 
-def test_past_spending_makes_a_vip_entry() -> None:
-    """Past spenders deserve a greeting too, not just current members."""
-    assert is_vip_entry(Viewer(uid=1), lifetime_gift_cny=30.0)
+def test_current_room_medal_level_five_makes_a_vip_entry() -> None:
+    viewer = Viewer(uid=1, medal=Medal(name="米娅", level=5, anchor_room_id=777))
+    assert is_vip_entry(viewer, room_id=777)
+
+
+def test_other_room_or_low_level_medal_does_not_make_a_vip_entry() -> None:
+    other_room = Viewer(uid=1, medal=Medal(name="别家", level=21, anchor_room_id=888))
+    low_level = Viewer(uid=2, medal=Medal(name="米娅", level=4, anchor_room_id=777))
+    assert not is_vip_entry(other_room, room_id=777)
+    assert not is_vip_entry(low_level, room_id=777)
+
+
+def test_gift_total_battery_is_unit_price_times_quantity() -> None:
+    gift = Gift(name="小花花", num=120, unit_battery=1)
+    assert gift.total_battery == 120
 
 
 def test_guard_level_from_wire() -> None:

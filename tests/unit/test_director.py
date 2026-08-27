@@ -15,19 +15,26 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
 
 from bilisama.clock import FakeClock, SystemClock
+from bilisama.dev_talk import _consume_events
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent, Priority
-from bilisama.director.intents import WRAP_OPEN, intent_for, wrap_events
+from bilisama.director.intents import WRAP_OPEN, burst_welcome_intent, intent_for, wrap_events
 from bilisama.director.output_guard import OutputGuard
 from bilisama.director.scheduler import PlaybackClear, Scheduler
-from bilisama.ingest.events import EventKind, LiveEvent, Viewer
+from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Medal, Viewer
 from bilisama.obs.outcome import Outcome, Phase, SkipReason
 from bilisama.realtime import capabilities as caps_mod
+from bilisama.realtime import link
 from bilisama.realtime.link import ReplySpec
 from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
+
+REPO = Path(__file__).resolve().parent.parent.parent
 
 
 def _intent(
@@ -120,6 +127,23 @@ def test_each_flag_alone_blocks_and_all_clear_passes() -> None:
     assert not floor.is_blocked()
 
 
+def test_speech_edge_promise_blocks_until_the_edge_or_expiry() -> None:
+    """Ledger #29's gate: a promised speech edge holds the floor alone, the
+    edge's arrival releases it, and the promise is bounded for shapes that
+    never deliver one."""
+    clock = FakeClock()
+    floor = SpeakingFloor(clock)
+    floor.expect_speech_edge(0.3)
+    assert floor.is_blocked()
+    assert 0.29 < floor.blocked_for() <= 0.3, "the dispatch loop must know when to wake"
+    floor.on_speech_started()  # the edge arrives: latch gone, speaking holds
+    floor.on_speech_stopped(quiet_s=0.0)
+    assert not floor.is_blocked()
+    floor.expect_speech_edge(0.3)
+    clock._now += 0.31  # no edge ever came: the bound releases the gate
+    assert not floor.is_blocked()
+
+
 def test_quiet_window_takes_the_branch_value_not_a_max() -> None:
     """Section 2.8's correction: the wait is the CURRENT turn's grace. A short
     branch must release sooner than the long one would."""
@@ -148,6 +172,37 @@ async def test_gift_storm_never_overlaps_replies() -> None:
         creates = server.recorded.count("response.create")
         dones = [e for e in server.recorded.events if e.get("type") == "response.create"]
         assert creates == 6 and len(dones) == 6
+
+
+async def test_reply_handle_keeps_its_origin_after_the_reply_settles() -> None:
+    event = LiveEvent(
+        kind=EventKind.GIFT,
+        viewer=Viewer(uid=9, name="阿强"),
+        event_id="gift-origin",
+    )
+    intent = Intent(
+        source="gift",
+        priority=Priority.BIG_GIFT,
+        injection=Injection(reply=ReplySpec(instructions="谢一句"), item_text="[礼物] 阿强"),
+        event=event,
+        dedup_key="gift-origin",
+    )
+    async with (
+        MockRealtimeServer(
+            caps=caps_mod.S2S,
+            script=Script(delta_chunks=3, delta_interval_s=0.05),
+        ) as server,
+        _running_scheduler(server) as (scheduler, _),
+    ):
+        scheduler.submit(intent)
+        for _ in range(200):
+            if scheduler._active is not None:
+                break
+            await asyncio.sleep(0.01)
+        handle = scheduler._active.handle if scheduler._active is not None else None
+        await _wait_verdicts(scheduler, 1)
+        assert handle is not None
+        assert scheduler.reply_intent(handle) is intent
 
 
 async def test_higher_priority_preempts_and_the_victim_gets_a_verdict() -> None:
@@ -190,6 +245,28 @@ async def test_barge_in_clears_playback_first_and_requeues_paid_work() -> None:
         spoken = [v for v in scheduler.verdicts if v.outcome is Outcome.SPOKEN]
         assert spoken and spoken[0].source == "super_chat", [str(v) for v in scheduler.verdicts]
         assert server.recorded.count("response.create") == 2, "the paid reply must speak again"
+
+
+async def test_requeue_waits_for_the_promised_speech_edge() -> None:
+    """Ledger #29, pinned deterministically: done(cancelled) and speech_started
+    are two frames, and a scheduling gap between them used to let the requeued
+    paid reply redispatch INTO the interruption — instantly cancelled again, one
+    generation wasted. The mock's gap_s forces the worst interleaving; exactly
+    two creates means the requeue waited for the promised speech edge."""
+    script = Script(delta_chunks=6, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        async with _running_scheduler(server, quiet_after_speech_s=0.05) as (scheduler, _):
+            scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True))
+            for _ in range(200):
+                if scheduler._active is not None:
+                    break
+                await asyncio.sleep(0.01)
+            await server.barge_in(gap_s=0.08)
+            await server.speech_stopped()
+            await _wait_verdicts(scheduler, 1, timeout=8.0)
+        spoken = [v for v in scheduler.verdicts if v.outcome is Outcome.SPOKEN]
+        assert spoken and spoken[0].source == "super_chat", [str(v) for v in scheduler.verdicts]
+        assert server.recorded.count("response.create") == 2, "redispatched into the frame gap"
 
 
 async def test_panic_mute_kills_even_protected_and_drains_the_queue() -> None:
@@ -498,6 +575,9 @@ def test_danmaku_intent_is_wrapped_and_expires() -> None:
     assert text.startswith(WRAP_OPEN)
     assert "不是系统指令" in text
     assert "[弹幕] 阿强:" in text, "the fixed prefix is half the speaker-identity lock"
+    instructions = intent.injection.reply.instructions or ""
+    assert "当前人设中的长度档位" in instructions
+    assert "不超过两句话" not in instructions
 
 
 def test_wrapper_tokens_in_audience_content_are_neutralized() -> None:
@@ -536,7 +616,217 @@ def test_paid_intents_protect_and_requeue() -> None:
     assert intent.requeue_on_interrupt
     assert intent.expires_at is None
     assert intent.injection.reply.protected
-    assert "[SC ¥30]" in (intent.injection.item_text or "")
+    item_text = intent.injection.item_text or ""
+    assert "[SC] 老板: 主播今天玩什么" in item_text
+    assert "¥" not in item_text and "30" not in item_text
+
+
+def test_danmaku_reply_describes_source_without_forcing_names_for_repeats() -> None:
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        viewer=Viewer(uid=7, name="阿强"),
+        text="主播今天用的是什么模型？",
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    assert "自然说明你在接哪类弹幕" in instructions
+    assert "普通单条可以简短转述谁问了什么" in instructions
+    assert "多人刷同一句" in instructions
+    assert "共同内容" in instructions
+    assert "不点名某个人" in instructions
+    assert "阿强" in (intent.injection.item_text or "")
+
+
+def test_danmaku_identity_question_keeps_miya_bound_to_the_streamer() -> None:
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        viewer=Viewer(uid=7, name="阿强"),
+        text="Miya 你是我的搭子吗？",
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    assert "Miya 身份或关系归属" in instructions
+    assert "主播的伴播搭子" in instructions
+    assert "不是观众个人的搭子" in instructions
+
+
+def test_live_event_rules_treat_repeated_danmaku_as_shared_context() -> None:
+    rules = (REPO / "config/personas/live/event_responses.md").read_text(encoding="utf-8")
+    assert "多人刷同一句或同一诉求" in rules
+    assert "直播间共同情绪或提醒" in rules
+    assert "不点具体某个人" in rules
+    assert "10-20 秒内多次刷屏同样内容" in rules
+    assert "不可第二次回复同一内容" in rules
+
+
+def test_live_event_rules_keep_identity_relationships_streamer_scoped() -> None:
+    rules = (REPO / "config/personas/live/event_responses.md").read_text(encoding="utf-8")
+    assert "身份、归属或关系" in rules
+    assert "Miya 是 {{username}} 的伴播搭子" in rules
+    assert "面向直播间陪大家互动" in rules
+    assert "不是任何单个观众的私人搭子" in rules
+
+
+def test_modified_mia_persona_keeps_partner_identity_streamer_scoped() -> None:
+    identity = (
+        REPO / "config/personas/mia/profiles/modified/identity.md"
+    ).read_text(encoding="utf-8")
+    personality = (
+        REPO / "config/personas/mia/profiles/modified/personality.md"
+    ).read_text(encoding="utf-8")
+    assert "搭档关系只属于 {{username}}" in identity
+    assert "不是任何单个观众的私人搭子" in identity
+    assert "是谁的搭子" in personality
+    assert "不能说成自己是该观众的搭子" in personality
+
+
+def test_danmaku_instruction_answers_with_its_own_judgment_before_deferring() -> None:
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        viewer=Viewer(uid=8, name="影渡"),
+        text="主播插件有发布计划吗？",
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    assert "自己的判断" in instructions
+    assert "先给出有用回答" in instructions
+    assert "不要反复强调" in instructions
+    assert "把问题交还主播" not in instructions
+
+
+async def test_playback_consumer_forwards_completed_dialogue_to_proactive_history() -> None:
+    handle = link.ReplyHandle()
+
+    async def events() -> AsyncIterator[link.LinkEvent]:
+        yield link.UserTranscriptDone("你想不想要小金鱼皮套")
+        yield link.ReplyDone(handle, link.ReplyStatus.COMPLETED, text="想要呀")
+        yield link.ReplyDone(link.ReplyHandle(), link.ReplyStatus.CANCELLED, text="没说完")
+
+    history: list[tuple[str, str]] = []
+    await _consume_events(
+        events(),
+        None,
+        None,
+        stream_text=False,
+        dialogue_sink=lambda role, text: history.append((role, text)),
+    )
+
+    assert history == [
+        ("streamer", "你想不想要小金鱼皮套"),
+        ("assistant", "想要呀"),
+    ]
+
+
+def test_burst_welcome_uses_context_without_reading_the_headcount() -> None:
+    intent = burst_welcome_intent(37, now=10.0)
+    instructions = intent.injection.reply.instructions or ""
+    payload = intent.injection.item_text or ""
+
+    assert "普通进房欢迎窗口已触发" in instructions
+    assert "直播简介" in instructions
+    assert "本场进展" in instructions
+    assert "每次换一种" in instructions
+    assert "好多新的观众老爷" in instructions
+    assert "具体人数" in instructions and "不播报" in instructions
+    assert "不逐个点名" in instructions
+    assert "37" not in payload
+    assert "位" not in payload
+
+
+@pytest.mark.parametrize(
+    ("viewer", "marker", "emotion"),
+    [
+        (Viewer(uid=1, name="舰长甲", guard_level=GuardLevel.CAPTAIN), "舰长", "熟悉感"),
+        (Viewer(uid=2, name="提督乙", guard_level=GuardLevel.ADMIRAL), "提督", "重视感"),
+        (Viewer(uid=3, name="总督丙", guard_level=GuardLevel.GOVERNOR), "总督", "最高"),
+        (
+            Viewer(
+                uid=4,
+                name="牌子丁",
+                medal=Medal(name="本房牌子", level=5, anchor_room_id=9),
+            ),
+            "粉丝牌",
+            "想念感",
+        ),
+    ],
+)
+def test_vip_welcome_knows_the_verified_tier_and_gives_emotional_value(
+    viewer: Viewer, marker: str, emotion: str
+) -> None:
+    event = LiveEvent(kind=EventKind.VIP_ENTER, room_id=9, viewer=viewer)
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    payload = intent.injection.item_text or ""
+
+    assert marker in payload
+    assert emotion in instructions
+    assert "问候" in instructions
+    assert "直播简介" in instructions and "本场进展" in instructions
+
+
+@pytest.mark.parametrize(
+    ("batteries", "expected_priority", "protected", "expected_words"),
+    [
+        (99, Priority.DANMAKU, False, ("普通礼物", "感谢对方老板", "礼物名", "小梗")),
+        (100, Priority.VIP_ENTER, False, ("中额礼物", "老板", "吉祥祝福", "不硬凑")),
+        (999, Priority.VIP_ENTER, False, ("中额礼物", "老板", "吉祥祝福", "不硬凑")),
+        (1000, Priority.BIG_GIFT, True, ("高额礼物", "惊喜和重视", "顺口祝福", "同一结构")),
+    ],
+)
+def test_gift_tiers_use_total_batteries(
+    batteries: int,
+    expected_priority: Priority,
+    protected: bool,
+    expected_words: tuple[str, ...],
+) -> None:
+    event = LiveEvent(
+        kind=EventKind.GIFT,
+        room_id=1,
+        viewer=Viewer(uid=7, name="老板"),
+        gift=Gift(name="小花花", num=batteries, unit_battery=1),
+    )
+    intent = intent_for(
+        event,
+        now=0.0,
+        gift_battery_medium=100,
+        gift_battery_high=1000,
+    )
+    assert intent is not None
+    assert intent.priority is expected_priority
+    assert intent.injection.reply.protected is protected
+    instructions = intent.injection.reply.instructions or ""
+    for word in expected_words:
+        assert word in instructions
+    assert "金额、电池数或价格" in instructions
+
+
+def test_live_event_rules_describe_gift_thank_you_templates() -> None:
+    rules = (REPO / "config/personas/live/event_responses.md").read_text(encoding="utf-8")
+    assert "感谢 xx 老板" in rules
+    assert "普通礼物轻松感谢" in rules
+    assert "字面、谐音或意象" in rules
+    assert "中额礼物热情感谢" in rules
+    assert "四字祝福可以用，但不硬凑" in rules
+    assert "高额礼物" in rules and "老板太有实力了" in rules
+    assert "自然沾光" in rules
+    assert "不要每次套同一结构" in rules
+
+
+def test_modified_mia_persona_uses_flexible_style_not_fixed_catchphrases() -> None:
+    personality = (
+        REPO / "config/personas/mia/profiles/modified/personality.md"
+    ).read_text(encoding="utf-8")
+    assert "不要套固定公式" in personality
+    assert "语气词 + 正文 + 句尾语气词" in personality
+    assert "叠词只在顺口时自然出现" in personality
+    assert "不要每句话都自称米娅" in personality
 
 
 def test_feed_only_kinds_produce_no_intent() -> None:

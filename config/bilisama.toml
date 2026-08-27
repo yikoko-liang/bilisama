@@ -1,7 +1,7 @@
 # BiliSama 配置。这是唯一的真相源，密钥除外（密钥在系统钥匙串里）。
 #
 # 有几类值刻意不在这里：
-#   - 冷场阈值、弹幕窗口、打分门槛、冷却、回复长度 —— 由 chattiness 派生，
+#   - 冷场阈值、打分门槛、冷却 —— 由 chattiness 派生，
 #     跑 `bilisama config chattiness` 看三档分别是多少
 #   - 任何密钥 —— 只留一个引用名，值在钥匙串
 #
@@ -14,6 +14,7 @@ active_profile = "normal"
 room_id = 0
 platform = "bilibili"
 credential_ref = "env:BILI_SESSDATA"       # 登录态 cookie 的引用；没设这个环境变量就匿名连（观众全打码）
+stream_intro = ""                           # 本场直播在做什么；保存后立即参与进房欢迎
 
 [speech]
 provider = "s2s"                        # s2s | dashscope | openai_ga
@@ -50,6 +51,10 @@ smart_turn_cpu_count = 2
 endpoint = ""
 model = ""
 api_key_ref = "dashscope"
+# 留空的话服务端给 longanqian，实测基频 343Hz，比常见成年女声（180~260Hz）高一截，
+# 听着发尖。这里挑的 longanlingxin 是 242Hz。想换随时用 dev-talk 的 --voice 试听，
+# 名字写错服务端会把可用清单报回来。
+voice = "longanlingxin"
 
 [speech.side]                           # 主动话题、记忆蒸馏、事实抽取都用它，挑便宜的
 base_url = ""
@@ -69,6 +74,9 @@ input_device = "auto"
 output_device = "auto"
 output_route = "virtual"                # virtual 走虚拟声卡给 OBS；direct 必须戴耳机
 echo_guard = "duck"                     # 主播一开口先把 AI 音量压下去
+input_enabled = true
+output_enabled = true
+noise_sensitivity = 50                  # 0 更抗噪，100 更容易听见小声说话
 
 [safety]
 wordlist_path = "auto"
@@ -77,9 +85,10 @@ on_hit = "drop_sentence"
 
 [interaction]
 chattiness = "medium"
+reply_length = "low"
 sc_protect_ms = 4000
-gift_gold_high = 10000
-gift_gold_medium = 1000
+gift_battery_high = 1000
+gift_battery_medium = 100
 burst_uniques = 5
 burst_window_s = 45
 burst_cooldown_s = 90                   # 欢迎过一批后，多少秒内不再发第二次批量欢迎
@@ -98,8 +107,14 @@ share = false
 proactive = true
 background_result = false               # MVP 默认关
 
-[interaction.danmaku]                   # 弹幕挑选（L3）。窗口长度和打分门槛由话痨度派生，不在这里
+[interaction.danmaku]                   # 弹幕挑选（L3）。打分门槛由话痨度派生，窗口长度可独立调整
 per_uid_cooldown_s = 60                 # 回应过谁之后，多少秒内不再挑他的弹幕；他的话照常入库
+window_s = 20                           # 多久整理一次普通弹幕并挑一条回复
+
+[interaction.entry_welcome]
+ordinary = true
+naval = true
+ranking = true
 
 [interaction.proactive]                 # 主动话题（L1）。开口时机由冷场阈值（话痨度派生）决定
 max_per_hour = 12
@@ -114,8 +129,9 @@ clock_granularity_min = 5               # 推给模型的时间按几分钟取�
 
 [persona]
 id = "mia"
+profile = "modified"                   # Mia 的默认/改动人设，界面切换后立即生效
 data_dir = "auto"                       # auto = 用户数据目录/personas/<id>，四个人设文件的活副本在这
-streamer_name = "主播"                  # AI 怎么称呼你。填真名它就会叫你名字，比一口一个「主播」亲切
+streamer_name = ""                      # 每次启动输入框清空；留空时 prompt 内部仍称呼「主播」
 display_name = ""                       # 它自称什么。留空用上面的 id；想换个写法或起别名再填
 
 # 生长层三态：off 不长 | collect 只攒进文件、不进提示词 | on 攒并注入（§4.6）。
@@ -124,8 +140,13 @@ display_name = ""                       # 它自称什么。留空用上面的 i
 relationship = "off"
 voice = "off"
 
+# renderer 三选一：tofu 内置像素机器人「豆腐」（零素材）| sprite 精灵图皮肤包 | live2d 待接入（阶段 5）。
+# model_id 跟着 renderer 解释：tofu 不用填；sprite 填皮肤包目录名；live2d 填模型目录名。
+# 出厂默认 tofu：零素材、无版权包袱，跟代码层的默认一致。想用皮肤包就把 renderer 改成
+# sprite、model_id 填目录名（内部分支带了 kirby，约束见 src/bilisama/ui/web/skins/kirby/README.md）；
+# 只试一次不用改这里，跑 dev-talk 时加 --skin <名字>。皮肤缺失或损坏会自动退回豆腐。
 [avatar]
-renderer = "live2d"
+renderer = "tofu"
 model_id = ""
 expression_source = "tag"               # 只在我们自己做 TTS 时安全
 

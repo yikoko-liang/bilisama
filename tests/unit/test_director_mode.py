@@ -7,21 +7,64 @@ variables substitute, and each hanako port carries its own proactive prompt
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import io
+import socket
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
+from bilisama import dev_talk
 from bilisama.cli import main
-from bilisama.dev_talk import _Fanout, _parse_console_event
+from bilisama.config import load
+from bilisama.config.enums import ProviderName
+from bilisama.dev_talk import (
+    _as_live_mock_event,
+    _director_session_overrides,
+    _Fanout,
+    _parse_console_event,
+    _should_persist_panel_edit,
+)
 from bilisama.ingest.events import EventKind
 from bilisama.persona.loader import PersonaStore
 from bilisama.realtime import link
+from tests.fakes.mock_realtime import Fault, MockRealtimeServer, Script
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 GLOBAL_PROACTIVE = CONFIG_DIR / "prompts" / "proactive.md"
+
+
+def test_director_session_defaults_ignore_previous_room_and_audio_state(tmp_path: Path) -> None:
+    config = tmp_path / "bilisama.toml"
+    profile = tmp_path / "profiles" / "normal.toml"
+    profile.parent.mkdir()
+    config.write_text('active_profile = "normal"\n', encoding="utf-8")
+    profile.write_text(
+        "[audio]\ninput_enabled = false\noutput_enabled = false\n"
+        "[room]\nroom_id = 123456\n"
+        '[persona]\nstreamer_name = "上次的主播"\n',
+        encoding="utf-8",
+    )
+
+    settings = load(config, overrides=_director_session_overrides(), strict=False)
+
+    assert settings.audio.input_enabled is True
+    assert settings.audio.output_enabled is True
+    assert settings.room.room_id == 0
+    assert settings.persona.streamer_name == ""
+
+
+def test_session_only_panel_fields_are_not_written_back() -> None:
+    for path in (
+        "audio.input_enabled",
+        "audio.output_enabled",
+        "room.room_id",
+        "persona.streamer_name",
+    ):
+        assert not _should_persist_panel_edit(path)
+    assert _should_persist_panel_edit("interaction.reply_length")
 
 
 # ------------------------------------------------------------ ported personas
@@ -107,8 +150,17 @@ def test_console_super_chat_and_gift_carry_value() -> None:
     gift = _parse_console_event("/gift 老板 52", 2)
     assert gift is not None
     assert gift.kind is EventKind.GIFT
-    assert gift.value_cny == 52.0
-    assert gift.gift is not None and gift.gift.is_paid
+    assert gift.value_cny == 0.0
+    assert gift.gift is not None and gift.gift.total_battery == 52
+    assert gift.gift.is_paid
+
+
+def test_panel_mock_is_marked_as_a_live_room_event() -> None:
+    event = _parse_console_event("阿强:真实规则选我", 1)
+    assert event is not None and event.room_id == 0
+    mocked = _as_live_mock_event(event, 0)
+    assert mocked.room_id > 0
+    assert mocked.raw == {"manual_mock": True}
 
 
 @pytest.mark.parametrize("bad", ["", "/sc 阿强", "/gift 老板", "/sc 阿强 abc 话", "/unknown x"])
@@ -182,6 +234,77 @@ async def test_fanout_passthrough_reaches_the_inner_link() -> None:
     await fan.push_audio(b"\x00\x01")
     assert stub.pushed == [b"\x00\x01"]
     await fan.aclose()
+
+
+# ------------------------------------------------------------ connect failures
+
+
+def _talk_args(url: str) -> argparse.Namespace:
+    """The wire-mode argument set, as main()'s parser would build it."""
+    return argparse.Namespace(
+        provider="s2s",
+        url=url,
+        model="qwen-audio-3.0-realtime-flash",
+        wav=None,
+        mute_while_speaking=False,
+        input_device=None,
+        output_device=None,
+        director=False,
+        config=None,
+        persona=None,
+        show_context=False,
+        room=None,
+        plain_console=False,
+    )
+
+
+async def test_a_full_server_exits_with_advice_not_a_traceback() -> None:
+    """The reported failure (2026-08-14): a stale client held the single s2s
+    session slot, and dev-talk answered with a raw ConnectionError traceback.
+    The exit must say what is wrong and what to do next (CLAUDE.md 报错人话条款),
+    which pytest.raises(SystemExit) is the machine half of: SystemExit prints
+    its message without a traceback and exits non-zero.
+    """
+    async with MockRealtimeServer(script=Script(faults={Fault.SESSION_LIMIT})) as server:
+        with pytest.raises(SystemExit) as excinfo:
+            await dev_talk.run(_talk_args(server.url))
+        message = str(excinfo.value)
+        assert "会话槽" in message
+        assert "关掉其他 dev-talk" in message
+
+
+async def test_a_dead_port_exits_with_the_serve_recipe() -> None:
+    """Nothing listening at all — the other connect failure a dev box hits."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    with pytest.raises(SystemExit) as excinfo:
+        await dev_talk.run(_talk_args(f"ws://127.0.0.1:{port}/v1/realtime"))
+    message = str(excinfo.value)
+    assert "没有 s2s 服务" in message
+    assert "起 serve" in message
+
+
+def test_connect_failures_without_a_recipe_keep_endpoint_and_reason() -> None:
+    """Advice may compress, but not at the cost of the facts: whatever we
+    cannot diagnose still says where we dialed and what came back."""
+    message = dev_talk._connect_advice(
+        OSError("no route to host"), ProviderName.S2S, "ws://10.0.0.9:8765/v1/realtime?x=1"
+    )
+    assert "ws://10.0.0.9:8765/v1/realtime" in message
+    assert "no route to host" in message
+
+
+def test_the_serve_recipe_is_only_offered_for_the_local_provider() -> None:
+    """A refused DashScope connection is a network problem, not a missing
+    serve terminal — the s2s recipe there would send the user the wrong way."""
+    message = dev_talk._connect_advice(
+        ConnectionRefusedError(61, "Connection refused"),
+        ProviderName.DASHSCOPE,
+        "wss://dashscope.example/api-ws/v1/realtime?model=m",
+    )
+    assert "起 serve" not in message
+    assert "wss://dashscope.example/api-ws/v1/realtime" in message
 
 
 # ------------------------------------------------------------ persona list CLI

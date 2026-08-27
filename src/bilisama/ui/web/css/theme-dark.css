@@ -1,0 +1,38 @@
+/* Dark theme: the same names as theme.css, different values. Loaded with a
+   prefers-color-scheme media attribute, so it IS the dark mode switch.
+   Palette follows Claude Code's dark chrome: layered warm charcoal, cream
+   ink, coral accent at full brand strength (it reads better on dark). */
+
+:root {
+  color-scheme: dark;
+
+  --page: #1f1e1d;
+  --panel: #262624;
+  --panel-edge: rgb(255 255 255 / 0.09);
+  --ink: #f0eee6;
+  --ink-dim: #a3a094;
+  --ink-faint: #5a574e;
+  --accent: #d97757;
+  --accent-strong: #a84b2f;
+  --err-strong: #a13525;
+
+  --pet-shell: #33373d;
+  --pet-shell-deep: #24272c;
+  --pet-screen: #121417;
+  --pet-glow: #5fd6c4;
+  --pet-glow-listen: #7cc7ff;
+  --pet-glow-think: #c5a8ff;
+  --pet-blush: #b0766a;
+
+  --c-sc: #e6b04a;
+  --c-gift: #e07eae;
+  --c-danmaku: #8fa5bc;
+  --c-reply: #d97757;
+  --c-ok: #5cc08c;
+  --c-warn: #e0a35a;
+  --c-err: #e07463;
+
+  --scrim: rgb(0 0 0 / 0.5);
+
+  --shadow-1: 0 2px 10px rgb(0 0 0 / 0.35), 0 8px 32px rgb(0 0 0 / 0.30);
+}

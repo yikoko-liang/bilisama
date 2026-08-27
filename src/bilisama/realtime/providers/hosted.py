@@ -12,14 +12,15 @@ not pin the session to text.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
-from bilisama.clock import Clock
+from bilisama.clock import Clock, SystemClock
 from bilisama.config.enums import ProviderName
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
-from bilisama.realtime.providers import profile_for
+from bilisama.realtime.providers import compose_instructions, profile_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -41,7 +42,22 @@ class HostedLink:
         watchdog_s: float = 25.0,
         headers: dict[str, str] | None = None,
         turn: HostedTurnConfig | None = None,
+        voice: str = "",
+        auto_reconnect: bool = True,
+        reconnect_backoff_s: float = 1.0,
+        session_cap_min: int = 0,
+        rotate_margin_min: float = 3.0,
     ) -> None:
+        """Args:
+        voice: Which voice the provider speaks in. Empty leaves the choice to
+            the server, whose pick is not neutral — DashScope's is longanqian
+            at 343 Hz, high enough to read as shrill. Names are the
+            provider's; a wrong one draws a refusal listing the valid ones.
+        session_cap_min: How long this endpoint lets one connection live.
+            DashScope 120, OpenAI 60 (plan section 3.1); 0 disables rotation.
+            We rotate `rotate_margin_min` early so the swap happens on our
+            clock rather than mid-sentence on theirs.
+        """
         profile = profile_for(provider)
         self._client = RealtimeClient(
             url,
@@ -50,16 +66,58 @@ class HostedLink:
             clock=clock,
             watchdog_s=watchdog_s,
             headers=headers,
+            auto_reconnect=auto_reconnect,
+            reconnect_backoff_s=reconnect_backoff_s,
         )
         self._codec = profile.codec
         self._caps = profile.caps
         self._turn = turn
+        self._voice = voice
+        self._context = ""
+        self._clock: Clock = clock or SystemClock()
+        self._session_cap_s = max(0.0, (session_cap_min - rotate_margin_min) * 60.0)
+        self._rotation: asyncio.Task[None] | None = None
+        self._suspended = False
 
     async def connect(self) -> None:
+        """Open the socket, bootstrap the session, restore what we knew.
+
+        The bootstrap frame carries modalities and turn detection; the context
+        replay carries the persona. Both are per-connection state that a
+        reconnect starts without, and no layer above this one re-sends them:
+        Assembly pushes only on change (app.py refresh_context).
+        """
+        self._client.on_resume = self._resume_session
         await self._client.connect()
+        await self._resume_session()
+        self._arm_rotation()
+
+    def _arm_rotation(self) -> None:
+        """Restart the countdown. Every fresh socket gets a full lifetime."""
+        if self._session_cap_s <= 0:
+            return
+        if self._rotation is not None:
+            self._rotation.cancel()
+        self._rotation = asyncio.create_task(self._rotate_when_due(), name="hosted:rotate")
+
+    async def _rotate_when_due(self) -> None:
+        await self._clock.sleep(self._session_cap_s)
+        await self._client.rotate("session_cap")
+
+    async def _resume_session(self) -> None:
+        """Everything a fresh socket needs before it behaves like the old one.
+
+        Called on the first connect and again after every reconnect, which is
+        why it has to be idempotent: a session.update carrying the same values
+        twice is free, and losing either half is not.
+        """
         frame = self._bootstrap_frame()
         if frame is not None:
             await self._client.send_command(frame)
+        if self._context:
+            await self.set_context(self._context)
+        # A reconnect (ours or theirs) starts the clock over.
+        self._arm_rotation()
 
     def _bootstrap_frame(self) -> dict[str, Any] | None:
         """The session bootstrap a hosted endpoint needs before audio flows.
@@ -69,31 +127,74 @@ class HostedLink:
         (probed live 2026-08-10). Formats use the flat beta keys; the GA
         dialect nests them and runs server_vad by default, so a link built
         without turn config sends nothing at all.
+
+        The voice rides along here rather than in set_context, because it is
+        per-connection state like the rest of this frame: a rotated or
+        reconnected socket goes back to the server's default without it.
         """
-        if self._turn is None:
+        session: dict[str, Any] = {}
+        if self._turn is not None:
+            # Field set follows the type: threshold/silence_duration_ms belong
+            # to server_vad only — semantic_vad and smart_turn endpoints can
+            # reject them outright (C9), killing the session on frame one.
+            turn_detection: dict[str, Any] = {"type": self._turn.type}
+            if self._turn.type == "server_vad":
+                turn_detection["threshold"] = self._turn.threshold
+                turn_detection["silence_duration_ms"] = self._turn.silence_duration_ms
+            session[self._codec.modalities_key] = ["text", "audio"]
+            session["turn_detection"] = turn_detection
+            if not self._codec.nested_audio_format:
+                session["input_audio_format"] = "pcm16"
+                session["output_audio_format"] = "pcm16"
+        if self._voice:
+            session["voice"] = self._voice
+        if not session:
             return None
-        # Field set follows the type: threshold/silence_duration_ms belong to
-        # server_vad only — semantic_vad and smart_turn endpoints can reject
-        # them outright (C9), which would kill the session on frame one.
-        turn_detection: dict[str, Any] = {"type": self._turn.type}
-        if self._turn.type == "server_vad":
-            turn_detection["threshold"] = self._turn.threshold
-            turn_detection["silence_duration_ms"] = self._turn.silence_duration_ms
-        session: dict[str, Any] = {
-            self._codec.modalities_key: ["text", "audio"],
-            "turn_detection": turn_detection,
-        }
         if self._codec.needs_session_type:
             session["type"] = "realtime"
-        if not self._codec.nested_audio_format:
-            session["input_audio_format"] = "pcm16"
-            session["output_audio_format"] = "pcm16"
         return {"type": dia.ClientEvent.SESSION_UPDATE.value, "session": session}
 
     async def aclose(self) -> None:
+        if self._rotation is not None:
+            self._rotation.cancel()
         await self._client.aclose()
 
+    @property
+    def suspended(self) -> bool:
+        return self._suspended
+
+    async def suspend(self) -> None:
+        """Close the idle session and suppress reconnect until resume."""
+        if self._suspended:
+            return
+        self._suspended = True
+        if self._rotation is not None:
+            self._rotation.cancel()
+            self._rotation = None
+        await self._client.aclose()
+
+    async def resume(self) -> None:
+        """Restore bootstrap and context onto a new speech session."""
+        if not self._suspended:
+            return
+        await self.connect()
+        self._suspended = False
+
+    async def reconfigure_session(
+        self, *, voice: str | None = None, turn: HostedTurnConfig | None = None
+    ) -> None:
+        """Change first-frame-only settings by rotating the socket."""
+        if voice is not None:
+            self._voice = voice
+        if turn is not None:
+            self._turn = turn
+        await self._client.rotate("settings_changed")
+
     async def set_context(self, instructions: str) -> None:
+        # Kept locally too: per-response instructions REPLACE the session's on
+        # the wire (same protocol semantics as s2s), so request_reply
+        # recomposes persona + per-turn ask.
+        self._context = instructions
         await self._client.send_command(
             self._codec.session_patch(instructions=instructions, text_only=False)
         )
@@ -120,7 +221,7 @@ class HostedLink:
         frame = self._codec.response_create(
             out_of_band=self._caps.out_of_band_exempt_from_slot,
             text_only=False,
-            instructions=spec.instructions,
+            instructions=compose_instructions(self._context, spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
         return await self._client.request_reply(frame)

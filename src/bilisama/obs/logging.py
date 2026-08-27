@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Final, Literal, TextIO
@@ -189,6 +189,7 @@ def setup(
     level: Literal["debug", "info", "warning", "error"] = "info",
     log_viewer_content: bool = False,
     stream: TextIO | None = None,
+    extra_handlers: Sequence[logging.Handler] = (),
 ) -> None:
     """Configure the root logger. Call once at process start.
 
@@ -197,15 +198,25 @@ def setup(
         log_viewer_content: Whether to log danmaku bodies verbatim. Off by
             default — that text belongs to the audience.
         stream: Where lines go. Defaults to stderr.
+        extra_handlers: Handlers installed alongside the stream handler, each
+            given the same JSON formatter so scrubbing has one source of
+            truth. dev-talk reconfigures logging around its console patch;
+            passing the same handlers to every setup() call keeps them alive
+            across the `handlers.clear()` below.
     """
     handler = logging.StreamHandler(stream or sys.stderr)
-    handler.setFormatter(_JsonFormatter(log_viewer_content=log_viewer_content))
+    formatter = _JsonFormatter(log_viewer_content=log_viewer_content)
+    handler.setFormatter(formatter)
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
+    for extra in extra_handlers:
+        extra.setFormatter(formatter)
+        root.addHandler(extra)
     root.setLevel(getattr(logging, level.upper()))
-    # Quiet the third-party chatter.
-    for noisy in ("websockets", "asyncio", "aiohttp", "httpx"):
+    # Quiet the third-party chatter. uvicorn is started with log_config=None,
+    # so its records propagate to root and this parent-level cap applies.
+    for noisy in ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     # The vendored danmaku client logs on its own hardcoded 'blivedm' name —
     # NOT its module path — and a busy room draws unknown-command WARNINGs

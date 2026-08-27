@@ -36,20 +36,43 @@ import base64
 import contextlib
 import json
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import websockets
 
 from bilisama.clock import Clock, SystemClock
+from bilisama.obs.logging import get_logger
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.capabilities import Capabilities
+from bilisama.realtime.errors import ErrorClass, classify_error, describe
 
-__all__ = ["RealtimeClient", "ReplyRecord"]
+__all__ = ["RealtimeClient", "ReplyRecord", "SessionRefused"]
+
+log = get_logger(__name__)
 
 _WATCHDOG_S = 25.0  # plan section 3.3 rule 2
+
+
+class SessionRefused(ConnectionError):
+    """The handshake's first frame was not session.created.
+
+    Almost always the server's one error frame before its 1008 close — a full
+    server refuses at connect, not at response.create (the mock's SESSION_LIMIT
+    fault models this). The code survives as an attribute so a CLI can turn
+    known refusals into targeted advice instead of a traceback; code and detail
+    mirror link.LinkError's field names.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        text = f"服务端第一帧不是 session.created：{code}"
+        if detail:
+            text += f"（{detail}）"
+        super().__init__(text)
+        self.code = code
+        self.detail = detail
 
 
 @dataclass(slots=True)
@@ -78,6 +101,9 @@ class RealtimeClient:
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
         headers: dict[str, str] | None = None,
+        auto_reconnect: bool = False,
+        reconnect_backoff_s: float = 1.0,
+        max_reconnect_attempts: int = 6,
     ) -> None:
         self.caps = caps
         self.codec = codec
@@ -85,6 +111,17 @@ class RealtimeClient:
         self._headers = headers or {}
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
+        self._auto_reconnect = auto_reconnect
+        self._reconnect_backoff_s = reconnect_backoff_s
+        self._max_reconnect_attempts = max_reconnect_attempts
+        # Set by the adapter: replays whatever is per-connection state up
+        # there (a bootstrap frame, the session instructions). The client owns
+        # the socket and knows nothing about session shape, so restoring one
+        # has to be a callback rather than a method here.
+        self.on_resume: Callable[[], Awaitable[None]] | None = None
+        # aclose() must not look like a failure worth reconnecting from.
+        self._closing = False
+        self._reconnect_task: asyncio.Task[None] | None = None
         self._ws: Any = None
         self._events: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
         self._recv_task: asyncio.Task[None] | None = None
@@ -105,16 +142,49 @@ class RealtimeClient:
     # ------------------------------------------------------------ lifecycle
 
     async def connect(self) -> None:
+        self._closing = False
+        await self._open_socket()
+
+    async def _open_socket(self) -> None:
+        # close_timeout bounds the goodbye, not the conversation: a wedged
+        # server otherwise holds aclose() for the library's 10s default —
+        # most of the "Ctrl-C then nothing" exit stall.
         self._ws = await websockets.connect(
-            self._url, max_size=16 * 1024 * 1024, additional_headers=self._headers
+            self._url,
+            max_size=16 * 1024 * 1024,
+            additional_headers=self._headers,
+            close_timeout=2.0,
         )
-        first = json.loads(await self._ws.recv())
+        raw = await self._ws.recv()
+        try:
+            first = json.loads(raw)
+        except ValueError:
+            first = None
+        if not isinstance(first, dict):
+            # Not a realtime endpoint at all (wrong port, an echo/HMR socket):
+            # its greeting is not even a JSON object. Refuse like any other bad
+            # handshake instead of letting JSONDecodeError — or normalize()'s
+            # AttributeError on a list — escape as a raw traceback.
+            await self._ws.close()
+            self._ws = None
+            raise SessionRefused(code="not_realtime", detail=str(raw)[:120])
         kind, _ = self.codec.normalize(first)
         if kind is not dia.ServerEvent.SESSION_CREATED:
-            raise ConnectionError(f"服务端第一帧不是 session.created：{first.get('type')}")
+            # A refused handshake leaves nothing worth keeping: close before
+            # raising so a caller that catches and retries does not leak sockets.
+            await self._ws.close()
+            self._ws = None
+            error = first.get("error") or {}
+            raise SessionRefused(
+                code=str(error.get("type") or first.get("type") or "unknown"),
+                detail=str(error.get("message") or ""),
+            )
         self._recv_task = asyncio.create_task(self._recv_loop(), name="realtime:recv")
 
     async def aclose(self) -> None:
+        self._closing = True
+        if self._reconnect_task is not None:
+            self._reconnect_task.cancel()
         for task in (self._recv_task, *self._tasks):
             if task is not None:
                 task.cancel()
@@ -234,6 +304,7 @@ class RealtimeClient:
     async def _recv_loop(self) -> None:
         assert self._ws is not None
         reason = "connection_closed"
+        cause: BaseException | None = None
         try:
             async for raw in self._ws:
                 try:
@@ -247,18 +318,101 @@ class RealtimeClient:
             return  # aclose(): a deliberate teardown needs no failure theatre
         except websockets.ConnectionClosed as exc:
             reason = f"connection_closed:{exc.code}"
+            cause = exc
         # The link died underneath us. Silence here used to freeze the whole
         # consumer stack (C4/A9): the active reply never settles, the floor
         # stays pending, and nobody upstairs hears a word about it.
-        self._on_disconnect(reason)
+        self._on_disconnect(reason, cause)
 
-    def _on_disconnect(self, reason: str) -> None:
-        """Fail every open record, free the slot, tell the consumer."""
+    def _on_disconnect(self, reason: str, cause: BaseException | None = None) -> None:
+        """Fail every open record, free the slot, tell the consumer.
+
+        The books are cleared BEFORE anyone hears about it, so a consumer that
+        reacts to LinkDown by draining its queue is looking at a settled world.
+        """
         for record in (*self._replies.values(), *self._awaiting_created):
             record.handle.stale = True
             self._settle(record, link.ReplyStatus.FAILED)
+        self._awaiting_created.clear()
         self._slot_free.set()
-        self._events.put_nowait(link.LinkError("connection_lost", reason))
+        self._ws = None
+        if self._closing:
+            return
+        cls = classify_error(cause) if cause is not None else ErrorClass.RETRYABLE
+        retrying = self._auto_reconnect and cls is not ErrorClass.FATAL
+        self._events.put_nowait(link.LinkDown(reason, retrying=retrying))
+        if not retrying:
+            if cls is ErrorClass.FATAL:
+                log.error("link.fatal", error_text=describe(cls, reason))
+            return
+        self._reconnect_task = asyncio.create_task(
+            self._reconnect_loop(), name="realtime:reconnect"
+        )
+
+    async def rotate(self, reason: str = "session_cap") -> None:
+        """Retire this socket and come back on a fresh one.
+
+        Break-before-make on purpose (see module note). The in-flight books go
+        through the same settle path a real drop takes, so callers see one
+        vocabulary for both: every reply FAILED, then LinkDown, then LinkUp.
+        Cheaper than a second code path, and it is the path already under
+        test.
+        """
+        ws = self._ws
+        self._ws = None
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            await asyncio.gather(self._recv_task, return_exceptions=True)
+            self._recv_task = None
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+        log.info("link.rotating", reason=reason)
+        # Settles records, frees the slot, emits LinkDown, starts the loop that
+        # reopens and resumes. _closing stays False, so this is a reconnect.
+        self._on_disconnect(f"rotate:{reason}")
+
+    async def _reconnect_loop(self) -> None:
+        """Reopen the socket, restore the session, say so — or give up loudly.
+
+        Backoff runs on the injected clock so a test can walk a whole retry
+        ladder without waiting. The same shape as SupervisedSource
+        (ingest/sources.py): bounded attempts, exponential delay, and a give-up
+        that is visible rather than silent.
+        """
+        delay = self._reconnect_backoff_s
+        for attempt in range(1, self._max_reconnect_attempts + 1):
+            await self._clock.sleep(delay)
+            if self._closing:
+                return
+            try:
+                await self._open_socket()
+                if self.on_resume is not None:
+                    await self.on_resume()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                cls = classify_error(exc)
+                log.warning(
+                    "link.reconnect_failed",
+                    attempt=attempt,
+                    error_class=str(cls),
+                    error_text=str(exc)[:200],
+                )
+                if cls is ErrorClass.FATAL:
+                    self._events.put_nowait(link.LinkDown(str(exc)[:120], retrying=False))
+                    log.error("link.fatal", error_text=describe(cls, str(exc)[:120]))
+                    return
+                # A busy backend deserves a longer wait than a dropped packet.
+                delay = min(delay * (4.0 if cls is ErrorClass.BACKOFF else 2.0), 30.0)
+                continue
+            log.info("link.reconnected", attempt=attempt)
+            self._events.put_nowait(link.LinkUp(attempts=attempt))
+            return
+        log.error("link.reconnect_gave_up", attempts=self._max_reconnect_attempts)
+        self._events.put_nowait(
+            link.LinkDown(f"重连 {self._max_reconnect_attempts} 次都没成功", retrying=False)
+        )
 
     async def _dispatch(self, kind: dia.ServerEvent, payload: dict[str, Any] | Any) -> None:
         emit = self._events.put_nowait

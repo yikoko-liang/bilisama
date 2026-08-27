@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,8 @@ from bilisama.director.intent import Intent, Priority
 from bilisama.ingest.events import EventKind, LiveEvent, Viewer
 from bilisama.memory.store import MemoryStore
 from bilisama.proactive import ProactiveTopicLoop
+
+CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 
 
 class FakeSide:
@@ -91,7 +94,7 @@ async def test_dead_air_produces_exactly_one_topic() -> None:
         intent = intents[0]
         assert intent.priority is Priority.PROACTIVE
         assert intent.trusted is True
-        assert intent.injection.item_text is None
+        assert intent.injection.item_text == "[系统触发] 直播间持续冷场，请自然发起一个话题。"
         assert "新键盘" in (intent.injection.reply.instructions or "")
         assert intent.expires_at is not None, "a stale topic must die in the queue"
 
@@ -208,3 +211,53 @@ async def test_recent_events_feed_the_candidate_material(kind: EventKind) -> Non
         store.close()
 
     assert side.users and "键盘怎么样" in side.users[0]
+
+
+async def test_recent_dialogue_feeds_the_candidate_material() -> None:
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+
+    class Recorder(FakeSide):
+        def __init__(self) -> None:
+            super().__init__()
+            self.users: list[str] = []
+
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            self.users.append(user)
+            return await super().complete(system=system, user=user, max_tokens=max_tokens)
+
+    side = Recorder()
+    loop = ProactiveTopicLoop(
+        side,
+        store,
+        SpeakingFloor(clock),
+        clock,
+        submit=lambda _i: None,
+        prompt="想一个话题",
+        idle_threshold_s=99.0,
+    )
+    loop.note_dialogue("streamer", "我最近在看小金鱼皮套")
+    loop.note_dialogue("assistant", "那个造型确实挺可爱的")
+    task = asyncio.create_task(loop.run())
+    try:
+        await clock.advance(2.0)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        store.close()
+
+    assert side.users
+    assert "主播：我最近在看小金鱼皮套" in side.users[0]
+    assert "Miya：那个造型确实挺可爱的" in side.users[0]
+
+
+def test_modified_mia_answers_her_own_choices_instead_of_deferring_to_streamer() -> None:
+    prompt = (
+        CONFIG_DIR / "personas" / "mia" / "profiles" / "modified" / "personality.md"
+    ).read_text(encoding="utf-8")
+
+    assert "实时语音始终是主播本人在和 Miya 说话" in prompt
+    assert "由 Miya 直接回答" in prompt
+    assert "不能让主播再去问主播" in prompt
+    assert "涉及主播的选择、经历和主观看法时，把话题递回主播" not in prompt

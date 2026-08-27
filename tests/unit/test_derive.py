@@ -23,7 +23,7 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from bilisama.config import Chattiness, DerivedThresholds, Settings, derive
+from bilisama.config import Chattiness, DerivedThresholds, Settings, derive, effective_thresholds
 
 # Semantic order, quietest to chattiest. Chattiness is a StrEnum, so its own
 # ordering is alphabetical and says nothing about how talkative a level is; every
@@ -73,6 +73,20 @@ def test_every_level_derives_a_row() -> None:
     """
     for level in Chattiness:
         assert isinstance(derive(level), DerivedThresholds)
+
+
+def test_independent_reply_length_and_window_override_only_their_fields() -> None:
+    row = effective_thresholds(
+        Chattiness.LOW,
+        reply_length=Chattiness.HIGH,
+        danmaku_window_s=75,
+    )
+
+    assert row.idle_threshold_s == 180
+    assert row.cooldown_s == 20
+    assert row.score_threshold == 0.55
+    assert row.danmaku_window_s == 75
+    assert row.max_output_tokens == 180
 
 
 def test_each_level_derives_a_different_row() -> None:
@@ -142,7 +156,7 @@ _TUNED_TABLE: dict[Chattiness, dict[str, float]] = {
         "danmaku_window_s": 30,
         "score_threshold": 0.55,
         "cooldown_s": 20,
-        "max_output_tokens": 70,
+        "max_output_tokens": 45,
     },
     Chattiness.MEDIUM: {
         "idle_threshold_s": 90,

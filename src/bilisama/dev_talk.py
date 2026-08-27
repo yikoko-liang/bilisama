@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -32,14 +33,16 @@ import sys
 import threading
 import wave
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+import websockets
 
 from bilisama.config.enums import ProviderName
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.realtime import link
-from bilisama.realtime.client import RealtimeClient
+from bilisama.realtime.client import RealtimeClient, SessionRefused
 from bilisama.realtime.providers import profile_for
 
 
@@ -50,9 +53,92 @@ class _AudioIn(Protocol):
     async def push_audio(self, pcm: bytes) -> None: ...
 
 
+class _Connects(Protocol):
+    """What _connect_or_exit needs: the raw client in wire mode, the
+    fanned-out adapter in director mode."""
+
+    async def connect(self) -> None: ...
+
+
 _INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
 _OUTPUT_RATE = 24000  # and answer at 24 kHz (plan section 3.1 table)
 _FRAME_MS = 32
+
+# Where a reply may be broken into a printable line while it is still arriving.
+# s2s hands us one fragment per LLM chunk (roughly a sentence); DashScope
+# streams tokens, so the cap keeps a punctuation-free run from waiting forever.
+# How far playback may fall behind before the speaker skips forward. Ten
+# seconds is roughly two replies: enough that a burst plays out intact, far
+# short of the minutes of drift measured before the floor gate was fed.
+_MAX_BACKLOG_BYTES = 10 * 2 * _OUTPUT_RATE
+
+_SENTENCE_END = "。！？…；\n.!?"
+_LINE_SOFT_CAP = 32
+
+# Live config paths whose consumer snapshots its value at setup and therefore
+# needs a re-poke after an edit. Out in the open on purpose: a field marked
+# Reload.LIVE must either be read at call time or be listed here, and a hook
+# hidden inside a closure is how "the panel says 配置已改 and nothing changes"
+# gets reintroduced.
+_RELOG_ON_EDIT = frozenset({"runtime.log_level", "runtime.log_viewer_content"})
+_MANUAL_MOCK_ROOM_ID = 1
+_LIVE_MOCK_SPEAK_KEYS = frozenset(
+    {"danmaku", "gift", "super_chat", "guard_buy", "entry", "vip_enter"}
+)
+_SESSION_ONLY_PANEL_PATHS = frozenset(
+    {
+        "audio.input_enabled",
+        "audio.output_enabled",
+        "room.room_id",
+        "persona.streamer_name",
+    }
+)
+
+
+def _director_session_overrides(
+    *,
+    room_id: int | None = None,
+    persona_id: str | None = None,
+    skin: str | None = None,
+) -> dict[str, Any]:
+    """Fresh desktop-session state, above saved profile preferences."""
+    overrides: dict[str, Any] = {
+        "audio": {"input_enabled": True, "output_enabled": True},
+        "room": {"room_id": room_id if room_id is not None else 0},
+        "persona": {"streamer_name": ""},
+    }
+    if persona_id:
+        overrides["persona"]["id"] = persona_id
+    if skin:
+        overrides["avatar"] = (
+            {"renderer": "tofu", "model_id": ""}
+            if skin == "tofu"
+            else {"renderer": "sprite", "model_id": skin}
+        )
+    return overrides
+
+
+def _should_persist_panel_edit(path: str) -> bool:
+    """Whether a hot edit is a preference rather than current-session state."""
+    return path not in _SESSION_ONLY_PANEL_PATHS
+
+
+def _live_mock_config_edits(data: Mapping[str, object]) -> list[tuple[str, object]]:
+    """Validated config values a successful live-mock preflight must own."""
+    edits: list[tuple[str, object]] = []
+    room_id = data.get("room_id")
+    if isinstance(room_id, int) and not isinstance(room_id, bool) and room_id > 0:
+        edits.append(("room.room_id", room_id))
+    stream_intro = data.get("stream_intro")
+    if isinstance(stream_intro, str):
+        edits.append(("room.stream_intro", stream_intro.strip()))
+    speak = data.get("speak")
+    if isinstance(speak, Mapping):
+        for name in _LIVE_MOCK_SPEAK_KEYS:
+            value = speak.get(name)
+            if isinstance(value, bool):
+                edits.append((f"interaction.speak.{name}", value))
+    return edits
 
 
 def _dashscope_url(model: str) -> str:
@@ -63,7 +149,7 @@ def _dashscope_url(model: str) -> str:
     return f"wss://{host}/api-ws/v1/realtime?model={model}"
 
 
-def _session_frame(provider: ProviderName) -> dict[str, Any] | None:
+def _session_frame(provider: ProviderName, voice: str = "") -> dict[str, Any] | None:
     """The audio session setup, in the dialect the provider actually speaks.
 
     s2s gets nothing: its VAD runs unconditionally, and its session.update
@@ -74,16 +160,39 @@ def _session_frame(provider: ProviderName) -> dict[str, Any] | None:
     can trip on this.
     """
     if provider is ProviderName.DASHSCOPE:
-        return {
-            "type": "session.update",
-            "session": {
-                "modalities": ["text", "audio"],
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "turn_detection": {"type": "server_vad"},
-            },
+        session: dict[str, Any] = {
+            "modalities": ["text", "audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "turn_detection": {"type": "server_vad"},
         }
+        if voice:
+            session["voice"] = voice
+        return {"type": "session.update", "session": session}
     return None
+
+
+def _connect_advice(exc: BaseException, provider: ProviderName, url: str) -> str:
+    """One line of Chinese with a fix action (CLAUDE.md's error-wording rule).
+
+    The two connect failures a dev box actually hits each get their recipe;
+    anything else keeps the endpoint and the underlying reason.
+    """
+    where = url.split("?")[0]
+    if isinstance(exc, SessionRefused) and exc.code == "session_limit_reached":
+        return "s2s 只有一个会话槽，被别的客户端占着：关掉其他 dev-talk，或重启 serve 终端。"
+    if isinstance(exc, ConnectionRefusedError) and provider is ProviderName.S2S:
+        return f"{where} 上没有 s2s 服务：先按 runbook 起 serve。"
+    return f"连不上 {where}：{exc}"
+
+
+async def _connect_or_exit(target: _Connects, provider: ProviderName, url: str) -> None:
+    """Connect, or exit through the file's established fatal path: SystemExit
+    prints its message without a traceback and exits non-zero."""
+    try:
+        await target.connect()
+    except (OSError, websockets.WebSocketException) as exc:
+        raise SystemExit(_connect_advice(exc, provider, url)) from exc
 
 
 async def _pump_wav(client: _AudioIn, path: Path) -> None:
@@ -102,6 +211,39 @@ async def _pump_wav(client: _AudioIn, path: Path) -> None:
     while True:
         await client.push_audio(silence)
         await asyncio.sleep(_FRAME_MS / 1000)
+
+
+def _sane_terminal(saved: Any) -> None:
+    """Put the tty back the way we found it. Idempotent, never raises.
+
+    prompt_toolkit runs stdin in raw mode, where Ctrl-C is a KEY, not a signal.
+    If the prompt goes away without restoring (cancelled mid-read, or torn down
+    while the shutdown chain runs), every later Ctrl-C is just an echoed ^C and
+    the promised force-quit can never fire — the terminal, not the handler, was
+    what swallowed it.
+    """
+    if saved is None or not sys.stdin.isatty():
+        return
+    with contextlib.suppress(Exception):
+        import termios
+
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+
+
+def _close_audio_stream(stream: Any) -> None:
+    """Discard-then-release a PortAudio stream. BLOCKING — run off-loop.
+
+    close() on its own drains pending buffers, and the device release behind
+    it (worst on Bluetooth) can take whole seconds. Done on the event loop it
+    freezes everything — including the SIGINT handler, which is exactly the
+    "Ctrl-C again does nothing" exit hang. abort() first so close() has no
+    drain left to wait for; both wrapped because a half-dead stream raising
+    must not block the shutdown chain.
+    """
+    with contextlib.suppress(Exception):
+        stream.abort()
+    with contextlib.suppress(Exception):
+        stream.close()
 
 
 async def _pump_mic(
@@ -137,7 +279,12 @@ async def _pump_mic(
         callback=on_block,
     )
     silence = b"\x00\x00" * (_INPUT_RATE * _FRAME_MS // 1000)
-    with stream:
+    try:
+        # start() inside the try: it can fail on its own (device pulled or
+        # claimed between open and start), and the stream is already OPEN by
+        # then — left unreleased it becomes the blocking atexit stall this
+        # module fixes everywhere else.
+        stream.start()
         while True:
             block = await queue.get()
             if mute and speaker is not None and speaker.busy:
@@ -147,6 +294,13 @@ async def _pump_mic(
                 # freezes the provider's audio clock (plan section 3.3 rule 7).
                 block = silence
             await client.push_audio(block)
+    finally:
+        # NOT `with stream:` — its __exit__ closes on the loop, which is the
+        # freeze described on _close_audio_stream. The release runs on a worker
+        # thread; asyncio joins that pool during shutdown, so it always
+        # completes (it does NOT make a second Ctrl-C instant — that path exits
+        # the process outright, see on_sigint).
+        await asyncio.to_thread(_close_audio_stream, stream)
 
 
 class _Speaker:
@@ -169,43 +323,185 @@ class _Speaker:
         import threading
 
         self._buffer = bytearray()
+        self._dropped_s = 0.0
+        self._enabled = True
         self._lock = threading.Lock()
+        self._requested_device = device
+        self._opened_device: int | None = None
+        self._sounddevice: Any = None
+        self._stream: Any = None
+        self._last_output_error = ""
         try:
             import sounddevice
         except ImportError:
-            self._stream = None
             return
+        self._sounddevice = sounddevice
+        try:
+            self._stream = self._start_stream(device)
+            self._opened_device = device if device is not None else self._default_output_device()
+        except Exception as exc:
+            # An opened-but-unstartable device (Bluetooth pulled mid-setup)
+            # would otherwise leave the stream unreachable — the constructor
+            # raises, no caller ever holds the object, and close() can never
+            # run. Release it here and carry on mute: the voice loop is worth
+            # more than the speaker.
+            print(f"[音频] 扬声器起不来（{exc}），这场没有声音输出。", file=sys.stderr)
 
-        def feed(outdata: Any, frames: int, time_info: Any, status: Any) -> None:
-            need = len(outdata)
-            with self._lock:
-                chunk = bytes(self._buffer[:need])
-                del self._buffer[: len(chunk)]
-            outdata[: len(chunk)] = chunk
-            if len(chunk) < need:
-                outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
+    def _feed(self, outdata: Any, frames: int, time_info: Any, status: Any) -> None:
+        """PortAudio callback: drain one block without touching asyncio."""
+        need = len(outdata)
+        with self._lock:
+            chunk = bytes(self._buffer[:need])
+            del self._buffer[: len(chunk)]
+        outdata[: len(chunk)] = chunk
+        if len(chunk) < need:
+            outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
 
-        self._stream = sounddevice.RawOutputStream(
+    def _start_stream(self, device: int | None) -> Any:
+        stream = self._sounddevice.RawOutputStream(
             samplerate=_OUTPUT_RATE,
             channels=1,
             dtype="int16",
             device=device,
-            callback=feed,
+            callback=self._feed,
         )
-        self._stream.start()
+        try:
+            stream.start()
+        except Exception:
+            _close_audio_stream(stream)
+            raise
+        return stream
+
+    def _default_output_device(self) -> int | None:
+        if self._sounddevice is None:
+            return None
+        pair = self._sounddevice.default.device
+        try:
+            value = int(pair[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    def refresh_default_device(self) -> str | None:
+        """Follow a macOS default-output change without restarting BiliSama.
+
+        Explicit ``--output-device`` selections stay pinned. The desktop
+        default follows System Settings, including a Bluetooth headset that
+        connects after this process started.
+        """
+        if self._requested_device is not None or self._sounddevice is None:
+            return None
+        target = self._default_output_device()
+        if target is None:
+            return None
+        old = self._stream
+        try:
+            active = bool(old is not None and old.active)
+        except Exception:
+            active = False
+        if target == self._opened_device and active:
+            return None
+        # Stop the old callback before starting the new one. Both callbacks
+        # share the same PCM ring; overlapping them, even briefly, lets two
+        # devices race to consume different halves of one sentence.
+        if old is not None:
+            _close_audio_stream(old)
+        self._stream = None
+        try:
+            replacement = self._start_stream(target)
+        except Exception as exc:
+            with self._lock:
+                self._buffer.clear()
+            message = f"默认扬声器重连失败（{exc}），会继续重试"
+            if message == self._last_output_error:
+                return None
+            self._last_output_error = message
+            return message
+        self._stream = replacement
+        previous = self._opened_device
+        self._opened_device = target
+        self._last_output_error = ""
+        if previous == target:
+            return f"默认扬声器设备 {target} 已重新连接"
+        return f"默认扬声器已切换到设备 {target}"
 
     def play(self, pcm: bytes) -> None:
+        if self._stream is None:
+            # Muted run (no sounddevice, or the device refused to start).
+            # Buffering here would be worse than useless: nothing drains it,
+            # so `busy` would latch True and the playback gate would hold the
+            # floor shut for the rest of the stream.
+            return
         with self._lock:
+            if not self._enabled:
+                return
             self._buffer.extend(pcm)
+            over = len(self._buffer) - _MAX_BACKLOG_BYTES
+            if over > 0:
+                # Skip forward rather than fall further behind. A co-host that
+                # is a minute late is worse than one that dropped a sentence:
+                # the audience hears an answer to a comment nobody remembers.
+                # Only reachable when the floor gate is bypassed; loud on
+                # purpose, because silent drift is what this replaces.
+                # Whole samples only. Dropping an odd byte count shifts every
+                # later sample by one byte, and 16-bit audio read half a
+                # sample out of phase is not quiet damage — it is white noise
+                # at full scale for the rest of the run.
+                over -= over % 2
+                del self._buffer[:over]
+                self._dropped_s += over / 2.0 / _OUTPUT_RATE
+
+    @property
+    def backlog_s(self) -> float:
+        """Seconds of audio waiting to be heard."""
+        with self._lock:
+            return len(self._buffer) / 2.0 / _OUTPUT_RATE
+
+    @property
+    def dropped_s(self) -> float:
+        """Seconds skipped to stay current. Nonzero means the gate leaked."""
+        return self._dropped_s
 
     def flush(self) -> None:
         with self._lock:
             self._buffer.clear()
 
     @property
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable playback; disabling also stops already-buffered speech."""
+        with self._lock:
+            self._enabled = enabled
+            if not enabled:
+                self._buffer.clear()
+
+    def close(self) -> None:
+        """Release the output stream. BLOCKING — call via asyncio.to_thread.
+
+        Without this the stream lived until interpreter teardown, where
+        PortAudio's atexit release ran AFTER the farewell print — the exit
+        that "hangs after 再见". Idempotent so both exit paths may call it.
+        """
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            _close_audio_stream(stream)
+
+    @property
     def busy(self) -> bool:
         with self._lock:
             return len(self._buffer) > 0
+
+
+async def _watch_default_output(speaker: _Speaker) -> None:
+    """Keep desktop playback on the current macOS default output."""
+    while True:
+        await asyncio.sleep(1.0)
+        message = await asyncio.to_thread(speaker.refresh_default_device)
+        if message:
+            print(f"[音频] {message}")
 
 
 async def _consume(
@@ -215,14 +511,59 @@ async def _consume(
 
 
 async def _consume_events(
-    events: AsyncIterator[link.LinkEvent], speaker: _Speaker | None, reply_wav: Path | None
+    events: AsyncIterator[link.LinkEvent],
+    speaker: _Speaker | None,
+    reply_wav: Path | None,
+    *,
+    stream_text: bool = True,
+    dialogue_sink: Callable[[Literal["streamer", "assistant"], str], None] | None = None,
 ) -> None:
+    """Print what she says and play what she sends.
+
+    Args:
+        events: One view of the link's event stream.
+        speaker: Playback sink, None in WAV mode.
+        reply_wav: Where to save the reply audio, None to skip.
+        stream_text: Print reply text character by character. MUST be False
+            while a prompt_toolkit prompt owns the terminal: a line without its
+            newline has not scrolled yet, so the prompt's next repaint
+            (`ESC[J`) erases it — the reply vanished and left only the end
+            marker behind. Under the prompt the text still arrives live, but
+            one finished sentence at a time (see _SENTENCE_END): whole lines
+            survive the repaint, and waiting for the WHOLE reply put the
+            terminal visibly behind the browser bubble.
+    """
     collected: list[bytes] = []
+    said: list[str] = []
+    buffered: list[str] = []  # printed a sentence at a time when not streaming
+
+    def flush_sentences(*, final: bool = False) -> None:
+        text = "".join(buffered)
+        if not final:
+            cut = max((text.rfind(mark) for mark in _SENTENCE_END), default=-1)
+            if cut < 0 and len(text) < _LINE_SOFT_CAP:
+                return
+            if cut < 0:
+                cut = len(text) - 1  # no punctuation in a long run: break anyway
+            text, rest = text[: cut + 1], text[cut + 1 :]
+            buffered[:] = [rest]
+        else:
+            buffered.clear()
+        if text:
+            print(text)
+
     async for event in events:
         if isinstance(event, link.UserTranscriptDone):
             print(f"你说：{event.text}")
+            if dialogue_sink is not None and event.text.strip():
+                dialogue_sink("streamer", event.text)
         elif isinstance(event, link.ReplyTextDelta):
-            print(event.text, end="", flush=True)
+            said.append(event.text)
+            if stream_text:
+                print(event.text, end="", flush=True)
+            else:
+                buffered.append(event.text)
+                flush_sentences()
         elif isinstance(event, link.ReplyAudioDelta):
             collected.append(event.pcm)
             if speaker is not None:
@@ -231,7 +572,19 @@ async def _consume_events(
             if speaker is not None:
                 speaker.flush()  # the local half of playback.clear
         elif isinstance(event, link.ReplyDone):
-            print(f"\n—— 回复结束（{event.status}）——")
+            if (
+                dialogue_sink is not None
+                and event.status is link.ReplyStatus.COMPLETED
+                and event.text.strip()
+            ):
+                dialogue_sink("assistant", event.text)
+            said.clear()
+            marker = f"—— 回复结束（{event.status}）——"
+            if stream_text:
+                print(f"\n{marker}")
+            else:
+                flush_sentences(final=True)  # whatever the last sentence left
+                print(marker)
             if reply_wav is not None and collected:
                 with wave.open(str(reply_wav), "wb") as w:
                     w.setnchannels(1)
@@ -241,6 +594,11 @@ async def _consume_events(
                 print(f"回复音频已存：{reply_wav}")
                 return
             collected.clear()
+        elif isinstance(event, link.LinkDown):
+            tail = "，正在自动重连…" if event.retrying else "，已放弃重连。"
+            print(f"[链路] 断了（{event.reason}）{tail}", file=sys.stderr)
+        elif isinstance(event, link.LinkUp):
+            print(f"[链路] 已恢复（第 {event.attempts} 次尝试成功），人设已重新推送。")
         elif isinstance(event, link.LinkError):
             print(f"[错误] {event.code}: {event.detail}", file=sys.stderr)
 
@@ -298,6 +656,12 @@ class _Fanout:
             await asyncio.gather(self._task, return_exceptions=True)
         await self._inner.aclose()
 
+    async def suspend(self) -> None:
+        await self._inner.suspend()
+
+    async def resume(self) -> None:
+        await self._inner.resume()
+
     async def set_context(self, instructions: str) -> None:
         await self._inner.set_context(instructions)
 
@@ -342,7 +706,7 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     """One typed line, one simulated live event.
 
     "你好" — danmaku from 测试观众; "阿强:你好" — danmaku from 阿强;
-    "/sc 阿强 30 主播玩什么" — Super Chat; "/gift 阿强 52" — paid gift.
+    "/sc 阿强 30 主播玩什么" — Super Chat; "/gift 阿强 52" — 52-battery gift.
     """
     text = text.strip()
     if not text:
@@ -368,13 +732,13 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
         if len(parts) < 2:
             return None
         value = _parse_amount(parts[1])
-        if value is None:
+        if value is None or not value.is_integer():
             return None
+        batteries = int(value)
         return LiveEvent(
             kind=EventKind.GIFT,
             viewer=_console_viewer(parts[0]),
-            gift=Gift(name="礼物", num=1, coin_type="gold", total_coin=int(value * 1000)),
-            value_cny=value,
+            gift=Gift(name="礼物", num=1, coin_type="gold", unit_battery=batteries),
             event_id=event_id,
         )
     if text.startswith("/"):
@@ -397,6 +761,15 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     )
 
 
+def _as_live_mock_event(event: LiveEvent, room_id: int) -> LiveEvent:
+    """Mark a panel injection so Assembly applies the real-room funnel."""
+    return dataclasses.replace(
+        event,
+        room_id=room_id if room_id > 0 else _MANUAL_MOCK_ROOM_ID,
+        raw={**(event.raw or {}), "manual_mock": True},
+    )
+
+
 async def run_director(args: argparse.Namespace) -> int:
     """The whole stage-3 assembly behind the mic, before Electron exists.
 
@@ -406,13 +779,17 @@ async def run_director(args: argparse.Namespace) -> int:
     acceptance tests compose, with a microphone on one side and the console
     standing in for the danmaku feed on the other.
     """
+    from secrets import token_hex
+
     from bilisama import secrets
     from bilisama.app import Assembly
     from bilisama.cli import DEFAULT_CONFIG
     from bilisama.clock import SystemClock
-    from bilisama.config import check, derive, load
+    from bilisama.config import check, effective_thresholds, load
+    from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
+    from bilisama.director.intent import Intent
     from bilisama.director.scheduler import Scheduler
     from bilisama.ingest.sources import QueueSource
     from bilisama.memory.distill import Distiller
@@ -420,11 +797,31 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
     from bilisama.obs.outcome import Outcome, Verdict
-    from bilisama.persona.loader import PersonaStore, default_data_dir, template_variables
+    from bilisama.persona.loader import default_data_dir, template_variables
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.realtime.providers import turn_type_problems
     from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
+    from bilisama.ui.assistants import (
+        active_persona_store,
+        assistant_snapshot,
+        persona_profile,
+        profile_config_changes,
+        save_anchor,
+    )
+    from bilisama.ui.config_edit import ConfigEditError, apply_runtime_config_edit, speak_paths
+    from bilisama.ui.events import ClientEvent, ServerEvent, link_frames, live_event_payload
+    from bilisama.ui.hub import UiHub, VoiceSignals
+    from bilisama.ui.live_mock import AudioInputSwitch, LiveMockController, RoomSource
+    from bilisama.ui.room_control import RoomConnectionError, SwitchableRoomSource
+    from bilisama.ui.server import (
+        UiServer,
+        bind_ui_socket,
+        create_ui_app,
+        default_endpoint_path,
+        write_endpoint_file,
+    )
+    from bilisama.ui.test_runner import MockTestRunner, load_test_catalog
 
     provider = ProviderName(args.provider)
     config_path: Path = args.config or DEFAULT_CONFIG
@@ -432,7 +829,11 @@ async def run_director(args: argparse.Namespace) -> int:
         # load() treats a missing path as "all defaults", which silently ignores
         # a typo'd --config — the one case where defaults are a lie (D6).
         raise SystemExit(f"找不到配置文件：{config_path}")
-    overrides = {"persona": {"id": args.persona}} if args.persona else None
+    overrides = _director_session_overrides(
+        room_id=args.room,
+        persona_id=args.persona,
+        skin=args.skin,
+    )
     settings = load(config_path, overrides=overrides, strict=False)
     # strict=False keeps a half-configured dev box usable, but the problems
     # still get said out loud instead of silently shaping behaviour (D6).
@@ -444,23 +845,82 @@ async def run_director(args: argparse.Namespace) -> int:
     # reach the console as bare event names with their error fields dropped.
     from bilisama.obs.logging import setup as logging_setup
 
-    logging_setup(level=settings.runtime.log_level)
     clock = SystemClock()
-    thresholds = derive(settings.interaction.chattiness)
+    # The hub exists before logging so its ring handler catches every line;
+    # bind failure later just parks the hub unused (its staging is bounded).
+    hub: UiHub | None = UiHub(clock) if not args.no_ui else None
+    log_tee = (hub.log_handler,) if hub is not None else ()
+    # Bound here, set for real once the console mode is known: relog() reads it
+    # at call time, and a panel edit can arrive before that point.
+    use_prompt = False
+    # Captured before anything can put the tty in raw mode, restored at the top
+    # of the shutdown chain (see _sane_terminal).
+    saved_tty: Any = None
+    if sys.stdin.isatty():
+        with contextlib.suppress(Exception):
+            import termios
+
+            saved_tty = termios.tcgetattr(sys.stdin.fileno())
+
+    def relog() -> None:
+        """(Re)install logging from the CURRENT settings.
+
+        Both runtime.log_* fields are live-editable, and logging snapshots them
+        at setup — so every path that changes one calls this. The stream
+        follows the prompt window; log_viewer_content rides along, which before
+        this was a config field nothing read at all.
+        """
+        logging_setup(
+            level=settings.runtime.log_level,
+            log_viewer_content=settings.runtime.log_viewer_content,
+            stream=sys.stdout if use_prompt else None,
+            extra_handlers=log_tee,
+        )
+
+    relog()
+
+    def thresholds() -> Any:
+        return effective_thresholds(
+            settings.interaction.chattiness,
+            reply_length=settings.interaction.reply_length,
+            danmaku_window_s=settings.interaction.danmaku.window_s,
+        )
 
     stop = asyncio.Event()
 
     def on_sigint() -> None:
         if stop.is_set():
-            # Second press: the polite path is stuck somewhere before
-            # stop.wait() (a hung connect, a wedged close). BaseExceptions
-            # escape loop callbacks by design, so this aborts asyncio.run.
-            raise KeyboardInterrupt
+            # Second press means "out, now". Raising KeyboardInterrupt here
+            # only unwinds asyncio.run, which still gathers every finally and
+            # then JOINS the to_thread pool — including the multi-second
+            # PortAudio release that made the user press twice in the first
+            # place. os._exit skips atexit and that join: this is the promised
+            # escape hatch, and the polite path already had its turn.
+            print("\n[退出] 强退（本场蒸馏未做）。", file=sys.stderr)
+            sys.stderr.flush()
+            sys.stdout.flush()
+            os._exit(130)  # 128 + SIGINT, the shell's own convention
         stop.set()
+        # Feedback beats patience: without this line the polite teardown
+        # (distill, socket farewells) looks like a hang.
+        print("\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。", file=sys.stderr)
+
+    def arm_sigint() -> None:
+        """(Re)install the SIGINT handler. Call it whenever the prompt lets go.
+
+        prompt_toolkit REMOVES the loop's SIGINT handler when its session ends
+        (verified against the installed version) — it owns Ctrl-C as a key
+        while it runs, and takes ours with it on the way out. Nothing then
+        catches the second press, so the "再按一次 Ctrl-C 强退" promise died
+        exactly where it was needed: during the shutdown chain, with
+        distillation still on the wire.
+        """
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGINT, on_sigint)
 
     # Installed before the first await so a Ctrl-C during connect/setup exits
     # cleanly instead of unwinding with a traceback (C7).
-    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, on_sigint)
+    arm_sigint()
 
     # Memory persists across runs on purpose: streams_seen is the point.
     # Same data home the personas use, one directory up from them.
@@ -472,8 +932,11 @@ async def run_director(args: argparse.Namespace) -> int:
     store.prune_events(retain_days=settings.memory.retain_event_days)
     store.begin_stream()
 
-    persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
-    variables = template_variables(settings.persona)
+    persona = active_persona_store(settings, config_path.parent)
+    variables = template_variables(
+        settings.persona,
+        reply_length=settings.interaction.reply_length,
+    )
 
     # Side-model resolution, most reliable first: explicit config wins, then
     # the aliyun compatible-mode endpoint from path.sh (public network, no VPN
@@ -513,6 +976,8 @@ async def run_director(args: argparse.Namespace) -> int:
         print(f"[侧路] {side_desc}")
 
     inner: link.SpeechLink
+    hosted_link: Any = None
+    connect_url: str = args.url
     if provider is ProviderName.S2S:
         # Audio replies, not the shipping default: this stands against the
         # zero-patch official pipeline whose own TTS does the speaking. A
@@ -531,17 +996,24 @@ async def run_director(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
-        inner = HostedLink(
-            _dashscope_url(args.model),
+        connect_url = _dashscope_url(args.model)
+        hosted_link = HostedLink(
+            connect_url,
             ProviderName.DASHSCOPE,
             headers={"Authorization": f"Bearer {key}"},
             turn=settings.speech.dashscope.turn,
+            voice=args.voice or settings.speech.dashscope.voice,
         )
+        inner = hosted_link
     else:
         raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
     speech = _Fanout(inner)
-    await speech.connect()
+    await _connect_or_exit(speech, provider, connect_url)
     speech.start()
+    audio_input = AudioInputSwitch(
+        speech.push_audio, noise_sensitivity=settings.audio.noise_sensitivity
+    )
+    audio_input.set_enabled(settings.audio.input_enabled)
 
     from bilisama.director.output_guard import load_guard
 
@@ -574,29 +1046,49 @@ async def run_director(args: argparse.Namespace) -> int:
     def verdict_sink(verdict: Verdict) -> None:
         if verdict.outcome is not Outcome.SPOKEN:
             print(f"[调度] {verdict.source} → {verdict}")
+        if hub is not None:
+            # The panel wants the COMPLETE per-intent record, SPOKEN included;
+            # the console keeps printing exceptions only.
+            hub.broadcast(
+                ServerEvent.EVENT_FEED,
+                {
+                    "kind": "verdict",
+                    "source": verdict.source,
+                    "outcome": str(verdict.outcome),
+                    "phase": str(verdict.phase),
+                    "reason": str(verdict.reason) if verdict.reason else "",
+                },
+            )
 
     scheduler = Scheduler(
         speech,
         floor,
         clock,
-        cooldown_s=float(thresholds.cooldown_s),
+        cooldown_s=float(thresholds().cooldown_s),
         quiet_after_speech_s=quiet_s,
         verdict_sink=verdict_sink,
         guard=guard,
         on_hit=settings.safety.on_hit,
         spoken_sink=distiller.note_assistant_line,
     )
+
+    def proactive_submit(intent: Intent) -> None:
+        # Read the switch at submit time, not at wiring time: panel.set flips
+        # it mid-stream, and ui_meta already promises Reload.LIVE for it.
+        if settings.interaction.speak.proactive:
+            scheduler.submit(intent)
+
     proactive = ProactiveTopicLoop(
         side,
         store,
         floor,
         clock,
-        submit=scheduler.submit if settings.interaction.speak.proactive else lambda _i: None,
+        submit=proactive_submit,
         prompt=persona.proactive_prompt(config_path.parent / "prompts" / "proactive.md", variables),
-        idle_threshold_s=float(thresholds.idle_threshold_s),
+        idle_threshold_s=float(thresholds().idle_threshold_s),
         wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
         max_per_hour=settings.interaction.proactive.max_per_hour,
-        max_tokens=thresholds.max_output_tokens,
+        max_tokens=thresholds().max_output_tokens,
     )
 
     async def push_context(text: str) -> None:
@@ -609,7 +1101,7 @@ async def run_director(args: argparse.Namespace) -> int:
 
     selector = DanmakuSelector(
         clock,
-        thresholds=lambda: thresholds,
+        thresholds=thresholds,
         per_uid_cooldown_s=float(settings.interaction.danmaku.per_uid_cooldown_s),
     )
     presence = PresenceWelcomer(
@@ -617,6 +1109,15 @@ async def run_director(args: argparse.Namespace) -> int:
         window_s=float(settings.interaction.burst_window_s),
         cooldown_s=float(settings.interaction.burst_cooldown_s),
     )
+
+    def publish_room_event(event: LiveEvent) -> None:
+        """Mirror each adopted platform event to the control-centre timeline."""
+        if hub is None:
+            return
+        hub.broadcast(ServerEvent.EVENT_FEED, live_event_payload(event))
+
+    from bilisama.persona.loader import live_event_rules
+
     assembly = Assembly(
         store=store,
         distiller=distiller,
@@ -627,37 +1128,58 @@ async def run_director(args: argparse.Namespace) -> int:
         submit=scheduler.submit,
         push_context=push_context,
         clock=clock,
-        max_tokens=thresholds.max_output_tokens,
+        max_tokens=thresholds().max_output_tokens,
         protect_ms=settings.interaction.sc_protect_ms,
         variables=variables,
+        event_rules=live_event_rules(config_path.parent, variables),
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
         presence=presence,
-        gift_gold_high=settings.interaction.gift_gold_high,
-        gift_gold_medium=settings.interaction.gift_gold_medium,
+        event_observer=publish_room_event,
+        entry_group_enabled=lambda group: bool(
+            getattr(settings.interaction.entry_welcome, group, False)
+        ),
+        stream_intro=lambda: settings.room.stream_intro,
+        gift_battery_high=settings.interaction.gift_battery_high,
+        gift_battery_medium=settings.interaction.gift_battery_medium,
     )
 
-    # Real danmaku, when a room is named (--room beats [room] room_id). The
-    # credential chain: config ref first, then path.sh's BILI_SESSDATA. No
-    # credential still connects — Bilibili then masks every uid to 0, which
-    # kills regular-viewer memory, so say it out loud.
-    bili_source = None
+    # The real room source is switchable: panel edits replace the transport in
+    # process, so changing room id never asks the streamer to restart.
     room_id = args.room if args.room is not None else settings.room.room_id
-    if room_id:
-        from bilisama.ingest.bilibili import BilibiliEventSource
+    sessdata = secrets.resolve(settings.room.credential_ref) or ""
+    from bilisama.ingest.bilibili import BilibiliEventSource
 
-        # One truth: the config reference (shipped default env:BILI_SESSDATA).
-        sessdata = secrets.resolve(settings.room.credential_ref) or ""
-        bili_source = BilibiliEventSource(
-            room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
+    def live_room_source(target_room_id: int) -> RoomSource:
+        return BilibiliEventSource(
+            target_room_id,
+            clock,
+            sessdata=sessdata,
+            on_sc_delete=scheduler.revoke,
         )
-        if sessdata:
-            print(f"[弹幕] 连接房间 {room_id}（登录态）")
-        else:
-            print(
-                f"[弹幕] 连接房间 {room_id}（匿名：观众全部打码，认不出常客——"
-                "path.sh 加 export BILI_SESSDATA=... 后重跑）"
-            )
+
+    room_source = SwitchableRoomSource(live_room_source, room_id)
+    if room_id:
+        auth_label = "登录态" if sessdata else "匿名，观众身份可能被打码"
+        print(f"[弹幕] 准备连接房间 {room_id}（{auth_label}）")
+
+    def publish_live_mock_state(data: dict[str, Any]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.LIVE_MOCK_STATE, data)
+
+    def publish_live_mock_event(data: dict[str, object]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.LIVE_MOCK_EVENT, data)
+
+    live_mock = LiveMockController(
+        source_factory=live_room_source,
+        event_sink=assembly.on_event,
+        audio=audio_input,
+        publish_state=publish_live_mock_state,
+        publish_event=publish_live_mock_event,
+        enabled=True,
+        disabled_reason="",
+    )
 
     # The same probes stage 5's UI server will mount; until then the exit
     # snapshot is their one reader (D3).
@@ -670,142 +1192,852 @@ async def run_director(args: argparse.Namespace) -> int:
     lag_monitor = LoopLagMonitor()
     registry.register("loop", lag_monitor.status)
     registry.register("selector", selector.status)
-    if bili_source is not None:
-        registry.register("bilibili", bili_source.status)
+    registry.register("live_mock", live_mock.state)
+    registry.register("bilibili", room_source.status)
 
     console = QueueSource("console")
+    mock_source = QueueSource("ui-tests", maxsize=512)
+    try:
+        test_catalog = load_test_catalog(config_path.parent / "testsets")
+    except ValueError as exc:
+        raise SystemExit(f"测试台加载失败：{exc}") from exc
+
+    def publish_test_status(data: dict[str, object]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.EVENT_FEED, data)
+
+    test_runner = MockTestRunner(
+        test_catalog, mock_source, clock, publish_test_status, revoke=scheduler.revoke
+    )
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
+    speaker.set_enabled(settings.audio.output_enabled)
+    runtime_paused = False
+    config_writer = TomlConfigWriter(config_path, settings)
 
-    async def handle_line(line: str) -> None:
+    def setting_value(path: str) -> Any:
+        current: Any = settings
+        for part in path.split("."):
+            current = getattr(current, part)
+        return current
+
+    def refresh_interaction_settings() -> None:
+        row = thresholds()
+        scheduler.set_cooldown(float(row.cooldown_s))
+        assembly.configure_interaction(
+            max_tokens=row.max_output_tokens,
+            protect_ms=settings.interaction.sc_protect_ms,
+            gift_battery_high=settings.interaction.gift_battery_high,
+            gift_battery_medium=settings.interaction.gift_battery_medium,
+        )
+        proactive.configure(
+            idle_threshold_s=float(row.idle_threshold_s),
+            wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
+            max_per_hour=settings.interaction.proactive.max_per_hour,
+            max_tokens=row.max_output_tokens,
+        )
+
+    async def refresh_persona_settings() -> None:
+        nonlocal persona, variables
+        persona = active_persona_store(settings, config_path.parent)
+        variables = template_variables(
+            settings.persona,
+            reply_length=settings.interaction.reply_length,
+        )
+        assembly.replace_persona(
+            persona,
+            settings.persona.growth,
+            variables,
+            live_event_rules(config_path.parent, variables),
+        )
+        distiller.replace_persona(persona, settings.persona.growth)
+        proactive.configure(
+            prompt=persona.proactive_prompt(
+                config_path.parent / "prompts" / "proactive.md", variables
+            )
+        )
+        await assembly.refresh_context()
+
+    async def run_reload_hook(path: str) -> None:
+        if path.startswith("interaction."):
+            refresh_interaction_settings()
+        if path.startswith("persona.") or path == "interaction.reply_length":
+            await refresh_persona_settings()
+        if path == "room.stream_intro":
+            await assembly.refresh_context()
+        if path == "audio.input_enabled":
+            if not runtime_paused:
+                audio_input.set_enabled(settings.audio.input_enabled)
+        elif path == "audio.output_enabled":
+            if not runtime_paused:
+                speaker.set_enabled(settings.audio.output_enabled)
+        elif path == "audio.noise_sensitivity":
+            audio_input.set_noise_sensitivity(settings.audio.noise_sensitivity)
+        elif path in _RELOG_ON_EDIT:
+            relog()
+        elif path == "room.room_id":
+            if settings.room.room_id:
+                await room_source.connect(settings.room.room_id)
+            else:
+                await room_source.disconnect()
+        elif path.startswith("speech.dashscope.") and hosted_link is not None:
+            await hosted_link.reconfigure_session(
+                voice=settings.speech.dashscope.voice,
+                turn=settings.speech.dashscope.turn,
+            )
+
+    async def apply_runtime_edit(path: Any, value: Any, *, reload_runtime: bool = True) -> str:
+        """Validate and hot-apply one visible panel field; save preferences only."""
+        try:
+            old = setting_value(path) if isinstance(path, str) else None
+        except AttributeError as exc:
+            raise ConfigEditError(f"没有「{path}」这个配置项") from exc
+        meta, applied = apply_runtime_config_edit(settings, path, value)
+        if settings.interaction.gift_battery_medium > settings.interaction.gift_battery_high:
+            apply_runtime_config_edit(settings, path, old)
+            raise ConfigEditError("中额礼物门槛不能高于高额礼物门槛")
+        try:
+            if reload_runtime:
+                await run_reload_hook(str(path))
+            if _should_persist_panel_edit(str(path)):
+                config_writer.write(str(path), applied)
+        except (ConfigWriteError, RoomConnectionError, OSError) as exc:
+            apply_runtime_config_edit(settings, path, old)
+            if reload_runtime:
+                with contextlib.suppress(Exception):
+                    await run_reload_hook(str(path))
+            raise ConfigEditError(str(exc)) from exc
+        shown = "开" if applied is True else "关" if applied is False else str(applied)
+        if _should_persist_panel_edit(str(path)):
+            return f"配置已保存并生效：{meta.label} → {shown}"
+        return f"本场已生效，重启恢复默认：{meta.label} → {shown}"
+
+    async def select_persona_profile(profile_id: str) -> str:
+        try:
+            profile = persona_profile(profile_id)
+        except ValueError as exc:
+            raise ConfigEditError(str(exc)) from exc
+        changes = profile_config_changes(profile.id)
+        old_values = {path: setting_value(path) for path, _value in changes}
+        try:
+            for path, value in changes:
+                _meta, applied = apply_runtime_config_edit(settings, path, value)
+                config_writer.write(path, applied)
+            await refresh_persona_settings()
+        except (ConfigEditError, ConfigWriteError, OSError, ValueError) as exc:
+            for path, old in old_values.items():
+                with contextlib.suppress(ConfigEditError, ConfigWriteError):
+                    _meta, applied = apply_runtime_config_edit(settings, path, old)
+                    config_writer.write(path, applied)
+            with contextlib.suppress(Exception):
+                await refresh_persona_settings()
+            raise ConfigEditError(f"切换人设失败：{exc}") from exc
+        return f"已切换到{profile.name}，Mia 的形象、音色和语音连接保持不变"
+
+    _USAGE = "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 电池数"
+
+    async def handle_line(line: str, *, as_live: bool = False) -> None:
         if not line.strip():
             return  # a bare Enter injects nothing and lectures nobody
         event = _parse_console_event(line, next(seq))
         if event is None:
-            print("弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额")
+            print(_USAGE)
+            if hub is not None:
+                # The panel's inject box needs the same feedback the console gets.
+                hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": _USAGE})
             return
+        if as_live:
+            active_room_id = int(room_source.status().get("active_room_id") or 0)
+            event = _as_live_mock_event(event, active_room_id)
         label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
-        money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
+        amount = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
+        if event.kind is EventKind.GIFT and event.gift is not None:
+            amount = f"（{event.gift.total_battery} 电池）"
         body = f"：{event.text}" if event.text else ""
-        print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
+        print(f"[已注入 {label}] {event.viewer.name}{body}{amount}")
         await console.push(event)
 
-    # A bottom-pinned input line when prompt_toolkit is installed: everything
-    # the session prints (replies, verdicts, log lines) lands ABOVE the line
-    # being typed instead of tearing through it. Optional exactly like
-    # sounddevice; --plain-console or piped stdin falls back to the raw reader.
-    use_prompt = (
-        not args.plain_console
-        and sys.stdin.isatty()
-        and importlib.util.find_spec("prompt_toolkit") is not None
-    )
-    if not args.plain_console and sys.stdin.isatty() and not use_prompt:
-        print("提示：装上 prompt_toolkit 后，打弹幕不再被输出打乱（pip install prompt_toolkit）。")
-
-    if use_prompt:
-
-        async def stdin_pump() -> None:
-            from prompt_toolkit import PromptSession
-
-            session: PromptSession[str] = PromptSession("弹幕> ")
-            while True:
-                try:
-                    line = await session.prompt_async()
-                except KeyboardInterrupt:
-                    # Raw mode turns Ctrl-C into a key press on the prompt, so
-                    # the loop-level SIGINT handler never sees it — route it to
-                    # the same graceful stop.
-                    stop.set()
-                    return
-                except EOFError:
-                    return  # Ctrl-D: console closed; the rest keeps running
-                await handle_line(line)
-
-    else:
-        # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
-        # default executor on shutdown, and a worker parked in readline() holds
-        # that join until one more Enter — Ctrl-C would hang the exit (C7). A
-        # daemon thread just dies with the process.
-        lines: asyncio.Queue[str | None] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def read_stdin() -> None:
-            while True:
-                raw_line = sys.stdin.readline()
-                try:
-                    loop.call_soon_threadsafe(lines.put_nowait, raw_line or None)
-                except RuntimeError:
-                    return  # loop already closed; we are exiting
-                if not raw_line:
-                    return
-
-        threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
-
-        async def stdin_pump() -> None:
-            while True:
-                line = await lines.get()
-                if line is None:
-                    return  # stdin closed; keep the rest running
-                await handle_line(line)
-
-    async def drain_controls() -> None:
-        while True:
-            clear = await scheduler.controls.get()
-            if speaker is not None:
-                speaker.flush()
-            print(f"[打断] playback.clear（{clear.reason}）")
-
+    # Resources acquired below (UI server, endpoint file, the pet shell) must
+    # be torn down even when the console setup that follows them raises — a
+    # half-installed prompt_toolkit used to orphan the shell and leave a stale
+    # endpoint.json behind. Pre-bound here so the finally can name them.
+    ui_server: UiServer | None = None
+    ui_url = ""
+    endpoint_file: Path | None = None
+    pet_proc: asyncio.subprocess.Process | None = None
     console_patch = contextlib.ExitStack()
-    if use_prompt:
-        from prompt_toolkit.patch_stdout import patch_stdout
-
-        # While the prompt is live, print() and the log stream both write
-        # through a proxy that repaints the input line beneath them. Logging
-        # re-targets onto the patched stdout for the window; the shutdown
-        # chain restores it.
-        console_patch.enter_context(patch_stdout(raw=True))
-        logging_setup(level=settings.runtime.log_level, stream=sys.stdout)
-
-    print(
-        f"已连接 {provider.value}（{args.url.split('?')[0]}），director 模式：\n"
-        f"  人设 {settings.persona.id}（persona list 可看全部）  "
-        f"话痨度 {settings.interaction.chattiness.value}"
-        f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
-        f"  生长层 relationship={settings.persona.growth.relationship.value} "
-        f"voice={settings.persona.growth.voice.value}\n"
-        "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
-    )
-    if not args.mute_while_speaking:
-        print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
-
-    await assembly.refresh_context()
-    tasks = [
-        asyncio.create_task(scheduler.run(), name="director:scheduler"),
-        asyncio.create_task(proactive.run(), name="director:proactive"),
-        asyncio.create_task(
-            assembly.run([console] + ([bili_source] if bili_source is not None else [])),
-            name="director:assembly",
-        ),
-        asyncio.create_task(
-            _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
-            name="director:mic",
-        ),
-        asyncio.create_task(_consume_events(speech.events(), speaker, None), name="director:play"),
-        asyncio.create_task(drain_controls(), name="director:controls"),
-        asyncio.create_task(stdin_pump(), name="director:stdin"),
-        asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
-    ]
+    tasks: list[asyncio.Task[None]] = []
     try:
+        # ------------------------------------------------------------ UI server
+
+        if hub is not None:
+            active_hub = hub
+
+            def panel_state() -> dict[str, Any]:
+                speak = settings.interaction.speak
+                room_status = room_source.status()
+                return {
+                    "paused": runtime_paused,
+                    "panicked": bool(scheduler.status().get("panicked")),
+                    "audio": {
+                        "input_enabled": audio_input.enabled,
+                        "output_enabled": speaker.enabled,
+                        "noise_sensitivity": audio_input.noise_sensitivity,
+                        "signal_level": audio_input.signal_level,
+                    },
+                    "speak": {
+                        name: bool(getattr(speak, name)) for name in type(speak).model_fields
+                    },
+                    "interaction": {
+                        "chattiness": settings.interaction.chattiness.value,
+                        "reply_length": settings.interaction.reply_length.value,
+                        "danmaku_window_s": settings.interaction.danmaku.window_s,
+                        "gift_battery_medium": settings.interaction.gift_battery_medium,
+                        "gift_battery_high": settings.interaction.gift_battery_high,
+                        "entry_welcome": settings.interaction.entry_welcome.model_dump(),
+                    },
+                    "room": {
+                        "room_id": settings.room.room_id,
+                        "stream_intro": settings.room.stream_intro,
+                        "connected": bool(room_status.get("connected")),
+                        "requested_room_id": int(room_status.get("requested_room_id") or 0),
+                        "active_room_id": int(room_status.get("active_room_id") or 0),
+                        "error": str(room_status.get("error") or ""),
+                    },
+                    "persona": {
+                        "id": settings.persona.id,
+                        "name": settings.persona.display_name or settings.persona.id,
+                        "streamer_name": settings.persona.streamer_name,
+                    },
+                    "avatar": {
+                        "renderer": settings.avatar.renderer,
+                        "model_id": settings.avatar.model_id,
+                    },
+                    "assistants": assistant_snapshot(settings, config_path.parent),
+                }
+
+            async def on_poke(_data: dict[str, Any]) -> None:
+                # The fixed, immediate quip is presentation-owned in main.js.
+                # Keeping the wire event preserves observability without filing
+                # a second model reply that would overwrite the promised text.
+                return
+
+            async def on_panel_set(data: dict[str, Any]) -> None:
+                nonlocal runtime_paused
+
+                def announce(line: str) -> None:
+                    print(f"[面板] {line}")
+                    if hub is not None:
+                        hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
+
+                paused = data.get("paused")
+                if isinstance(paused, bool) and paused != runtime_paused:
+                    if paused:
+                        runtime_paused = True
+                        assembly.set_event_input_enabled(False)
+                        audio_input.set_paused(True)
+                        audio_input.set_enabled(False)
+                        speaker.set_enabled(False)
+                        scheduler.panic_mute()
+                        await speech.suspend()
+                        announce("伴播已暂停：输入、事件和播报均已停止")
+                    else:
+                        try:
+                            await speech.resume()
+                        except (OSError, SessionRefused, websockets.WebSocketException) as exc:
+                            advice = _connect_advice(exc, provider, connect_url)
+                            announce(f"恢复失败，仍保持暂停：{advice}")
+                            return
+                        runtime_paused = False
+                        audio_input.set_paused(False)
+                        scheduler.release_panic()
+                        assembly.set_event_input_enabled(True)
+                        audio_input.set_enabled(settings.audio.input_enabled)
+                        speaker.set_enabled(settings.audio.output_enabled)
+                        announce("伴播已恢复")
+
+                edits: list[tuple[Any, Any]] = []
+                audio_patch = data.get("audio")
+                if isinstance(audio_patch, dict):
+                    for name, value in audio_patch.items():
+                        if name in {"input_enabled", "output_enabled", "noise_sensitivity"}:
+                            edits.append((f"audio.{name}", value))
+                        else:
+                            announce(f"未知音频配置 {name}，忽略")
+                speak_patch = data.get("speak")
+                if isinstance(speak_patch, dict):
+                    known_speak = speak_paths(settings)
+                    for name, value in speak_patch.items():
+                        path = known_speak.get(name)
+                        if path is None:
+                            announce(f"未知直播事件开关 {name}，忽略")
+                        else:
+                            edits.append((path, value))
+                config_patch = data.get("config")
+                if isinstance(config_patch, dict):
+                    edits.append((config_patch.get("path"), config_patch.get("value")))
+                room_patch = data.get("room")
+                if isinstance(room_patch, dict):
+                    room_action = room_patch.get("action")
+                    room_id_value = room_patch.get("room_id")
+                    if room_action == "disconnect":
+                        await room_source.disconnect()
+                        announce("已断开直播间事件流，语音输入保持原设置")
+                    elif room_action == "connect":
+                        if (
+                            not isinstance(room_id_value, int)
+                            or isinstance(room_id_value, bool)
+                            or room_id_value <= 0
+                        ):
+                            announce("直播间号必须是正整数")
+                        elif settings.room.room_id == room_id_value:
+                            try:
+                                await room_source.connect(room_id_value)
+                                announce(f"已连接直播间 {room_id_value}")
+                            except RoomConnectionError as exc:
+                                announce(str(exc))
+                        else:
+                            edits.append(("room.room_id", room_id_value))
+                    elif room_action == "save_info":
+                        streamer_name = room_patch.get("streamer_name")
+                        stream_intro = room_patch.get("stream_intro")
+                        if not isinstance(streamer_name, str):
+                            announce("主播昵称必须是文字")
+                        elif not isinstance(stream_intro, str):
+                            announce("直播主题简介必须是文字")
+                        else:
+                            edits.extend(
+                                [
+                                    ("persona.streamer_name", streamer_name.strip()),
+                                    ("room.stream_intro", stream_intro.strip()),
+                                ]
+                            )
+                    elif "room_id" in room_patch:
+                        edits.append(("room.room_id", room_id_value))
+
+                for path, value in edits:
+                    try:
+                        announce(await apply_runtime_edit(path, value))
+                    except ConfigEditError as exc:
+                        announce(str(exc))
+
+                assistant_patch = data.get("assistant")
+                if isinstance(assistant_patch, dict):
+                    action = assistant_patch.get("action")
+                    assistant_id = assistant_patch.get("id")
+                    profile_id = assistant_patch.get("profile")
+                    if assistant_id != "mia":
+                        announce("当前只支持 Mia 助手")
+                    elif not isinstance(profile_id, str):
+                        announce("人设方案 id 不合法")
+                    elif action == "select_profile":
+                        try:
+                            announce(await select_persona_profile(profile_id))
+                        except ConfigEditError as exc:
+                            announce(str(exc))
+                    elif action == "save":
+                        anchor_name = assistant_patch.get("anchor")
+                        text = assistant_patch.get("text")
+                        if anchor_name not in {"identity", "personality"} or not isinstance(
+                            text, str
+                        ):
+                            announce("人设保存参数不合法")
+                        else:
+                            try:
+                                if anchor_name == "identity":
+                                    saved = save_anchor(
+                                        settings,
+                                        config_path.parent,
+                                        profile_id,
+                                        "identity",
+                                        text,
+                                    )
+                                else:
+                                    saved = save_anchor(
+                                        settings,
+                                        config_path.parent,
+                                        profile_id,
+                                        "personality",
+                                        text,
+                                    )
+                                if profile_id == settings.persona.profile:
+                                    await refresh_persona_settings()
+                                announce(f"人设已保存并生效：{saved.name}")
+                            except (OSError, ValueError) as exc:
+                                announce(f"人设保存失败：{exc}")
+                    else:
+                        announce("未知助手操作，忽略")
+                if hub is not None:
+                    hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
+
+            async def on_console_line(data: dict[str, Any]) -> None:
+                text = data.get("text")
+                if isinstance(text, str):
+                    await handle_line(text, as_live=data.get("as_live") is True)
+
+            async def on_test_run(data: dict[str, Any]) -> None:
+                case_id = data.get("case_id")
+                if not isinstance(case_id, str) or not case_id:
+                    publish_test_status(
+                        {"kind": "test", "status": "failed", "text": "测试用例 id 不能为空"}
+                    )
+                    return
+                try:
+                    await test_runner.start(case_id)
+                except ValueError as exc:
+                    publish_test_status(
+                        {
+                            "kind": "test",
+                            "status": "failed",
+                            "case_id": case_id,
+                            "text": str(exc),
+                        }
+                    )
+
+            async def on_test_stop(_data: dict[str, Any]) -> None:
+                await test_runner.stop()
+
+            live_mock_suspended_room = False
+
+            async def on_live_mock_check(data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
+                raw_room_id = data.get("room_id")
+                capture = data.get("capture")
+                room = (
+                    raw_room_id
+                    if isinstance(raw_room_id, int) and not isinstance(raw_room_id, bool)
+                    else 0
+                )
+                await live_mock.check(
+                    room_id=room,
+                    capture=capture if isinstance(capture, dict) else {},
+                )
+                if live_mock.state().get("status") != "ready":
+                    return
+                try:
+                    if room_source.status().get("connected"):
+                        await room_source.disconnect()
+                    live_mock_suspended_room = True
+                    for path, value in _live_mock_config_edits(data):
+                        message = await apply_runtime_edit(
+                            path,
+                            value,
+                            reload_runtime=path != "room.room_id",
+                        )
+                        print(f"[直播 Mock] {message}")
+                except (ConfigEditError, RoomConnectionError) as exc:
+                    print(f"[直播 Mock] 配置覆盖失败：{exc}")
+                    if hub is not None:
+                        hub.broadcast(
+                            ServerEvent.EVENT_FEED,
+                            {"kind": "system", "text": f"直播 Mock 配置覆盖失败：{exc}"},
+                        )
+                    return
+                if hub is not None:
+                    hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
+
+            async def on_live_mock_start(_data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
+                if room_source.status().get("connected"):
+                    await room_source.disconnect()
+                    live_mock_suspended_room = True
+                await live_mock.start()
+                if not live_mock.state().get("running") and live_mock_suspended_room:
+                    live_mock_suspended_room = False
+                    if settings.room.room_id:
+                        with contextlib.suppress(RoomConnectionError):
+                            await room_source.connect(settings.room.room_id)
+
+            async def on_live_mock_stop(_data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
+                await live_mock.stop()
+                if live_mock_suspended_room:
+                    live_mock_suspended_room = False
+                    if settings.room.room_id:
+                        with contextlib.suppress(RoomConnectionError):
+                            await room_source.connect(settings.room.room_id)
+
+            async def on_live_mock_capture_stop(_data: dict[str, Any]) -> None:
+                nonlocal live_mock_suspended_room
+                await live_mock.capture_stopped()
+                if live_mock_suspended_room:
+                    live_mock_suspended_room = False
+                    if settings.room.room_id:
+                        with contextlib.suppress(RoomConnectionError):
+                            await room_source.connect(settings.room.room_id)
+
+            async def on_audio_chunk(data: dict[str, Any]) -> None:
+                await live_mock.push_audio(data)
+
+            async def on_app_quit(_data: dict[str, Any]) -> None:
+                print("[桌宠] 收到退出确认，正在收尾…")
+                active_hub.broadcast(ServerEvent.APP_EXITING, {})
+                # Give the local WebSocket pump a moment to deliver the close
+                # acknowledgement. The shell disappears before the slower
+                # distillation and resource teardown start.
+                await asyncio.sleep(0.05)
+                stop.set()
+
+            def hello() -> dict[str, Any]:
+                return {
+                    "protocol": 1,
+                    "persona": {
+                        "id": settings.persona.id,
+                        "name": settings.persona.display_name or settings.persona.id,
+                    },
+                    "provider": provider.value,
+                    "room_connected": bool(room_source.status().get("connected")),
+                    "avatar": {
+                        "renderer": settings.avatar.renderer,
+                        "model_id": settings.avatar.model_id,
+                    },
+                    "panel": panel_state(),
+                    "tests": test_catalog.public(),
+                    "test_state": test_runner.state(),
+                    "live_mock": live_mock.state(),
+                }
+
+            try:
+                ui_sock = bind_ui_socket(settings.runtime.ui_port)
+            except OSError as exc:
+                # The UI is a passenger; the voice loop must survive a taken port.
+                print(
+                    f"[界面] 端口 {settings.runtime.ui_port} 绑不上（{exc}），本场没有界面；"
+                    "改 [runtime] ui_port 或空出端口。"
+                )
+                hub = None
+            else:
+                ui_port = ui_sock.getsockname()[1]
+                ui_origin = f"http://127.0.0.1:{ui_port}"
+                ui_token = token_hex(24)
+                ui_url = f"{ui_origin}/{ui_token}/"
+                app = create_ui_app(
+                    hub=hub,
+                    registry=registry,
+                    settings=settings,
+                    token=ui_token,
+                    origin=ui_origin,
+                    handlers={
+                        ClientEvent.PET_POKE: on_poke,
+                        ClientEvent.PANEL_SET: on_panel_set,
+                        ClientEvent.CONSOLE_LINE: on_console_line,
+                        ClientEvent.TEST_RUN: on_test_run,
+                        ClientEvent.TEST_STOP: on_test_stop,
+                        ClientEvent.LIVE_MOCK_CHECK: on_live_mock_check,
+                        ClientEvent.LIVE_MOCK_START: on_live_mock_start,
+                        ClientEvent.LIVE_MOCK_STOP: on_live_mock_stop,
+                        ClientEvent.LIVE_MOCK_CAPTURE_STOP: on_live_mock_capture_stop,
+                        ClientEvent.AUDIO_CHUNK: on_audio_chunk,
+                        ClientEvent.APP_QUIT: on_app_quit,
+                    },
+                    hello=hello,
+                    # <data home>/bilisama/skins — user-imported packs, shadowing
+                    # the packaged ones. Endpoint file and skins share the roof.
+                    user_skins_root=default_endpoint_path().parent.parent / "skins",
+                )
+                ui_server = UiServer(app, ui_sock)
+                ui_server.start()
+                endpoint_file = default_endpoint_path()
+                try:
+                    write_endpoint_file(endpoint_file, url=ui_url, pid=os.getpid())
+                except OSError as exc:
+                    print(f"[界面] 端点文件写不了（{exc}）；壳这场要用 BILISAMA_UI_URL={ui_url}")
+                    endpoint_file = None
+                hub.broadcast(ServerEvent.PANEL_STATE, panel_state())  # seed the sticky state
+                hub.broadcast(ServerEvent.LIVE_MOCK_STATE, live_mock.state())
+                if args.open:
+                    import webbrowser
+
+                    webbrowser.open(ui_url)
+
+        # The desktop shell comes up on its own whenever it is installed — this
+        # is the desktop-pet preview, and having to remember a flag for the pet
+        # was a surprise every single time. Best-effort, never supervision:
+        # stage 7 inverts the relationship (Electron launches P2), the shell
+        # finds the endpoint file by itself, and a missing or broken electron
+        # never touches the voice loop. --no-pet opts out.
+        if not args.no_pet and ui_server is not None:
+            pet_dir = Path(__file__).resolve().parents[2] / "desktop" / "preview"
+            electron = pet_dir / "node_modules" / ".bin" / "electron"
+            if electron.is_file():
+                try:
+                    pet_proc = await asyncio.create_subprocess_exec(
+                        str(electron),
+                        ".",
+                        cwd=pet_dir,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                except OSError as exc:
+                    # The shell is a passenger of a passenger; failing to spawn it
+                    # must not touch the voice loop.
+                    print(f"[桌宠] 壳拉不起来（{exc}）；手动 npm start 也行")
+                else:
+                    print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走；不想要加 --no-pet）")
+            else:
+                print(
+                    f"[桌宠] 桌面悬浮窗没装，这场只有浏览器界面。装一次就好："
+                    f"cd {pet_dir} && npm install"
+                )
+
+        # A bottom-pinned input line when prompt_toolkit is installed: everything
+        # the session prints (replies, verdicts, log lines) lands ABOVE the line
+        # being typed instead of tearing through it. Optional exactly like
+        # sounddevice; --plain-console or piped stdin falls back to the raw reader.
+        use_prompt = (
+            not args.plain_console
+            and sys.stdin.isatty()
+            and importlib.util.find_spec("prompt_toolkit") is not None
+        )
+        if not args.plain_console and sys.stdin.isatty() and not use_prompt:
+            print(
+                "提示：装上 prompt_toolkit 后，打弹幕不再被输出打乱（pip install prompt_toolkit）。"
+            )
+
+        if use_prompt:
+
+            async def stdin_pump() -> None:
+                from prompt_toolkit import PromptSession
+
+                session: PromptSession[str] = PromptSession("弹幕> ")
+                while True:
+                    try:
+                        line = await session.prompt_async()
+                    except KeyboardInterrupt:
+                        # Raw mode turns Ctrl-C into a key press on the prompt, so
+                        # the loop-level SIGINT handler never sees it — route it to
+                        # the same graceful stop.
+                        stop.set()
+                        print(
+                            "\n[退出] 正在收尾（蒸馏、断连）…再按一次 Ctrl-C 强退。",
+                            file=sys.stderr,
+                        )
+                        # Leaving this session tears our SIGINT handler down with
+                        # it, and the escalation just promised above would have
+                        # nothing to land on. Put it back before returning.
+                        _sane_terminal(saved_tty)
+                        arm_sigint()
+                        return
+                    except EOFError:
+                        return  # Ctrl-D: console closed; the rest keeps running
+                    await handle_line(line)
+
+        else:
+            # Stdin on a daemon thread, not run_in_executor: asyncio.run joins the
+            # default executor on shutdown, and a worker parked in readline() holds
+            # that join until one more Enter — Ctrl-C would hang the exit (C7). A
+            # daemon thread just dies with the process.
+            lines: asyncio.Queue[str | None] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def read_stdin() -> None:
+                while True:
+                    raw_line = sys.stdin.readline()
+                    try:
+                        loop.call_soon_threadsafe(lines.put_nowait, raw_line or None)
+                    except RuntimeError:
+                        return  # loop already closed; we are exiting
+                    if not raw_line:
+                        return
+
+            threading.Thread(target=read_stdin, name="dev-talk:stdin", daemon=True).start()
+
+            async def stdin_pump() -> None:
+                while True:
+                    line = await lines.get()
+                    if line is None:
+                        return  # stdin closed; keep the rest running
+                    await handle_line(line)
+
+        async def report_playback() -> None:
+            """Tell the floor whether the audience is still listening.
+
+            This is the producer plan section 4.3 assumes for queued_audio and
+            that nothing had ever supplied. Without it the scheduler dispatches
+            the next reply the moment the SERVER finishes generating, while the
+            speaker is still far from playing the last one out: measured against
+            the real endpoint, fourteen back-to-back replies built 106 seconds of
+            unplayed audio in 48 seconds of wall clock and never recovered. What
+            the listener gets is answers to danmaku from two minutes ago.
+
+            A poll rather than a callback because the buffer drains on
+            PortAudio's thread, and hopping threads to announce silence would
+            cost more than looking. 100 ms is well inside one audio block.
+            """
+            last = False
+            while True:
+                busy = speaker.busy
+                if busy != last:
+                    floor.on_playback(busy)
+                    last = busy
+                    if not busy:
+                        # State gates release on events, and playback finishing
+                        # is not one the link ever sends.
+                        scheduler.notify()
+                await asyncio.sleep(0.1)
+
+        async def drain_controls() -> None:
+            while True:
+                clear = await scheduler.controls.get()
+                if speaker is not None:
+                    speaker.flush()
+                print(f"[打断] playback.clear（{clear.reason}）")
+                if hub is not None:
+                    # The bubble shatters on this; the queue stays single-consumer
+                    # here and the hub only gets a copy.
+                    hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": clear.reason})
+
+        if use_prompt:
+            from prompt_toolkit.patch_stdout import patch_stdout
+
+            # While the prompt is live, print() and the log stream both write
+            # through a proxy that repaints the input line beneath them. Logging
+            # re-targets onto the patched stdout for the window; the shutdown
+            # chain restores it.
+            console_patch.enter_context(patch_stdout(raw=True))
+            relog()
+
+        print(
+            # connect_url, not args.url: on DashScope the dial goes to the
+            # wss endpoint while args.url still holds the s2s default, and a
+            # banner naming a host nobody dialled sends debugging the wrong way.
+            f"已连接 {provider.value}（{connect_url.split('?')[0]}），director 模式：\n"
+            f"  人设 {settings.persona.id}（persona list 可看全部）  "
+            f"话痨度 {settings.interaction.chattiness.value}"
+            f"（冷场 {thresholds().idle_threshold_s}s 起话题）\n"
+            f"  生长层 relationship={settings.persona.growth.relationship.value} "
+            f"voice={settings.persona.growth.voice.value}\n"
+            "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
+        )
+        if ui_url:
+            print(
+                f"  界面 {ui_url}\n  （浏览器打开看桌宠和面板；desktop/preview 的壳会自己找到它）"
+            )
+        if not args.mute_while_speaking:
+            print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
+
+        await assembly.refresh_context()
+        tasks = [
+            asyncio.create_task(scheduler.run(), name="director:scheduler"),
+            asyncio.create_task(proactive.run(), name="director:proactive"),
+            asyncio.create_task(
+                assembly.run([console, mock_source, room_source]),
+                name="director:assembly",
+            ),
+            asyncio.create_task(
+                _pump_mic(audio_input, args.input_device, speaker, args.mute_while_speaking),
+                name="director:mic",
+            ),
+            asyncio.create_task(
+                # stream_text off under the prompt: see _consume_events.
+                _consume_events(
+                    speech.events(),
+                    speaker,
+                    None,
+                    stream_text=not use_prompt,
+                    dialogue_sink=proactive.note_dialogue,
+                ),
+                name="director:play",
+            ),
+            asyncio.create_task(drain_controls(), name="director:controls"),
+            asyncio.create_task(stdin_pump(), name="director:stdin"),
+            asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
+            asyncio.create_task(report_playback(), name="director:playback"),
+            asyncio.create_task(_watch_default_output(speaker), name="director:audio-output"),
+        ]
+        if hub is not None:
+            live_hub = hub
+
+            def read_signals() -> VoiceSignals:
+                status = scheduler.status()
+                return VoiceSignals(
+                    streamer_speaking=floor.streamer_speaking,
+                    dispatching=bool(status.get("dispatching")),
+                    active=status.get("active_source") is not None,
+                    implicit=floor.implicit_active,
+                    audio_busy=speaker.busy,
+                )
+
+            async def ui_feed() -> None:
+                # The fanout's third view (scheduler and director:play hold the
+                # other two); link_frames drops PCM before it can reach a browser.
+                async for ev in speech.events():
+                    reply_context: dict[str, Any] | None = None
+                    if isinstance(ev, link.ReplyTextDelta | link.ReplyDone):
+                        intent = scheduler.reply_intent(ev.handle)
+                        if intent is not None:
+                            reply_context = {"source": intent.source}
+                            if intent.event is not None:
+                                reply_context["reference"] = live_event_payload(intent.event)
+                            elif intent.source in {
+                                "entry",
+                                "proactive",
+                                "background_result",
+                            }:
+                                reply_context["reference"] = {"kind": intent.source}
+                    for name, data in link_frames(ev, reply_context=reply_context):
+                        live_hub.broadcast(name, data)
+
+            async def ui_audio_level() -> None:
+                last = -1
+                while True:
+                    level = audio_input.signal_level
+                    if level != last:
+                        last = level
+                        live_hub.broadcast(ServerEvent.AUDIO_LEVEL, {"level": level})
+                    await asyncio.sleep(0.1)
+
+            tasks += [
+                asyncio.create_task(ui_feed(), name="director:ui-feed"),
+                asyncio.create_task(live_hub.run(read_signals), name="director:ui-state"),
+                asyncio.create_task(ui_audio_level(), name="director:ui-audio-level"),
+            ]
         await stop.wait()
     finally:
+        await test_runner.stop()
+        await live_mock.aclose()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         # The prompt died with its task; unpatch stdout before the shutdown
         # chain prints, and point logging back at stderr.
         console_patch.close()
+        # Two things the prompt took with it, both needed for the rest of this
+        # chain to stay interruptible: the tty's cooked mode (raw mode turns
+        # Ctrl-C into an echoed ^C instead of a signal) and our SIGINT handler.
+        _sane_terminal(saved_tty)
+        arm_sigint()
         if use_prompt:
-            logging_setup(level=settings.runtime.log_level)
+            use_prompt = False  # the patched stdout is gone; relog to stderr
+            relog()
+        # The UI goes first: aclose() chases the browsers off their sockets so
+        # uvicorn's graceful stop is not stuck waiting on an open WebSocket.
+        if ui_server is not None:
+            try:
+                if hub is not None:
+                    await hub.aclose()
+                await ui_server.stop()
+            except Exception as exc:
+                print(f"[收尾] 界面服务器没关上：{exc}", file=sys.stderr)
+        if endpoint_file is not None:
+            # Only if it is still OURS. Two --director sessions share this path
+            # (ui_port=0 gives each its own port but one endpoint file), the
+            # later one overwrites it, and deleting another live session's
+            # endpoint sends its shell back to the waiting card for good.
+            with contextlib.suppress(OSError, ValueError):
+                published = json.loads(endpoint_file.read_text(encoding="utf-8"))
+                if published.get("pid") == os.getpid():
+                    endpoint_file.unlink(missing_ok=True)
+        if pet_proc is not None and pet_proc.returncode is None:
+            # A viewer, not a dependent: terminate politely, then the axe — a
+            # shell that shrugs off SIGTERM must not outlive its dev-talk.
+            with contextlib.suppress(ProcessLookupError):
+                pet_proc.terminate()
+            try:
+                await asyncio.wait_for(pet_proc.wait(), timeout=3.0)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    pet_proc.kill()
         # Every step below gets its own try: this is a chain of unrelated
         # resources, and one refusing to close must not leak the rest — a
         # failed distillation would otherwise leave the WS and the DB open
@@ -841,6 +2073,12 @@ async def run_director(args: argparse.Namespace) -> int:
             await speech.aclose()
         except Exception as exc:
             print(f"[收尾] 语音连接没关上：{exc}", file=sys.stderr)
+        try:
+            # Off-loop: the PortAudio release blocks (see _close_audio_stream),
+            # and left open it would stall interpreter teardown after 再见.
+            await asyncio.to_thread(speaker.close)
+        except Exception as exc:
+            print(f"[收尾] 扬声器没关上：{exc}", file=sys.stderr)
         print("再见。")
     return 0
 
@@ -859,15 +2097,15 @@ async def run(args: argparse.Namespace) -> int:
         url = args.url
 
     client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
-    await client.connect()
-    print(f"已连接 {provider.value}（{url.split("?")[0]}），说话即可，Ctrl-C 退出。")
+    await _connect_or_exit(client, provider, url)
+    print(f"已连接 {provider.value}（{url.split('?')[0]}），说话即可，Ctrl-C 退出。")
     if args.wav is None and not args.mute_while_speaking:
         print("提示：外放会让 AI 听到自己的声音。戴耳机，或加 --mute-while-speaking。")
+    speaker: _Speaker | None = None
     try:
-        session_frame = _session_frame(provider)
+        session_frame = _session_frame(provider, args.voice)
         if session_frame is not None:
             await client.send_command(session_frame)
-        speaker: _Speaker | None = None
         reply_wav: Path | None = None
         if args.wav is not None:
             reply_wav = args.wav.with_name(args.wav.stem + ".reply.wav")
@@ -886,7 +2124,17 @@ async def run(args: argparse.Namespace) -> int:
             task.result()  # surface pump/consume failures instead of swallowing
         return 0
     finally:
-        await client.aclose()
+        # One try per resource, same rule as director mode's teardown chain:
+        # a raise from the socket goodbye must not skip the audio release.
+        try:
+            await client.aclose()
+        except Exception as exc:
+            print(f"[收尾] 语音连接没关上：{exc}", file=sys.stderr)
+        if speaker is not None:
+            try:
+                await asyncio.to_thread(speaker.close)
+            except Exception as exc:
+                print(f"[收尾] 扬声器没关上：{exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -897,6 +2145,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", default="ws://127.0.0.1:8765/v1/realtime", help="s2s 服务地址")
     parser.add_argument(
         "--model", default="qwen-audio-3.0-realtime-flash", help="DashScope 的 realtime 模型名"
+    )
+    parser.add_argument(
+        "--voice",
+        default="",
+        help="换音色，覆盖 [speech.dashscope] voice。留空用服务端默认（偏尖）；"
+        "名字写错时服务端会把可用清单报回来",
     )
     parser.add_argument(
         "--wav", type=Path, default=None, help="不用麦克风，喂一段 16kHz 单声道 WAV"
@@ -931,13 +2185,40 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="不用底部输入行，退回逐行读 stdin（终端行为怪异时的逃生口）",
     )
+    parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="不起桌宠界面服务器（director 模式默认起，浏览器/壳都从它看）",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="界面起来后自动在浏览器打开（director 用）",
+    )
+    parser.add_argument(
+        "--no-pet",
+        action="store_true",
+        help="这场不要桌面悬浮窗（装了壳就默认拉起，只想要浏览器界面时加它）",
+    )
+    parser.add_argument(
+        # Kept so the muscle memory and the older runbook lines still work; the
+        # shell is the default now, so it has nothing left to turn on.
+        "--pet",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--skin",
+        default=None,
+        help="本次运行的形象：皮肤包目录名（如 kirby），或 tofu 用内置豆腐机器人；不改配置文件",
+    )
     args = parser.parse_args(argv)
     if args.director:
         try:
             return asyncio.run(run_director(args))
         except KeyboardInterrupt:
-            # Only the second Ctrl-C lands here (see on_sigint); the first one
-            # goes through the graceful path.
+            # The second Ctrl-C exits inside on_sigint; this catches a Ctrl-C
+            # arriving before that handler is installed.
             print("\n强退。")
             return 130
     try:
