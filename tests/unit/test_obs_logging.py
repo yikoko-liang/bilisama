@@ -23,7 +23,13 @@ from typing import Any, Literal
 import pytest
 
 from bilisama.obs import logging as obs_logging
-from bilisama.obs.logging import EventLogger, bind, get_logger, setup
+from bilisama.obs.logging import (
+    EventLogger,
+    bind,
+    get_logger,
+    rolling_file_handler,
+    setup,
+)
 
 _QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn")
 
@@ -554,3 +560,71 @@ def test_every_level_takes_the_event_name_positionally_only(method: str) -> None
     sig = inspect.signature(getattr(EventLogger, method))
     kinds = {p.name: p.kind for p in sig.parameters.values()}
     assert kinds["event"] is inspect.Parameter.POSITIONAL_ONLY, f"{method} 的 event 不是仅位置"
+
+
+# ------------------------------------------------------------ two thresholds
+
+
+def test_the_console_can_be_quieter_than_the_record() -> None:
+    """One level decides what exists; another decides what the terminal shows.
+
+    dev-talk narrates in Chinese through print(), and a JSON copy of the same
+    events beside it makes the input line unusable. With a panel attached the
+    console can drop to warnings and lose nothing, because the panel and the log
+    file are both still receiving everything.
+    """
+    console = io.StringIO()
+    panel = logging.StreamHandler(io.StringIO())
+    setup(level="info", console_level="warning", stream=console, extra_handlers=(panel,))
+    log = get_logger("test.obs")
+    log.info("probe.decision")
+    log.warning("probe.trouble")
+
+    assert console.getvalue().count("probe.") == 1, "终端漏出了 info 级的行"
+    assert "probe.trouble" in console.getvalue()
+    assert isinstance(panel.stream, io.StringIO)
+    assert panel.stream.getvalue().count("probe.") == 2, "面板没拿到完整记录"
+
+
+def test_without_a_console_level_nothing_changes() -> None:
+    """`--no-ui` has no panel, so the terminal is the only reader there is.
+    The old behaviour has to stay the default or those lines go nowhere."""
+    console = io.StringIO()
+    setup(level="info", stream=console)
+    get_logger("test.obs").info("probe.decision")
+    assert "probe.decision" in console.getvalue()
+
+
+def test_the_log_file_survives_a_reconfigure(tmp_path: Path) -> None:
+    """dev-talk calls setup() again whenever the level or console mode changes,
+    and setup() clears the root handlers each time. The file handler is built
+    once by the caller and handed back on every call — the same contract the
+    panel's handler already relies on. Building it inside setup() would reopen
+    the file per call and leak the old one."""
+    target = tmp_path / "logs" / "bilisama.jsonl"
+    handler = rolling_file_handler(target)
+    for _ in range(3):
+        setup(level="info", stream=io.StringIO(), extra_handlers=(handler,))
+        get_logger("test.obs").info("probe.line")
+    logging.getLogger().handlers.clear()
+    handler.close()
+
+    lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 3, f"重配之后文件handler掉了：{lines}"
+    assert json.loads(lines[0])["event"] == "probe.line"
+
+
+def test_the_log_file_is_scrubbed_like_every_other_handler(tmp_path: Path) -> None:
+    """It shares the formatter, so audience text and credentials are folded
+    there too. A file is the one output that outlives the session, which makes
+    it the worst place to leak either."""
+    target = tmp_path / "bilisama.jsonl"
+    handler = rolling_file_handler(target)
+    setup(level="info", stream=io.StringIO(), extra_handlers=(handler,))
+    get_logger("test.obs").info("probe.line", api_key="sk-REAL", text="观众说的话")
+    logging.getLogger().handlers.clear()
+    handler.close()
+
+    payload = json.loads(target.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["api_key"] == "***"
+    assert payload["text"] == "<5 chars>"

@@ -25,6 +25,7 @@ import contextlib
 import importlib.util
 import itertools
 import json
+import logging
 import math
 import os
 import signal
@@ -1072,13 +1073,27 @@ async def run_director(args: argparse.Namespace) -> int:
         print(f"[配置{tag}] {problem.field}：{problem.message}{fix}")
     # Without this, background warnings (proactive.refresh_failed and friends)
     # reach the console as bare event names with their error fields dropped.
+    from bilisama.obs.logging import rolling_file_handler
     from bilisama.obs.logging import setup as logging_setup
+    from bilisama.paths import log_dir
 
     clock = SystemClock()
     # The hub exists before logging so its ring handler catches every line;
     # bind failure later just parks the hub unused (its staging is bounded).
     hub: UiHub | None = UiHub(clock) if not args.no_ui else None
-    log_tee = (hub.log_handler,) if hub is not None else ()
+    # Built once and reused by every relog(): setup() clears the root handlers,
+    # so a handler created per call would reopen the file and leak the old one.
+    log_path = log_dir() / "dev-talk.jsonl"
+    file_tee: tuple[logging.Handler, ...] = ()
+    try:
+        file_tee = (rolling_file_handler(log_path),)
+    except OSError as exc:
+        # No disk to write to is not a reason to refuse a stream; the panel and
+        # the console still work, and the streamer is told what they lost.
+        print(f"[日志] 落盘用不了（{exc}）；这一场只有终端和面板", file=sys.stderr)
+    log_tee: tuple[logging.Handler, ...] = (
+        (hub.log_handler, *file_tee) if hub is not None else file_tee
+    )
     # Bound here, set for real once the console mode is known: relog() reads it
     # at call time, and a panel edit can arrive before that point.
     use_prompt = False
@@ -1101,6 +1116,11 @@ async def run_director(args: argparse.Namespace) -> int:
         """
         logging_setup(
             level=settings.runtime.log_level,
+            # The panel and the file take the whole record; the terminal keeps
+            # its own Chinese narration and only wants to hear about trouble.
+            # Without a panel there is nowhere else to read info lines, so the
+            # console goes back to showing everything.
+            console_level="warning" if hub is not None else None,
             log_viewer_content=settings.runtime.log_viewer_content,
             stream=sys.stdout if use_prompt else None,
             extra_handlers=log_tee,

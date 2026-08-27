@@ -22,6 +22,8 @@ import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Final, Literal, TextIO
 
 # Correlation ids, carried across the call stack. All three may be unset.
@@ -249,9 +251,36 @@ def get_logger(name: str) -> EventLogger:
     return EventLogger(name)
 
 
+LogLevel = Literal["debug", "info", "warning", "error", "critical"]
+
+
+def rolling_file_handler(
+    path: Path, *, max_bytes: int = 4_000_000, backups: int = 3
+) -> logging.Handler:
+    """A rotating JSON log file, ready to pass to setup(extra_handlers=...).
+
+    Built here rather than inside setup() because the caller has to build it
+    ONCE and hand the same instance to every setup() call: dev-talk
+    reconfigures logging whenever the console mode or the level changes, and a
+    handler created per call would reopen the file each time and leak the old
+    one. That is exactly the contract extra_handlers already has, so the file
+    is just another passenger on it.
+
+    Four megabytes across four files is enough for a long stream at info and
+    small enough to attach to a bug report. Failing to open it is not fatal:
+    a session with no disk to write to should still run, and the panel and
+    console both still work.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return RotatingFileHandler(
+        path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8", delay=True
+    )
+
+
 def setup(
     *,
-    level: Literal["debug", "info", "warning", "error"] = "info",
+    level: LogLevel = "info",
+    console_level: LogLevel | None = None,
     log_viewer_content: bool = False,
     stream: TextIO | None = None,
     extra_handlers: Sequence[logging.Handler] = (),
@@ -259,19 +288,32 @@ def setup(
     """Configure the root logger. Call once at process start.
 
     Args:
-        level: Root log level.
+        level: Root log level — what gets RECORDED at all.
+        console_level: What the console alone SHOWS, when that should differ.
+            None means the console shows everything the root level admits,
+            which is the old behaviour and stays the default.
+
+            The two are separate because the terminal already carries a
+            human-readable narration (dev-talk's own print lines) and a JSON
+            copy of the same events beside it makes the input line unusable.
+            With a panel attached the console can drop to warnings and lose
+            nothing; with `--no-ui` it must not, or info-level lines have no
+            reader anywhere.
         log_viewer_content: Whether to log danmaku bodies verbatim. Off by
             default — that text belongs to the audience.
         stream: Where lines go. Defaults to stderr.
         extra_handlers: Handlers installed alongside the stream handler, each
             given the same JSON formatter so scrubbing has one source of
-            truth. dev-talk reconfigures logging around its console patch;
-            passing the same handlers to every setup() call keeps them alive
-            across the `handlers.clear()` below.
+            truth, and each left at the root level — the panel and the log
+            file want the whole record. dev-talk reconfigures logging around
+            its console patch; passing the same handlers to every setup() call
+            keeps them alive across the `handlers.clear()` below.
     """
     handler = logging.StreamHandler(stream or sys.stderr)
     formatter = _JsonFormatter(log_viewer_content=log_viewer_content)
     handler.setFormatter(formatter)
+    if console_level is not None:
+        handler.setLevel(getattr(logging, console_level.upper()))
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)

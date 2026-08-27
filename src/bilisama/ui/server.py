@@ -39,6 +39,7 @@ from bilisama.config.ui_meta import UI_META
 from bilisama.obs.health import HealthRegistry
 from bilisama.obs.health import create_app as create_health_app
 from bilisama.obs.logging import get_logger
+from bilisama.paths import data_home
 from bilisama.ui.audio import AudioBroker, AudioOwner
 from bilisama.ui.config_edit import field_control
 from bilisama.ui.events import ClientEvent, ServerEvent, frame
@@ -111,9 +112,7 @@ def bind_ui_socket(port: int) -> socket.socket:
 def default_endpoint_path() -> Path:
     """`<data home>/bilisama/ui/endpoint.json` — the same roof as personas and
     the s2s engine install, so the desktop shell attaches with zero arguments."""
-    base = os.environ.get("XDG_DATA_HOME", "")
-    root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
-    return root / "bilisama" / "ui" / "endpoint.json"
+    return data_home() / "ui" / "endpoint.json"
 
 
 def write_endpoint_file(path: Path, *, url: str, pid: int) -> None:

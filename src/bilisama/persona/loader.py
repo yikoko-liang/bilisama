@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Literal
 
 from bilisama.obs.logging import get_logger
+from bilisama.paths import data_home
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -61,9 +62,7 @@ def default_data_dir(persona_id: str) -> Path:
     Same data home the s2s engine install already uses, so a streamer looking
     for "their AI's files" finds everything under one roof.
     """
-    base = os.environ.get("XDG_DATA_HOME", "")
-    root = Path(base).expanduser() if base else Path.home() / ".local" / "share"
-    return root / "bilisama" / "personas" / persona_id
+    return data_home() / "personas" / persona_id
 
 
 def template_variables(cfg: PersonaConfig) -> dict[str, str]:

@@ -48,7 +48,7 @@ from typing import Any, Literal, Protocol, cast
 from bilisama.clock import Clock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent
-from bilisama.obs.logging import get_logger
+from bilisama.obs.logging import bind, get_logger
 from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
 from bilisama.realtime import link
 
@@ -193,7 +193,7 @@ class Scheduler:
         """Queue an intent. Duplicates (same dedup_key while queued or active)
         are skipped with a verdict rather than silently dropped."""
         if self._link_down:
-            self._verdict_sink(
+            self._emit(
                 Verdict(
                     intent_id=intent.dedup_key or intent.source,
                     source=intent.source,
@@ -204,7 +204,7 @@ class Scheduler:
             )
             return
         if self._panicked:
-            self._verdict_sink(
+            self._emit(
                 Verdict(
                     intent_id=intent.dedup_key or intent.source,
                     source=intent.source,
@@ -215,7 +215,7 @@ class Scheduler:
             )
             return
         if intent.dedup_key and intent.dedup_key in self._queued_keys:
-            self._verdict_sink(
+            self._emit(
                 Verdict(
                     intent_id=intent.dedup_key,
                     source=intent.source,
@@ -270,6 +270,34 @@ class Scheduler:
     def release_panic(self) -> None:
         self._panicked = False
         self._wake.set()
+
+    def _emit(self, verdict: Verdict) -> None:
+        """Every intent's one terminal record, to the sink AND to the log.
+
+        The sink is whatever the entry point wired — dev-talk prints the
+        exceptions and pushes the lot to the panel's timeline. The log line is
+        the half that outlives the session, and it is written here rather than
+        in the sink so it does not depend on which entry point is running:
+        section 4.12's promise is that the answer to 「为什么刚才没说话」 is
+        recorded, not that one particular front end chose to record it.
+
+        Bound to intent_id so every line this dispatch produced — the sends,
+        the gate, the barge-in — can be pulled out together afterwards. The
+        contextvar covers only what runs inside this call; the id is on the
+        line either way because Verdict carries it.
+        """
+        with bind(intent_id=verdict.intent_id):
+            log.info(
+                "scheduler.verdict",
+                source=verdict.source,
+                outcome=str(verdict.outcome),
+                phase=str(verdict.phase),
+                reason=str(verdict.reason) if verdict.reason else "",
+                waited_s=round(verdict.waited_s, 2),
+                spoken_ms=verdict.spoken_ms,
+                detail=verdict.detail,
+            )
+        self._verdict_sink(verdict)
 
     @property
     def verdicts(self) -> list[Verdict]:
@@ -450,7 +478,7 @@ class Scheduler:
                 await self._clock.sleep(_DISPATCH_RETRY_BACKOFF_S)
                 self._requeue(intent, item_written=wrote_item, deadline=deadline)
                 return
-            self._verdict_sink(
+            self._emit(
                 Verdict(
                     intent_id=intent.dedup_key or intent.source,
                     source=intent.source,
@@ -719,7 +747,7 @@ class Scheduler:
             self._park_for_playback(active)
             self._wake.set()
             return
-        self._verdict_sink(
+        self._emit(
             Verdict(
                 intent_id=intent.dedup_key or intent.source,
                 source=intent.source,
@@ -769,7 +797,7 @@ class Scheduler:
             if played is None and not drained and now < parked.deadline:
                 still_waiting.append(parked)
                 continue
-            self._verdict_sink(
+            self._emit(
                 Verdict(
                     intent_id=parked.intent.dedup_key or parked.intent.source,
                     source=parked.intent.source,
@@ -803,7 +831,7 @@ class Scheduler:
         phase: Phase = Phase.QUEUED,
     ) -> None:
         self._free_key(intent)
-        self._verdict_sink(
+        self._emit(
             Verdict(
                 intent_id=intent.dedup_key or intent.source,
                 source=intent.source,
