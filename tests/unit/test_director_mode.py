@@ -129,6 +129,7 @@ class _StubLink:
 
     def __init__(self, events: list[link.LinkEvent]) -> None:
         self._events = events
+        self.quiet_window_s = 0.6
         self.pushed: list[bytes] = []
 
     async def connect(self) -> None: ...

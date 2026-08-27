@@ -55,8 +55,14 @@ class HostedLink:
         reconnect_backoff_s: float = 1.0,
         session_cap_min: int | None = None,
         rotate_margin_min: float = 3.0,
+        quiet_window_s: float = 0.6,
     ) -> None:
         """Args:
+        quiet_window_s: How long the speaking floor holds after the streamer
+            stops (plan section 3.3 rule 1). Handed in rather than computed
+            here so that L3 can ask the LINK for it instead of doing its own
+            arithmetic over provider config — that arithmetic was a two-armed
+            branch whose `else` handed a fourth provider DashScope's timing.
         voice: Which voice the provider speaks in. Empty leaves the choice to
             the server, whose pick is not neutral — DashScope's is longanqian
             at 343 Hz, high enough to read as shrill. Names are the
@@ -94,6 +100,7 @@ class HostedLink:
         # converted on the way in.
         self._uplink = Resampler(source_rate=_CAPTURE_RATE, target_rate=profile.uplink_rate)
         self._voice = voice
+        self.quiet_window_s = quiet_window_s
         self._context = ""
         self._clock: Clock = clock or SystemClock()
         cap_min = profile.session_cap_min if session_cap_min is None else session_cap_min

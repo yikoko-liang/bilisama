@@ -153,3 +153,19 @@ def test_the_quiet_window_covers_the_s2s_two_stage_grace() -> None:
     assert quiet_window_s(settings, ProviderName.S2S) == pytest.approx(
         (turn.smart_turn_max_wait_ms + turn.smart_turn_incomplete_delay_ms) / 1000 + 0.3
     )
+
+
+def test_the_built_in_address_names_its_path_once() -> None:
+    """`default_url` used to be a whole URL written out beside `socket_path`,
+    so the same path literal appeared twice in one table entry — and the next
+    person to change one of them would have had no reason to look at the
+    other."""
+    from bilisama.realtime.providers import PROFILES
+
+    for provider, profile in PROFILES.items():
+        if not profile.default_host:
+            assert profile.default_url == "", provider
+            continue
+        assert profile.default_url == f"{profile.default_host}{profile.socket_path}"
+        assert profile.socket_path, f"{provider} 有内置地址却没有路径"
+        assert profile.default_url.count(profile.socket_path) == 1

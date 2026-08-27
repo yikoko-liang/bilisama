@@ -11,8 +11,14 @@ from.
 This is ONE branch, not zero. A registry where adapters sign themselves up
 would need something to import the adapter modules first, and that import is
 both invisible and load-order dependent; a match statement in the module whose
-whole job is choosing beats it. Adding a provider means adding one arm here
-and one entry in PROFILES.
+whole job is choosing beats it.
+
+What it does NOT buy is "one arm and one PROFILES entry", which is what this
+docstring used to claim. Volcano took nine touchpoints: `config/enums.py`,
+`PROFILES`, `capabilities.py`, the arm below, `quiet_window_s`, `schema.py`,
+`validate.py`, `ui_meta.py` and `config/bilisama.toml`. The arm being in one
+file is still right; the claim about the saving was not, and it would send the
+next author looking in one place instead of nine.
 
 Lazy imports on purpose: hosted.py and s2s.py import the package this module
 lives in, so importing them at module scope would close a cycle.
@@ -26,21 +32,20 @@ from typing import TYPE_CHECKING, assert_never
 
 from bilisama import secrets
 from bilisama.config.enums import ProviderName
+from bilisama.config.validate import volcano_voice_problems
 from bilisama.realtime import link
-from bilisama.realtime.providers import Endpoint, turn_type_problems, with_model
+from bilisama.realtime.providers import (
+    Endpoint,
+    profile_for,
+    quiet_window_s,
+    turn_type_problems,
+    with_model,
+)
 
 if TYPE_CHECKING:
     from bilisama.config.schema import Settings
 
-__all__ = ["BuiltLink", "LinkRequest", "build_link"]
-
-# The names path.sh has always written: lower case and unprefixed because that
-# is what the file holds, not because they are good names for globals. Each is
-# the LAST resort — a configured api_key_ref outranks it.
-_KEY_ENV: dict[ProviderName, str] = {
-    ProviderName.DASHSCOPE: "ali_api_key",
-    ProviderName.OPENAI_GA: "api_key",
-}
+__all__ = ["BuiltLink", "LinkRequest", "build_link", "hosted_key"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +55,13 @@ class LinkRequest:
     A dataclass rather than a widening keyword list: the arms differ in which
     fields they read, and a new provider that needs one more input should not
     make every caller pass it.
+
+    The cost, stated rather than hidden: some fields below belong to exactly
+    one arm (`text_replies` to s2s, `bot_name` to volcano), so this is a union
+    with no narrowing and nothing stops an arm reading a field that was not
+    meant for it. At four providers that is cheaper than four request types;
+    if it reaches the point where most fields are single-owner, per-provider
+    payloads are the shape to move to.
     """
 
     endpoint: Endpoint
@@ -98,14 +110,23 @@ class BuiltLink:
     url: str
 
 
-def _hosted_key(request: LinkRequest, provider: ProviderName) -> str:
+def hosted_key(settings: Settings, provider: ProviderName, env: Mapping[str, str]) -> str:
     """Config reference first, path.sh second — the order the key already used.
+
+    Public because dev-talk's bare-link mode needs the same answer and used to
+    carry its own copy, message text and all. Two copies of a credential rule
+    is two chances for them to disagree about which layer wins.
 
     Raises:
         SystemExit: Neither layer had one, naming both places to fix.
     """
-    section = getattr(request.settings.speech, provider.value)
-    key = secrets.resolve(section.api_key_ref) or request.env.get(_KEY_ENV[provider], "")
+    section = getattr(settings.speech, provider.value)
+    # The env name lives on the profile. It used to be a module-level dict
+    # keyed by the same enum — a fifth table beside the four ProviderProfile
+    # exists to have absorbed, and one whose miss is a KeyError at a
+    # streamer's connect that neither mypy nor assert_never can see.
+    env_name = profile_for(provider).key_env
+    key = secrets.resolve(section.api_key_ref) or (env.get(env_name, "") if env_name else "")
     if not key:
         raise SystemExit(
             f"缺 {provider.value} 凭据：配 [speech.{provider.value}] api_key_ref，"
@@ -126,7 +147,7 @@ def _build_hosted(request: LinkRequest, provider: ProviderName) -> BuiltLink:
     # silently ignored.
     for problem in turn_type_problems(provider, section.turn.type, model=request.endpoint.model):
         raise SystemExit(f"{problem.message} {problem.fix}")
-    key = _hosted_key(request, provider)
+    key = hosted_key(request.settings, provider, request.env)
     url = with_model(request.endpoint.url, request.endpoint.model, explicit=request.model_explicit)
     return BuiltLink(
         HostedLink(
@@ -136,6 +157,7 @@ def _build_hosted(request: LinkRequest, provider: ProviderName) -> BuiltLink:
             turn=section.turn,
             voice=request.voice or section.voice,
             session_cap_min=section.session_cap_min,
+            quiet_window_s=quiet_window_s(request.settings, provider),
         ),
         url,
     )
@@ -156,23 +178,25 @@ def build_link(request: LinkRequest) -> BuiltLink:
             from bilisama.realtime.providers.s2s import S2SLink
 
             return BuiltLink(
-                S2SLink(request.endpoint.url, text_replies=request.text_replies),
+                S2SLink(
+                    request.endpoint.url,
+                    text_replies=request.text_replies,
+                    quiet_window_s=quiet_window_s(request.settings, provider),
+                ),
                 request.endpoint.url,
             )
 
-        case ProviderName.DASHSCOPE:
-            return _build_hosted(request, provider)
-
-        case ProviderName.OPENAI_GA:
-            # Unblocked 2026-08-27. HostedLink already served this profile and
-            # the capability bits, config section and panel metadata were all
-            # in place; what was missing was the uplink rate conversion, which
-            # now rides on the profile (realtime/resample.py).
+        case ProviderName.DASHSCOPE | ProviderName.OPENAI_GA:
+            # One body, because the difference between them is data — the
+            # profile's codec, capabilities, key name and uplink rate — and
+            # not behaviour. openai_ga was unblocked 2026-08-27: what had been
+            # missing was the uplink rate conversion, which now rides on the
+            # profile (realtime/resample.py).
             #
-            # Still the development reference rather than a shipping path —
-            # plan section 3.1 has the reasons, and they are commercial and
-            # regulatory rather than technical. Nothing here enforces that; the
-            # config simply defaults elsewhere.
+            # It is still the development reference rather than a shipping
+            # path, and plan section 3.1 has the reasons — commercial and
+            # regulatory, not technical. Nothing here enforces that; the config
+            # simply defaults elsewhere.
             return _build_hosted(request, provider)
 
         case ProviderName.VOLCANO:
@@ -184,13 +208,16 @@ def build_link(request: LinkRequest) -> BuiltLink:
             # X-Api-Access-Key slot draws 401 「requested grant not found」,
             # so guessing which one a value is would fail in a way whose
             # error text names neither.
-            api_key = (
-                secrets.resolve(cfg.api_key_ref)
-                or request.env.get("volcano_api_key", "")
-                or request.env.get("volcano_access_key", "")
+            #
+            # Which is also why `volcano_access_key` is NOT read here as a
+            # third source for the api_key slot. It is the older pair's second
+            # half; feeding it to the x-api-key header is precisely the mixture
+            # this file, the schema comment and the runbook each say is
+            # impossible, and it had no documentation anywhere.
+            api_key = secrets.resolve(cfg.api_key_ref) or request.env.get(
+                profile_for(provider).key_env, ""
             )
             app_id = secrets.resolve(cfg.app_id_ref) or request.env.get("volcano_app_id", "")
-            app_id = app_id or ""
             legacy_key = secrets.resolve(cfg.access_key_ref) or ""
             if not api_key and not (app_id and legacy_key):
                 raise SystemExit(
@@ -200,7 +227,16 @@ def build_link(request: LinkRequest) -> BuiltLink:
                     "老账号也可以用 App ID ＋ Access Token 那一对，填 app_id_ref "
                     "和 access_key_ref。"
                 )
-            for problem in turn_type_problems(provider, "server_vad"):
+            # `--voice` overrides the config, so the model/generation pairing
+            # has to be judged on what will actually be sent. Checking only the
+            # config left the obvious way to try the other generation — pass
+            # the other voice on the command line — silently wrong, and both
+            # halves of wrong are silent on this endpoint: SC with an official
+            # voice says nothing at all, O with a cloned one speaks as somebody
+            # else. No turn-type check here: this protocol declares server_vad
+            # and nothing else, so asking would be asking a constant.
+            speaker = request.voice or cfg.speaker
+            for problem in volcano_voice_problems(cfg.model, speaker):
                 raise SystemExit(f"{problem.message} {problem.fix}")
             return BuiltLink(
                 VolcanoLink(
@@ -210,6 +246,8 @@ def build_link(request: LinkRequest) -> BuiltLink:
                     app_id=app_id,
                     access_key=legacy_key,
                     config=cfg,
+                    speaker=speaker,
+                    quiet_window_s=quiet_window_s(request.settings, provider),
                 ),
                 request.endpoint.url,
             )

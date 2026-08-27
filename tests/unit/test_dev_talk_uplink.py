@@ -692,6 +692,8 @@ class _FakeLink:
     def __init__(self, url: str, **kwargs: Any) -> None:
         _FakeLink.instances.append(self)
         self.url = url
+        # SpeechLink promises it, and _Fanout reads it while wrapping.
+        self.quiet_window_s = float(kwargs.get("quiet_window_s", 0.6))
         self.contexts: list[str] = []
         self.closed = False
         self._events: asyncio.Queue[Any] = asyncio.Queue()
@@ -1108,3 +1110,48 @@ async def test_the_credential_watch_waits_rather_than_accusing_early() -> None:
     assert not task.done()
     source.logged_in = True
     await asyncio.wait_for(task, timeout=1.0)
+
+
+# ------------------------------------------------------- bare-link mode refuses
+
+
+_WIRE_CONFIG = """
+config_version = 1
+[speech]
+provider = "s2s"
+[speech.s2s]
+llm_model = "our-s2t-v1"
+[speech.volcano]
+api_key_ref = "env:volcano_api_key"
+[speech.openai_ga]
+endpoint = "wss://api.openai.com/v1/realtime"
+[avatar]
+expression_source = "lexicon"
+"""
+
+
+@pytest.mark.parametrize(
+    ("provider", "reason"),
+    [("volcano", "不说 OpenAI Realtime 方言"), ("openai_ga", "上行要 24000 Hz")],
+)
+def test_bare_link_mode_refuses_a_backend_it_cannot_drive(
+    provider: str, reason: str, tmp_path: Path
+) -> None:
+    """`--provider` used to list only the two that work, so argparse was the
+    guard. Reading the list off the enum instead — right, because it was a
+    fourth place that had to learn a new provider's name — removed it, and the
+    refusal became a raw ValueError out of codec_for printed after the banner,
+    past a main() that catches only KeyboardInterrupt. openai_ga got worse than
+    that: it dialled with no Authorization header and no resampling at all.
+    """
+    config = tmp_path / "bilisama.toml"
+    config.write_text(_WIRE_CONFIG, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        dev_talk.main(["--provider", provider, "--config", str(config)])
+
+    message = str(excinfo.value)
+    assert reason in message
+    assert "--director" in message, "得告诉主播往哪走"
+    for jargon in ("Traceback", "ValueError", "codec_for"):
+        assert jargon not in message

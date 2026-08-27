@@ -48,13 +48,13 @@ from bilisama.obs.logging import bind, get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
 from bilisama.realtime.providers import (
+    ProviderProfile,
     codec_for,
     profile_for,
-    quiet_window_s,
     resolve_endpoint,
     with_model,
 )
-from bilisama.realtime.providers.factory import LinkRequest, build_link
+from bilisama.realtime.providers.factory import LinkRequest, build_link, hosted_key
 
 
 class _AudioIn(Protocol):
@@ -73,7 +73,7 @@ class _Connects(Protocol):
 
 log = get_logger(__name__)
 
-_INPUT_RATE = 16000  # both providers take 16 kHz mono s16 uplink
+_INPUT_RATE = 16000  # what this file's mic pump and WAV reader produce
 _OUTPUT_RATE = 24000  # and answer at 24 kHz (plan section 3.1 table)
 _FRAME_MS = 32
 
@@ -729,6 +729,9 @@ class _Fanout:
 
     def __init__(self, inner: link.SpeechLink) -> None:
         self._inner = inner
+        # Forwarded, not recomputed: this wrapper stands in for the link
+        # everywhere the scheduler looks, so it has to answer the same.
+        self.quiet_window_s = inner.quiet_window_s
         self._sinks: list[asyncio.Queue[link.LinkEvent]] = []
         self._task: asyncio.Task[None] | None = None
 
@@ -1273,12 +1276,14 @@ async def run_director(args: argparse.Namespace) -> int:
         guard=guard.text_blocked,
     )
     floor = SpeakingFloor(clock)
-    # Plan section 3.3 rule 1. Which numbers make up the window is the
-    # provider's business and lives in the registry — computing it here meant
-    # a two-armed branch whose `else` handed volcano DashScope's endpointing.
-    # The floor also holds while an implicit reply is generating, so this timer
-    # only carries the no-reply case.
-    quiet_s = quiet_window_s(settings, provider)
+    # Plan section 3.3 rule 1, asked of the LINK. Which numbers make up the
+    # window is the provider's business, and every previous arrangement had
+    # this file doing arithmetic over provider config — first a two-armed
+    # branch whose `else` handed volcano DashScope's endpointing, then a
+    # registry call that still left two readers of the same fields at two
+    # altitudes. The floor also holds while an implicit reply is generating,
+    # so this timer only carries the no-reply case.
+    quiet_s = speech.quiet_window_s
 
     # The window health reports from (plan §4.12). Fed here rather than inside
     # the scheduler: this is already the one place every Verdict passes through.
@@ -2170,7 +2175,6 @@ async def run_director(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
-    from bilisama import secrets
     from bilisama.cli import DEFAULT_CONFIG
     from bilisama.config import load
 
@@ -2185,17 +2189,15 @@ async def run(args: argparse.Namespace) -> int:
     )
     provider = endpoint.provider
     profile = profile_for(provider)
+    _refuse_if_wire_mode_cannot_drive(provider, profile)
     headers: dict[str, str] = {}
     url = endpoint.url
     if provider is ProviderName.DASHSCOPE:
-        # Same order the key already used in director mode: config reference
-        # first, path.sh second. The two entry points disagreed until now.
-        env_key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
-        key = secrets.resolve(settings.speech.dashscope.api_key_ref) or env_key
-        if not key:
-            raise SystemExit(
-                "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
-            )
+        # The factory's resolver, not a second copy of it. This block used to
+        # restate the rule — config reference first, path.sh second — along
+        # with its own refusal text, which is two places for one answer to
+        # drift.
+        key = hosted_key(settings, provider, os.environ)
         url = with_model(url, endpoint.model, explicit=bool(args.model))
         headers = {"Authorization": f"Bearer {key}"}
     print(f"[语音] {provider.value} @ {_endpoint_line(url)}（来自{endpoint.source}）")
@@ -2343,6 +2345,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="本次运行的形象：皮肤包目录名（如 kirby），或 tofu 用内置豆腐机器人；不改配置文件",
     )
     return parser
+
+
+def _refuse_if_wire_mode_cannot_drive(provider: ProviderName, profile: ProviderProfile) -> None:
+    """Say no in Chinese, before the banner, to a backend this path cannot dial.
+
+    Bare-link mode drives RealtimeClient directly: one OpenAI dialect, one
+    uplink rate, no adapter in between. Two of the four providers do not fit
+    through it, and until now argparse was what said so — `--provider` listed
+    exactly the two that worked. Widening it to the whole enum (so it stops
+    being a fourth place that has to learn a new provider's name) turned that
+    clean refusal into a raw ValueError out of `codec_for`, printed after the
+    banner, past a main() that only catches KeyboardInterrupt.
+
+    Both conditions come from the registry rather than a list, so the fifth
+    provider is covered on the day it is added.
+
+    Raises:
+        SystemExit: This provider needs `--director`.
+    """
+    if profile.codec is None:
+        raise SystemExit(
+            f"{provider.value} 不说 OpenAI Realtime 方言，裸链路模式驱动不了它。"
+            "加 --director 走完整装配。"
+        )
+    if profile.uplink_rate != _INPUT_RATE:
+        raise SystemExit(
+            f"{provider.value} 的上行要 {profile.uplink_rate} Hz，而裸链路模式的麦克风固定 "
+            f"{_INPUT_RATE} Hz——重采样挂在托管适配器上，这条路上没有。"
+            "加 --director 走完整装配。"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

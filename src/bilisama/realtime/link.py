@@ -182,10 +182,21 @@ LinkEvent = (
 class SpeechLink(Protocol):
     """What L3 is allowed to know about a speech backend.
 
-    The speculative-quiet gate (plan section 3.3 rule 1) is deliberately not
-    here: it is scheduling policy built on SpeechStopped timing, and it arrives
-    with the SpeakingFloor in stage 2.
+    The speculative-quiet gate (plan section 3.3 rule 1) is scheduling policy
+    and stays in the SpeakingFloor. How LONG that gate holds is not: it is a
+    number only this backend knows, so it is asked for here.
     """
+
+    quiet_window_s: float
+    """How long after SpeechStopped the floor must stay shut for this backend.
+
+    Plan section 3.3 rule 1, and 4.3 is explicit that the gate must not know
+    field names like `smart_turn_max_wait_ms`. Read off the link rather than
+    recomputed by the caller: the value is assembled from endpointing settings
+    that the adapter is also about to put on the wire, and a caller doing its
+    own arithmetic over the same config is a second reader at a different
+    altitude — which is how volcano once inherited DashScope's timing from an
+    `else` branch and opened the gate about 0.9 s early."""
 
     async def connect(self) -> None: ...
 

@@ -53,9 +53,15 @@ class S2SLink:
         clock: Clock | None = None,
         watchdog_s: float = 25.0,
         text_replies: bool = True,
+        quiet_window_s: float = 1.9,
         auto_reconnect: bool = True,
     ) -> None:
         """Args:
+        quiet_window_s: How long the speaking floor holds after the streamer
+            stops (plan section 3.3 rule 1). Handed in rather than computed
+            here so that L3 can ask the LINK for it instead of doing its own
+            arithmetic over provider config — that arithmetic was a two-armed
+            branch whose `else` handed a fourth provider DashScope's timing.
         text_replies: True (the shipping path) pins the session and every
             explicit create to text — the patched server hands us prose and
             stage 4's TTS speaks it. False leaves the modality at the
@@ -75,6 +81,7 @@ class S2SLink:
         )
         self._codec = codec
         self._text_replies = text_replies
+        self.quiet_window_s = quiet_window_s
         self._context = ""
         # Barge-in is a session-level flag we turn OFF for protected replies.
         # Remembering that we did is the only way to put it back when the send

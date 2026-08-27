@@ -101,12 +101,13 @@ def resolve_endpoint(
         SystemExit: No layer supplied an address, with the two places to fix.
     """
     chosen = ProviderName(provider) if provider else settings.speech.provider
+    profile = PROFILES[chosen]
     hosted = getattr(settings.speech, chosen.value)
     # An empty string is what the factory file ships, so it means "unset"
     # rather than "deliberately blank" — otherwise it would shadow the
     # environment on every clean checkout.
     configured = (hosted.endpoint or "").strip()
-    picked_model = (model or getattr(hosted, "model", "") or PROFILES[chosen].default_model).strip()
+    picked_model = (model or getattr(hosted, "model", "") or profile.default_model).strip()
 
     if url:
         return Endpoint(chosen, url, picked_model, "命令行")
@@ -124,8 +125,8 @@ def resolve_endpoint(
     # Last, and only where the address is the same for everyone. It ranks
     # BELOW the environment on purpose: a variable someone deliberately
     # exported should still win over a constant compiled in here.
-    if PROFILES[chosen].default_url:
-        return Endpoint(chosen, PROFILES[chosen].default_url, picked_model, "内置默认")
+    if profile.default_url:
+        return Endpoint(chosen, profile.default_url, picked_model, "内置默认")
 
     # The env fallback is only offered where it exists, so the fix line never
     # sends an openai_ga user to source a file that cannot help them.
@@ -292,16 +293,38 @@ class ProviderProfile:
     providers take. OpenAI GA is the exception at 24 kHz, and the mismatch was
     what kept it refused: its DOWNLINK is 24 kHz too, which already matches
     our playback, so only the uplink ever needed converting — plan section 3.1
-    asks for a resampler on each side and overstates it by one."""
+    asks for a resampler on each side and overstates it by one.
 
-    default_url: str = ""
-    """A complete address to fall back on when no layer named one.
+    Read by HostedLink alone. VolcanoLink does not consult it: that protocol
+    fixes the uplink shape in its own frame format (volcano_wire.audio_request)
+    and there is nothing for a rate here to change. So editing this field for
+    volcano would do nothing, quietly — hence saying so."""
+
+    default_host: str = ""
+    """A host to fall back on when no layer named an address.
 
     Only for providers whose address is genuinely universal. DashScope's is
     not — path.sh holds a tenant's own MaaS instance — so it stays empty
     there and the refusal keeps pointing at the config. Where it IS universal,
     shipping it is what lets an installed app connect at all: no terminal, no
-    path.sh, and nowhere in the panel to type an endpoint (backlog item 55)."""
+    path.sh, and nowhere in the panel to type an endpoint (backlog item 55).
+
+    A HOST, not a whole URL, so `socket_path` stays the one place that knows
+    the path. Hardcoding an address at all is against the rule that
+    bilisama.toml is the single source of truth; this is the documented
+    exception, and item 55 is where it gets revisited."""
+
+    key_env: str = ""
+    """The environment variable to read a credential from, after api_key_ref.
+
+    Here rather than in a side table keyed by the same enum: that was one of
+    the four tables this dataclass exists to have absorbed, and the one it
+    grew back. A provider without one simply has no path.sh fallback."""
+
+    @property
+    def default_url(self) -> str:
+        """The built-in address, assembled from the two fields above."""
+        return f"{self.default_host}{self.socket_path}" if self.default_host else ""
 
 
 PROFILES: dict[ProviderName, ProviderProfile] = {
@@ -312,6 +335,7 @@ PROFILES: dict[ProviderName, ProviderProfile] = {
         socket_path="/api-ws/v1/realtime",
         default_model="qwen-audio-3.0-realtime-flash",
         session_cap_min=120,
+        key_env="ali_api_key",
     ),
     ProviderName.OPENAI_GA: ProviderProfile(
         caps_mod.OPENAI_GA,
@@ -319,6 +343,13 @@ PROFILES: dict[ProviderName, ProviderProfile] = {
         socket_path="/v1/realtime",
         session_cap_min=60,
         uplink_rate=24000,
+        # ⚠️ Backlog item 85: `api_key` is path.sh's INTRANET chat-model
+        # credential (docs/runbook.md, .env.example), not an OpenAI one, and
+        # nothing else supplies this provider a key — so reading it here sends
+        # an internal secret to api.openai.com as a bearer token. Moved here
+        # unchanged rather than quietly emptied: which way it should go is a
+        # decision, and item 85 is where it gets made.
+        key_env="api_key",
     ),
     ProviderName.VOLCANO: ProviderProfile(
         caps_mod.VOLCANO,
@@ -329,7 +360,8 @@ PROFILES: dict[ProviderName, ProviderProfile] = {
         # No per-connection cap published; a 10-minute IDLE timeout instead,
         # which our never-silent uplink (plan section 3.3 rule 7) cannot reach.
         session_cap_min=0,
-        default_url="wss://openspeech.bytedance.com/api/v3/realtime/dialogue",
+        default_host="wss://openspeech.bytedance.com",
+        key_env="volcano_api_key",
     ),
 }
 

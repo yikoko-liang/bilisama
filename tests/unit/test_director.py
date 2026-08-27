@@ -433,6 +433,9 @@ class _ScriptedLink:
     """
 
     def __init__(self, *, cancel_error: Exception | None = None, item_failures: int = 0) -> None:
+        # The floor's own tests cover the window itself; here it only has to
+        # exist, because SpeechLink promises it.
+        self.quiet_window_s = 0.6
         self.feed: asyncio.Queue[LinkEvent] = asyncio.Queue()
         self.items: list[str] = []
         self.item_attempts = 0

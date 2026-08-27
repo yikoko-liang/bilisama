@@ -201,3 +201,90 @@ def test_dashscope_still_refuses_rather_than_inventing_an_address() -> None:
             env={},
         )
     assert "endpoint 没填" in str(caught.value)
+
+
+# ---------------------------------------------- credentials, voice and timing
+
+
+def test_the_env_fallback_name_comes_off_the_profile() -> None:
+    """It used to be a module-level dict keyed by ProviderName — a fifth table
+    beside the four `ProviderProfile` exists to have absorbed, and the only one
+    whose miss is a KeyError at a streamer's connect rather than at import.
+    Neither mypy nor the factory's `assert_never` can see that.
+    """
+    from bilisama.realtime.providers import PROFILES
+
+    for provider in ProviderName:
+        name = PROFILES[provider].key_env
+        if not name:
+            continue
+        built = build_link(_request(provider, env={name: "从环境来的"}))
+        assert isinstance(built.link, HostedLink | VolcanoLink)
+
+
+def test_the_older_pairs_access_token_is_not_read_as_an_api_key() -> None:
+    """The two credential shapes are alternatives, not complements — this file,
+    the schema comment and the runbook each say so, and the endpoint agrees:
+    an API Key in the X-Api-Access-Key slot draws 401 「requested grant not
+    found」. Reading `volcano_access_key` into the x-api-key header was the
+    same mixture in the other direction, and no document admitted it existed.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        build_link(_request(ProviderName.VOLCANO, env={"volcano_access_key": "老账号那半个"}))
+
+    assert "缺火山凭据" in str(excinfo.value)
+
+
+def test_the_command_line_voice_reaches_volcano_and_is_judged_on_the_way() -> None:
+    """`--voice` beats the config on every other provider, and was dropped on
+    the one where a wrong voice is fatal: `validate` makes the
+    model/generation pairing a hard refusal, and passing the other voice is
+    the obvious way to try the other generation. Silently ignoring it left the
+    streamer watching a config value they thought they had overridden.
+    """
+    settings = _settings(
+        provider=ProviderName.VOLCANO,
+        volcano={"api_key_ref": "", "model": "1.2.1.1", "speaker": "zh_female_vv_jupiter_bigtts"},
+    )
+    built = build_link(
+        _request(
+            ProviderName.VOLCANO,
+            settings=settings,
+            env={"volcano_api_key": "k"},
+            voice="zh_female_test",
+        )
+    )
+    assert isinstance(built.link, VolcanoLink)
+    assert built.link._speaker == "zh_female_test"
+
+    # ...and the pairing is judged on the override, not on the config.
+    with pytest.raises(SystemExit) as excinfo:
+        build_link(
+            _request(
+                ProviderName.VOLCANO,
+                settings=settings,
+                env={"volcano_api_key": "k"},
+                voice="saturn_zh_female_keainvsheng_tob",
+            )
+        )
+    assert "克隆音色" in str(excinfo.value)
+
+
+def test_every_link_answers_how_long_the_floor_holds() -> None:
+    """L3 asks the LINK rather than doing arithmetic over provider config.
+
+    Both earlier arrangements had the caller computing it: first a two-armed
+    branch in dev_talk whose `else` handed a fourth provider DashScope's
+    endpointing, then a registry function that still left two readers of the
+    same fields at two altitudes. The numbers differ per backend, so a shared
+    default would be the same bug wearing a hat.
+    """
+    windows = {}
+    for provider in ProviderName:
+        built = build_link(
+            _request(provider, env={"ali_api_key": "k", "api_key": "k", "volcano_api_key": "k"})
+        )
+        windows[provider] = built.link.quiet_window_s
+        assert windows[provider] > 0, provider
+
+    assert windows[ProviderName.S2S] != windows[ProviderName.DASHSCOPE], "两条路的判停完全不同"
