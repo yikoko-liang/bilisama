@@ -550,6 +550,54 @@ export BILI_SESSDATA=<浏览器 cookie 里的 SESSDATA>
 
 ## 人设与生长层
 
+### 「名字」一共有几种（2026-08-28 梳理，待统一整理）
+
+六个槽位，分属**三个互不相干的命名空间**。`tofu` 这个词现在同时出现在两个空间里，
+所以先说清楚它们的关系：**同名是因为指的是同一个角色，代码上零关联**——渲染器
+不认识人设，人设层也不认识形象，两边互相 grep 是空的。
+
+**空间 A ── 她是谁（人设）**
+
+| 字段 | 出厂值 | 是什么 | 谁读 |
+|---|---|---|---|
+| `[persona] id` | `tofu` | **人设包的目录名**，决定去读 `config/personas/<id>/` | `persona/loader.py` 的 `PersonaStore.from_config` |
+| `[persona] display_name` | `豆腐` | **她自称什么** → 模板里的 `{{agentName}}` | 四个人设正文；**火山的 `dialog.bot_name`** |
+| `[persona] streamer_name` | `主播` | **她怎么称呼你** → `{{userName}}` | 人设正文 |
+
+`id` 是英文的目录名，`display_name` 是中文的名字，两件事。
+`agentName = display_name or id`（`persona/loader.py` 的 `template_variables`），
+所以 `display_name` 留空会退回英文 `tofu` —— 这就是它出厂被填上的原因。
+
+**空间 B ── 她长什么样（形象）**
+
+| 字段 | 出厂值 | 是什么 |
+|---|---|---|
+| `[avatar] renderer` | `tofu` | 哪套渲染方式。`ui/web/js/renderer.js` 里 `BUILTIN = "tofu"`，装的是 `ui/web/skins/tofu/` 那个内置像素机器人 |
+| `[avatar] model_id` | 空 | renderer 各自解释：`sprite` 时是皮肤包目录名（比如 `kirby`），`tofu` 时不用填 |
+
+**空间 C ── 她听起来什么样（音色）**
+
+`[speech.dashscope] voice`、`[speech.volcano] speaker`。是音色 id，跟名字无关，
+只是碰巧也是字符串。
+
+**两个 `tofu` 各自解析到哪：**
+
+```
+[persona] id = "tofu"      →  config/personas/tofu/            人设文本
+[avatar] renderer = "tofu" →  src/bilisama/ui/web/skins/tofu/  精灵图
+```
+
+`--persona tofu` 和 `--skin tofu` 是两个不同的查找，改一个不影响另一个。
+
+**两条已知的毛刺，都不是这次改名引入的：**
+
+- `--persona hanako` 这类临时切换**只覆盖 `id`，不覆盖 `display_name`**
+  （`dev_talk.py` 的 `overrides["persona"] = {"id": args.persona}`）。四个人设都用
+  `{{agentName}}`，所以切过去之后她仍然自称「豆腐」。`display_name` 本来就是全局的
+  「她自称什么」，这是既有设计——但改名之后更容易被当成 bug。
+- `renderer` 那个三值枚举混了两个轴：`tofu` 是「哪个皮肤包」，`sprite` / `live2d`
+  是「哪种机制」。老账 #40，跟名字无关。
+
 人设文件的活副本在 `~/.local/share/bilisama/personas/<id>/`（`persona.data_dir` 可改），
 全是明文 markdown，随时可以打开手改：
 
