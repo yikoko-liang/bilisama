@@ -43,6 +43,20 @@ async def _collect(source: AsyncIterator[link.LinkEvent], count: int) -> list[li
     return got
 
 
+async def _until(cond: Any, *, timeout: float = 2.0) -> None:
+    """Poll until `cond()` holds, or fail saying it never did.
+
+    For states the adapter owns. Waiting on a frame the FAKE has recorded is a
+    different clock, and tests that conflate the two report races that are not
+    there — or miss ones that are.
+    """
+    for _ in range(int(timeout / 0.005)):
+        if cond():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("等不到那个状态成立")
+
+
 async def _linked(
     server: MockVolcanoServer, **kw: Any
 ) -> tuple[VolcanoLink, AsyncIterator[link.LinkEvent]]:
@@ -1123,8 +1137,13 @@ async def test_a_fatal_close_code_does_not_promise_a_retry() -> None:
     """1008 is 「你不受欢迎」, not 「我们被切断了」 — `errors.py` calls it fatal
     and says so in its own docstring. Reporting `retrying=True` for it makes
     the panel wait for a reconnection nobody is attempting."""
+    # auto_reconnect ON. With it off, `retrying = self._auto_reconnect and not
+    # fatal` is False whatever classify_error says, so the assertion held for
+    # the wrong reason — replacing the classification with `fatal = False` left
+    # the whole suite green.
+    clock = FakeClock()
     async with MockVolcanoServer() as server:
-        volcano, events = await _linked(server, auto_reconnect=False)
+        volcano, events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
         try:
             await server.drop(code=1008)
             got = await _collect(events, 1)
@@ -1178,11 +1197,25 @@ async def test_uplink_stops_while_the_session_is_being_replaced() -> None:
         )
         try:
             swapping = asyncio.create_task(volcano.set_context("新人设"))
-            await server.wait_for(wire.ClientEvent.FINISH_SESSION)
+            # Wait for the state the gate actually keys on, not for a frame that
+            # merely implies it. `wait_for(FINISH_SESSION)` returns when the
+            # FAKE has recorded the frame, and that is a different clock from
+            # the adapter's — the first version of this test raced on exactly
+            # that difference and reported a leak that was not there.
+            await _until(lambda: not volcano._session_ready.is_set())
 
             for _ in range(5):
                 await volcano.push_audio(b"\x00\x01" * 320)
-            assert server.recorded.count(wire.ClientEvent.TASK_REQUEST) == 0
+            # And give the fake's handler a turn before counting. Reading
+            # `recorded` straight after a send is the race mock_volcano's own
+            # docstring warns about, and it made this assertion vacuous: with
+            # the gate deleted the test still passed, because nothing had
+            # landed yet.
+            await asyncio.sleep(0.1)
+            assert (
+                server.recorded.count(wire.ClientEvent.TASK_REQUEST) == 0
+            ), f"有帧发给了正在被收掉的会话：{server.recorded.events}"
+            assert volcano._dropped_uplink == 5
 
             await clock.advance(5.0)
             await asyncio.wait_for(swapping, timeout=2.0)
@@ -1206,3 +1239,52 @@ async def test_closing_ends_a_reply_that_was_still_in_flight() -> None:
         assert isinstance(done[0], link.ReplyDone)
         assert done[0].handle is handle
         assert handle.stale
+
+
+async def test_closing_leaves_nothing_still_running() -> None:
+    """client.py:206-214 records the lesson: cancelling without awaiting left a
+    ladder still climbing after aclose returned. The window is real here — a
+    reconnect sitting just past `websockets.connect` would assign the new
+    socket over the one we just dropped, set `_started` and start a receive
+    task, all after we said we were done."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server, clock=clock, reconnect_backoff_s=5.0)
+        await volcano.request_reply(link.ReplySpec())
+        await server.drop()
+        await _until(lambda: volcano._reconnect_task is not None)
+
+        await volcano.aclose()
+
+        still_running = [
+            name
+            for name, task in (
+                ("watchdog", volcano._watchdog),
+                ("reconnect", volcano._reconnect_task),
+                ("recv", volcano._recv),
+            )
+            if task is not None and not task.done()
+        ]
+        assert not still_running, f"aclose 返回了，这些还在跑：{still_running}"
+
+
+async def test_a_socket_dropped_while_a_send_waits_for_the_lock_says_so() -> None:
+    """The `_ws is None` check has to be inside the lock and read through a
+    local name. Outside it, a caller passes the check, blocks on the lock, and
+    acquires it after the receive loop has nulled the socket — then runs
+    `None.send` and raises AttributeError, which `cancel()` does not catch and
+    which escapes a spawned barge-in task instead of taking its intended
+    「socket 都死了，她自然已经停了」 path."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server, auto_reconnect=False)
+        try:
+            await volcano._send_lock.acquire()
+            blocked = asyncio.create_task(volcano.push_audio(b"\x00\x01" * 320))
+            await asyncio.sleep(0.02)
+            volcano._ws = None
+            volcano._send_lock.release()
+
+            with pytest.raises(ConnectionError):
+                await asyncio.wait_for(blocked, timeout=1.0)
+        finally:
+            await volcano.aclose()

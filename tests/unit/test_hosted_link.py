@@ -431,3 +431,23 @@ async def test_a_voice_alone_is_worth_a_bootstrap() -> None:
             assert "turn_detection" not in session, "we never configured one"
         finally:
             await hosted.aclose()
+
+
+async def test_a_chunk_too_short_to_convert_is_not_sent_as_an_empty_frame() -> None:
+    """`Resampler.feed` returns b"" when a chunk cannot produce one output
+    sample at this ratio. Forwarding that base64s an empty buffer into an
+    append with `"audio": ""`, which the GA endpoint rejects — a rate
+    conversion that turns a valid frame into a protocol error is backwards."""
+    sent: list[bytes] = []
+    hosted = HostedLink("wss://example.invalid/x", ProviderName.OPENAI_GA)
+    hosted._client.push_audio = lambda pcm: _record(sent, pcm)  # type: ignore[method-assign]
+
+    await hosted.push_audio(b"\x01\x02")  # one sample: 16k -> 24k emits nothing yet
+    assert sent == []
+
+    await hosted.push_audio(b"\x01\x02" * 320)
+    assert sent and sent[0]
+
+
+async def _record(sink: list[bytes], pcm: bytes) -> None:
+    sink.append(pcm)

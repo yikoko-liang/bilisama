@@ -217,7 +217,15 @@ class HostedLink:
         )
 
     async def push_audio(self, pcm: bytes) -> None:
-        await self._client.push_audio(self._uplink.feed(pcm))
+        converted = self._uplink.feed(pcm)
+        if not converted:
+            # A chunk too short to produce one output sample at this ratio.
+            # Forwarding it would base64 an empty buffer into an
+            # input_audio_buffer.append with `"audio": ""`, which the GA
+            # endpoint rejects — a rate conversion turning a valid frame into a
+            # protocol error is the wrong way round.
+            return
+        await self._client.push_audio(converted)
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
         await self._client.send_command(

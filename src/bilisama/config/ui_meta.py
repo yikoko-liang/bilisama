@@ -939,13 +939,14 @@ def _scope_by_path(table: dict[str, FieldMeta]) -> None:
     that changed behaviour are dashscope's and openai_ga's endpoint, model and
     key status, which the panel used to list while another backend was live.
 
-    Eighteen entries had left `provider_scoped` blank — every endpoint, model
-    and key under dashscope, openai_ga and s2s — so the panel listed all three
-    backends' addresses at once and only one of them did anything. That is the
-    exact complaint `ui/server.py:176` was written against; the metadata that
-    would have prevented it was simply not filled in.
+    Thirty entries had left `provider_scoped` blank — every endpoint, model and
+    key under dashscope, openai_ga and s2s, plus every knob under
+    `speech.s2s.turn` — so the panel listed all the backends' addresses at once
+    and only one of them did anything. That is the exact complaint
+    `ui/server.py:176` was written against; the metadata that would have
+    prevented it was simply not filled in.
 
-    Derived rather than typed out eighteen more times, because the next
+    Derived rather than typed out thirty more times, because the next
     provider would forget too. The path already says which backend owns a
     field, and check_ui_meta refuses a declaration that disagrees with it, so
     the explicit value could never have said anything different — it could only

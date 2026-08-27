@@ -230,3 +230,20 @@ def test_an_absent_body_reads_as_empty_rather_than_raising() -> None:
     )
 
     assert decode(raw).json() == {}
+
+
+def test_the_truncation_message_names_its_field_in_chinese() -> None:
+    """This string reaches the streamer: volcano.py wraps it in
+    SessionRefused(detail=...). Three of the five field names used to be
+    English, and the only test that reached them asserted the exception type
+    alone — it passed identically with 「sequence」 restored."""
+    frames = {
+        "序列号": bytes((17, 0b1001_0001, 0, 0)) + b"\x00\x00",
+        "事件号": bytes((17, 180, 0, 0)) + b"\x00\x00",
+        "错误码": bytes((17, (MessageKind.ERROR << 4) | 0b0100, 0, 0))
+        + struct.pack(">i", 1)
+        + b"\x00\x00",
+    }
+    for expected, raw in frames.items():
+        with pytest.raises(VolcanoProtocolError, match=expected):
+            decode(raw)

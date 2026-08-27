@@ -330,6 +330,12 @@ class VolcanoLink:
         # around means two receive tasks racing to dispatch onto one adapter
         # the moment a reconnect succeeds — client.py:193-200 cancels its own
         # for the same reason.
+        #
+        # No test reaches this today, and the reason is worth writing down
+        # rather than pretending otherwise: every path into `_open` goes
+        # through `_drop_socket` first, so the old reader's `async for` has
+        # already ended and this is a no-op. It is three lines of depth
+        # against a future path that does not close the socket first.
         if self._recv is not None and not self._recv.done():
             self._recv.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -630,13 +636,19 @@ class VolcanoLink:
             older one would send the whole thing round again for nothing.
         """
         self._session_closed.clear()
+        # Cleared BEFORE the goodbye goes out, not after the server answers it.
+        # The uplink gate reads this flag, and a swap has two halves: the old
+        # session is dying from the moment FinishSession leaves, and the new one
+        # is unconfirmed until SessionStarted lands. Clearing it only for the
+        # second half left every microphone frame in the first half addressed to
+        # a session the server was in the middle of retiring.
+        self._session_ready.clear()
         await self._send(
             wire.client_request(wire.ClientEvent.FINISH_SESSION, session_id=self._session_id)
         )
         if not await self._wait_or_lose(self._session_closed, "等不到服务端收掉上一个会话"):
             return None
         self._session_id = str(uuid.uuid4())
-        self._session_ready.clear()
         # Read together, with no await between them, so what is recorded is
         # exactly what the frame carries.
         sent = self._context
@@ -702,6 +714,12 @@ class VolcanoLink:
         if self._closing or not self._started:
             return
         self._started = False
+        # A deferred context change dies with the session. Leaving the flag set
+        # would strand it: `_settle` below only spawns a swap while the socket
+        # is alive, and nothing else clears it. Nothing is lost — `_open`
+        # rebuilds the next session from `self._context` — but a flag that
+        # outlives its meaning is the next reader's trap.
+        self._swap_pending = False
         # Nothing in flight survives the gap; settle first so no reply is left
         # holding the single slot across it.
         self._settle(link.ReplyStatus.FAILED)

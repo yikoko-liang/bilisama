@@ -70,6 +70,8 @@ _FIELD_ERROR_TEXT = {
     "float_type": "这里要一个数字。",
     "bool_type": "这里要 true 或 false。",
     "list_type": "这里要一个列表，用方括号括起来。",
+    "tuple_type": "这里要一个列表，用方括号括起来。",
+    "int_from_float": "这里要一个整数，不能带小数点。",
 }
 
 
