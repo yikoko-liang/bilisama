@@ -1,6 +1,7 @@
 """Contract tests against the real Volcengine dialogue endpoint.
 
-Run for the first time on 2026-08-27; ten green as of 2026-08-28. Before that every
+Run for the first time on 2026-08-27. Ten tests as of 2026-08-28, eight of them
+parametrised over both model generations, so eighteen cases. Before that every
 assertion here came from the vendor's documentation plus one worked example
 frame, and the file said so — that distinction is why it exists: the
 alternative is an adapter whose assumptions live only in comments, which is
@@ -26,9 +27,12 @@ endpoint changes its mind:
 4. **TTSEnded does follow ChatEnded**, so settling the reply on the audio
    ending (rather than on the model finishing) holds the slot for exactly as
    long as she is still talking.
-5. **Barge-in arrives as ASRInfo and nothing else**, and no un-stale audio
-   follows it. There is no response.cancel on this protocol; what makes the
-   interruption sound clean is the handle going stale.
+5. **Barge-in arrives as ASRInfo and nothing else**, and once L3 acts on it no
+   un-stale audio follows. The adapter reports the signal and stops there —
+   ending the reply is the scheduler's call, because only it knows whether this
+   one is a paid thank-you inside its protected window. What makes the
+   interruption sound clean is the handle going stale; what stops the far end
+   is ClientInterrupt (test 7).
 6. **UpdateConfig takes effect.** This was the one most likely to fail
    silently: the assembly pushes the persona AFTER connect (dev_talk.py:1330),
    so on this provider that is the only channel it has, and an event accepted
@@ -56,7 +60,6 @@ import contextlib
 import json
 import os
 import struct
-import subprocess
 import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -71,6 +74,7 @@ from bilisama.realtime import link
 from bilisama.realtime.providers import PROFILES
 from bilisama.realtime.providers.volcano import VolcanoLink
 from bilisama.realtime.providers.volcano_wire import ServerEvent, decode
+from tests.integration.speech_fixture import speech_wav
 
 pytestmark = pytest.mark.provider_a
 
@@ -85,9 +89,10 @@ def _credentials() -> tuple[str, str]:
     2026-08-27 confirmed it — x-api-key plus the resource headers completes the
     handshake, while the same value in the X-Api-Access-Key slot draws 401.
     """
-    key = os.environ.get("volcano_api_key", "") or os.environ.get(  # noqa: SIM112
-        "volcano_access_key", ""  # noqa: SIM112
-    )
+    # Only the API Key. `volcano_access_key` is the older pair's second half,
+    # and putting it in the x-api-key slot draws 401 「requested grant not
+    # found」 — the same mixture the factory stopped doing.
+    key = os.environ.get("volcano_api_key", "")  # noqa: SIM112
     if not key:
         pytest.skip(
             "没有火山 API Key（volcano_api_key）。控制台 > API Key 管理拿一个，"
@@ -124,6 +129,13 @@ def _config(**over: Any) -> VolcanoConfig:
 
 
 async def _link(**over: Any) -> AsyncIterator[VolcanoLink]:
+    """A live link, already through both handshake levels.
+
+    `connect()` returning is the readiness signal. Waiting for a LinkUp here
+    would wait forever: that event means 「the link came BACK」 and the adapter
+    only emits it from the reconnect ladder — a first connect is not a
+    recovery.
+    """
     url, key = _credentials()
     volcano = VolcanoLink(url, api_key=key, config=_config(**over))
     await volcano.connect()
@@ -166,8 +178,10 @@ async def test_the_handshake_climbs_both_levels(generation: dict[str, str]) -> N
     as a refusal right here rather than as a mystery three events later.
     """
     async for volcano in _link(**generation):
-        got = await _drain(volcano, 5.0, until=link.LinkUp)
-        assert any(isinstance(e, link.LinkUp) for e in got), f"没建起会话：{got}"
+        # Getting here is the assertion: `_link` awaits connect(), which climbs
+        # StartConnection then StartSession and raises SessionRefused if either
+        # step is answered with anything else.
+        assert volcano.dialog_id, "服务端没给 dialog_id，会话没真建起来"
 
 
 async def test_a_session_event_without_a_session_id_is_refused() -> None:
@@ -210,7 +224,6 @@ async def test_the_downlink_really_comes_back_as_pcm(generation: dict[str, str])
     stream fed to a PCM player is not an error, it is noise.
     """
     async for volcano in _link(**generation):
-        await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.request_reply(link.ReplySpec(instructions="用五个字回答：你好吗"))
         got = await _drain(volcano, 25.0, until=link.ReplyDone)
         audio = [e for e in got if isinstance(e, link.ReplyAudioDelta)]
@@ -226,7 +239,6 @@ async def test_a_reply_ends_with_tts_ended_after_chat_ended(generation: dict[str
     her not answering anybody.
     """
     async for volcano in _link(**generation):
-        await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.request_reply(link.ReplySpec(instructions="用五个字回答：你好吗"))
         got = await _drain(volcano, 25.0, until=link.ReplyDone)
         done = [e for e in got if isinstance(e, link.ReplyDone)]
@@ -237,53 +249,31 @@ async def test_a_reply_ends_with_tts_ended_after_chat_ended(generation: dict[str
         assert done[0].text, "回复没有文字，ChatResponse 的字段名可能不是 content"
 
 
-def _speech_wav(tmp_path: Path) -> Path:
-    """A real speech waveform, synthesised to a file. No device is opened.
-
-    Silence cannot answer this question — the server's VAD will not fire on it
-    — and a test that feeds silence and then reports "inconclusive" is a test
-    that never had a chance. Same trick test_hosted_contract uses.
-    """
-    out = tmp_path / "speech.wav"
-    try:
-        subprocess.run(
-            [
-                "say",
-                "-v",
-                "Tingting",
-                "-o",
-                str(out),
-                "--data-format=LEI16@16000",
-                "等一下等一下，我插一句，先别说了",
-            ],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        pytest.skip(f"造不出语音素材（macOS say 不可用）：{exc}")
-    return out
-
-
 async def test_what_the_server_does_when_talked_over(
     tmp_path: Path, generation: dict[str, str]
 ) -> None:
     """Question 5, and the one the product hangs on.
 
-    There is no response.cancel on this protocol, so `cancel()` is local only.
-    What matters is whether the server at least TELLS us to stop playing, and
-    whether it keeps sending audio afterwards. Both answers are usable; not
-    knowing which is true is not.
+    Two halves, and the split between them is the point. The SERVER's job is to
+    tell us the streamer cut in — ASRInfo, there being no speech_started here.
+    Ending the reply is L3's job, not the adapter's: only the scheduler knows
+    whether this one is a paid thank-you inside its protected window. So this
+    drives the real product path — signal arrives, we cancel the way
+    director/scheduler.py's _barge_in does, and the audio has to stop.
+
+    It used to cancel implicitly, because the adapter settled on ASRInfo by
+    itself. That looked the same here and was wrong in production: the log said
+    「扛住了打断」 for a reply already killed, and the cancel L3 did send could
+    no longer reach the wire.
 
     Asks for a long reply, lets her get going, then feeds a real speech
     waveform — the same shape as a streamer cutting in.
     """
-    wav = _speech_wav(tmp_path)
+    wav = speech_wav(tmp_path, "等一下等一下，我插一句，先别说了")
     async for volcano in _link(**generation):
-        await _drain(volcano, 5.0, until=link.LinkUp)
         collected: list[link.LinkEvent] = []
         task = asyncio.create_task(_collect_into(volcano, collected))
-        await volcano.request_reply(
+        handle = await volcano.request_reply(
             link.ReplySpec(instructions="讲一个五百字左右的长故事，从头讲到尾，中间不要停")
         )
         await asyncio.sleep(3.0)  # let her get going
@@ -297,15 +287,19 @@ async def test_what_the_server_does_when_talked_over(
                     break
                 await volcano.push_audio(block)
                 await asyncio.sleep(0.02)
-        cut_at = len(collected)
-        await asyncio.sleep(6.0)
-        task.cancel()
 
+        # Give the signal a moment, then do what L3 does with it.
+        await asyncio.sleep(1.0)
         started = [e for e in collected if isinstance(e, link.SpeechStarted)]
         assert started, (
             "喂了真人语音，服务端一个打断信号都没给——"
             f"收到的是 {sorted({type(e).__name__ for e in collected})}"
         )
+        await volcano.cancel(handle)
+        cut_at = len(collected)
+        await asyncio.sleep(6.0)
+        task.cancel()
+
         after = collected[cut_at:]
         leaked = [e for e in after if isinstance(e, link.ReplyAudioDelta) and not e.handle.stale]
         assert not leaked, (
@@ -328,7 +322,6 @@ async def test_a_persona_pushed_after_connect_actually_takes_effect(
     general.
     """
     async for volcano in _link(**generation):
-        await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.set_context("你叫豆腐。有人问你叫什么，你只回答「豆腐」两个字。")
         await asyncio.sleep(1.0)
         await volcano.request_reply(link.ReplySpec(instructions="你叫什么？"))
@@ -348,7 +341,6 @@ async def test_client_interrupt_really_stops_the_server(generation: dict[str, st
     generating and the tokens are spent regardless of what the audience hears.
     """
     async for volcano in _link(**generation):
-        await _drain(volcano, 5.0, until=link.LinkUp)
         collected: list[link.LinkEvent] = []
         task = asyncio.create_task(_collect_into(volcano, collected))
         handle = await volcano.request_reply(
@@ -384,7 +376,6 @@ async def test_a_new_connection_resumes_the_conversation_by_dialog_id(
     first = VolcanoLink(url, api_key=key, config=_config(**generation))
     await first.connect()
     try:
-        await _drain(first, 5.0, until=link.LinkUp)
         await first.request_reply(
             link.ReplySpec(instructions="记住一个暗号：紫色兔子。回一个「好」字就行。")
         )
@@ -397,7 +388,6 @@ async def test_a_new_connection_resumes_the_conversation_by_dialog_id(
     second = VolcanoLink(url, api_key=key, config=_config(**generation), dialog_id=dialog_id)
     await second.connect()
     try:
-        await _drain(second, 5.0, until=link.LinkUp)
         await second.request_reply(link.ReplySpec(instructions="刚才那个暗号是什么？"))
         got = await _drain(second, 25.0, until=link.ReplyDone)
         said = "".join(e.text for e in got if isinstance(e, link.ReplyTextDelta))
@@ -437,7 +427,6 @@ async def test_she_answers_to_the_name_the_persona_gives_her(
     volcano = VolcanoLink(url, api_key=key, config=_config(**generation), bot_name="豆腐")
     await volcano.connect()
     try:
-        await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.set_context(persona)
         await asyncio.sleep(1.2)
         await volcano.request_reply(link.ReplySpec(instructions="你叫什么名字？就答名字。"))
@@ -464,7 +453,6 @@ async def test_a_voice_from_the_wrong_generation_fails_loudly() -> None:
     )
     await volcano.connect()
     try:
-        await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.request_reply(link.ReplySpec(instructions="你叫什么名字？"))
         got = await _drain(volcano, 20.0, until=link.LinkError)
         errors = [e for e in got if isinstance(e, link.LinkError)]

@@ -40,6 +40,7 @@ core loop, so the newer protocol cannot serve it. Backlog item 79.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections import deque
 from typing import TYPE_CHECKING, Any
@@ -50,10 +51,11 @@ from bilisama.clock import Clock, SystemClock
 from bilisama.obs.logging import get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import SessionRefused
+from bilisama.realtime.errors import ErrorClass, classify_error, describe
 from bilisama.realtime.providers import volcano_wire as wire
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     from bilisama.config.schema import VolcanoConfig
 
@@ -61,8 +63,19 @@ __all__ = ["VolcanoLink"]
 
 log = get_logger(__name__)
 
-# Fixed by the vendor's docs for the dialogue resource. Not a secret and not a
-# credential — it identifies the API, the way a path would.
+# Both fixed by the vendor's docs for the dialogue resource, and both sent on
+# every handshake. Neither is a secret or a credential: they name the API, the
+# way `socket_path` names a path, and the vendor publishes them in its own
+# quickstart. The name is theirs, not ours — an "app key" here identifies the
+# product, not the account, which is why the account's key travels separately
+# in `x-api-key`.
+#
+# Hardcoded rather than configurable, which is against the rule that
+# bilisama.toml is the single source of truth. The exception is the same one
+# `ProviderProfile.default_host` takes: a value that is identical for every
+# installation is a constant, and asking a streamer to type it is asking them
+# to get it wrong. If the vendor ever versions these, they move into PROFILES
+# beside the address.
 _APP_KEY = "PlgvMymc7f3tQnJ6"
 _RESOURCE_ID = "volc.speech.dialog"
 
@@ -79,6 +92,15 @@ _SWAP_TIMEOUT_S = 10.0
 _PERSONA_KEY: dict[str, str] = {"1.2.1.1": "system_role", "2.2.0.0": "character_manifest"}
 
 
+def _error_detail(body: Mapping[str, Any]) -> str:
+    """The server's own words about a failure, trimmed.
+
+    Three call sites read this same shape, and the vendor is not consistent
+    about which of the two keys it fills.
+    """
+    return str(body.get("error") or body.get("message") or "")[:200]
+
+
 class VolcanoLink:
     """SpeechLink over the Volcengine realtime dialogue endpoint."""
 
@@ -91,8 +113,11 @@ class VolcanoLink:
         access_key: str = "",
         config: VolcanoConfig,
         bot_name: str = "",
+        speaker: str = "",
+        quiet_window_s: float = 1.8,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
+        swap_timeout_s: float = _SWAP_TIMEOUT_S,
         session_id: str | None = None,
         dialog_id: str = "",
         auto_reconnect: bool = True,
@@ -117,6 +142,15 @@ class VolcanoLink:
             saying the same thing DID win, which is why this looked fine in
             early testing. O generation only — SC takes the name from its
             character manifest.
+        speaker: The voice, overriding the config's. Empty keeps it. The
+            model/generation pairing is judged by the factory on whichever of
+            the two wins, because both ways of getting it wrong are silent on
+            this endpoint.
+        quiet_window_s: How long the speaking floor holds after the streamer
+            stops. Handed in rather than computed here: the s2s parameters that
+            shape the equivalent number live in another process's launch file,
+            so one caller assembling it for every adapter is the only shape
+            that works for all four.
         session_id: The id we choose for this session — the client picks it,
             not the server. Injectable so tests are not at the mercy of uuid4.
         dialog_id: A conversation to pick back up, from an earlier session's
@@ -130,10 +164,19 @@ class VolcanoLink:
         self._access_key = access_key
         self._cfg = config
         self._bot_name = bot_name
+        # `--voice` beats the config, and the factory has already judged the
+        # pairing on this effective value rather than on the config's.
+        self._speaker = speaker or config.speaker
+        self.quiet_window_s = quiet_window_s
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
-        self._session_id = session_id or str(uuid.uuid4())
-        self._pinned_session_id = session_id is not None
+        self._swap_timeout_s = swap_timeout_s
+        # Only the FIRST session on each socket can use a pinned id: a swap
+        # has to mint a new one, because the server has retired the old and one
+        # connection holds one session at a time. Injectable so tests are not
+        # at the mercy of uuid4.
+        self._fixed_session_id = session_id or ""
+        self._session_id = self._fixed_session_id or str(uuid.uuid4())
         self._auto_reconnect = auto_reconnect
         self._reconnect_backoff_s = reconnect_backoff_s
         self._max_attempts = max_reconnect_attempts
@@ -182,6 +225,10 @@ class VolcanoLink:
         # VAD — so this tracks whoever holds it, not just replies we asked for.
         self._active: link.ReplyHandle | None = None
         self._reply_text: list[str] = []
+        # Queries of ours that were settled before the server named them. The
+        # ack is still coming, and tombstoning the id it carries is exact —
+        # guessing from timing would not be.
+        self._orphan_queries = 0
         # Which server-side question the active reply answers, and the ones
         # already finished. Every text and lifecycle frame carries a
         # question_id (ChatResponse, TTSSentenceStart, TTSEnded, ASRInfo), and
@@ -195,12 +242,28 @@ class VolcanoLink:
         # what this protocol actually gives us.
         self._question = ""
         self._done: deque[str] = deque(maxlen=32)
-        # TTSResponse is raw audio with no id of its own, so it inherits the
-        # judgement made on the TTSSentenceStart that preceded it.
-        self._audio_muted = False
+        # TTSResponse is raw audio with no id of its own, so it belongs to the
+        # sentence announced before it. Scoped to that sentence and no further:
+        # a single link-wide "muted" flag stayed set until the next settle, so
+        # one late frame from a reply we had closed silenced whatever was
+        # speaking now, for its whole duration.
+        self._audio_question = ""
+        # Uplink frames thrown away because no session was live to send them to.
+        # Counted rather than silent: a swap that starts costing seconds should
+        # show up as a number, not as the streamer sounding clipped.
+        self._dropped_uplink = 0
         self._slot_free = asyncio.Event()
         self._slot_free.set()
         self._send_lock = asyncio.Lock()
+        # Held across the wait AND the take. Event.set() wakes every waiter and
+        # each then clears the event on its own, so without this two callers
+        # both walked out holding the one slot — and the loser's watchdog had
+        # been cancelled by the winner, so it never settled at all.
+        # client.py:254-257 holds _command_lock for the same reason.
+        self._slot_lock = asyncio.Lock()
+        # One swap at a time, and only when there is something new to carry.
+        self._swap_lock = asyncio.Lock()
+        self._swapped_context = ""
 
     @property
     def dialog_id(self) -> str:
@@ -262,8 +325,15 @@ class VolcanoLink:
         # A fresh session id per attempt: it identifies the socket-level
         # session, while dialog_id is what carries the conversation across.
         # Reusing a spent one is asking the server to resume the wrong thing.
-        if not self._pinned_session_id:
-            self._session_id = str(uuid.uuid4())
+        self._session_id = self._fixed_session_id or str(uuid.uuid4())
+        # The previous socket's reader has no socket left to read. Leaving it
+        # around means two receive tasks racing to dispatch onto one adapter
+        # the moment a reconnect succeeds — client.py:193-200 cancels its own
+        # for the same reason.
+        if self._recv is not None and not self._recv.done():
+            self._recv.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._recv
         # close_timeout bounds the goodbye, not the conversation — same reason
         # RealtimeClient sets it: a wedged server otherwise holds aclose() for
         # the library's 10s default.
@@ -292,18 +362,30 @@ class VolcanoLink:
             what="会话",
         )
         self._started = True
+        # This session was built with the context in hand, so a swap has
+        # nothing to carry until someone changes it. Any query settled before
+        # the old session died is gone with it — its ack is never coming.
+        self._swapped_context = self._context
+        self._orphan_queries = 0
         resumed = bool(self._dialog_id)
         self._dialog_id = str(frame.json().get("dialog_id", "")) or self._dialog_id
         log.info(
             "volcano.session_started",
             model=self._cfg.model,
-            speaker=self._cfg.speaker,
+            speaker=self._speaker,
             dialog_id=self._dialog_id,
             resumed=resumed,
             context_len=len(self._context),
         )
+        # Live: push_audio may address it again. Cleared for the duration of a
+        # swap, when it is briefly true that no session exists.
+        self._session_ready.set()
         self._recv = asyncio.create_task(self._recv_loop(), name="volcano:recv")
-        await self._events.put(link.LinkUp(attempts=self._attempts + 1))
+        # No LinkUp here. It means "the link came BACK", which is what
+        # client.py:498 uses it for and what dev_talk prints 「已恢复」 on —
+        # emitting it from the shared _open announced a recovery on every
+        # single startup, twice into the panel feed. The reconnect ladder
+        # emits it, with the attempt number it actually took.
 
     def _session_body(self) -> dict[str, Any]:
         """The StartSession config: what it hears, what it sounds like, who it is.
@@ -346,10 +428,12 @@ class VolcanoLink:
                 },
             },
         }
-        if self._cfg.speaker:
-            body["tts"]["speaker"] = self._cfg.speaker
-        if dialog:
-            body["dialog"] = dialog
+        if self._speaker:
+            body["tts"]["speaker"] = self._speaker
+        # Unconditional: `dialog` always carries at least extra.model, which is
+        # a required parameter. The `if dialog:` that used to guard this read
+        # as though the section were optional.
+        body["dialog"] = dialog
         return body
 
     async def _expect(
@@ -389,7 +473,7 @@ class VolcanoLink:
                 body = frame.json()
                 raise SessionRefused(
                     code=str(frame.error_code or frame.event or "unknown"),
-                    detail=str(body.get("error") or body.get("message") or "")[:200],
+                    detail=_error_detail(body),
                     summary=f"服务端拒了这次{what}",
                 )
             # Anything else this early is noise from a step we already passed.
@@ -411,12 +495,24 @@ class VolcanoLink:
         cancelled leaves the connection closing under the next send. The mock
         did not answer that goodbye until it was taught to, and the bug was
         invisible for as long as it did not.
+
+        Everything cancelled here is also AWAITED here. `client.py:206-214`
+        records why: cancelling without awaiting left a ladder still climbing
+        after aclose returned, which at process exit is a socket nobody owns.
+        The window is real on this adapter — a reconnect sitting just past
+        `websockets.connect` would assign the new socket back over the one we
+        just dropped, set `_started`, and start a receive task, all after we
+        said we were done.
         """
         self._closing = True
-        # These two never read the socket; only the receive loop does.
-        for task in (self._watchdog, self._reconnect_task, self._swap_task):
-            if task is not None:
-                task.cancel()
+        # These three never read the socket; only the receive loop does.
+        pending = [
+            task
+            for task in (self._watchdog, self._reconnect_task, self._swap_task)
+            if task is not None
+        ]
+        for task in pending:
+            task.cancel()
         if self._ws is not None and self._started:
             # Best effort: a socket already gone is the normal way to arrive
             # here, and failing to say goodbye must not hide the real reason
@@ -432,16 +528,36 @@ class VolcanoLink:
                 log.debug("volcano.goodbye_skipped", detail=str(exc)[:120])
         if self._recv is not None:
             self._recv.cancel()
+            pending.append(self._recv)
         await self._drop_socket()
+        # Nothing here re-raises: these were all cancelled on purpose, and a
+        # teardown that reports its own cancellations as failures buries the
+        # reason the caller is tearing down.
+        await asyncio.gather(*pending, return_exceptions=True)
         self._started = False
+        # A reply still in flight gets its ReplyDone. The disconnect path
+        # already did this; aclose did not, so a scheduler awaiting that handle
+        # never woke — and its watchdog, the only other thing that could have
+        # ended it, had just been cancelled two lines up.
+        self._settle(link.ReplyStatus.FAILED)
 
     # ------------------------------------------------------------- sending
 
     async def _send(self, frame: bytes) -> None:
-        if self._ws is None:
-            raise ConnectionError("火山语音连接没开，发不出去。")
+        """One frame out, or a Chinese ConnectionError.
+
+        The check sits INSIDE the lock and reads through a local name. Outside
+        it, a caller could pass the check, block on the lock, and acquire it
+        after _recv_loop or _drop_socket had nulled the socket — then run
+        `None.send` and raise AttributeError, which `cancel` does not catch and
+        which escapes a spawned barge-in task instead of taking its intended
+        "a dead socket has already stopped her" path.
+        """
         async with self._send_lock:
-            await self._ws.send(frame)
+            ws = self._ws
+            if ws is None:
+                raise ConnectionError("火山语音连接没开，发不出去。")
+            await ws.send(frame)
 
     async def set_context(self, instructions: str) -> None:
         """Push the persona, by whichever channel this generation has.
@@ -488,21 +604,42 @@ class VolcanoLink:
             log.debug("volcano.swap_deferred", context_len=len(self._context))
             return
         self._swap_pending = False
+        # One at a time. Two swaps overlapping used to interleave their frames:
+        # each cleared the event the other was waiting on, each generated its
+        # own session id, and the real server — concurrent, unlike the fake —
+        # answered the second StartSession with 「session number limit
+        # exceeded: 1」. The link was then addressing an id the server had never
+        # confirmed. It does not take two callers: a context push deferred by
+        # _settle and the ticker's next refresh are enough.
+        async with self._swap_lock:
+            if self._swapped_context == self._context:
+                # Someone else already carried this one across while we queued.
+                return
+            sent = await self._swap_once()
+            if sent is not None:
+                self._swapped_context = sent
+
+    async def _swap_once(self) -> str | None:
+        """Retire the session and open the next one.
+
+        Returns:
+            The context that actually went out in the StartSession, or None if
+            the swap did not land. What went out rather than what was wanted:
+            a second push arriving mid-swap changes `_context` before the body
+            is built, so its value is already on the wire and recording the
+            older one would send the whole thing round again for nothing.
+        """
         self._session_closed.clear()
         await self._send(
             wire.client_request(wire.ClientEvent.FINISH_SESSION, session_id=self._session_id)
         )
-        try:
-            await asyncio.wait_for(self._session_closed.wait(), timeout=_SWAP_TIMEOUT_S)
-        except TimeoutError:
-            log.warning(
-                "volcano.swap_timed_out",
-                waited_s=_SWAP_TIMEOUT_S,
-                error_text="等不到服务端收掉上一个会话，这次人设更新没落地。",
-            )
-            return
+        if not await self._wait_or_lose(self._session_closed, "等不到服务端收掉上一个会话"):
+            return None
         self._session_id = str(uuid.uuid4())
         self._session_ready.clear()
+        # Read together, with no await between them, so what is recorded is
+        # exactly what the frame carries.
+        sent = self._context
         await self._send(
             wire.client_request(
                 wire.ClientEvent.START_SESSION,
@@ -510,22 +647,92 @@ class VolcanoLink:
                 body=self._session_body(),
             )
         )
-        try:
-            await asyncio.wait_for(self._session_ready.wait(), timeout=_SWAP_TIMEOUT_S)
-        except TimeoutError:
-            log.warning(
-                "volcano.swap_timed_out",
-                waited_s=_SWAP_TIMEOUT_S,
-                error_text="换会话之后等不到服务端确认，这次人设更新可能没落地。",
-            )
-            return
+        if not await self._wait_or_lose(self._session_ready, "换会话之后等不到服务端确认"):
+            return None
         log.info(
             "volcano.session_swapped",
-            context_len=len(self._context),
+            context_len=len(sent),
             dialog_id=self._dialog_id,
+            dropped_uplink=self._dropped_uplink,
         )
+        self._dropped_uplink = 0
+        return sent
+
+    async def _wait_or_lose(self, event: asyncio.Event, what: str) -> bool:
+        """Wait for one swap step, or tear the link down so it can be rebuilt.
+
+        Returning quietly — which is what this used to do — left the worst
+        state this adapter has: the server has retired the session, `_started`
+        is still True, no LinkDown was ever emitted, and every later frame is
+        addressed to a session that no longer exists. On the panel that reads
+        as a healthy link that has simply stopped talking. The reconnect ladder
+        already knows how to rebuild both levels and carries the dialog_id, so
+        the honest move is to hand it the job.
+
+        The wait goes through the injected clock rather than asyncio.wait_for,
+        which is why these two branches are testable at all — every other timer
+        in this class already does.
+        """
+        waiter = asyncio.ensure_future(event.wait())
+        timer = asyncio.ensure_future(self._clock.sleep(self._swap_timeout_s))
+        try:
+            await asyncio.wait({waiter, timer}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+            timer.cancel()
+        if event.is_set():
+            return True
+        log.warning(
+            "volcano.swap_timed_out",
+            waited_s=self._swap_timeout_s,
+            error_text=f"{what}，这条会话已经不在了，交给重连重建。",
+        )
+        await self._lose_link(f"换会话没成：{what}")
+        return False
+
+    async def _lose_link(self, reason: str, *, exc: BaseException | None = None) -> None:
+        """The one place that turns "the session is gone" into events and
+        recovery.
+
+        Two callers arrive here: the receive loop when the socket drops, and a
+        swap that could not finish. They used to do different things — the
+        second did nothing at all — which is how a failed swap became a link
+        that looked fine forever.
+        """
+        if self._closing or not self._started:
+            return
+        self._started = False
+        # Nothing in flight survives the gap; settle first so no reply is left
+        # holding the single slot across it.
+        self._settle(link.ReplyStatus.FAILED)
+        await self._drop_socket()
+        # A revoked key or a rejected model answers the same way every time, so
+        # `retrying=True` there is a promise we cannot keep — and it buys a
+        # minute of a panel reading 「连接中」 before it admits as much.
+        fatal = exc is not None and classify_error(exc) is ErrorClass.FATAL
+        retrying = self._auto_reconnect and not fatal
+        if fatal:
+            log.error("volcano.link_fatal", error_text=describe(ErrorClass.FATAL, reason[:120]))
+        await self._events.put(link.LinkDown(reason=reason[:120], retrying=retrying))
+        if retrying and (self._reconnect_task is None or self._reconnect_task.done()):
+            self._reconnect_task = asyncio.create_task(self._reconnect(), name="volcano:reconnect")
 
     async def push_audio(self, pcm: bytes) -> None:
+        """The streamer's microphone, 20 ms at a time.
+
+        Dropped rather than queued while a swap is in flight. For those ~114 ms
+        the old session is retired and the new one is unconfirmed, so a frame
+        sent now draws a server error that lands in the ERROR branch and
+        settles the active reply FAILED — losing a fifth of a second of uplink
+        is much the cheaper of the two.
+
+        This is NOT the s2s invariant (plan 3.3 rule 7, never stop sending).
+        That rule exists because the speculative reopen window runs on the
+        audio clock, and this protocol has no such window.
+        """
+        if not self._session_ready.is_set():
+            self._dropped_uplink += 1
+            return
         await self._send(wire.audio_request(pcm, session_id=self._session_id))
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
@@ -541,18 +748,41 @@ class VolcanoLink:
         so waiting here is not merely bookkeeping. The watchdog is what
         guarantees the wait ends.
         """
-        await self._slot_free.wait()
-        parts = [part for part in (self._pending_item, spec.instructions) if part]
-        self._pending_item = ""
         handle = link.ReplyHandle()
-        self._take_slot(handle)
-        await self._send(
-            wire.client_request(
-                wire.ClientEvent.CHAT_TEXT_QUERY,
-                session_id=self._session_id,
-                body={"content": "\n\n".join(parts)},
-            )
-        )
+        item = self._pending_item
+        # The wait and the take have to be one step: Event.set() wakes every
+        # waiter, so two callers each cleared it and each thought it had the
+        # slot — three queries on a single-slot endpoint, and the loser never
+        # settled because the winner's _take_slot cancelled its watchdog.
+        async with self._slot_lock:
+            if not self._slot_free.is_set():
+                waited_since = self._clock.monotonic()
+                await self._slot_free.wait()
+                log.info(
+                    "link.slot_waited",
+                    purpose="reply",
+                    waited_ms=round((self._clock.monotonic() - waited_since) * 1000),
+                )
+            parts = [part for part in (item, spec.instructions) if part]
+            self._pending_item = ""
+            self._take_slot(handle)
+            try:
+                await self._send(
+                    wire.client_request(
+                        wire.ClientEvent.CHAT_TEXT_QUERY,
+                        session_id=self._session_id,
+                        body={"content": "\n\n".join(parts)},
+                    )
+                )
+            except Exception:
+                # A query that never left must not hold the slot for 25 s: the
+                # scheduler retries a paid intent, and the retry would spend
+                # the whole watchdog waiting on a reply nobody is producing.
+                # Same guard, same reason, as client.py:260-272. The stashed
+                # item goes back so the retry still carries the danmaku text.
+                self._pending_item = item
+                self._release_slot()
+                raise
         log.info(
             "volcano.reply_requested",
             handle_id=handle.handle_id,
@@ -578,6 +808,15 @@ class VolcanoLink:
         if self._active is None or self._active is not handle:
             return
         self._settle(link.ReplyStatus.CANCELLED)
+        await self._interrupt("cancel", handle_id=handle.handle_id)
+
+    async def _interrupt(self, why: str, *, handle_id: int = 0) -> None:
+        """Tell the far end to stop. Best effort, by design.
+
+        Raising out of here would surface inside a barge-in — a spawned task
+        whose failure nobody is waiting on — and a dead socket has already
+        stopped her more thoroughly than this frame would have.
+        """
         try:
             await self._send(
                 wire.client_request(
@@ -585,11 +824,9 @@ class VolcanoLink:
                 )
             )
         except (websockets.ConnectionClosed, OSError, ConnectionError) as exc:
-            # A dead socket has already stopped her more thoroughly than this
-            # frame would have. Worth a line, not worth raising into a barge-in.
-            log.debug("volcano.interrupt_unsent", detail=str(exc)[:120])
+            log.debug("volcano.interrupt_unsent", why=why, detail=str(exc)[:120])
             return
-        log.info("volcano.interrupted", handle_id=handle.handle_id)
+        log.info("volcano.interrupted", why=why, handle_id=handle_id)
 
     async def end_protection(self) -> None:
         """No-op, like the hosted adapter's.
@@ -601,13 +838,33 @@ class VolcanoLink:
 
     # ------------------------------------------------------------ receiving
 
-    def _take_slot(self, handle: link.ReplyHandle) -> None:
+    def _take_slot(self, handle: link.ReplyHandle, reason: str = "request") -> None:
+        # Same three event names RealtimeClient uses. They are the log line
+        # 「为什么她刚才没说话」 gets answered from, and this adapter reaching
+        # for its own vocabulary would have split that answer in two.
+        log.info("link.slot_taken", reason=reason)
         self._active = handle
         self._reply_text = []
         self._slot_free.clear()
         if self._watchdog is not None:
             self._watchdog.cancel()
         self._watchdog = asyncio.create_task(self._watch(handle), name="volcano:watchdog")
+
+    def _release_slot(self, reason: str = "send_failed") -> None:
+        """Hand the slot back without announcing a reply.
+
+        _settle's counterpart for the one case where there is nothing to
+        settle: the request never made it onto the wire, so no ReplyDone is
+        owed to anyone and emitting one would tell L3 about a reply that never
+        existed.
+        """
+        self._active = None
+        self._reply_text = []
+        self._slot_free.set()
+        log.info("link.slot_freed", reason=reason)
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
 
     async def _watch(self, handle: link.ReplyHandle) -> None:
         """The only thing that ends a reply nobody ever ended.
@@ -623,6 +880,12 @@ class VolcanoLink:
                 waited_s=self._watchdog_s,
                 error_text="等不到回复结束，先把说话名额收回来。",
             )
+            # Before the settle, not after: _settle cancels this very task, so
+            # anything awaited afterwards would be eaten by our own cancel.
+            # And it has to happen at all — giving up locally left the server
+            # generating, which is the same wasted spend `cancel` exists to
+            # stop, just reached by the other road.
+            await self._interrupt("watchdog")
             self._settle(link.ReplyStatus.TIMED_OUT)
 
     def _settle(self, status: link.ReplyStatus) -> None:
@@ -637,26 +900,32 @@ class VolcanoLink:
             handle.stale = True
         if self._question:
             self._done.append(self._question)
-        else:
-            # Nothing to tombstone: this reply was settled before the server
-            # ever named it, which is what a watchdog timeout on a silent
-            # endpoint looks like. A tail arriving later can then still mint an
-            # implicit reply — but a server that never named the question is
-            # also one that sent no tail, so the two cases do not overlap in
-            # practice. Left as a note rather than a guess at a heuristic.
+        elif status is not link.ReplyStatus.COMPLETED:
+            # Settled before the server ever named it — a cancel or a watchdog
+            # timeout landing ahead of ChatTextQueryConfirmed. We cannot
+            # tombstone an id we were never told, but the ack is still on its
+            # way and carries it, so the id is claimed there instead. Exact,
+            # rather than a guess from timing.
+            self._orphan_queries += 1
             log.debug("volcano.settled_unnamed", status=status.value)
         self._question = ""
-        self._audio_muted = False
+        self._audio_question = ""
         self._active = None
-        if self._swap_pending:
+        if self._swap_pending and self._started and self._ws is not None:
             # A context push landed while she was talking. Now that the slot is
             # free the swap can happen — as a task, because settling is called
             # from the receive loop and must not wait on the wire. Held in an
             # attribute rather than let loose: CPython only keeps a weak
             # reference to a running task, so a bare create_task can be
             # collected mid-flight and the swap simply never happens.
+            #
+            # Guarded on the socket being alive because this also runs on the
+            # disconnect path, where _recv_loop nulls _ws in the very next
+            # statement: the swap task then raised ConnectionError into nobody,
+            # every time, and swallowed _swap_pending on the way out.
             self._swap_task = asyncio.create_task(self._swap_session(), name="volcano:swap")
         self._slot_free.set()
+        log.info("link.slot_freed", reason=status.value)
         if self._watchdog is not None:
             self._watchdog.cancel()
             self._watchdog = None
@@ -680,7 +949,7 @@ class VolcanoLink:
             return None
         if self._active is None:
             handle = link.ReplyHandle()
-            self._take_slot(handle)
+            self._take_slot(handle, reason="implicit")
             self._question = question
             self._events.put_nowait(link.ReplyStarted(handle))
             log.debug("volcano.reply_implicit", handle_id=handle.handle_id, question=question)
@@ -711,14 +980,35 @@ class VolcanoLink:
             try:
                 await self._open()
             except (SessionRefused, OSError, websockets.WebSocketException) as exc:
+                kind = classify_error(exc)
                 log.warning(
                     "volcano.reconnect_failed",
                     attempt=attempt,
                     error_text=str(exc)[:160],
                     error_class=type(exc).__name__,
+                    error_kind=kind.value,
                 )
+                if kind is ErrorClass.FATAL:
+                    # A revoked key answers the same way six times. Climbing the
+                    # whole ladder for it costs about a minute of a panel that
+                    # says 「连接中」 and then a message about retries, when the
+                    # real reason arrived on the first rung.
+                    log.error(
+                        "volcano.reconnect_gave_up",
+                        attempts=attempt,
+                        error_text=describe(kind, str(exc)[:160]),
+                    )
+                    await self._events.put(
+                        link.LinkDown(reason=describe(kind, str(exc)[:80]), retrying=False)
+                    )
+                    return
+                if kind is ErrorClass.BACKOFF:
+                    # Full rather than broken: give it longer than the ladder's
+                    # own step before asking again.
+                    delay = min(delay * 2, 30.0)
                 continue
             log.info("volcano.reconnected", attempt=attempt, dialog_id=self._dialog_id)
+            await self._events.put(link.LinkUp(attempts=attempt))
             return
         log.error(
             "volcano.reconnect_gave_up",
@@ -739,25 +1029,34 @@ class VolcanoLink:
                     # keep reading, the way a dropped video frame is survivable.
                     log.warning(
                         "volcano.frame_unreadable",
+                        stage="decode",
                         error_text=str(exc),
                         error_class="VolcanoProtocolError",
                     )
                     continue
-                self._dispatch(frame)
+                try:
+                    self._dispatch(frame)
+                except wire.VolcanoProtocolError as exc:
+                    # Frame.json() raises by design on a body that is not JSON,
+                    # and _dispatch calls it in nine places. Outside this guard
+                    # one such frame killed the receive task with an exception
+                    # nobody retrieved: socket still open, no LinkDown, the
+                    # reconnect ladder never armed, and a link that had gone
+                    # deaf while every later request_reply waited out its full
+                    # watchdog. Survivable for the same reason the decode above
+                    # is — one bad body is not a dead session.
+                    log.warning(
+                        "volcano.frame_unreadable",
+                        stage="body",
+                        wire_event=frame.event,
+                        error_text=str(exc),
+                        error_class="VolcanoProtocolError",
+                    )
+                    continue
         except asyncio.CancelledError:
             raise
         except (websockets.ConnectionClosed, OSError) as exc:
-            if self._closing:
-                return
-            # Everything in flight is gone with the socket. Settle first so no
-            # reply is left holding the single slot across the gap.
-            self._settle(link.ReplyStatus.FAILED)
-            await self._events.put(link.LinkDown(reason=str(exc)[:120], retrying=True))
-            self._ws = None
-            if self._auto_reconnect:
-                self._reconnect_task = asyncio.create_task(
-                    self._reconnect(), name="volcano:reconnect"
-                )
+            await self._lose_link(str(exc), exc=exc)
 
     def _dispatch(self, frame: wire.Frame) -> None:
         """One decoded frame to zero or more normalised events.
@@ -774,10 +1073,7 @@ class VolcanoLink:
             # server had said 「ClientError:InvalidSpeaker」 the whole time.
             body = frame.json()
             self._events.put_nowait(
-                link.LinkError(
-                    code=str(frame.error_code or "unknown"),
-                    detail=str(body.get("error") or body.get("message") or "")[:200],
-                )
+                link.LinkError(code=str(frame.error_code or "unknown"), detail=_error_detail(body))
             )
             log.warning(
                 "volcano.error_frame",
@@ -792,9 +1088,16 @@ class VolcanoLink:
         if event == wire.ServerEvent.ASR_INFO:
             # The vendor's own words for this one are 「用于打断客户端的播报」 —
             # it IS the barge-in signal. There is no separate speech_started.
+            #
+            # What it is NOT is a verdict. Whether the reply ends is L3's call,
+            # because only L3 knows whether this one is a paid thank-you inside
+            # its protected window (director/scheduler.py's _barge_in returns
+            # without cancelling when _protection_active). Settling here made
+            # that decision for it — the log read 「扛住了打断」 for a reply this
+            # adapter had killed two lines earlier — and cleared _active, so the
+            # cancel L3 did send hit cancel()'s own guard, never reached the
+            # wire, and the model went on generating at our expense.
             self._events.put_nowait(link.SpeechStarted())
-            if self._active is not None:
-                self._settle(link.ReplyStatus.CANCELLED)
             return
         if event == wire.ServerEvent.ASR_ENDED:
             self._events.put_nowait(link.SpeechStopped())
@@ -805,29 +1108,54 @@ class VolcanoLink:
         if event == wire.ServerEvent.CHAT_TEXT_QUERY_CONFIRMED:
             # The ack for our own query, and the only place the server tells us
             # which question_id it filed it under.
-            self._ensure_active(str(frame.json().get("question_id", "")))
+            question = str(frame.json().get("question_id", ""))
+            if self._orphan_queries:
+                # That query was already cancelled or timed out, before this
+                # ack could name it. Now it has a name: tombstone it, so its
+                # tail cannot walk into _ensure_active and mint a ghost.
+                self._orphan_queries -= 1
+                if question:
+                    self._done.append(question)
+                log.debug("volcano.orphan_tombstoned", question=question)
+                return
+            self._ensure_active(question)
             return
         if event == wire.ServerEvent.CHAT_RESPONSE:
-            handle = self._ensure_active(str(frame.json().get("question_id", "")))
+            # One decode. Frame is frozen+slots, so json() re-parses every call
+            # and this is the highest-frequency JSON event on the link.
+            body = frame.json()
+            handle = self._ensure_active(str(body.get("question_id", "")))
             if handle is None:
                 return
-            text = str(frame.json().get("content", ""))
+            text = str(body.get("content", ""))
             if text:
                 self._reply_text.append(text)
                 self._events.put_nowait(link.ReplyTextDelta(handle, text))
             return
         if event == wire.ServerEvent.TTS_RESPONSE:
-            # Raw audio, no id of its own — it inherits the judgement made on
-            # the TTSSentenceStart that came before it.
-            if self._audio_muted:
+            # Raw audio, no id of its own — it belongs to the sentence
+            # announced before it, and to nothing else. Two rules, each of
+            # which was a bug once:
+            #
+            # Scoped to that sentence: the answer used to live in one
+            # link-wide flag that survived until the next settle, so a single
+            # late frame from a closed reply silenced whatever was speaking
+            # now, for its whole duration — subtitles moving, no sound.
+            #
+            # And it never mints. Every reply this endpoint starts announces
+            # itself with a frame that DOES carry a question_id, so minting
+            # from an id-less frame only ever resurrected one we had just
+            # cancelled: a fresh handle, the interrupted audio played after
+            # all, and the single slot held until the watchdog let go.
+            if self._audio_question and self._audio_question in self._done:
                 return
-            handle = self._ensure_active()
+            handle = self._active
             if handle is not None and frame.payload:
                 self._events.put_nowait(link.ReplyAudioDelta(handle, frame.payload))
             return
         if event == wire.ServerEvent.TTS_SENTENCE_START:
-            question = str(frame.json().get("question_id", ""))
-            self._audio_muted = self._ensure_active(question) is None
+            self._audio_question = str(frame.json().get("question_id", ""))
+            self._ensure_active(self._audio_question)
             return
         if event == wire.ServerEvent.TTS_ENDED:
             if str(frame.json().get("question_id", "")) in self._done:
@@ -857,7 +1185,7 @@ class VolcanoLink:
             self._events.put_nowait(
                 link.LinkError(
                     code=str(body.get("error_code") or frame.error_code or event),
-                    detail=str(body.get("error") or body.get("message") or "")[:200],
+                    detail=_error_detail(body),
                 )
             )
             if self._active is not None:

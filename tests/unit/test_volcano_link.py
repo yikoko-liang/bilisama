@@ -1,19 +1,26 @@
 """VolcanoLink against a fake that refuses things.
 
-The four semantic gaps in the module docstring are what these tests are mostly
-about — no response.create, no cancel, no per-turn instructions slot, and a
-reply that ends when the AUDIENCE stops hearing rather than when the model
-stops generating. Each one is a place where doing the obvious thing produces a
-link that looks fine and behaves wrong.
+The semantic gaps in the adapter's module docstring are what these tests are
+mostly about — no response.create, no per-turn instructions slot, and a reply
+that ends when the AUDIENCE stops hearing rather than when the model stops
+generating. Each one is a place where doing the obvious thing produces a link
+that looks fine and behaves wrong.
+
+「No cancel」 used to be on that list and is not: ClientInterrupt exists and
+works, probed live 2026-08-27. A test asserting the old reading survived the
+correction for a while, comparing two snapshots both taken before the frame
+had landed — an assertion that would have passed whatever cancel sent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import struct
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+import websockets
 
 from bilisama.clock import FakeClock
 from bilisama.config.schema import VolcanoConfig
@@ -43,12 +50,94 @@ async def _linked(
     volcano = VolcanoLink(server.url, app_id="app", access_key="key", config=config, **kw)
     await volcano.connect()
     await server.wait_ready()
-    events = volcano.events()
-    await _collect(events, 1)  # LinkUp
-    return volcano, events
+    # No LinkUp to drain: it means 「the link came BACK」 and a first connect is
+    # not a recovery. This helper used to swallow one, which is how the extra
+    # startup event went unnoticed while dev-talk printed 「已恢复」 every run.
+    return volcano, volcano.events()
 
 
 # ------------------------------------------------------------------ handshake
+
+
+async def _raw_frame(
+    kind: wire.MessageKind, event: int, *, session_id: str, json_bit: bool
+) -> bytes:
+    """Build a client frame by hand, so a planted violation does not have to go
+    through the encoder that is supposed to prevent it."""
+    header = bytes((0x11, (kind << 4) | 0b0100, 0b0001_0000 if json_bit else 0, 0))
+    parts = [header, struct.pack(">i", event)]
+    if event >= 100:
+        # The length field is always there for a session-scoped event; a client
+        # that "forgot the field exists" writes zero into it, which is the shape
+        # the fake's header describes. Omitting it entirely is a different bug
+        # and one the decoder catches on its own.
+        parts.append(struct.pack(">I", len(session_id)))
+        parts.append(session_id.encode())
+    body = b"{}"
+    parts.append(struct.pack(">I", len(body)))
+    parts.append(body)
+    return b"".join(parts)
+
+
+@pytest.mark.parametrize(
+    ("rule", "frames"),
+    [
+        pytest.param(
+            "没带 session id",
+            [(wire.MessageKind.FULL_CLIENT, int(wire.ClientEvent.START_SESSION), "", False)],
+            id="会话级事件漏了 id",
+        ),
+        pytest.param(
+            "还没建连接就开会话",
+            [(wire.MessageKind.FULL_CLIENT, int(wire.ClientEvent.START_SESSION), "s1", False)],
+            id="跳过握手第一级",
+        ),
+        pytest.param(
+            "上行音频不是 Raw",
+            [(wire.MessageKind.AUDIO_CLIENT, int(wire.ClientEvent.TASK_REQUEST), "s1", True)],
+            id="音频按 JSON 发",
+        ),
+    ],
+)
+async def test_the_fake_refuses_what_its_header_says_it_refuses(
+    rule: str, frames: list[tuple[wire.MessageKind, int, str, bool]]
+) -> None:
+    """These rules are asserts inside a websockets handler, and websockets
+    catches whatever a handler raises — it logs and closes with 1011. So for a
+    while all but the first were decoration: a violation showed up as a stray
+    reconnect (VolcanoLink retries by default) and the test went green. This
+    plants one and checks the fake now names it.
+
+    Same reasoning as tests/unit/test_ui_meta.py's planted violations: a gate
+    whose teeth are never exercised is one nobody can trust.
+    """
+    async with MockVolcanoServer() as server:
+        async with websockets.connect(server.url) as ws:
+            for kind, event, session_id, json_bit in frames:
+                await ws.send(
+                    await _raw_frame(kind, event, session_id=session_id, json_bit=json_bit)
+                )
+            # Give the handler a turn; the violation is recorded, not answered.
+            for _ in range(100):
+                if server.violations:
+                    break
+                await asyncio.sleep(0.005)
+
+        assert any(rule in complaint for complaint in server.violations), server.violations
+        # Cleared so __aexit__ does not re-raise what we just asserted.
+        server.violations.clear()
+
+
+async def test_the_fake_leaves_a_legal_exchange_alone() -> None:
+    """A gate that fires on correct traffic is one someone switches off."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server)
+        try:
+            await volcano.push_audio(b"\x00\x01" * 320)
+            await server.wait_for(wire.ClientEvent.TASK_REQUEST)
+        finally:
+            await volcano.aclose()
+        assert server.violations == []
 
 
 async def test_the_handshake_climbs_both_levels_in_order() -> None:
@@ -244,45 +333,60 @@ async def test_asr_info_is_the_barge_in_signal() -> None:
             await volcano.request_reply(link.ReplySpec(instructions="讲个长故事"))
             await server.barge_in("等一下")
 
-            got = await _collect(events, 5)
+            got = await _collect(events, 4)
             assert isinstance(got[0], link.SpeechStarted)
-            done = [e for e in got if isinstance(e, link.ReplyDone)]
-            assert done and done[0].status is link.ReplyStatus.CANCELLED
             assert isinstance(got[-1], link.SpeechStopped)
         finally:
             await volcano.aclose()
 
 
-async def test_a_barged_in_reply_goes_stale_so_late_audio_is_dropped() -> None:
-    """Nothing on the wire stops generation, so the frames keep coming. What
-    makes the barge-in sound clean is the handle going stale — both audio
-    consumers drop anything carrying it."""
+async def test_a_barge_in_reports_it_and_leaves_the_verdict_to_l3() -> None:
+    """ASRInfo says the streamer opened their mouth. Whether that ends the
+    reply is a product decision, and L3 is the only layer holding the facts:
+    director/scheduler.py's _barge_in deliberately does NOT cancel while a paid
+    thank-you is inside its protected window.
+
+    Settling here took that decision away. The log then read 「扛住了打断」 for
+    a reply this adapter had killed two lines earlier — and worse, _settle had
+    already cleared _active, so the cancel L3 does send hit cancel()'s own
+    guard and never reached the wire. The model kept generating and the tokens
+    kept being spent, which is the exact thing ClientInterrupt was wired up for.
+    """
     async with MockVolcanoServer() as server:
         volcano, events = await _linked(server)
         try:
-            handle = await volcano.request_reply(link.ReplySpec())
+            handle = await volcano.request_reply(link.ReplySpec(protected=True))
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
+            await server.confirm_query()
             await server.barge_in()
-            await _collect(events, 5)
+            got = await _collect(events, 4)
+
+            assert isinstance(got[0], link.SpeechStarted)
+            assert not any(isinstance(e, link.ReplyDone) for e in got), "adapter 替调度器拍了板"
+            assert not handle.stale
+
+            # And the decision L3 does make still reaches the far end.
+            await volcano.cancel(handle)
+            await server.wait_for(wire.ClientEvent.CLIENT_INTERRUPT)
+            assert server.interrupted == 1
             assert handle.stale
         finally:
             await volcano.aclose()
 
 
-async def test_cancel_is_local_and_says_so() -> None:
-    """No wire event stops the model. cancel() settles our side and nothing
-    else — the audience hears the right thing, the tokens are spent anyway."""
+async def test_a_cancelled_reply_goes_stale_so_late_audio_is_dropped() -> None:
+    """What makes a barge-in sound clean is the handle going stale — both audio
+    consumers drop anything carrying it. The interrupt stops the far end; this
+    is what covers the frames already in flight."""
     async with MockVolcanoServer() as server:
         volcano, events = await _linked(server)
         try:
             handle = await volcano.request_reply(link.ReplySpec())
-            before = list(server.recorded.events)
+            await server.barge_in()
+            await _collect(events, 4)
             await volcano.cancel(handle)
-
-            done = await _collect(events, 1)
-            assert isinstance(done[0], link.ReplyDone)
-            assert done[0].status is link.ReplyStatus.CANCELLED
+            await _collect(events, 1)
             assert handle.stale
-            assert server.recorded.events == before, "cancel 往线上发了东西"
         finally:
             await volcano.aclose()
 
@@ -724,3 +828,381 @@ async def test_a_context_change_waits_until_she_stops_talking() -> None:
             assert body["dialog"]["character_manifest"] == "你现在是海盗。"
         finally:
             await volcano.aclose()
+
+
+# ------------------------------------------------- audio attribution and slots
+
+
+async def test_a_stale_sentence_start_does_not_silence_the_live_reply() -> None:
+    """The mute decision belongs to the sentence it was made on, not to the link.
+
+    TTSResponse carries no id, so it inherits the judgement made on the
+    TTSSentenceStart before it. That judgement used to be stored in one
+    link-wide flag that stayed set until the next settle — so a single late
+    frame from a reply we had already closed muted whatever was speaking NOW,
+    for its whole duration. The audience saw her subtitles move and heard
+    nothing at all.
+
+    What is still lost, honestly: the live reply's audio between the stale
+    sentence-start and its own next one. That is one sentence, bounded, and
+    there is no id on the audio to do better with.
+    """
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            handle = await volcano.request_reply(link.ReplySpec())
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
+            await server.confirm_query("q1")
+            await volcano.cancel(handle)
+            await _collect(events, 1)  # ReplyDone for q1, which is now tombstoned
+
+            # A genuinely new reply, the model's own.
+            await server.chat_delta("新的", question="q2")
+            await _collect(events, 2)  # ReplyStarted, ReplyTextDelta
+
+            # q1's tail crosses it, and must take only its own audio down.
+            await server.sentence_start("q1")
+            await server.audio_only(b"\x07\x08")
+            await server.sentence_start("q2")
+            await server.audio_only(b"\x09\x0a")
+
+            got = await _collect(events, 1)
+            assert isinstance(got[0], link.ReplyAudioDelta)
+            assert got[0].pcm == b"\x09\x0a", "放出去的是 q1 的尾巴"
+        finally:
+            await volcano.aclose()
+
+
+async def test_audio_on_its_own_never_mints_a_reply() -> None:
+    """Raw audio has no id, so it cannot be told apart from a tail — and it
+    used to walk into _ensure_active and mint a fresh handle. That is how a
+    cancelled reply came back as a ghost: ReplyStarted for something nobody
+    asked for, the interrupted audio played to the audience after all, and the
+    one reply slot held until the 25-second watchdog let go.
+
+    Every reply this endpoint starts announces itself with a frame that DOES
+    carry a question_id, so audio has no business minting one.
+    """
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            handle = await volcano.request_reply(link.ReplySpec())
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
+            await volcano.cancel(handle)
+            await _collect(events, 1)  # ReplyDone
+
+            await server.audio_only(b"\x0b\x0c")
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(events), timeout=0.2)
+
+            # The slot is genuinely free, not merely quiet.
+            again = await asyncio.wait_for(volcano.request_reply(link.ReplySpec()), timeout=0.5)
+            assert again is not handle
+        finally:
+            await volcano.aclose()
+
+
+async def test_the_slot_is_taken_by_one_waiter_at_a_time() -> None:
+    """`Event.set()` wakes every waiter, and each then clears the event on its
+    own — so two request_reply calls both walked out with the single slot. The
+    loser's watchdog was cancelled by the winner's _take_slot, so it never
+    settled at all and whoever awaited it hung. client.py holds a lock across
+    the wait AND the take for exactly this reason.
+    """
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            first = asyncio.create_task(volcano.request_reply(link.ReplySpec(instructions="甲")))
+            second = asyncio.create_task(volcano.request_reply(link.ReplySpec(instructions="乙")))
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
+            await asyncio.sleep(0.05)
+
+            assert server.recorded.count(wire.ClientEvent.CHAT_TEXT_QUERY) == 1, "两个都拿到了名额"
+            handle = await asyncio.wait_for(first, timeout=1.0)
+
+            # Finish the first, and the second gets its turn rather than hanging.
+            # Three events: the text delta, the audio delta, and the done — no
+            # ReplyStarted, because this reply is one we asked for.
+            await server.say("好", audio=b"\x01\x02")
+            done = [e for e in await _collect(events, 3) if isinstance(e, link.ReplyDone)]
+            assert done and done[0].handle is handle
+            await asyncio.wait_for(second, timeout=1.0)
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY, count=2)
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_send_that_never_left_does_not_hold_the_slot() -> None:
+    """Taking the slot before the send means a ConnectionError leaves it taken
+    for the full watchdog — 25 seconds during which the retry the scheduler is
+    about to make just waits. client.py:260-272 records the same lesson."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server, auto_reconnect=False)
+        try:
+            await volcano._drop_socket()
+            with pytest.raises(ConnectionError):
+                await volcano.request_reply(link.ReplySpec())
+
+            # Free again, so the next attempt is not stuck behind a ghost.
+            volcano._ws = object()
+            assert volcano._slot_free.is_set()
+        finally:
+            volcano._ws = None
+            await volcano.aclose()
+
+
+async def test_a_body_that_is_not_json_does_not_take_the_session_down() -> None:
+    """decode() says yes and Frame.json() then says no, which is by design. But
+    the dispatch that calls json() sat OUTSIDE the receive loop's guard, so one
+    such frame killed the receive task with an exception nobody retrieved: the
+    socket stayed open, no LinkDown was emitted, the reconnect ladder was never
+    armed, and every later request_reply waited out its full watchdog against a
+    link that had gone deaf.
+    """
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            await server.send_unparseable_body()
+            await server.say("还在", audio=b"\x01\x02")
+
+            got = await _collect(events, 4)
+            assert any(isinstance(e, link.ReplyTextDelta) for e in got), "会话被一帧坏 body 带走了"
+            assert not any(isinstance(e, link.LinkDown) for e in got)
+        finally:
+            await volcano.aclose()
+
+
+# ---------------------------------------------------------- the session swap
+
+
+async def test_two_context_pushes_do_not_race_into_two_sessions() -> None:
+    """A swap has no serialisation of its own, and it does not take two callers
+    to overlap two of them: a push deferred by _settle and the ticker's next
+    refresh are enough. Overlapping, each cleared the event the other was
+    waiting on and each generated its own session id — and the real endpoint,
+    which is concurrent unlike this fake, answers the second StartSession with
+    「session number limit exceeded: 1」. The link is then addressing an id the
+    server never confirmed, which is a link that has quietly gone mute.
+    """
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server, config=_cfg(model="2.2.0.0", speaker="saturn_x"))
+        try:
+            await asyncio.gather(volcano.set_context("甲"), volcano.set_context("乙"))
+            server.check()
+
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body["dialog"]["character_manifest"] == "乙", "后来的那次人设没赢"
+            # Coalesced: the first session plus one swap, not one swap each.
+            assert server.recorded.count(wire.ClientEvent.START_SESSION) == 2
+        finally:
+            await volcano.aclose()
+
+
+@pytest.mark.parametrize(
+    ("answer_finish", "step"),
+    [(False, "收掉上一个会话"), (True, "换会话之后")],
+    ids=["旧会话收不掉", "新会话建不起来"],
+)
+async def test_a_swap_that_cannot_finish_takes_the_link_down(
+    answer_finish: bool, step: str
+) -> None:
+    """Both failure paths used to just `return`, and that is the worst state
+    this adapter can be in: the server has retired the session, `_started` is
+    still True, no LinkDown was emitted, and every later frame goes to a
+    session that no longer exists. On the panel it reads as a healthy link that
+    simply stopped talking.
+
+    Both branches also used wall-clock `asyncio.wait_for`, which is why neither
+    had a test — the injected clock is what makes them reachable.
+    """
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        server.answer_finish_session = answer_finish
+        volcano, events = await _linked(
+            server,
+            config=_cfg(model="2.2.0.0", speaker="saturn_x"),
+            clock=clock,
+            swap_timeout_s=5.0,
+            auto_reconnect=False,
+        )
+        try:
+            if answer_finish:
+                # Let FinishSession through, then refuse the StartSession that
+                # follows, so the wait that times out is the second one.
+                server.refuse_session = True
+            swapping = asyncio.create_task(volcano.set_context("新人设"))
+            await server.wait_for(wire.ClientEvent.FINISH_SESSION)
+            await clock.advance(5.0)
+            await asyncio.wait_for(swapping, timeout=2.0)
+
+            # A refused StartSession also reports itself as a LinkError first,
+            # which is worth having: it names the reason while the timeout is
+            # still counting.
+            got = await _collect(events, 2 if answer_finish else 1)
+            down = [e for e in got if isinstance(e, link.LinkDown)]
+            assert down, got
+            assert step in down[0].reason
+            assert down[0].retrying is False
+        finally:
+            await volcano.aclose()
+
+
+# ------------------------------------------------- lifecycle and error classes
+
+
+async def test_a_first_connect_is_not_a_recovery() -> None:
+    """`LinkUp` means 「the link came BACK」 — client.py emits it from one place,
+    the reconnect loop. Sharing `_open` between connect and the ladder made
+    every startup announce a recovery: dev_talk printed 「已恢复（第 1 次尝试
+    成功）」, the panel feed got 「语音连接已恢复」, and link_health.mark_up ran
+    twice for one connection.
+    """
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            await server.say("在的", audio=b"\x01\x02")
+            got = await _collect(events, 3)
+            assert not any(isinstance(e, link.LinkUp) for e in got), got
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_reconnect_reports_the_try_that_worked() -> None:
+    """`link.py` and `obs/health.py` both define this number as 「第几次成功的，
+    1 = 第一次」. `_reconnect` assigned `self._attempts` and then `_open` sent
+    `self._attempts + 1`, so succeeding on the first retry reported 第 2 次 —
+    into the streamer's banner and into the health probe."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
+        try:
+            await server.drop()
+            down = await _collect(events, 1)
+            assert isinstance(down[0], link.LinkDown)
+            await clock.advance(1.0)
+            up = await _collect(events, 1)
+            assert isinstance(up[0], link.LinkUp)
+            assert up[0].attempts == 1, "第一次重试就成功，不该报第 2 次"
+        finally:
+            await volcano.aclose()
+
+
+class _Unauthorized(OSError):
+    """A handshake rejection, in the shape `errors.classify_error` reads."""
+
+    status_code = 401
+
+
+async def test_a_revoked_key_stops_the_ladder_instead_of_climbing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`realtime/errors.py` exists to answer 「retry or stop」 and this adapter
+    never asked it. A dead credential answers the same way six times, so the
+    ladder spent about a minute on a panel reading 「连接中」 before saying
+    anything — and then said the retries failed, not that the key is bad.
+    """
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
+        try:
+            monkeypatch.setattr(
+                volcano, "_open", lambda: (_ for _ in ()).throw(_Unauthorized("401"))
+            )
+            await server.drop()
+            await _collect(events, 1)  # LinkDown(retrying=True)
+            await clock.advance(1.0)
+
+            got = await _collect(events, 1)
+            assert isinstance(got[0], link.LinkDown)
+            assert got[0].retrying is False, "吊销的 key 还在说自己会重试"
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_fatal_close_code_does_not_promise_a_retry() -> None:
+    """1008 is 「你不受欢迎」, not 「我们被切断了」 — `errors.py` calls it fatal
+    and says so in its own docstring. Reporting `retrying=True` for it makes
+    the panel wait for a reconnection nobody is attempting."""
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, auto_reconnect=False)
+        try:
+            await server.drop(code=1008)
+            got = await _collect(events, 1)
+            assert isinstance(got[0], link.LinkDown)
+            assert got[0].retrying is False
+        finally:
+            await volcano.aclose()
+
+
+async def test_the_watchdog_stops_the_far_end_too() -> None:
+    """Giving up locally leaves the server generating. That is the same wasted
+    spend `cancel` was wired to ClientInterrupt to stop, reached by the other
+    road — and the road nobody is watching, because a timeout is by definition
+    a turn that went quiet."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, watchdog_s=25.0)
+        try:
+            handle = await volcano.request_reply(link.ReplySpec())
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
+            await clock.advance(25.0)
+
+            done = await _collect(events, 1)
+            assert isinstance(done[0], link.ReplyDone)
+            assert done[0].status is link.ReplyStatus.TIMED_OUT
+            assert done[0].handle is handle
+            await server.wait_for(wire.ClientEvent.CLIENT_INTERRUPT)
+        finally:
+            await volcano.aclose()
+
+
+async def test_uplink_stops_while_the_session_is_being_replaced() -> None:
+    """For the ~114 ms of a swap the old session is retired and the new one is
+    unconfirmed. A frame addressed to either draws a server error, which lands
+    in the ERROR branch and settles the active reply FAILED — so dropping a
+    fifth of a second of microphone is the cheaper of the two.
+
+    Not the s2s invariant (plan 3.3 rule 7): that one exists because the
+    speculative reopen window runs on the audio clock, and this protocol has no
+    such window.
+    """
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        server.answer_finish_session = False
+        volcano, _ = await _linked(
+            server,
+            config=_cfg(model="2.2.0.0", speaker="saturn_x"),
+            clock=clock,
+            swap_timeout_s=5.0,
+            auto_reconnect=False,
+        )
+        try:
+            swapping = asyncio.create_task(volcano.set_context("新人设"))
+            await server.wait_for(wire.ClientEvent.FINISH_SESSION)
+
+            for _ in range(5):
+                await volcano.push_audio(b"\x00\x01" * 320)
+            assert server.recorded.count(wire.ClientEvent.TASK_REQUEST) == 0
+
+            await clock.advance(5.0)
+            await asyncio.wait_for(swapping, timeout=2.0)
+        finally:
+            await volcano.aclose()
+
+
+async def test_closing_ends_a_reply_that_was_still_in_flight() -> None:
+    """aclose cancels the watchdog, which is the only other thing that could
+    have ended this reply — so without settling here the scheduler awaiting
+    that handle never wakes. The disconnect path has always done it."""
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            handle = await volcano.request_reply(link.ReplySpec())
+            await server.wait_for(wire.ClientEvent.CHAT_TEXT_QUERY)
+        finally:
+            await volcano.aclose()
+
+        done = await _collect(events, 1)
+        assert isinstance(done[0], link.ReplyDone)
+        assert done[0].handle is handle
+        assert handle.stale

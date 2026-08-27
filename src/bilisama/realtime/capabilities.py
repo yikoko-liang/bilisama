@@ -99,6 +99,13 @@ OPENAI_GA = Capabilities(
 )
 
 
+# Four of the six below have no reader on this provider, and saying so is the
+# point: VolcanoLink owns its own slot accounting and never waits for an ack,
+# because the protocol has no session.updated to wait for. They stay declared
+# because this table is also documentation of what each endpoint DOES, and a
+# blank is indistinguishable from an unexamined default. What must not be
+# assumed is the reverse — changing one of the four here changes nothing at
+# run time until somebody wires it up.
 VOLCANO = Capabilities(
     owns_tts=True,  # its own TTS speaks; we forward PCM
     # One dialogue at a time, and the model claims the slot itself after VAD
