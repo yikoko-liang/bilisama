@@ -216,7 +216,7 @@ def test_live_event_rules_require_useful_danmaku_answers_and_contextual_welcomes
     assert "不默认把问题推给" in rules
     assert "我可不敢" in rules and "不要使用" in rules
     assert "直播简介" in rules and "本场进展" in rules
-    assert "不播报人数" in rules or "不把人数" in rules
+    assert "不把具体人数" in rules or "不播报具体人数" in rules
     assert all(tier in rules for tier in ("舰长", "提督", "总督", "五级以上"))
 
 

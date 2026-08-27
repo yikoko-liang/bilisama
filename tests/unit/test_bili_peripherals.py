@@ -23,7 +23,7 @@ from bilisama.director.intent import Intent, Priority
 from bilisama.director.intents import intent_for
 from bilisama.ingest.bilibili.selector import PresenceWelcomer
 from bilisama.ingest.bilibili.source import BilibiliEventSource, _Forwarder
-from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
+from bilisama.ingest.events import EventKind, Gift, LiveEvent, Medal, Viewer
 from bilisama.memory.distill import Distiller
 from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
@@ -389,6 +389,12 @@ async def test_captain_identity_on_current_entry_is_promoted(tmp_path: Path) -> 
 
     assembly, _store, intents, _clock = _assembly(tmp_path)
     await assembly.on_event(_entry(55, guard_level=GuardLevel.CAPTAIN))
+    assert [i.source for i in intents] == ["vip_enter"]
+
+
+async def test_current_room_high_fan_medal_on_entry_is_promoted(tmp_path: Path) -> None:
+    assembly, _store, intents, _clock = _assembly(tmp_path)
+    await assembly.on_event(_entry(56, medal=Medal(name="本房牌子", level=5, anchor_room_id=777)))
     assert [i.source for i in intents] == ["vip_enter"]
 
 

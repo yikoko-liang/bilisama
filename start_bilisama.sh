@@ -20,7 +20,7 @@ die() {
 running_backend_pid() {
   local pid command
   [ -f "$ENDPOINT_FILE" ] || return 1
-  pid="$($PYTHON - "$ENDPOINT_FILE" <<'PY'
+  pid="$("$PYTHON" - "$ENDPOINT_FILE" <<'PY'
 import json
 import sys
 from pathlib import Path

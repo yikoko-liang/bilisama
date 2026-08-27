@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,8 @@ from bilisama.realtime import link
 from bilisama.realtime.link import ReplySpec
 from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
+
+REPO = Path(__file__).resolve().parent.parent.parent
 
 
 def _intent(
@@ -618,7 +621,7 @@ def test_paid_intents_protect_and_requeue() -> None:
     assert "¥" not in item_text and "30" not in item_text
 
 
-def test_danmaku_reply_paraphrases_who_asked_what() -> None:
+def test_danmaku_reply_describes_source_without_forcing_names_for_repeats() -> None:
     event = LiveEvent(
         kind=EventKind.DANMAKU,
         room_id=1,
@@ -628,9 +631,57 @@ def test_danmaku_reply_paraphrases_who_asked_what() -> None:
     intent = intent_for(event, now=0.0)
     assert intent is not None
     instructions = intent.injection.reply.instructions or ""
-    assert "自然转述" in instructions
-    assert "哪位观众" in instructions
+    assert "自然说明你在接哪类弹幕" in instructions
+    assert "普通单条可以简短转述谁问了什么" in instructions
+    assert "多人刷同一句" in instructions
+    assert "共同内容" in instructions
+    assert "不点名某个人" in instructions
     assert "阿强" in (intent.injection.item_text or "")
+
+
+def test_danmaku_identity_question_keeps_miya_bound_to_the_streamer() -> None:
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        viewer=Viewer(uid=7, name="阿强"),
+        text="Miya 你是我的搭子吗？",
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    instructions = intent.injection.reply.instructions or ""
+    assert "Miya 身份或关系归属" in instructions
+    assert "主播的伴播搭子" in instructions
+    assert "不是观众个人的搭子" in instructions
+
+
+def test_live_event_rules_treat_repeated_danmaku_as_shared_context() -> None:
+    rules = (REPO / "config/personas/live/event_responses.md").read_text(encoding="utf-8")
+    assert "多人刷同一句或同一诉求" in rules
+    assert "直播间共同情绪或提醒" in rules
+    assert "不点具体某个人" in rules
+    assert "10-20 秒内多次刷屏同样内容" in rules
+    assert "不可第二次回复同一内容" in rules
+
+
+def test_live_event_rules_keep_identity_relationships_streamer_scoped() -> None:
+    rules = (REPO / "config/personas/live/event_responses.md").read_text(encoding="utf-8")
+    assert "身份、归属或关系" in rules
+    assert "Miya 是 {{username}} 的伴播搭子" in rules
+    assert "面向直播间陪大家互动" in rules
+    assert "不是任何单个观众的私人搭子" in rules
+
+
+def test_modified_mia_persona_keeps_partner_identity_streamer_scoped() -> None:
+    identity = (
+        REPO / "config/personas/mia/profiles/modified/identity.md"
+    ).read_text(encoding="utf-8")
+    personality = (
+        REPO / "config/personas/mia/profiles/modified/personality.md"
+    ).read_text(encoding="utf-8")
+    assert "搭档关系只属于 {{username}}" in identity
+    assert "不是任何单个观众的私人搭子" in identity
+    assert "是谁的搭子" in personality
+    assert "不能说成自己是该观众的搭子" in personality
 
 
 def test_danmaku_instruction_answers_with_its_own_judgment_before_deferring() -> None:
@@ -677,10 +728,13 @@ def test_burst_welcome_uses_context_without_reading_the_headcount() -> None:
     instructions = intent.injection.reply.instructions or ""
     payload = intent.injection.item_text or ""
 
+    assert "普通进房欢迎窗口已触发" in instructions
     assert "直播简介" in instructions
     assert "本场进展" in instructions
     assert "每次换一种" in instructions
-    assert "人数" in instructions and "不要" in instructions
+    assert "好多新的观众老爷" in instructions
+    assert "具体人数" in instructions and "不播报" in instructions
+    assert "不逐个点名" in instructions
     assert "37" not in payload
     assert "位" not in payload
 
@@ -695,10 +749,10 @@ def test_burst_welcome_uses_context_without_reading_the_headcount() -> None:
             Viewer(
                 uid=4,
                 name="牌子丁",
-                medal=Medal(name="本房牌子", level=8, anchor_room_id=9),
+                medal=Medal(name="本房牌子", level=5, anchor_room_id=9),
             ),
             "粉丝牌",
-            "常来",
+            "想念感",
         ),
     ],
 )
@@ -713,20 +767,24 @@ def test_vip_welcome_knows_the_verified_tier_and_gives_emotional_value(
 
     assert marker in payload
     assert emotion in instructions
+    assert "问候" in instructions
     assert "直播简介" in instructions and "本场进展" in instructions
 
 
 @pytest.mark.parametrize(
-    ("batteries", "expected_priority", "protected"),
+    ("batteries", "expected_priority", "protected", "expected_words"),
     [
-        (99, Priority.DANMAKU, False),
-        (100, Priority.VIP_ENTER, False),
-        (999, Priority.VIP_ENTER, False),
-        (1000, Priority.BIG_GIFT, True),
+        (99, Priority.DANMAKU, False, ("普通礼物", "感谢对方老板", "礼物名", "小梗")),
+        (100, Priority.VIP_ENTER, False, ("中额礼物", "老板", "吉祥祝福", "不硬凑")),
+        (999, Priority.VIP_ENTER, False, ("中额礼物", "老板", "吉祥祝福", "不硬凑")),
+        (1000, Priority.BIG_GIFT, True, ("高额礼物", "惊喜和重视", "顺口祝福", "同一结构")),
     ],
 )
 def test_gift_tiers_use_total_batteries(
-    batteries: int, expected_priority: Priority, protected: bool
+    batteries: int,
+    expected_priority: Priority,
+    protected: bool,
+    expected_words: tuple[str, ...],
 ) -> None:
     event = LiveEvent(
         kind=EventKind.GIFT,
@@ -743,6 +801,32 @@ def test_gift_tiers_use_total_batteries(
     assert intent is not None
     assert intent.priority is expected_priority
     assert intent.injection.reply.protected is protected
+    instructions = intent.injection.reply.instructions or ""
+    for word in expected_words:
+        assert word in instructions
+    assert "金额、电池数或价格" in instructions
+
+
+def test_live_event_rules_describe_gift_thank_you_templates() -> None:
+    rules = (REPO / "config/personas/live/event_responses.md").read_text(encoding="utf-8")
+    assert "感谢 xx 老板" in rules
+    assert "普通礼物轻松感谢" in rules
+    assert "字面、谐音或意象" in rules
+    assert "中额礼物热情感谢" in rules
+    assert "四字祝福可以用，但不硬凑" in rules
+    assert "高额礼物" in rules and "老板太有实力了" in rules
+    assert "自然沾光" in rules
+    assert "不要每次套同一结构" in rules
+
+
+def test_modified_mia_persona_uses_flexible_style_not_fixed_catchphrases() -> None:
+    personality = (
+        REPO / "config/personas/mia/profiles/modified/personality.md"
+    ).read_text(encoding="utf-8")
+    assert "不要套固定公式" in personality
+    assert "语气词 + 正文 + 句尾语气词" in personality
+    assert "叠词只在顺口时自然出现" in personality
+    assert "不要每句话都自称米娅" in personality
 
 
 def test_feed_only_kinds_produce_no_intent() -> None:

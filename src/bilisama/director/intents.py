@@ -147,8 +147,10 @@ def intent_for(
     instruction = "挑最值得回应的内容，用角色口吻回应；回复长度遵循当前人设中的长度档位。"
     if event.kind is EventKind.DANMAKU:
         instruction = (
-            "开头先自然转述哪位观众问了什么，让只听音频的人知道你在接哪条弹幕；"
+            "开头先自然说明你在接哪类弹幕；普通单条可以简短转述谁问了什么，"
+            "多人刷同一句时只回应共同内容，不点名某个人；"
             "再用你自己的判断和知识先给出有用回答，不要默认让主播回答。"
+            "涉及 Miya 身份或关系归属时，明确她是主播的伴播搭子，不是观众个人的搭子；"
             "只有确实无法从可靠上下文确认的主播私事、未公开计划或个人承诺，才说明未知并请主播补充；"
             "不要反复强调自己是伴播，也不要说「我可不敢」「这得问主播」之类推卸责任的话。"
         )
@@ -160,11 +162,21 @@ def intent_for(
     elif event.kind is EventKind.GIFT and event.gift is not None:
         batteries = event.gift.total_battery
         if batteries >= gift_battery_high:
-            intensity = "这是高额礼物，明确、真诚并带一点惊喜地感谢"
+            intensity = (
+                "这是高额礼物，先表达惊喜和重视，可以用老板大气或老板太有实力了这类句式，"
+                "再念出礼物名；顺着礼物意象造一句顺口祝福或小段子，"
+                "可以让米娅、主播或直播间自然沾光，但不要承诺回报，也不要每次套同一结构"
+            )
         elif batteries >= gift_battery_medium:
-            intensity = "这是中额礼物，热情但不过度地感谢"
+            intensity = (
+                "这是中额礼物，热情感谢，可称对方老板，念出礼物名，"
+                "顺着礼物名造一句吉祥祝福或现场接梗；四字祝福可以用，但不硬凑"
+            )
         else:
-            intensity = "这是普通礼物，用一句轻松的话感谢"
+            intensity = (
+                "这是普通礼物，轻松感谢，可以说感谢对方老板，念出礼物名，"
+                "顺着字面、谐音或意象接一句小梗，不夸张拔高"
+            )
         instruction = f"{intensity}；严禁说出或暗示礼物的金额、电池数或价格。"
     elif event.kind is EventKind.GUARD_BUY:
         tier = {
@@ -176,13 +188,13 @@ def intent_for(
     elif event.kind is EventKind.VIP_ENTER:
         guard = event.viewer.guard_level.value
         if guard == "governor":
-            emotion = "这是总督进房，给出最高一档的重视感和仪式感，热烈但不要谄媚"
+            emotion = "这是总督进房，点名欢迎，给出最高一档的重视感和仪式感，带想念感和一句自然问候，热烈但不要谄媚"
         elif guard == "admiral":
-            emotion = "这是提督进房，给出明显的重视感和熟客欢迎"
+            emotion = "这是提督进房，点名欢迎，给出明显的重视感、想念感和熟客问候"
         elif guard == "captain":
-            emotion = "这是舰长进房，带着熟悉感欢迎对方回来"
+            emotion = "这是舰长进房，点名欢迎，带着熟悉感、想念感和一句自然问候欢迎对方回来"
         else:
-            emotion = "这是本房五级以上粉丝牌观众进房，像欢迎常来互动的熟面孔一样自然"
+            emotion = "这是本房五级以上粉丝牌观众进房，点名欢迎，带着想念感和一句自然问候，像欢迎常来互动的熟面孔一样自然"
         instruction = (
             f"{emotion}；结合# 直播简介和# 本场进展，说清现在正聊什么或在做什么，"
             "让对方一进来就能接上；没有可靠共同经历时不要假装认识，也不要提消费记录。"
@@ -223,8 +235,9 @@ def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> In
     """
     spec = ReplySpec(
         instructions=(
-            "有新观众进房。结合# 直播简介和# 本场进展，用一句话自然欢迎并告诉新人现在正聊什么；"
-            "每次换一种说法，不逐个点名，也绝对不要播报、暗示或猜测进房人数。"
+            "普通进房欢迎窗口已触发。结合# 直播简介和# 本场进展，用一句话做欢迎进房和内容介绍；"
+            "可以笼统说来了不少新观众或好多新的观众老爷，但不逐个点名，不播报具体人数、UID、批次或名单；"
+            "每次换一种自然说法，不背固定欢迎词。"
         ),
         max_tokens=max_tokens,
     )
