@@ -100,7 +100,8 @@ export volcano_api_key=...
 
 | 组合 | 实际发生什么 |
 |---|---|
-| `1.2.1.1` ＋ 官方音色或留空 | 正常。官方音色是 `zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts` |
+| `1.2.1.1` ＋ 官方音色 | 正常。官方音色是 `zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts` |
+| `1.2.1.1` ＋ **留空** | **她变成豆包**。服务端默认音色自带它自己的角色，压过 `dialog.bot_name`，也压过 557 字的人设——问她是谁答「豆包」。2026-08-28 真端点复现，换成官方音色当场恢复。这一格原来写的是「正常」，是错的：验过的是官方音色那一格，留空从没人测过 |
 | `1.2.1.1` ＋ 克隆音色 | **她变成别人**。克隆音色自带服务端角色，会盖过人设——实测她自称「夏栀」，还写了人设里明令禁止的动作描写 |
 | `2.2.0.0` ＋ 克隆音色（`saturn_` / `ICL_` / 自己的 `S_`） | 正常 |
 | `2.2.0.0` ＋ 官方音色或留空 | **一片安静**。会话建得起来、query 也 ack 了，然后什么都不回。服务端回的是 `ClientError:InvalidSpeaker`，在一帧不带事件号的错误帧上——adapter 以前会把它当未知事件丢掉 |

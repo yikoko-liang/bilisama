@@ -67,10 +67,22 @@ def clock_line(store: MemoryStore, clock: Clock, *, granularity_min: int = 1) ->
 
 
 def regulars_line(store: MemoryStore, *, limit: int = 5) -> str:
-    parts = [
-        f"{v.uname or v.identity}（第 {v.streams_seen} 次来）"
-        for v in store.present_regulars(limit=limit)
-    ]
+    """Who is here that has been here before, and what we know about them.
+
+    The facts are the reason distillation runs at all, and until now they were
+    written every stream and read by nothing — `scope="viewer"` had a writer
+    (distill.py) and no reader, so 「阿强，第五次来了，上周送过舰长」 could name
+    the person and never say the second half.
+
+    Scoped to the people actually in the room, which is plan section 4.7's
+    isolation rule and the cheap version of it: no query goes near a viewer who
+    is not present, so one viewer's history cannot be answered to another.
+    """
+    parts: list[str] = []
+    for viewer in store.present_regulars(limit=limit):
+        who = f"{viewer.uname or viewer.identity}（第 {viewer.streams_seen} 次来）"
+        known = "；".join(fact.text for fact in store.facts("viewer", viewer.identity))
+        parts.append(f"{who}：{known}" if known else who)
     return "、".join(parts)
 
 

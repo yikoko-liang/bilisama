@@ -99,6 +99,7 @@ class VolcanoLink:
         config: VolcanoConfig,
         bot_name: str = "",
         speaker: str = "",
+        model: str = "",
         quiet_window_s: float = 1.8,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
@@ -127,6 +128,9 @@ class VolcanoLink:
             saying the same thing DID win, which is why this looked fine in
             early testing. O generation only — SC takes the name from its
             character manifest.
+        model: The model generation, overriding the config's. Empty keeps it.
+            It decides which key the persona travels under and which voice
+            family is legal, so a swallowed override is two silent failures.
         speaker: The voice, overriding the config's. Empty keeps it. The
             model/generation pairing is judged by the factory on whichever of
             the two wins, because both ways of getting it wrong are silent on
@@ -152,6 +156,11 @@ class VolcanoLink:
         # `--voice` beats the config, and the factory has already judged the
         # pairing on this effective value rather than on the config's.
         self._speaker = speaker or config.speaker
+        # Same story as the voice: `--model` lands on the resolved endpoint, and
+        # reading `config.model` here meant the banner and the logs said one
+        # generation while the wire carried the other — including the field that
+        # decides which key the persona goes under.
+        self._model = model or config.model
         self.quiet_window_s = quiet_window_s
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
@@ -358,7 +367,7 @@ class VolcanoLink:
         self._dialog_id = str(frame.json().get("dialog_id", "")) or self._dialog_id
         log.info(
             "volcano.session_started",
-            model=self._cfg.model,
+            model=self._model,
             speaker=self._speaker,
             dialog_id=self._dialog_id,
             resumed=resumed,
@@ -390,14 +399,14 @@ class VolcanoLink:
         is about to use, so sending the key without the version is asking two
         different questions.
         """
-        dialog: dict[str, Any] = {"extra": {"model": self._cfg.model}}
+        dialog: dict[str, Any] = {"extra": {"model": self._model}}
         if self._context:
-            dialog[_PERSONA_KEY[self._cfg.model]] = self._context
+            dialog[_PERSONA_KEY[self._model]] = self._context
         # O generation only. The vendor documents bot_name as 「只针对O版本生效」
         # and SC reads the name out of its character manifest, so sending it
         # there would put a field in the frame that does nothing — and a field
         # that does nothing is one the next reader assumes does something.
-        if self._bot_name and _PERSONA_KEY[self._cfg.model] == "system_role":
+        if self._bot_name and _PERSONA_KEY[self._model] == "system_role":
             dialog["bot_name"] = self._bot_name
         if self._dialog_id:
             # Reconnecting. The server keeps the last 20 QA rounds against this
@@ -567,7 +576,7 @@ class VolcanoLink:
         self._context = instructions
         if not self._started:
             return
-        if _PERSONA_KEY[self._cfg.model] == "character_manifest":
+        if _PERSONA_KEY[self._model] == "character_manifest":
             await self._swap_session()
             return
         await self._send(

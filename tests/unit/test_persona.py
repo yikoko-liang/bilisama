@@ -415,9 +415,10 @@ def test_assemble_puts_the_tail_after_the_prefix() -> None:
 
 
 def test_template_variables_come_from_config() -> None:
+    from bilisama.config.schema import PersonaConfig
+
     """The streamer's own name is the whole point of {{userName}}: with it set,
     the persona addresses a person instead of announcing 「主播」."""
-    from bilisama.config.schema import PersonaConfig
     from bilisama.persona.loader import template_variables
 
     cfg = PersonaConfig.model_validate({"id": "hanako", "streamer_name": "阿强"})
@@ -605,3 +606,30 @@ def test_growth_update_writes_nothing_when_the_caller_gives_up(store: PersonaSto
         rows.clear()
         raise SystemExit(2)
     assert store.growth_entries("voice") == ["蒸馏刚写进来的一条"]
+
+
+def test_a_hand_edited_file_we_cannot_read_does_not_wedge_the_context(tmp_path: Path) -> None:
+    """pinned.md and the growth files are edited by hand, so they arrive in
+    whatever encoding the editor saved. They are read by the context ticker,
+    which catches and retries — so an unreadable one surfaced not as an error
+    but as the context silently never being pushed again. The anchor path
+    already degrades for exactly this reason; these two did not.
+    """
+    from bilisama.persona.loader import PersonaStore
+
+    data = tmp_path / "personas" / "tofu"
+    data.mkdir(parents=True)
+    # UTF-16 with a BOM — what a Windows editor happily writes and utf-8
+    # cannot read.
+    (data / "pinned.md").write_bytes("主播下周五发新歌".encode("utf-16"))
+    (data / "voice.md").write_bytes("- 哈".encode("utf-16"))
+
+    store = PersonaStore(
+        template_dir=Path(__file__).resolve().parents[2] / "config" / "personas" / "tofu",
+        data_dir=data,
+    )
+
+    assert store.pinned_text() == ""
+    assert store.growth_entries("voice") == []
+    # And the anchors still load, so one bad file costs one section, not the run.
+    assert store.anchors({"agentName": "豆腐", "userName": "主播"}).identity

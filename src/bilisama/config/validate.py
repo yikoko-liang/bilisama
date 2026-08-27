@@ -74,6 +74,30 @@ def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
     """
     cloned = speaker.startswith(("saturn_", "ICL_", "S_"))
     problems: list[ConfigProblem] = []
+    if not speaker:
+        # Reproduced on the real endpoint 2026-08-28, and it is the combination
+        # nothing had ever tested: the shipped config left this blank with the
+        # comment 「留空用服务端默认」, and that default voice brings its own
+        # server-side character. It beats `dialog.bot_name` AND a 557-character
+        # persona that names her in its first sentence — asked who she is, she
+        # answers 「豆包」. Naming a voice fixes it on the spot.
+        #
+        # Fatal, like the other two: nothing about it looks wrong at run time.
+        # She talks, she sounds fine, she is somebody else.
+        problems.append(
+            ConfigProblem(
+                field="speech.volcano.speaker",
+                message=(
+                    "火山的音色留空了。服务端默认音色自带它自己的角色，会盖过人设——"
+                    "问她是谁她答「豆包」，而且不会报任何错。"
+                ),
+                fix=(
+                    "O2.0（1.2.1.1）填官方音色，比如 zh_female_vv_jupiter_bigtts；"
+                    "SC2.0（2.2.0.0）填 saturn_ 开头的克隆音色。"
+                ),
+            )
+        )
+        return problems
     if model == "2.2.0.0" and not cloned:
         problems.append(
             ConfigProblem(

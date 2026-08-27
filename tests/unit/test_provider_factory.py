@@ -25,8 +25,17 @@ def _settings(**speech: Any) -> Settings:
     return Settings.model_validate({"speech": speech})
 
 
+# Volcano refuses a blank voice now, and rightly: the server's default one
+# brings its own character and she answers 「豆包」. Tests that are about
+# something else still have to name one.
+_VOLCANO_OK = {"volcano": {"speaker": "zh_female_vv_jupiter_bigtts"}}
+
+
 def _request(provider: ProviderName, *, url: str = "", **kw: Any) -> LinkRequest:
-    settings = kw.pop("settings", None) or _settings(provider=provider)
+    default: dict[str, Any] = {"provider": provider}
+    if provider is ProviderName.VOLCANO:
+        default |= _VOLCANO_OK
+    settings = kw.pop("settings", None) or _settings(**default)
     endpoint = Endpoint(provider, url or "wss://example.invalid/x", kw.pop("model", ""), "测试")
     return LinkRequest(endpoint=endpoint, settings=settings, **kw)
 
@@ -132,7 +141,11 @@ def test_volcano_accepts_the_older_pair_too() -> None:
     """An account that predates API Key management only has these two."""
     settings = _settings(
         provider=ProviderName.VOLCANO,
-        volcano={"app_id_ref": "env:VOLC_APP", "access_key_ref": "env:VOLC_TOKEN"},
+        volcano={
+            "app_id_ref": "env:VOLC_APP",
+            "access_key_ref": "env:VOLC_TOKEN",
+            **_VOLCANO_OK["volcano"],
+        },
     )
     import os
 

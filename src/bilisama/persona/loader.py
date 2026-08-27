@@ -162,6 +162,27 @@ class PersonaAnchors:
     personality: str
 
 
+def _read_hand_edited(path: Path) -> str | None:
+    """Read a file a human edits by hand, or say we could not.
+
+    Hand-edited files arrive in whatever encoding the editor saved them in, and
+    these two are read by the CONTEXT TICKER — a loop that catches and retries.
+    An unreadable file there does not surface as an error, it surfaces as the
+    context silently never being pushed again. The anchor path already degrades
+    for the same reason (`_live_anchor_text`); these two did not.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning(
+            "persona.hand_edited_unreadable",
+            path=str(path),
+            error_text=f"{path.name} 读不出来（{exc}），这一轮先当它不存在。",
+            error_class=type(exc).__name__,
+        )
+        return None
+
+
 def _substitute(text: str, variables: Mapping[str, str]) -> str:
     # Unknown {{names}} stay as-is: a typo in a template should read as a typo
     # in the prompt, not vanish silently.
@@ -259,7 +280,8 @@ class PersonaStore:
         path = self.growth_path(layer)
         if not path.is_file():
             return []
-        return _bullets(path.read_text(encoding="utf-8"))
+        text = _read_hand_edited(path)
+        return _bullets(text) if text is not None else []
 
     def write_growth(self, layer: GrowthLayer, entries: Sequence[str]) -> None:
         """Replace a growth file wholesale. Budgets are the caller's job
@@ -362,8 +384,10 @@ class PersonaStore:
         path = self._data_dir / "pinned.md"
         if not path.is_file():
             return ""
-        text = path.read_text(encoding="utf-8").strip()
-        return re.sub(r"\s*\n+\s*", "；", text)
+        raw = _read_hand_edited(path)
+        if raw is None:
+            return ""
+        return re.sub(r"\s*\n+\s*", "；", raw.strip())
 
     # ------------------------------------------------------------ promotion
 

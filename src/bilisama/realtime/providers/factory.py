@@ -236,7 +236,11 @@ def build_link(request: LinkRequest) -> BuiltLink:
             # else. No turn-type check here: this protocol declares server_vad
             # and nothing else, so asking would be asking a constant.
             speaker = request.voice or cfg.speaker
-            for problem in volcano_voice_problems(cfg.model, speaker):
+            # The RESOLVED model, not the config's: `--model` outranks it in
+            # resolve_endpoint and then used to be dropped here, so the banner
+            # printed one generation while the wire carried the other.
+            model = request.endpoint.model or cfg.model
+            for problem in volcano_voice_problems(model, speaker):
                 raise SystemExit(f"{problem.message} {problem.fix}")
             return BuiltLink(
                 VolcanoLink(
@@ -247,6 +251,7 @@ def build_link(request: LinkRequest) -> BuiltLink:
                     access_key=legacy_key,
                     config=cfg,
                     speaker=speaker,
+                    model=model,
                     quiet_window_s=quiet_window_s(request.settings, provider),
                 ),
                 request.endpoint.url,

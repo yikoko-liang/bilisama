@@ -1288,3 +1288,44 @@ async def test_a_socket_dropped_while_a_send_waits_for_the_lock_says_so() -> Non
                 await asyncio.wait_for(blocked, timeout=1.0)
         finally:
             await volcano.aclose()
+
+
+async def test_the_command_line_model_reaches_the_wire() -> None:
+    """`--model` lands on the resolved endpoint and used to stop there: the
+    banner and `volcano.session_started` printed the generation the caller
+    asked for while `_session_body` sent `cfg.model`. Two silent failures in
+    one, because the generation decides which key the persona travels under
+    and which voice family is legal."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(
+            server,
+            config=_cfg(model="1.2.1.1"),
+            model="2.2.0.0",
+            speaker="saturn_x",
+        )
+        try:
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body["dialog"]["extra"]["model"] == "2.2.0.0"
+        finally:
+            await volcano.aclose()
+
+
+async def test_the_name_survives_the_channel_production_actually_uses() -> None:
+    """The assembly connects first and pushes the persona afterwards, so on
+    O2.0 the persona arrives in an UpdateConfig — which the vendor documents as
+    a FULL replacement. If bot_name did not ride along with it, she would be
+    named for one frame and 「豆包」 for the rest of the stream. Nothing pinned
+    that; the tests that touched bot_name all used StartSession."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(
+            server, config=_cfg(model="1.2.1.1", speaker="zh_female_x"), bot_name="豆腐"
+        )
+        try:
+            await volcano.set_context("我叫豆腐，是主播的AI搭子。" * 20)
+            await server.wait_for(wire.ClientEvent.UPDATE_CONFIG)
+
+            dialog = server.recorded.body_for(wire.ClientEvent.UPDATE_CONFIG)["dialog"]
+            assert dialog["bot_name"] == "豆腐"
+            assert dialog["system_role"].startswith("我叫豆腐")
+        finally:
+            await volcano.aclose()

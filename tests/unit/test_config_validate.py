@@ -639,3 +639,39 @@ def test_every_voice_fix_names_a_field_that_exists() -> None:
         named = re.findall(r"speech\.[a-z_0-9.]+", problem.fix)
         assert named, problem.fix
         assert _resolves(named[0]), f"{named[0]} 这个字段不存在（{provider}）"
+
+
+def test_an_empty_volcano_voice_is_refused_before_it_can_become_doubao() -> None:
+    """The combination the shipped config used to carry, and the one nothing
+    had ever tested: blank means 「the server picks」, and what it picks brings
+    its own character. Reproduced on the real endpoint 2026-08-28 — she answers
+    「豆包」, over `dialog.bot_name` and over a 557-character persona whose first
+    sentence names her, with no error anywhere.
+
+    Fatal because there is nothing to notice at run time: she talks, she sounds
+    fine, she is somebody else.
+    """
+    for model in ("1.2.1.1", "2.2.0.0"):
+        s = _settings(
+            provider=ProviderName.VOLCANO,
+            volcano_model=model,
+            volcano_speaker="",
+            volcano_api_key_ref="env:k",
+            expression_source="lexicon",
+        )
+        problem = _one(s, "speech.volcano.speaker")
+        assert problem.fatal is True, model
+        assert "豆包" in problem.message
+        assert "zh_female_vv_jupiter_bigtts" in problem.fix
+
+
+def test_the_shipped_config_names_a_voice() -> None:
+    """The rule above is only worth having if what we ship passes it. This
+    file shipped a blank one with a comment saying that was fine."""
+    from bilisama.cli import DEFAULT_CONFIG
+    from bilisama.config import load
+    from bilisama.config.validate import volcano_voice_problems
+
+    volcano = load(DEFAULT_CONFIG, strict=False).speech.volcano
+    assert volcano.speaker, "随包配置又把音色留空了"
+    assert not volcano_voice_problems(volcano.model, volcano.speaker)

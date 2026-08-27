@@ -361,3 +361,42 @@ def test_memory_segments_passes_the_granularity_through(
     clock._now += 7 * 60
     segments = memory_segments(store, clock, clock_granularity_min=5)
     assert segments.clock_line.startswith("开播约 5 分钟，现在 04:05 左右，")
+
+
+def test_a_regulars_fact_reaches_the_prompt(clock: FakeClock) -> None:
+    """Distillation writes `scope="viewer"` facts every stream, and until now
+    nothing read them back — the segment could say 「阿强（第 5 次来）」 and never
+    the half that makes it worth having. Scoped to who is present, which is
+    also the isolation plan section 4.7 asks for: no query touches a viewer who
+    is not in the room."""
+    from bilisama.memory.context import regulars_line
+
+    store = MemoryStore(":memory:", clock)
+    for stream in range(2):
+        store.begin_stream()
+        store.on_event(_event(uid=42, name="阿强", text="来了"))
+        if stream == 0:
+            store.end_stream()
+    store.replace_facts("viewer", "uid:42", [("上周开过舰长，爱看修 bug", "")])
+
+    line = regulars_line(store)
+    assert "阿强" in line
+    assert "第 2 次来" in line
+    assert "上周开过舰长" in line, f"事实还是没读出来：{line}"
+
+
+def test_a_viewer_who_is_not_here_stays_out_of_the_prompt(clock: FakeClock) -> None:
+    """The isolation half. A fact about someone who is not in the room must not
+    be answered to whoever is — that is the eight lines plan section 4.7 asks
+    for, and it comes free from scoping the read to present_regulars."""
+    from bilisama.memory.context import regulars_line
+
+    store = MemoryStore(":memory:", clock)
+    for stream in range(2):
+        store.begin_stream()
+        store.on_event(_event(uid=42, name="阿强", text="来了"))
+        if stream == 0:
+            store.end_stream()
+    store.replace_facts("viewer", "uid:99", [("这个人今天没来", "")])
+
+    assert "今天没来" not in regulars_line(store)

@@ -55,10 +55,10 @@ _BATCH_TEMPLATE = (
     "可以记的：观众的稳定偏好和身份线索；观众和主播之间的约定或梗；对下次直播有用的事。\n"
     "不要记的：一次性的寒暄和 666；某句话的原样复述；敏感个人信息（真名、住址、联系方式）；"
     "数字和价格的堆砌；你自己的推测；和直播无关的时事。\n"
-    "每条不超过 40 字。viewer_facts 每人至多一条，带 2~5 个标签；identity 只能从材料里抄。\n"
+    "每条不超过 40 字。viewer_facts 每人至多一条；identity 只能从材料里抄。\n"
     "没有值得记的就给空数组——留白完全可以。\n"
     "{growth_rules}"
-    '输出格式：{{"viewer_facts": [{{"identity": "uid:123", "fact": "...", "tags": ["..."]}}], '
+    '输出格式：{{"viewer_facts": [{{"identity": "uid:123", "fact": "..."}}], '
     '"session_summary": "...", "relationship": ["..."], "voice": ["..."]}}\n\n'
     "本场观众（identity 名单）：\n{viewers}\n\n本场进展摘要：{summary}\n\n"
     "最近事件：\n{events}\n\n伴播自己说过的话（完整播出、没被打断的）：\n{assistant_lines}"
@@ -332,6 +332,11 @@ class Distiller:
                 continue
             identity = str(item.get("identity") or "")
             fact = str(item.get("fact") or "").strip()
+            # Tags are still parsed when a model volunteers them — the column
+            # and the retrieval design in plan section 4.7 are unchanged — but
+            # they are no longer ASKED for. Measured: they were about a quarter
+            # of a hard 900-token batch budget whose overflow is all-or-nothing,
+            # spent on a field nothing has ever read back.
             tags = ",".join(str(t) for t in _as_list(item.get("tags")) if t)
             if identity not in known_identities:
                 dropped.append(f"viewer_fact:unknown_identity:{identity}")

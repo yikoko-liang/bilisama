@@ -116,6 +116,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "memory.stream_ended",
         "persona.anchor_loaded",
         "persona.growth_lock_contended",
+        "persona.hand_edited_unreadable",
         "persona.proactive_prompt_loaded",
         "persona.prompt_assembled",
         "proactive.budget_exhausted",
