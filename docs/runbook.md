@@ -53,6 +53,7 @@ export openai_compatible_url=...
 | 固定用某个后端 | 改 `bilisama.toml` 的 `[speech] provider`，别每次敲 `--provider` |
 | 临时试另一个地址 | `--url`，不改配置 |
 | 开发机图省事 | `source path.sh`，`dashscope_url` 仍然兜底 |
+| 拿 OpenAI 当基准对照 | `--provider openai_ga`。2026-08-27 解封——卡了几个月的是上行 24kHz 对我们 16kHz 的重采样，不是别的。**它是开发期参照不是出货路径**（理由在计划 §3.1：支持地区和按小时计费的音频），`config validate` 会提醒一句 |
 
 `[speech.dashscope] endpoint` 出厂是空的——那是租户专属地址，不适合入库。
 开发机靠 `path.sh` 兜着；将来打包出去的版本要靠首次向导填。
@@ -102,6 +103,10 @@ export volcano_api_key=...
 **两件跟别的后端不一样的事，别当成故障**：①它的模型判停后**自己就答**，我们不发
 「开始生成」那种指令；②给一段文本换一句她自己组织的话，走的是 `ChatTextQuery`
 而不是 `response.create`——所以「加一条上下文」和「请她答一句」在这条路上是一个动作。
+
+**注入用 `ChatTextQuery`，不是 `ChatRAGText`。** 后者名字像是给「一批弹幕当背景材料」
+准备的，实测发过去回来是空的——文档措辞是「**用户query之后**…如果客户判断用户query
+不需要闲聊结果」，它替掉的是一个已经在飞的 query 的答案，不是独立通道。
 
 **打断和重连都有了**（2026-08-27 补的）。一开始我读文档漏了 `ClientInterrupt`，
 写成「只能本地作废」；实测它在 server_vad 模式下照样管用，打断前 94 帧音频、

@@ -77,6 +77,9 @@ class MockVolcanoServer:
         self.dialog_id = "dlg-abc"
         self.resumed_with: list[str] = []
         self.interrupted = 0
+        # Every text and lifecycle frame carries one; the client keys its
+        # tombstones off it.
+        self.question_id = "q1"
         self.refuse_connection = refuse_connection
         self.refuse_session = refuse_session
         self._server: Any = None
@@ -244,6 +247,24 @@ class MockVolcanoServer:
             )
             await asyncio.sleep(gap)
 
+    async def confirm_query(self, question: str = "q1") -> None:
+        """The ack for a ChatTextQuery, which is where the server first names
+        the question_id everything after it carries."""
+        await self._emit(wire.ServerEvent.CHAT_TEXT_QUERY_CONFIRMED, {"question_id": question})
+
+    async def late_tail(self, question: str = "q1", *, audio: bytes = b"\x03\x04") -> None:
+        """What a server that has not stopped yet keeps sending after we gave
+        up on a reply — a watchdog timeout does not reach the far end."""
+        await self._emit(
+            wire.ServerEvent.TTS_SENTENCE_START,
+            {"question_id": question, "reply_id": "r1", "tts_type": "default"},
+        )
+        await self._send(wire.ServerEvent.TTS_RESPONSE, audio, session_id="", raw=True)
+        await self._emit(
+            wire.ServerEvent.CHAT_RESPONSE, {"content": "迟到的", "question_id": question}
+        )
+        await self._emit(wire.ServerEvent.TTS_ENDED, {"question_id": question, "reply_id": "r1"})
+
     async def say(self, text: str, *, audio: bytes = b"") -> None:
         """One complete reply: text, then audio, then the two enders.
 
@@ -251,14 +272,20 @@ class MockVolcanoServer:
         stops generating well before the audience stops hearing, and a client
         that closes the reply on the first of them frees the slot mid-sentence.
         """
+        question = self.question_id
         for chunk in text:
-            await self._emit(wire.ServerEvent.CHAT_RESPONSE, {"content": chunk})
-        await self._emit(wire.ServerEvent.CHAT_ENDED, {})
+            await self._emit(
+                wire.ServerEvent.CHAT_RESPONSE, {"content": chunk, "question_id": question}
+            )
+        await self._emit(wire.ServerEvent.CHAT_ENDED, {"question_id": question})
         if audio:
-            await self._emit(wire.ServerEvent.TTS_SENTENCE_START, {})
+            await self._emit(
+                wire.ServerEvent.TTS_SENTENCE_START,
+                {"question_id": question, "tts_type": "default"},
+            )
             await self._send(wire.ServerEvent.TTS_RESPONSE, audio, session_id="", raw=True)
-            await self._emit(wire.ServerEvent.TTS_SENTENCE_END, {})
-        await self._emit(wire.ServerEvent.TTS_ENDED, {})
+            await self._emit(wire.ServerEvent.TTS_SENTENCE_END, {"question_id": question})
+        await self._emit(wire.ServerEvent.TTS_ENDED, {"question_id": question})
 
     async def barge_in(self, transcript: str = "等一下") -> None:
         """The streamer starts talking.

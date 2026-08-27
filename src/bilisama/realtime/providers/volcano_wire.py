@@ -95,6 +95,12 @@ class ClientEvent(IntEnum):
     END_ASR = 400
     CHAT_TTS_TEXT = 500
     CHAT_TEXT_QUERY = 501
+    # Not an injection channel, despite reading like one. Probed live
+    # 2026-08-27 with a batch of danmaku as external_rag: the reply came
+    # back empty. The docs mean it as 「用户query之后…如果客户判断用户query
+    # 不需要闲聊结果」 — it REPLACES the model's own answer to a query
+    # already in flight, so it needs a ChatTextQuery first and adds nothing
+    # over one. Kept named so the next reader does not have to re-probe it.
     CHAT_RAG_TEXT = 502
     CONVERSATION_CREATE = 510
     CONVERSATION_TRUNCATE = 513

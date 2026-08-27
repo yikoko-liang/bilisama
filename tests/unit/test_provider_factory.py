@@ -96,17 +96,33 @@ def test_an_unsupported_turn_type_is_refused_before_the_socket_opens() -> None:
     assert "semantic_vad" in str(caught.value)
 
 
-def test_openai_ga_is_refused_for_the_reason_that_is_actually_blocking_it() -> None:
-    """It used to be refused as "not a shipping path", which is true and
+def test_openai_ga_builds_now_that_the_uplink_converts() -> None:
+    """It was refused for months as 「not a shipping path」, which was true and
     useless: the adapter, capability bits, config section and panel metadata
-    are all in place. What is missing is resampling — 24 kHz both ways against
-    a 16 kHz uplink — and that is what the message has to say, because it is
-    what someone would have to go build."""
-    with pytest.raises(SystemExit) as caught:
-        build_link(_request(ProviderName.OPENAI_GA, env={"api_key": "k"}))
-    message = str(caught.value)
-    assert "24" in message and "16" in message
-    assert "重采样" in message
+    were all there. The actual blocker was one rate — 24 kHz uplink against
+    the 16 kHz this chain captures — and naming it is what made it fixable."""
+    built = build_link(
+        _request(
+            ProviderName.OPENAI_GA,
+            url="wss://api.openai.com/v1/realtime",
+            model="gpt-realtime-2.1",
+            env={"api_key": "k"},
+        )
+    )
+    assert isinstance(built.link, HostedLink)
+
+
+def test_only_the_provider_that_needs_it_converts_the_uplink() -> None:
+    """A resampler on a path that was already correct is pure cost on the hot
+    path — one interpolation pass per 20 ms frame, fifty times a second."""
+    from bilisama.realtime.providers import PROFILES
+    from bilisama.realtime.resample import Resampler
+
+    for provider, profile in PROFILES.items():
+        converts = not Resampler(source_rate=16000, target_rate=profile.uplink_rate).passthrough
+        assert converts is (
+            provider is ProviderName.OPENAI_GA
+        ), f"{provider.value} 的上行转换状态不对：uplink_rate={profile.uplink_rate}"
 
 
 # ---------------------------------------------------------------- volcengine

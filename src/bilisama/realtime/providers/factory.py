@@ -154,22 +154,16 @@ def build_link(request: LinkRequest) -> BuiltLink:
             return _build_hosted(request, provider)
 
         case ProviderName.OPENAI_GA:
-            # The adapter itself is ready — HostedLink serves this profile and
-            # the capability bits, config section and panel metadata are all
-            # in place. What is missing is a pair of resamplers: this endpoint
-            # is 24 kHz in BOTH directions while every other path here sends
-            # 16 kHz uplink, and nothing in src/ resamples anything. Dialing it
-            # anyway would connect, sound wrong, and read as a model fault.
+            # Unblocked 2026-08-27. HostedLink already served this profile and
+            # the capability bits, config section and panel metadata were all
+            # in place; what was missing was the uplink rate conversion, which
+            # now rides on the profile (realtime/resample.py).
             #
-            # So the refusal stays, but it now names the thing that is
-            # actually missing rather than "not a shipping path" — and it
-            # lives in an arm of its own, so this provider is no longer
-            # refused by falling off the end of a branch.
-            raise SystemExit(
-                "openai_ga 还差一步：它收发都是 24kHz，而这条链路的上行按 16kHz 发，"
-                "中间的重采样还没写。\n"
-                "先用 dashscope 或自建那两条；真要走它，得先补上收发两侧的重采样。"
-            )
+            # Still the development reference rather than a shipping path —
+            # plan section 3.1 has the reasons, and they are commercial and
+            # regulatory rather than technical. Nothing here enforces that; the
+            # config simply defaults elsewhere.
+            return _build_hosted(request, provider)
 
         case ProviderName.VOLCANO:
             from bilisama.realtime.providers.volcano import VolcanoLink

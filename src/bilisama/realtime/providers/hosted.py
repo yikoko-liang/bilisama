@@ -22,6 +22,7 @@ from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.providers import codec_for, compose_instructions, profile_for
+from bilisama.realtime.resample import Resampler
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -31,6 +32,10 @@ if TYPE_CHECKING:
 __all__ = ["HostedLink"]
 
 log = get_logger(__name__)
+
+# What ui/web/js/capture-worklet.js produces, and what dev-talk's own mic
+# pump sends. Every provider but OpenAI GA takes it unchanged.
+_CAPTURE_RATE = 16000
 
 
 class HostedLink:
@@ -83,6 +88,11 @@ class HostedLink:
         self._codec = codec
         self._caps = profile.caps
         self._turn = turn
+        # Passthrough for everyone but OpenAI GA, which wants 24 kHz
+        # uplink against the 16 kHz this chain captures at. Its downlink is
+        # 24 kHz as well, which is already what we play, so nothing is
+        # converted on the way in.
+        self._uplink = Resampler(source_rate=_CAPTURE_RATE, target_rate=profile.uplink_rate)
         self._voice = voice
         self._context = ""
         self._clock: Clock = clock or SystemClock()
@@ -124,6 +134,7 @@ class HostedLink:
         why it has to be idempotent: a session.update carrying the same values
         twice is free, and losing either half is not.
         """
+        self._uplink.reset()
         frame = self._bootstrap_frame()
         if frame is not None:
             await self._client.send_command(frame)
@@ -199,7 +210,7 @@ class HostedLink:
         )
 
     async def push_audio(self, pcm: bytes) -> None:
-        await self._client.push_audio(pcm)
+        await self._client.push_audio(self._uplink.feed(pcm))
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
         await self._client.send_command(

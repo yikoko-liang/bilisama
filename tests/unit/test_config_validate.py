@@ -467,15 +467,23 @@ def test_the_two_tts_rules_never_both_fire() -> None:
 # ------------------------------------------------------------ openai_ga
 
 
-def test_openai_ga_warns_about_the_sample_rate_without_refusing() -> None:
-    """§7.6 row 5. It is 24k in both directions (plan §3.1) while the uplink
-    everywhere else is 16k, and the resampling that would bridge them is not
-    written — dev_talk.py:1066 refuses the provider outright."""
+def test_openai_ga_is_flagged_as_a_reference_not_a_shipping_path() -> None:
+    """§7.6 row 5, rewritten once the technical half went away.
+
+    It used to warn about 24 kHz against our 16 kHz uplink and say the
+    resampling was not written. It is written now (realtime/resample.py), and
+    a warning that still described a solved problem would send someone to fix
+    it twice. What is left is commercial and regulatory (plan §3.1: supported
+    countries, and per-hour audio pricing against an always-open microphone),
+    so it stays a note rather than a refusal.
+    """
     problem = _one(
-        _settings(provider=ProviderName.OPENAI_GA, expression_source="lexicon"), "speech.provider"
+        _settings(provider=ProviderName.OPENAI_GA, expression_source="lexicon"),
+        "speech.provider",
     )
     assert problem.fatal is False
-    assert "24" in problem.message
+    assert "重采样" not in problem.message, "这条障碍已经不在了，别再教人去修它"
+    assert "出货" in problem.message
 
 
 def test_the_sample_rate_note_is_only_for_openai_ga() -> None:

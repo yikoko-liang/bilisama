@@ -194,6 +194,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "volcano.reply_implicit",
         "volcano.reply_requested",
         "volcano.reply_timed_out",
+        "volcano.settled_unnamed",
         "volcano.session_started",
         "volcano.reconnect_failed",
         "volcano.reconnect_gave_up",

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import websockets
@@ -147,6 +148,22 @@ class VolcanoLink:
         # VAD — so this tracks whoever holds it, not just replies we asked for.
         self._active: link.ReplyHandle | None = None
         self._reply_text: list[str] = []
+        # Which server-side question the active reply answers, and the ones
+        # already finished. Every text and lifecycle frame carries a
+        # question_id (ChatResponse, TTSSentenceStart, TTSEnded, ASRInfo), and
+        # ChatTextQueryConfirmed hands back the one our own query was given.
+        #
+        # Without this, a frame arriving after a cancel or a watchdog timeout
+        # walked into _ensure_active and minted a GHOST reply: fresh handle,
+        # ReplyStarted emitted, the single slot taken again, and nothing to end
+        # it but another 25-second timeout. RealtimeClient carries tombstones
+        # for exactly this (client.py:143-145); this is the same idea keyed on
+        # what this protocol actually gives us.
+        self._question = ""
+        self._done: deque[str] = deque(maxlen=32)
+        # TTSResponse is raw audio with no id of its own, so it inherits the
+        # judgement made on the TTSSentenceStart that preceded it.
+        self._audio_muted = False
         self._slot_free = asyncio.Event()
         self._slot_free.set()
         self._send_lock = asyncio.Lock()
@@ -505,6 +522,18 @@ class VolcanoLink:
             # mechanism the other adapters use, and what makes a barge-in
             # sound clean even though nothing on the wire was cancelled.
             handle.stale = True
+        if self._question:
+            self._done.append(self._question)
+        else:
+            # Nothing to tombstone: this reply was settled before the server
+            # ever named it, which is what a watchdog timeout on a silent
+            # endpoint looks like. A tail arriving later can then still mint an
+            # implicit reply — but a server that never named the question is
+            # also one that sent no tail, so the two cases do not overlap in
+            # practice. Left as a note rather than a guess at a heuristic.
+            log.debug("volcano.settled_unnamed", status=status.value)
+        self._question = ""
+        self._audio_muted = False
         self._active = None
         self._slot_free.set()
         if self._watchdog is not None:
@@ -513,16 +542,30 @@ class VolcanoLink:
         self._events.put_nowait(link.ReplyDone(handle, status, "".join(self._reply_text)))
         self._reply_text = []
 
-    def _ensure_active(self) -> link.ReplyHandle:
+    def _ensure_active(self, question: str = "") -> link.ReplyHandle | None:
         """The handle for whatever is speaking, minting one if the model
-        started on its own. VAD-triggered replies arrive without anyone here
-        having asked, and they still need a handle to be cancellable."""
+        started on its own.
+
+        VAD-triggered replies arrive without anyone here having asked, and they
+        still need a handle to be cancellable. But a frame from a question we
+        already finished is not a new reply — it is the tail of an old one, and
+        minting for it is how a cancelled reply came back as a ghost holding
+        the slot.
+
+        Returns:
+            The handle to attribute this frame to, or None to drop the frame.
+        """
+        if question and question in self._done:
+            return None
         if self._active is None:
             handle = link.ReplyHandle()
             self._take_slot(handle)
+            self._question = question
             self._events.put_nowait(link.ReplyStarted(handle))
-            log.debug("volcano.reply_implicit", handle_id=handle.handle_id)
-        assert self._active is not None
+            log.debug("volcano.reply_implicit", handle_id=handle.handle_id, question=question)
+        elif question and not self._question:
+            # Our own query, now that the server has named it.
+            self._question = question
         return self._active
 
     async def _reconnect(self) -> None:
@@ -616,22 +659,38 @@ class VolcanoLink:
         if event == wire.ServerEvent.ASR_RESPONSE:
             self._on_transcript(frame)
             return
+        if event == wire.ServerEvent.CHAT_TEXT_QUERY_CONFIRMED:
+            # The ack for our own query, and the only place the server tells us
+            # which question_id it filed it under.
+            self._ensure_active(str(frame.json().get("question_id", "")))
+            return
         if event == wire.ServerEvent.CHAT_RESPONSE:
-            handle = self._ensure_active()
+            handle = self._ensure_active(str(frame.json().get("question_id", "")))
+            if handle is None:
+                return
             text = str(frame.json().get("content", ""))
             if text:
                 self._reply_text.append(text)
                 self._events.put_nowait(link.ReplyTextDelta(handle, text))
             return
         if event == wire.ServerEvent.TTS_RESPONSE:
+            # Raw audio, no id of its own — it inherits the judgement made on
+            # the TTSSentenceStart that came before it.
+            if self._audio_muted:
+                return
             handle = self._ensure_active()
-            if frame.payload:
+            if handle is not None and frame.payload:
                 self._events.put_nowait(link.ReplyAudioDelta(handle, frame.payload))
             return
         if event == wire.ServerEvent.TTS_SENTENCE_START:
-            self._ensure_active()
+            question = str(frame.json().get("question_id", ""))
+            self._audio_muted = self._ensure_active(question) is None
             return
         if event == wire.ServerEvent.TTS_ENDED:
+            if str(frame.json().get("question_id", "")) in self._done:
+                # The tail of a reply we already closed. Settling again would
+                # end whatever took the slot after it.
+                return
             # Audio finished, so the AUDIENCE is finished — which is what
             # "done" has to mean. ChatEnded only says the model stopped
             # generating, and settling there would free the slot while she is

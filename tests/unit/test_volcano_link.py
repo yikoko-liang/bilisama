@@ -524,3 +524,69 @@ async def test_reconnect_gives_up_out_loud_rather_than_retrying_forever() -> Non
             assert not final[0].retrying, "试满了还说在重试"
         finally:
             await volcano.aclose()
+
+
+async def test_the_tail_of_a_finished_reply_does_not_become_a_ghost() -> None:
+    """A watchdog timeout does not reach the far end, so she keeps talking.
+
+    Every content frame walked into _ensure_active, which minted a fresh
+    handle for anything arriving with no reply active — a phantom reply that
+    emitted ReplyStarted, took the single slot back, and could only be ended
+    by another 25-second timeout. The question_id is what tells the tail of an
+    old reply from the start of a new one.
+    """
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, watchdog_s=25.0)
+        try:
+            await volcano.request_reply(link.ReplySpec())
+            await server.confirm_query("q1")
+            # Collect a delta from the same question before touching the clock.
+            # It arrives after the ack on the same socket, so seeing it proves
+            # the ack was processed — waiting on a sleep instead would make
+            # this test pass or fail on scheduling luck.
+            await server._emit(
+                wire.ServerEvent.CHAT_RESPONSE, {"content": "开", "question_id": "q1"}
+            )
+            await _collect(events, 1)
+
+            await clock.advance(26.0)
+            timed_out = await _collect(events, 1)
+            assert isinstance(timed_out[0], link.ReplyDone)
+            assert timed_out[0].status is link.ReplyStatus.TIMED_OUT
+
+            await server.late_tail("q1")
+            # Whatever arrives next must not be a reply we never asked for.
+            leaked = asyncio.create_task(_collect(events, 1))
+            await asyncio.sleep(0.1)
+            assert not leaked.done(), f"迟到的尾巴变成了新回复：{leaked.result()}"
+            leaked.cancel()
+
+            # And the slot really is free, not held by a phantom.
+            await asyncio.wait_for(volcano.request_reply(link.ReplySpec()), timeout=2.0)
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_genuinely_new_reply_after_a_timeout_still_gets_through() -> None:
+    """The other half: tombstoning must not swallow the next real reply. A
+    filter that drops everything is not a filter."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, watchdog_s=25.0)
+        try:
+            await volcano.request_reply(link.ReplySpec())
+            await server.confirm_query("q1")
+            await server._emit(
+                wire.ServerEvent.CHAT_RESPONSE, {"content": "开", "question_id": "q1"}
+            )
+            await _collect(events, 1)
+            await clock.advance(26.0)
+            await _collect(events, 1)  # the timeout
+
+            server.question_id = "q2"
+            await server.say("这是新的一轮")
+            got = await _collect(events, 3)
+            assert any(isinstance(e, link.ReplyTextDelta) for e in got)
+        finally:
+            await volcano.aclose()

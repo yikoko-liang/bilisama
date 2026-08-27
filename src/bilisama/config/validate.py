@@ -188,16 +188,17 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
                 )
             )
 
-    # Plan section 7.6 row 5, and it is a note rather than a refusal on purpose.
-    # The rate mismatch is real (24k both ways per plan section 3.1, against the
-    # 16k uplink everywhere else — dev_talk.py:67-68), but so is the fact that
-    # this provider has no adapter at all yet (dev_talk.py:1066).
+    # Plan section 7.6 row 5. The rate mismatch that used to make this a real
+    # obstacle is handled now (realtime/resample.py converts the uplink), so
+    # what is left is a commercial and regulatory caution, not a technical one:
+    # plan section 3.1 has the supported-countries wording and the per-hour
+    # audio pricing against a microphone that is open all stream.
     if s.speech.provider is ProviderName.OPENAI_GA:
         problems.append(
             ConfigProblem(
                 field="speech.provider",
-                message="openai_ga 收发都是 24kHz，而这条链路的上行按 16kHz 发，中间要重采样。",
-                fix="换成 dashscope 或自建这两条接通了的路；真要走 openai_ga，得先补上重采样。",
+                message="openai_ga 是开发期的参照实现，不是出货路径。",
+                fix="出货前改成 dashscope、volcano 或自建；拿它当基准对照没问题。",
                 fatal=False,
             )
         )

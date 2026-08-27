@@ -285,6 +285,15 @@ class ProviderProfile:
     is an adapter constant. It sits here because it is per-provider data that
     the adapter should not have to be told."""
 
+    uplink_rate: int = 16000
+    """What this endpoint wants the microphone at.
+
+    16 kHz is what our capture worklet produces and what three of the four
+    providers take. OpenAI GA is the exception at 24 kHz, and the mismatch was
+    what kept it refused: its DOWNLINK is 24 kHz too, which already matches
+    our playback, so only the uplink ever needed converting — plan section 3.1
+    asks for a resampler on each side and overstates it by one."""
+
     default_url: str = ""
     """A complete address to fall back on when no layer named one.
 
@@ -309,6 +318,7 @@ PROFILES: dict[ProviderName, ProviderProfile] = {
         dia.GA,
         socket_path="/v1/realtime",
         session_cap_min=60,
+        uplink_rate=24000,
     ),
     ProviderName.VOLCANO: ProviderProfile(
         caps_mod.VOLCANO,
