@@ -34,16 +34,17 @@ from bilisama.obs.health import LinkHealth
 from bilisama.obs.logging import setup
 from bilisama.realtime import link
 from bilisama.realtime.providers import s2s as s2s_module
+from bilisama.realtime.providers import with_model
 
 _DEV_TALK_PY = Path(dev_talk.__file__)
 
-# ------------------------------------------------------------ _with_model
+# ------------------------------------------------------------- with_model
 
 
 def test_a_model_is_appended_when_the_address_names_none() -> None:
     """The plain case, unchanged: config gives a bare address, the resolved
     model gets stapled on."""
-    joined = dev_talk._with_model("wss://host/api-ws/v1/realtime", "qwen-flash")
+    joined = with_model("wss://host/api-ws/v1/realtime", "qwen-flash")
     assert joined == "wss://host/api-ws/v1/realtime?model=qwen-flash"
 
 
@@ -52,7 +53,7 @@ def test_an_address_that_already_names_a_model_keeps_it() -> None:
     the more specific of the two, and the resolved model here is only the
     registry default (realtime/providers/__init__.py:117-119)."""
     url = "wss://dashscope.example/api-ws/v1/realtime?model=qwen-omni-turbo-realtime"
-    assert dev_talk._with_model(url, "qwen-audio-3.0-realtime-flash") == url
+    assert with_model(url, "qwen-audio-3.0-realtime-flash") == url
 
 
 def test_the_command_line_model_beats_the_one_written_into_the_address() -> None:
@@ -63,7 +64,7 @@ def test_the_command_line_model_beats_the_one_written_into_the_address() -> None
     config there is.
     """
     url = "wss://dashscope.example/api-ws/v1/realtime?model=qwen-omni-turbo-realtime"
-    joined = dev_talk._with_model(url, "qwen-audio-3.0-realtime-flash", explicit=True)
+    joined = with_model(url, "qwen-audio-3.0-realtime-flash", explicit=True)
     assert "model=qwen-audio-3.0-realtime-flash" in joined
     assert "qwen-omni-turbo-realtime" not in joined
     assert joined.startswith("wss://dashscope.example/api-ws/v1/realtime?")
@@ -73,7 +74,7 @@ def test_overriding_the_model_leaves_the_rest_of_the_query_alone() -> None:
     """An address can carry more than the model; replacing one parameter must
     not drop the others."""
     url = "wss://host/api-ws/v1/realtime?region=cn&model=old&trace=1"
-    joined = dev_talk._with_model(url, "new", explicit=True)
+    joined = with_model(url, "new", explicit=True)
     assert "region=cn" in joined
     assert "trace=1" in joined
     assert "model=new" in joined
@@ -84,17 +85,15 @@ def test_a_parameter_that_merely_ends_in_model_is_not_a_model() -> None:
     """`"model=" in url` matched `llm_model=`, `submodel=`, and any other
     parameter whose name happens to end that way — and then refused to add the
     model that was actually asked for."""
-    joined = dev_talk._with_model("wss://host/v1/realtime?llm_model=x", "qwen-flash")
+    joined = with_model("wss://host/v1/realtime?llm_model=x", "qwen-flash")
     assert "model=qwen-flash" in joined
     assert "llm_model=x" in joined
 
 
 def test_no_model_at_all_leaves_the_address_untouched() -> None:
     """s2s resolves to an empty model; stapling `?model=` on would be a lie."""
-    assert dev_talk._with_model("ws://127.0.0.1:8765/v1/realtime", "") == (
-        "ws://127.0.0.1:8765/v1/realtime"
-    )
-    assert dev_talk._with_model("ws://127.0.0.1:8765/v1/realtime", "", explicit=True) == (
+    assert with_model("ws://127.0.0.1:8765/v1/realtime", "") == ("ws://127.0.0.1:8765/v1/realtime")
+    assert with_model("ws://127.0.0.1:8765/v1/realtime", "", explicit=True) == (
         "ws://127.0.0.1:8765/v1/realtime"
     )
 

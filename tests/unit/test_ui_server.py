@@ -126,7 +126,10 @@ def test_health_is_mounted_without_swallowing_the_routes() -> None:
 def test_config_snapshot_masks_every_secret_reference() -> None:
     settings = _settings(
         room={"credential_ref": "env:BILI_SESSDATA"},
-        speech={"dashscope": {"api_key_ref": "env:DASHSCOPE_API_KEY"}},
+        speech={
+            "provider": "dashscope",
+            "dashscope": {"api_key_ref": "env:DASHSCOPE_API_KEY"},
+        },
     )
     client, _, _ = _build(settings)
     response = client.get(f"/{_TOKEN}/config")
@@ -136,6 +139,9 @@ def test_config_snapshot_masks_every_secret_reference() -> None:
     assert "DASHSCOPE_API_KEY" not in body
     rows = {row["path"]: row for row in response.json()}
     assert rows["room.credential_ref"]["value"] == "已配置"
+    # The key belongs to the provider this session actually dials — with any
+    # other one selected the row is not on the page at all, and asserting it
+    # was masked would pass for the wrong reason.
     assert rows["speech.dashscope.api_key_ref"]["value"] == "已配置"
 
 

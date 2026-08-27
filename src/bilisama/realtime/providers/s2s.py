@@ -36,7 +36,7 @@ from bilisama.obs.logging import get_logger
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
-from bilisama.realtime.providers import compose_instructions, profile_for
+from bilisama.realtime.providers import codec_for, compose_instructions, profile_for
 
 __all__ = ["S2SLink"]
 
@@ -64,15 +64,16 @@ class S2SLink:
             a real TTS, and a text-pinned session would mute the whole run.
         """
         profile = profile_for(ProviderName.S2S)
+        codec = codec_for(ProviderName.S2S)
         self._client = RealtimeClient(
             url,
             caps=profile.caps,
-            codec=profile.codec,
+            codec=codec,
             clock=clock,
             watchdog_s=watchdog_s,
             auto_reconnect=auto_reconnect,
         )
-        self._codec = profile.codec
+        self._codec = codec
         self._text_replies = text_replies
         self._context = ""
         # Barge-in is a session-level flag we turn OFF for protected replies.

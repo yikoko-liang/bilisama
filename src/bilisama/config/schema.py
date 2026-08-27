@@ -137,6 +137,33 @@ class SideModelConfig(BaseModel):
     tool_choice: Literal["none"] = Field("none")
 
 
+class VolcanoConfig(BaseModel):
+    """Volcengine's end-to-end dialogue model (Doubao S2S).
+
+    Its own section rather than another HostedConfig: this endpoint takes two
+    credentials instead of one, picks its persona key by model generation, and
+    has no per-turn model query — so four of HostedConfig's fields would be
+    dead here and three of these have nowhere to live there.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    endpoint: str = Field("")
+    app_id_ref: str = Field("")
+    access_key_ref: str = Field("")
+    # Which generation, and therefore which persona key: O2.0 takes a plain
+    # instruction string under dialog.system_role, SC2.0 takes a character
+    # manifest. Sending one under the other's key is accepted and ignored,
+    # which is why this is a choice rather than something we sniff.
+    model: Literal["1.2.1.1", "2.2.0.0"] = Field("1.2.1.1")
+    # Voice. O2.0 takes the vendor's catalogue voices; SC2.0 takes cloned ones.
+    # Empty leaves it to the server.
+    speaker: str = Field("")
+    # How long a pause counts as "done talking". The vendor's default; the
+    # only turn-detection knob this endpoint exposes.
+    end_smooth_window_ms: int = Field(1500, ge=0, le=10000)
+
+
 class SpeechConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -144,6 +171,7 @@ class SpeechConfig(BaseModel):
     s2s: S2SConfig = Field(default_factory=S2SConfig)
     dashscope: HostedConfig = Field(default_factory=HostedConfig)
     openai_ga: HostedConfig = Field(default_factory=HostedConfig)
+    volcano: VolcanoConfig = Field(default_factory=VolcanoConfig)
     side: SideModelConfig = Field(default_factory=SideModelConfig)
 
 

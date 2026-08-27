@@ -53,6 +53,7 @@ def _settings(
     growth_voice: str = "off",
     side_base_url: str = "",
     tts_voice: str = "",
+    volcano_app_id_ref: str = "",
     config_version: int = CURRENT_VERSION,
 ) -> Settings:
     """Shipped defaults with a model id, and one axis moved off it.
@@ -68,6 +69,8 @@ def _settings(
     }
     if provider is not ProviderName.S2S:
         speech[provider.value] = {"endpoint": endpoint}
+    if provider is ProviderName.VOLCANO:
+        speech[provider.value]["app_id_ref"] = volcano_app_id_ref
     speech["side"] = {"base_url": side_base_url}
     return Settings.model_validate(
         {
@@ -158,6 +161,16 @@ BROKEN_ONE_WAY_EACH = {
     "speech.s2s.patches": _Broken(_settings(patches=("raw_instructions",), tts_voice="知性")),
     "speech.provider": _Broken(
         _settings(provider=ProviderName.OPENAI_GA, expression_source="lexicon")
+    ),
+    # Volcengine takes a PAIR of credentials, so the broken case is one of them
+    # present: with both blank the rule fires too, but so would a rule that only
+    # ever looked at the first field.
+    "speech.volcano.access_key_ref": _Broken(
+        _settings(
+            provider=ProviderName.VOLCANO,
+            expression_source="lexicon",
+            volcano_app_id_ref="volcano_app_id",
+        )
     ),
 }
 

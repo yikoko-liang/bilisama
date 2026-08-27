@@ -216,18 +216,34 @@ def _visible_controls(audience: Audience) -> list[str]:
 def test_streamer_sees_a_manageable_number_of_controls() -> None:
     """The streamer view should stay under twenty controls.
 
-    That is the whole point of the three audience tiers. Going over means something
-    is tagged for the wrong audience.
+    That is the whole point of the three audience tiers. Going over means
+    something is tagged for the wrong audience.
+
+    Counted per running provider, not as a union: `ui/server.py:174` hides the
+    sections belonging to backends this session is not using, so nobody ever
+    sees two sets of endpoints at once. Summing them all would fail this on the
+    day a fourth provider is added no matter how tidily it was tagged — and
+    would go on passing if one backend alone grew a dozen streamer knobs.
     """
-    controls = _visible_controls(Audience.STREAMER)
-    assert len(controls) <= 20, f"streamer view has {len(controls)} controls: {sorted(controls)}"
+    scoped = {p.value for p in ProviderName}
+    shared = [path for path in _visible_controls(Audience.STREAMER) if _owner(path) is None]
+    for provider in scoped:
+        mine = [path for path in _visible_controls(Audience.STREAMER) if _owner(path) == provider]
+        total = len(shared) + len(mine)
+        assert total <= 20, f"跑 {provider} 时主播能看到 {total} 个控件：{sorted(shared + mine)}"
+
+
+def _owner(path: str) -> str | None:
+    """Which provider's section a path sits in, or None for the shared ones."""
+    return UI_META[path].provider_scoped or None
 
 
 def test_provider_scoped_sections_point_at_their_own_provider() -> None:
-    """Nothing reads this key at runtime yet — `ui/server.py:149` does not pass
-    it to the page, which is why the panel shows DashScope and openai_ga fields
-    side by side. Pinning it here is what keeps it true until something does: a
-    hide rule that has quietly rotted is worse than no hide rule.
+    """`ui/server.py:174` reads this to hide the backends this session is not
+    using. Most entries no longer say it out loud — `_scope_by_path` derives it
+    from the path — so this is what keeps the derivation and the explicit
+    declarations agreeing: a hide rule that has quietly rotted is worse than no
+    hide rule.
     """
     scoped = {path: meta.provider_scoped for path, meta in UI_META.items() if meta.provider_scoped}
     assert scoped, "provider_scoped 一条都没有了——是不是删过头了"

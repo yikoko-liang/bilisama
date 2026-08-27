@@ -240,6 +240,29 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
             )
         )
 
+    # Two credentials, and it is the pair that authenticates — one alone gets a
+    # refused handshake whose text is about neither. Not fatal here because
+    # path.sh can still supply them at run time; the factory refuses for real
+    # when both layers come up empty, and it names which half is missing.
+    if s.speech.provider is ProviderName.VOLCANO:
+        absent = [
+            name
+            for name, value in (
+                ("app_id_ref", s.speech.volcano.app_id_ref),
+                ("access_key_ref", s.speech.volcano.access_key_ref),
+            )
+            if not value
+        ]
+        if absent:
+            problems.append(
+                ConfigProblem(
+                    field=f"speech.volcano.{absent[0]}",
+                    message=f"火山要 App ID 和 Access Key 两个凭据，这里少了 {'、'.join(absent)}。",
+                    fix="在设置里把两个都填上；开发机上也可以 source path.sh 兜底。",
+                    fatal=False,
+                )
+            )
+
     # Anonymous connections still work, but Bilibili masks every uid to 0, so
     # per-viewer memory, name-checking and per-uid cooldowns all stop working —
     # which is most of what makes a co-host feel present.

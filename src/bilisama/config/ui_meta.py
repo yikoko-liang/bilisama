@@ -12,16 +12,17 @@ Labels and hints stay in Chinese — they are shown to the streamer.
 Who actually reads this today: `ui/server.py:149` (`config_snapshot`) renders the
 config tab from it, and `ui/config_edit.py` refuses a write to a path that is not
 in here. Between them they pass through label, hint, group, order, unit, audience,
-reload and secret. `widget`, `provider_scoped`, `wizard_step` and `aliases` are
-written and not yet read by anything — the panel infers its controls and shows
-every provider's section at once. `check_ui_meta` below and the tests keep those
-four honest until the page catches up (plan §7.5, backlog: panel side).
+reload, secret — and `provider_scoped`, which `ui/server.py:174` uses to hide the
+sections belonging to backends this session is not using. `widget`, `wizard_step`
+and `aliases` are still written and not read: the panel infers its own controls,
+and there is no wizard. `check_ui_meta` below and the tests keep those three
+honest until the page catches up (plan §7.5, backlog: panel side).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from bilisama.config._ui import Audience, Reload
 from bilisama.config.enums import ProviderName
@@ -466,6 +467,69 @@ UI_META: dict[str, FieldMeta] = {
         group="安全",
         order=1,
     ),
+    "speech.volcano": FieldMeta(label="火山引擎", provider_scoped="volcano", group="语音"),
+    "speech.volcano.endpoint": FieldMeta(
+        label="服务地址",
+        hint="留空即用内置的公网地址，一般不用改",
+        provider_scoped="volcano",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="火山语音",
+        order=1,
+        wizard_step=2,
+    ),
+    "speech.volcano.app_id_ref": FieldMeta(
+        label="App ID",
+        hint="控制台上那个应用 id，这里只留一个引用",
+        provider_scoped="volcano",
+        audience=Audience.STREAMER,
+        reload=Reload.RECONNECT,
+        group="火山语音",
+        order=2,
+        wizard_step=2,
+        secret=True,
+    ),
+    "speech.volcano.access_key_ref": FieldMeta(
+        label="Access Key",
+        hint="跟 App ID 成对，缺一个都连不上",
+        provider_scoped="volcano",
+        audience=Audience.STREAMER,
+        reload=Reload.RECONNECT,
+        group="火山语音",
+        order=3,
+        wizard_step=2,
+        secret=True,
+    ),
+    "speech.volcano.model": FieldMeta(
+        label="模型版本",
+        hint="1.2.1.1 用文字描述人设、配官方音色；2.2.0.0 用角色档案、配克隆音色",
+        provider_scoped="volcano",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="火山语音",
+        order=4,
+        wizard_step=2,
+    ),
+    "speech.volcano.speaker": FieldMeta(
+        label="音色",
+        hint="留空用服务端默认。两个版本的音色清单不通用，换版本要跟着换",
+        provider_scoped="volcano",
+        audience=Audience.STREAMER,
+        reload=Reload.RECONNECT,
+        group="火山语音",
+        order=5,
+        wizard_step=2,
+    ),
+    "speech.volcano.end_smooth_window_ms": FieldMeta(
+        label="判停静音（毫秒）",
+        hint="停多久算一句说完了。调小抢话，调大接话慢——这条路上唯一的判停旋钮",
+        provider_scoped="volcano",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="火山语音",
+        order=6,
+        unit="ms",
+    ),
     "speech.dashscope": FieldMeta(label="DashScope", provider_scoped="dashscope", group="语音"),
     "speech.dashscope.api_key_ref": FieldMeta(
         label="API Key",
@@ -853,6 +917,37 @@ UI_META: dict[str, FieldMeta] = {
 }
 
 
+_PROVIDERS = frozenset(p.value for p in ProviderName)
+
+
+def _scope_by_path(table: dict[str, FieldMeta]) -> None:
+    """Anything under `speech.<provider>.` belongs to that provider. Say so.
+
+    Eighteen entries had left `provider_scoped` blank — every endpoint, model
+    and key under dashscope, openai_ga and s2s — so the panel listed all three
+    backends' addresses at once and only one of them did anything. That is the
+    exact complaint `ui/server.py:176` was written against; the metadata that
+    would have prevented it was simply not filled in.
+
+    Derived rather than typed out eighteen more times, because the next
+    provider would forget too. The path already says which backend owns a
+    field, and check_ui_meta refuses a declaration that disagrees with it, so
+    the explicit value could never have said anything different — it could only
+    be missing. An explicit one still wins: a field that lives under one
+    provider's section while belonging to another is not a shape we have, but
+    inventing a rule that forbids it is not this function's business.
+    """
+    for path, entry in table.items():
+        if entry.provider_scoped:
+            continue
+        parts = path.split(".")
+        if len(parts) > 2 and parts[0] == "speech" and parts[1] in _PROVIDERS:
+            table[path] = replace(entry, provider_scoped=parts[1])
+
+
+_scope_by_path(UI_META)
+
+
 # Read-only rows: chattiness computes these five and the TOML has no field for
 # any of them (derive.py is the single writer). They are a separate dict rather
 # than UI_META entries because `ui/server.py:149` resolves every UI_META path
@@ -905,9 +1000,6 @@ DERIVED_META: dict[str, FieldMeta] = {
         unit="token",
     ),
 }
-
-
-_PROVIDERS = frozenset(p.value for p in ProviderName)
 
 
 def check_ui_meta(meta: Mapping[str, FieldMeta] | None = None) -> list[str]:

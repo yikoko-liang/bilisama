@@ -19,7 +19,7 @@ platform = "bilibili"
 credential_ref = "env:BILI_SESSDATA"       # 登录态 cookie 的引用；没设这个环境变量就匿名连（观众全打码）
 
 [speech]
-provider = "s2s"                        # s2s | dashscope | openai_ga
+provider = "s2s"                        # s2s | dashscope | volcano | openai_ga
 
 [speech.s2s]
 endpoint = "ws://127.0.0.1:8765/v1/realtime"
@@ -57,6 +57,18 @@ api_key_ref = "dashscope"
 # 听着发尖。这里挑的 longanlingxin 是 242Hz。想换随时用 dev-talk 的 --voice 试听，
 # 名字写错服务端会把可用清单报回来。
 voice = "longanlingxin"
+
+# 火山引擎端到端语音（豆包 S2S）。地址留空就用内置的公网地址，一般不用改。
+# 两个凭据缺一不可：控制台上那对 App ID 和 Access Key。
+[speech.volcano]
+endpoint = ""
+app_id_ref = "volcano_app_id"
+access_key_ref = "volcano_access_key"
+# 1.2.1.1 = O2.0，人设走一段文字描述，配官方音色；
+# 2.2.0.0 = SC2.0，人设走角色档案，配克隆音色。换版本要跟着换音色。
+model = "1.2.1.1"
+speaker = ""                            # 留空用服务端默认
+end_smooth_window_ms = 1500             # 停多久算一句说完了。这条路上唯一的判停旋钮
 
 [speech.side]                           # 主动话题、记忆蒸馏、事实抽取都用它，挑便宜的
 base_url = ""

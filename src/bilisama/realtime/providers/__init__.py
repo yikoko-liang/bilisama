@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlencode
 
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import Settings
@@ -27,38 +28,18 @@ __all__ = [
     "PROFILES",
     "Endpoint",
     "ProviderProfile",
+    "codec_for",
     "compose_instructions",
     "profile_for",
     "resolve_endpoint",
     "turn_type_problems",
+    "with_model",
 ]
 
 # Fallback name for the environment variable path.sh has always used. Lower
 # case and unprefixed because that is what path.sh writes, not because it is
 # a good name for a global.
 _DASHSCOPE_URL_ENV = "dashscope_url"
-
-# What a hosted address looks like once it reaches the socket. path.sh holds
-# an https base for the REST API, so the host is the only reusable part.
-#
-# Per provider, not one constant: DashScope serves Realtime on its own path,
-# while OpenAI GA uses /v1/realtime — the same path our s2s server answers on
-# (config/schema.py:51), because both speak the GA protocol. Stapling
-# DashScope's path onto an OpenAI host dials a 404 and reports it as a refused
-# handshake, which sends people checking a key that was never the problem.
-_HOSTED_PATHS: dict[ProviderName, str] = {
-    ProviderName.DASHSCOPE: "/api-ws/v1/realtime",
-    ProviderName.OPENAI_GA: "/v1/realtime",
-}
-
-# The model to ask for when no layer names one. Kept here rather than in
-# argparse because position matters: as a flag default it outranked the
-# config, which is the bug this module exists to fix. As the last fallback it
-# only decides when nobody else did, so `dev-talk --provider dashscope` keeps
-# working on a box whose config leaves the field blank.
-_DEFAULT_MODELS: dict[ProviderName, str] = {
-    ProviderName.DASHSCOPE: "qwen-audio-3.0-realtime-flash",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +67,7 @@ def _hosted_url(raw: str, provider: ProviderName) -> str:
     if raw.startswith(("ws://", "wss://")):
         return raw
     host = raw.replace("https://", "").replace("http://", "").split("/")[0]
-    return f"wss://{host}{_HOSTED_PATHS[provider]}"
+    return f"wss://{host}{PROFILES[provider].socket_path}"
 
 
 def resolve_endpoint(
@@ -123,9 +104,7 @@ def resolve_endpoint(
     # rather than "deliberately blank" — otherwise it would shadow the
     # environment on every clean checkout.
     configured = (hosted.endpoint or "").strip()
-    picked_model = (
-        model or getattr(hosted, "model", "") or _DEFAULT_MODELS.get(chosen, "")
-    ).strip()
+    picked_model = (model or getattr(hosted, "model", "") or PROFILES[chosen].default_model).strip()
 
     if url:
         return Endpoint(chosen, url, picked_model, "命令行")
@@ -140,6 +119,12 @@ def resolve_endpoint(
         if from_env:
             return Endpoint(chosen, _hosted_url(from_env, chosen), picked_model, "环境变量")
 
+    # Last, and only where the address is the same for everyone. It ranks
+    # BELOW the environment on purpose: a variable someone deliberately
+    # exported should still win over a constant compiled in here.
+    if PROFILES[chosen].default_url:
+        return Endpoint(chosen, PROFILES[chosen].default_url, picked_model, "内置默认")
+
     # The env fallback is only offered where it exists, so the fix line never
     # sends an openai_ga user to source a file that cannot help them.
     fallback = (
@@ -151,6 +136,44 @@ def resolve_endpoint(
         f"不知道该连哪儿：[speech.{chosen.value}] 的 endpoint 没填，命令行也没给 --url。\n"
         f"填上 bilisama.toml 里那一行{fallback}。"
     )
+
+
+def with_model(url: str, model: str, *, explicit: bool = False) -> str:
+    """Name the model in the query string, the way hosted endpoints expect.
+
+    Deciding WHICH model, and which address, is resolve_endpoint's job just
+    above; this only joins the two. Idempotent because an address may arrive already
+    finished: someone can paste a complete URL into config or --url, and
+    stapling a second ?model= on would make it unroutable.
+
+    That idempotence used to be absolute, and it silently ate `--model`. The
+    hosted address shape carries the model in its query, so the endpoint line
+    a streamer pastes into bilisama.toml usually already has one; the flag
+    ranks FIRST in resolve_endpoint (realtime/providers/__init__.py:117-119)
+    and then lost right here. `explicit` is that ranking, carried down one
+    level: a model the command line asked for replaces the address's, and a
+    model that merely fell out of the config or the registry default does not
+    — between two config-level answers the more specific one should win.
+
+    Args:
+        url: The resolved address, with or without a query.
+        model: The resolved model name; "" for a provider that has none.
+        explicit: Whether `--model` supplied it.
+    """
+    if not model:
+        return url
+    base, question, query = url.partition("?")
+    named = parse_qsl(query, keep_blank_values=True)
+    # Whole parameter names, not a substring: "model=" in url also matched
+    # llm_model= and submodel=, and then refused to add the model actually
+    # asked for.
+    if not any(key == "model" for key, _ in named):
+        return f"{url}{'&' if question else '?'}model={model}"
+    if not explicit:
+        return url
+    kept = [(key, value) for key, value in named if key != "model"]
+    kept.append(("model", model))
+    return f"{base}?{urlencode(kept)}"
 
 
 def compose_instructions(context: str, turn: str | None) -> str | None:
@@ -186,21 +209,101 @@ def compose_instructions(context: str, turn: str | None) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class ProviderProfile:
-    """What one provider speaks: its capability bits and its wire dialect."""
+    """Everything the code knows about one provider, in one place.
+
+    It used to hold two fields while three sibling tables — hosted paths,
+    default models, session caps — sat beside it keyed by the same enum, one
+    of them in another module entirely. Four tables keyed alike are four
+    chances to add a provider to three of them, and the fourth failure is a
+    KeyError at connect time rather than at import.
+    """
 
     caps: Capabilities
-    codec: dia.Codec
+
+    codec: dia.Codec | None
+    """The OpenAI-Realtime dialect, or None for a provider that speaks its own
+    protocol. Reach it through `codec_for` when a codec is required."""
+
+    socket_path: str = ""
+    """Path to staple onto a bare host. DashScope serves Realtime on its own
+    path while OpenAI GA uses /v1/realtime — the same path our s2s server
+    answers on (config/schema.py:51), because both speak GA. Stapling
+    DashScope's path onto an OpenAI host dials a 404 and reports it as a
+    refused handshake, which sends people checking a key that was never the
+    problem. Empty means addresses arrive complete (s2s)."""
+
+    default_model: str = ""
+    """The model to ask for when no layer names one. Here rather than in
+    argparse because position matters: as a flag default it outranked the
+    config, which is the bug resolve_endpoint exists to fix. As the last
+    fallback it only decides when nobody else did."""
+
+    session_cap_min: int = 0
+    """How long this endpoint lets one connection live, in minutes; 0 means no
+    published cap. Not a capability — capabilities.py's own docstring puts
+    session limits with the adapters, because a field only the adapter reads
+    is an adapter constant. It sits here because it is per-provider data that
+    the adapter should not have to be told."""
+
+    default_url: str = ""
+    """A complete address to fall back on when no layer named one.
+
+    Only for providers whose address is genuinely universal. DashScope's is
+    not — path.sh holds a tenant's own MaaS instance — so it stays empty
+    there and the refusal keeps pointing at the config. Where it IS universal,
+    shipping it is what lets an installed app connect at all: no terminal, no
+    path.sh, and nowhere in the panel to type an endpoint (backlog item 55)."""
 
 
 PROFILES: dict[ProviderName, ProviderProfile] = {
     ProviderName.S2S: ProviderProfile(caps_mod.S2S, dia.GA),
-    ProviderName.DASHSCOPE: ProviderProfile(caps_mod.DASHSCOPE, dia.BETA),
-    ProviderName.OPENAI_GA: ProviderProfile(caps_mod.OPENAI_GA, dia.GA),
+    ProviderName.DASHSCOPE: ProviderProfile(
+        caps_mod.DASHSCOPE,
+        dia.BETA,
+        socket_path="/api-ws/v1/realtime",
+        default_model="qwen-audio-3.0-realtime-flash",
+        session_cap_min=120,
+    ),
+    ProviderName.OPENAI_GA: ProviderProfile(
+        caps_mod.OPENAI_GA,
+        dia.GA,
+        socket_path="/v1/realtime",
+        session_cap_min=60,
+    ),
+    ProviderName.VOLCANO: ProviderProfile(
+        caps_mod.VOLCANO,
+        # Binary frames and numbered events — neither dialect fits, so there is
+        # no codec. volcano_wire.py does this one's encoding.
+        None,
+        socket_path="/api/v3/realtime/dialogue",
+        # No per-connection cap published; a 10-minute IDLE timeout instead,
+        # which our never-silent uplink (plan section 3.3 rule 7) cannot reach.
+        session_cap_min=0,
+        default_url="wss://openspeech.bytedance.com/api/v3/realtime/dialogue",
+    ),
 }
 
 
 def profile_for(provider: ProviderName) -> ProviderProfile:
     return PROFILES[provider]
+
+
+def codec_for(provider: ProviderName) -> dia.Codec:
+    """The dialect codec, for the code paths that cannot work without one.
+
+    Raises:
+        ValueError: This provider speaks its own protocol. Loud on purpose —
+            the alternative is handing RealtimeClient a None it would only
+            trip over several frames later, somewhere that reads like a
+            server fault.
+    """
+    codec = PROFILES[provider].codec
+    if codec is None:
+        raise ValueError(
+            f"{provider.value} 不说 OpenAI Realtime 方言，没有 codec 可用——"
+            "这条路径要的是能说方言的 provider。"
+        )
+    return codec
 
 
 def turn_type_problems(

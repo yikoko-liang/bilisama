@@ -43,7 +43,7 @@ import pytest
 import websockets
 
 from bilisama.config.enums import ProviderName
-from bilisama.realtime.providers import _DEFAULT_MODELS, _hosted_url
+from bilisama.realtime.providers import PROFILES, _hosted_url
 
 pytestmark = pytest.mark.provider_a
 
@@ -55,7 +55,8 @@ def _endpoint() -> tuple[str, str]:
         pytest.skip("没有托管端点凭据（dashscope_url / ali_api_key）。本机跑先 source path.sh")
     url = _hosted_url(raw, ProviderName.DASHSCOPE)
     if "model=" not in url:
-        url += ("&" if "?" in url else "?") + f"model={_DEFAULT_MODELS[ProviderName.DASHSCOPE]}"
+        model = PROFILES[ProviderName.DASHSCOPE].default_model
+        url += ("&" if "?" in url else "?") + f"model={model}"
     return url, key
 
 

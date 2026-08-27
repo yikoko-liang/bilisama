@@ -37,7 +37,7 @@ import zlib
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import parse_qsl, urlencode
+from urllib.parse import parse_qsl
 
 import websockets
 
@@ -47,7 +47,8 @@ from bilisama.obs.health import LinkHealth
 from bilisama.obs.logging import bind, get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
-from bilisama.realtime.providers import profile_for, resolve_endpoint
+from bilisama.realtime.providers import codec_for, profile_for, resolve_endpoint, with_model
+from bilisama.realtime.providers.factory import LinkRequest, build_link
 
 
 class _AudioIn(Protocol):
@@ -140,44 +141,6 @@ def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
 
     task.add_done_callback(done)
     return task
-
-
-def _with_model(url: str, model: str, *, explicit: bool = False) -> str:
-    """Name the model in the query string, the way hosted endpoints expect.
-
-    Deciding WHICH model, and which address, moved to resolve_endpoint — this
-    only joins the two. Idempotent because an address may arrive already
-    finished: someone can paste a complete URL into config or --url, and
-    stapling a second ?model= on would make it unroutable.
-
-    That idempotence used to be absolute, and it silently ate `--model`. The
-    hosted address shape carries the model in its query, so the endpoint line
-    a streamer pastes into bilisama.toml usually already has one; the flag
-    ranks FIRST in resolve_endpoint (realtime/providers/__init__.py:117-119)
-    and then lost right here. `explicit` is that ranking, carried down one
-    level: a model the command line asked for replaces the address's, and a
-    model that merely fell out of the config or the registry default does not
-    — between two config-level answers the more specific one should win.
-
-    Args:
-        url: The resolved address, with or without a query.
-        model: The resolved model name; "" for a provider that has none.
-        explicit: Whether `--model` supplied it.
-    """
-    if not model:
-        return url
-    base, question, query = url.partition("?")
-    named = parse_qsl(query, keep_blank_values=True)
-    # Whole parameter names, not a substring: "model=" in url also matched
-    # llm_model= and submodel=, and then refused to add the model actually
-    # asked for.
-    if not any(key == "model" for key, _ in named):
-        return f"{url}{'&' if question else '?'}model={model}"
-    if not explicit:
-        return url
-    kept = [(key, value) for key, value in named if key != "model"]
-    kept.append(("model", model))
-    return f"{base}?{urlencode(kept)}"
 
 
 def _endpoint_line(url: str) -> str:
@@ -1036,8 +999,6 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.obs.outcome import Outcome, OutcomeWindow, Verdict
     from bilisama.persona.loader import PersonaStore, default_data_dir, template_variables
     from bilisama.proactive import ProactiveTopicLoop
-    from bilisama.realtime.providers import turn_type_problems
-    from bilisama.realtime.providers.s2s import S2SLink
     from bilisama.side import OpenAICompatSideModel, SideModel
     from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
     from bilisama.ui.config_edit import apply_panel_edits
@@ -1255,48 +1216,30 @@ async def run_director(args: argparse.Namespace) -> int:
         settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
     )
     provider = endpoint.provider
-    inner: link.SpeechLink
-    connect_url: str = endpoint.url
-    if provider is ProviderName.S2S:
-        # Audio replies, not the shipping default: this stands against the
-        # zero-patch official pipeline whose own TTS does the speaking. A
-        # text-pinned session would mute every reply until stage 4 exists.
-        inner = S2SLink(connect_url, text_replies=False)
-    elif provider is ProviderName.DASHSCOPE:
-        from bilisama.realtime.providers.hosted import HostedLink
-
-        # The registry knows which turn types this endpoint really honours;
-        # refusing here beats a session.update that gets silently ignored (D14).
-        # model, not just provider: semantic_vad exists on qwen3.5-omni and is
-        # refused by qwen-audio-3.0-realtime-flash, which is the factory default
-        # (providers/__init__.py). Checking the provider alone said yes to a
-        # combination the endpoint rejects.
-        for problem in turn_type_problems(
-            provider, settings.speech.dashscope.turn.type, model=endpoint.model
-        ):
-            raise SystemExit(f"{problem.message} {problem.fix}")
-        env_key = os.environ.get("ali_api_key", "")  # noqa: SIM112  (path.sh 里的原名)
-        key = secrets.resolve(settings.speech.dashscope.api_key_ref) or env_key
-        if not key:
-            raise SystemExit(
-                "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
-            )
-        connect_url = _with_model(connect_url, endpoint.model, explicit=bool(args.model))
-        inner = HostedLink(
-            connect_url,
-            ProviderName.DASHSCOPE,
-            headers={"Authorization": f"Bearer {key}"},
-            turn=settings.speech.dashscope.turn,
-            voice=args.voice or settings.speech.dashscope.voice,
-            session_cap_min=settings.speech.dashscope.session_cap_min,
+    # Which credential to look for, which turn types the endpoint honours, how
+    # the model joins the address: all of it is the provider's business, and it
+    # used to be spelled out right here as an if/elif whose `else` refused
+    # anything new. The factory owns that now (realtime/providers/factory.py).
+    built = build_link(
+        LinkRequest(
+            endpoint=endpoint,
+            settings=settings,
+            voice=args.voice,
+            model_explicit=bool(args.model),
+            env=os.environ,
+            # Audio replies, not the shipping default: this stands against the
+            # zero-patch official pipeline whose own TTS does the speaking. A
+            # text-pinned session would mute every reply until stage 4 exists.
+            text_replies=False,
         )
-    else:
-        raise SystemExit("--director 支持 s2s 和 dashscope；openai_ga 不是出货路径，暂时没接。")
-    # After the branch, not before it: only here is connect_url the address
-    # that will actually be dialed, model and all. Printed earlier the line
-    # could only guess which model wins — and a banner that guesses is how a
-    # swallowed --model stayed invisible. The three exits above each carry
-    # their own fix action, so none of them needed this line.
+    )
+    inner: link.SpeechLink = built.link
+    connect_url: str = built.url
+    # After the build, not before it: only here is connect_url the address that
+    # will actually be dialed, model and all. Printed earlier the line could
+    # only guess which model wins — and a banner that guesses is how a
+    # swallowed --model stayed invisible. Every refusal inside the factory
+    # carries its own fix action, so none of them needed this line.
     print(f"[语音] {provider.value} @ {_endpoint_line(connect_url)}（来自{endpoint.source}）")
     speech = _Fanout(inner)
     await _connect_or_exit(speech, provider, connect_url)
@@ -2246,11 +2189,11 @@ async def run(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "缺 DashScope 凭据：配 [speech.dashscope] api_key_ref，或先 source path.sh。"
             )
-        url = _with_model(url, endpoint.model, explicit=bool(args.model))
+        url = with_model(url, endpoint.model, explicit=bool(args.model))
         headers = {"Authorization": f"Bearer {key}"}
     print(f"[语音] {provider.value} @ {_endpoint_line(url)}（来自{endpoint.source}）")
 
-    client = RealtimeClient(url, caps=profile.caps, codec=profile.codec, headers=headers)
+    client = RealtimeClient(url, caps=profile.caps, codec=codec_for(provider), headers=headers)
     await _connect_or_exit(client, provider, url)
     print(f"已连接 {provider.value}（{url.split("?")[0]}），说话即可，Ctrl-C 退出。")
     if args.wav is None and not args.mute_while_speaking:
@@ -2315,7 +2258,14 @@ def build_parser() -> argparse.ArgumentParser:
     # --voice already uses with "". Not argparse.SUPPRESS: that removes the
     # attribute entirely and every hand-built Namespace in the tests breaks.
     parser.add_argument(
-        "--provider", choices=["s2s", "dashscope"], default=None, help="不给就读配置"
+        # From the enum, not a hand-written pair. The list was a fourth place
+        # that had to learn about a new provider, and the one place a streamer
+        # meets first: argparse refuses an unlisted name before any of the
+        # factory's messages get a chance to say what is really missing.
+        "--provider",
+        choices=[p.value for p in ProviderName],
+        default=None,
+        help="不给就读配置",
     )
     parser.add_argument("--url", default=None, help="语音服务地址；不给就读配置")
     parser.add_argument("--model", default=None, help="托管服务的模型名；不给就读配置")

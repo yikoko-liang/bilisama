@@ -40,9 +40,10 @@ export openai_compatible_url=...
 
 ### 连哪儿由谁说了算
 
-**命令行 > 配置 > 环境变量**，三层，先给的赢。密钥和音色本来就是这个顺序，
+**命令行 > 配置 > 环境变量 > 内置默认**，四层，先给的赢。密钥和音色本来就是这个顺序，
 2026-08-24 把 provider、地址、模型名也接了进来——在那之前 `[speech]` 那几个字段
-是摆设，命令行的默认值永远压着它们。
+是摆设，命令行的默认值永远压着它们。最后那层只对「地址全网一样」的后端开放：
+火山有（`wss://openspeech.bytedance.com/...`），DashScope 没有（那是租户专属实例）。
 
 启动时会打一行 `[语音] dashscope @ 地址（来自配置）`，告诉你这次是哪一层赢的。
 连不上的时候先看这一行，别急着改配置。
@@ -55,6 +56,45 @@ export openai_compatible_url=...
 
 `[speech.dashscope] endpoint` 出厂是空的——那是租户专属地址，不适合入库。
 开发机靠 `path.sh` 兜着；将来打包出去的版本要靠首次向导填。
+
+### 火山引擎（豆包端到端语音）
+
+⚠️ **还没在真端点上跑过。** 协议是照文档 ＋ 官方那一帧样例实现的，假服务器全通、
+门禁全绿，但真端点的行为有六个问题还没答（清单在
+[tests/integration/test_volcano_contract.py](../tests/integration/test_volcano_contract.py)
+的文件头）。凭据一到先跑那套契约测试，答案跟实现对不上就先改实现。
+
+path.sh 里放两个（缺一个都连不上，报错会说少的是哪一个）：
+
+```bash
+export volcano_app_id=...
+export volcano_access_key=...
+```
+
+然后：
+
+```bash
+.venv/bin/python -m bilisama dev-talk --director --provider volcano
+```
+
+地址不用填，走内置的公网地址。配置在 `[speech.volcano]`：
+
+| 字段 | 说明 |
+|---|---|
+| `model` | `1.2.1.1` 用一段文字描述人设、配官方音色；`2.2.0.0` 用角色档案、配克隆音色。**两个版本的音色清单不通用**，换版本要跟着换 `speaker` |
+| `speaker` | 留空用服务端默认 |
+| `end_smooth_window_ms` | 停多久算一句说完了。这条路上唯一的判停旋钮——它没有 `server_vad` 之外的判停类型 |
+
+跑契约测试（没凭据会逐条跳过并说清楚怎么补）：
+
+```bash
+.venv/bin/python -m pytest tests/integration/test_volcano_contract.py -m provider_a -v
+```
+
+**三件跟别的后端不一样的事，别当成故障**：①它的模型判停后**自己就答**，我们不发
+「开始生成」那种指令；②**没有打断指令**——服务端发一条 `ASRInfo` 让我们停播，
+`cancel()` 只能在本地作废，模型那侧可能还在生成，token 照算；③**没有重连**，
+HostedLink 那套断线重连这条路上还没有，掉线就得重启（欠账 #77）。
 
 ## 起本地语音服务器（原装三段管线：识别 → 对话 → 合成）
 

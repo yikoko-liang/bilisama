@@ -57,7 +57,7 @@ _WATCHDOG_S = 25.0  # plan section 3.3 rule 2
 
 
 class SessionRefused(ConnectionError):
-    """The handshake's first frame was not session.created.
+    """The handshake did not get through.
 
     Almost always the server's one error frame before its 1008 close — a full
     server refuses at connect, not at response.create (the mock's SESSION_LIMIT
@@ -66,8 +66,14 @@ class SessionRefused(ConnectionError):
     mirror link.LinkError's field names.
     """
 
-    def __init__(self, code: str, detail: str) -> None:
-        text = f"服务端第一帧不是 session.created：{code}"
+    def __init__(self, code: str, detail: str, *, summary: str = "") -> None:
+        """Args:
+        summary: What went wrong, in this protocol's own words. The default
+            describes the OpenAI-dialect handshake, which is what every caller
+            here means — but naming session.created to someone dialing a
+            provider that has no such event sends them looking for it.
+        """
+        text = f"{summary or '服务端第一帧不是 session.created'}：{code}"
         if detail:
             text += f"（{detail}）"
         super().__init__(text)

@@ -99,6 +99,29 @@ OPENAI_GA = Capabilities(
 )
 
 
+VOLCANO = Capabilities(
+    owns_tts=True,  # its own TTS speaks; we forward PCM
+    # One dialogue at a time, and the model claims the slot itself after VAD
+    # rather than waiting to be asked.
+    single_response_slot=True,
+    # There is no out-of-band concept at all here: no response.create means no
+    # conversation="none" to exempt. False is the honest answer for a
+    # distinction the protocol does not make.
+    out_of_band_exempt_from_slot=False,
+    # ConversationTruncate (513) does exist, but it wants a 2.0 model plus
+    # enable_conversation_truncate, and nothing in src/ reads this bit anyway
+    # (see the OPENAI_GA note). Claiming it would add a second untested path
+    # to a feature with no consumer.
+    item_truncate=False,
+    # Nothing acknowledges an UpdateConfig the way session.updated does; the
+    # client must not sit waiting for one.
+    acknowledges_session_update=False,
+    # The vendor's docs are explicit that only server VAD exists here. Naming
+    # the others would be the exact lie this field exists to prevent.
+    turn_detection_types=frozenset({"server_vad"}),
+)
+
+
 # Turn detection is the one capability that splits BELOW the provider: the same
 # DashScope account serves models with different answers (see DASHSCOPE above).
 # Only models we actually probed are listed — an unlisted one inherits its

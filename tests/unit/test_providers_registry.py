@@ -17,12 +17,11 @@ def test_every_provider_name_has_a_profile() -> None:
 
 
 def test_every_hosted_provider_has_a_socket_path() -> None:
-    """The address builder indexes this table. A hosted provider missing from
-    it is a KeyError at connect time — on the streamer's machine, mid-setup."""
-    from bilisama.realtime.providers import _HOSTED_PATHS
-
+    """The address builder staples this onto a bare host. A hosted provider
+    that left it empty dials the host's root — a 404 that reports as a refused
+    handshake, which sends people checking a key that was never the problem."""
     hosted = set(ProviderName) - {ProviderName.S2S}
-    assert hosted <= set(_HOSTED_PATHS)
+    assert all(PROFILES[p].socket_path for p in hosted)
 
 
 @pytest.mark.parametrize(
@@ -98,9 +97,9 @@ def test_the_factory_default_model_is_covered_by_the_narrowing() -> None:
     """The scenario the check exists for: config leaves [speech.dashscope].model
     blank, resolve_endpoint fills in this name, and the turn type is validated
     against it."""
-    from bilisama.realtime.providers import _DEFAULT_MODELS
+    default = PROFILES[ProviderName.DASHSCOPE].default_model
+    assert default, "注册表没给 DashScope 兜底模型，下面三条断言就没在测东西"
 
-    default = _DEFAULT_MODELS[ProviderName.DASHSCOPE]
     assert turn_type_problems(ProviderName.DASHSCOPE, "semantic_vad", model=default)
     assert turn_type_problems(ProviderName.DASHSCOPE, "server_vad", model=default) == []
     assert turn_type_problems(ProviderName.DASHSCOPE, "smart_turn", model=default) == []

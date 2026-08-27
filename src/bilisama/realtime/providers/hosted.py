@@ -21,7 +21,7 @@ from bilisama.obs.logging import get_logger
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient
-from bilisama.realtime.providers import compose_instructions, profile_for
+from bilisama.realtime.providers import codec_for, compose_instructions, profile_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -31,17 +31,6 @@ if TYPE_CHECKING:
 __all__ = ["HostedLink"]
 
 log = get_logger(__name__)
-
-# How long each endpoint lets one connection live, in minutes (plan section
-# 3.1). An adapter constant, not a capability: capabilities.py's own docstring
-# puts session limits here, because a field only the adapter reads is not a
-# capability. A provider missing from this table is one whose cap we never
-# measured, and it is left un-rotated — rotating on an invented number costs a
-# break-before-make for nothing.
-_SESSION_CAP_MIN: dict[ProviderName, int] = {
-    ProviderName.DASHSCOPE: 120,
-    ProviderName.OPENAI_GA: 60,
-}
 
 
 class HostedLink:
@@ -68,7 +57,7 @@ class HostedLink:
             at 343 Hz, high enough to read as shrill. Names are the
             provider's; a wrong one draws a refusal listing the valid ones.
         session_cap_min: How long this endpoint lets one connection live.
-            None takes the provider's published cap (_SESSION_CAP_MIN); 0
+            None takes the provider's published cap (ProviderProfile); 0
             disables rotation. It defaulted to 0, and every caller left it
             alone — so the rotation code shipped with no path that could
             reach it and the cap kept being met the passive way, by being cut
@@ -79,24 +68,25 @@ class HostedLink:
             clock rather than mid-sentence on theirs.
         """
         profile = profile_for(provider)
+        codec = codec_for(provider)
         self._provider = provider
         self._client = RealtimeClient(
             url,
             caps=profile.caps,
-            codec=profile.codec,
+            codec=codec,
             clock=clock,
             watchdog_s=watchdog_s,
             headers=headers,
             auto_reconnect=auto_reconnect,
             reconnect_backoff_s=reconnect_backoff_s,
         )
-        self._codec = profile.codec
+        self._codec = codec
         self._caps = profile.caps
         self._turn = turn
         self._voice = voice
         self._context = ""
         self._clock: Clock = clock or SystemClock()
-        cap_min = _SESSION_CAP_MIN.get(provider, 0) if session_cap_min is None else session_cap_min
+        cap_min = profile.session_cap_min if session_cap_min is None else session_cap_min
         self._session_cap_s = max(0.0, (cap_min - rotate_margin_min) * 60.0)
         self._rotation: asyncio.Task[None] | None = None
         # Said once per link, not once per protected reply: see request_reply.
