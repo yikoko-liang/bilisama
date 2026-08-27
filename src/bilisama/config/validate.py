@@ -59,6 +59,47 @@ class ConfigError(Exception):
         super().__init__("\n".join(p.message for p in problems))
 
 
+def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
+    """Whether this voice and this model generation can work together.
+
+    Its own function because the pairing has two judges. `check` reads the
+    config, and the factory reads what will ACTUALLY be sent — `--voice`
+    overrides the config, and overriding into the wrong pairing is the obvious
+    way to try the other generation. Both failures are silent on the wire, so
+    the check has to follow the value rather than the field.
+
+    Args:
+        model: The generation, `1.2.1.1` (O2.0) or `2.2.0.0` (SC2.0).
+        speaker: The voice id that will be sent, after any override.
+    """
+    cloned = speaker.startswith(("saturn_", "ICL_", "S_"))
+    problems: list[ConfigProblem] = []
+    if model == "2.2.0.0" and not cloned:
+        problems.append(
+            ConfigProblem(
+                field="speech.volcano.speaker",
+                message=(
+                    "SC2.0（2.2.0.0）只认克隆音色，这里"
+                    + (f"填的是「{speaker}」。" if speaker else "留空了。")
+                    + "配错了她会一声不吭——服务端回的是 InvalidSpeaker，不是拒绝启动。"
+                ),
+                fix="换成 saturn_ 开头的官方克隆音色，或你自己注册的 S_ 音色。",
+            )
+        )
+    if model == "1.2.1.1" and cloned:
+        problems.append(
+            ConfigProblem(
+                field="speech.volcano.speaker",
+                message=(
+                    f"O2.0（1.2.1.1）配了克隆音色「{speaker}」。克隆音色自带服务端角色，"
+                    "会盖过人设——她会用别人的名字和口吻说话，而且不报错。"
+                ),
+                fix="换成官方音色（zh_female_vv_jupiter_bigtts 这类），或把模型版本改成 2.2.0.0。",
+            )
+        )
+    return problems
+
+
 def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]:
     """Validate combinations that individual field types cannot express.
 
@@ -159,7 +200,11 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     touched = _customised(s.custom_tts)
     if touched and owns_tts:
         if s.speech.provider is not ProviderName.S2S:
-            hosted_voice = f"speech.{s.speech.provider.value}.voice"
+            # Not every backend calls it `voice`: volcano's is `speaker`, and
+            # its section forbids extras, so the old hard-coded name sent the
+            # streamer to a field that would be rejected if they created it.
+            voice_field = "speaker" if s.speech.provider is ProviderName.VOLCANO else "voice"
+            hosted_voice = f"speech.{s.speech.provider.value}.{voice_field}"
             problems.append(
                 ConfigProblem(
                     field="custom_tts.engine",
@@ -213,8 +258,20 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
         )
 
     if s.speech.provider is not ProviderName.S2S:
-        hosted = getattr(s.speech, s.speech.provider.value)
-        if not hosted.endpoint:
+        section = getattr(s.speech, s.speech.provider.value)
+        # A blank endpoint is only a problem when nothing else can supply one.
+        # Some backends answer at one address for everybody, so the registry
+        # ships it and `resolve_endpoint` falls back to it — refusing here
+        # rejected the very config config/bilisama.toml and the runbook tell
+        # people to write (「地址留空就用内置的公网地址」). DashScope has no
+        # such default, its address being tenant-specific, so it still refuses.
+        #
+        # Imported inside the function on purpose: the registry imports
+        # ConfigProblem from this module, so the arrow only goes one way at
+        # import time. Same dependency knot cli.py's cmd_validate names.
+        from bilisama.realtime.providers import PROFILES
+
+        if not section.endpoint and not PROFILES[s.speech.provider].default_url:
             problems.append(
                 ConfigProblem(
                     field=f"speech.{s.speech.provider.value}.endpoint",
@@ -254,39 +311,16 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     #
     # Fatal on both counts. A persona that silently does not apply is worse
     # than a refusal, and this one is decidable before a socket opens.
+    #
+    # One guard for both volcano rules. They used to be two adjacent `if`s on
+    # the same condition with nothing between them.
     if s.speech.provider is ProviderName.VOLCANO:
-        speaker = s.speech.volcano.speaker
-        cloned = speaker.startswith(("saturn_", "ICL_", "S_"))
-        if s.speech.volcano.model == "2.2.0.0" and not cloned:
-            problems.append(
-                ConfigProblem(
-                    field="speech.volcano.speaker",
-                    message=(
-                        "SC2.0（2.2.0.0）只认克隆音色，这里"
-                        + (f"填的是「{speaker}」。" if speaker else "留空了。")
-                        + "配错了她会一声不吭——服务端回的是 InvalidSpeaker，不是拒绝启动。"
-                    ),
-                    fix="换成 saturn_ 开头的官方克隆音色，或你自己注册的 S_ 音色。",
-                )
-            )
-        if s.speech.volcano.model == "1.2.1.1" and cloned:
-            problems.append(
-                ConfigProblem(
-                    field="speech.volcano.speaker",
-                    message=(
-                        f"O2.0（1.2.1.1）配了克隆音色「{speaker}」。克隆音色自带服务端角色，"
-                        "会盖过人设——她会用别人的名字和口吻说话，而且不报错。"
-                    ),
-                    fix="换成官方音色（zh_female_vv_jupiter_bigtts 这类），"
-                    "或把模型版本改成 2.2.0.0。",
-                )
-            )
+        problems += volcano_voice_problems(s.speech.volcano.model, s.speech.volcano.speaker)
 
-    # Either an API Key on its own, or the older App ID / Access Token pair —
-    # and they are alternatives, not complements. Not fatal here because
-    # path.sh can still supply one at run time; the factory refuses for real
-    # when no layer has any, and it names both shapes.
-    if s.speech.provider is ProviderName.VOLCANO:
+        # Either an API Key on its own, or the older App ID / Access Token pair
+        # — and they are alternatives, not complements. Not fatal here because
+        # path.sh can still supply one at run time; the factory refuses for
+        # real when no layer has any, and it names both shapes.
         volcano = s.speech.volcano
         has_pair = bool(volcano.app_id_ref and volcano.access_key_ref)
         if not volcano.api_key_ref and not has_pair:

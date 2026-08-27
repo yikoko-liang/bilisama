@@ -203,3 +203,74 @@ def test_show_keeps_a_finite_limit_as_a_number(
     cli.main(["config", "show", "--config", str(_write(tmp_path, body))])
     payload = _strict_json(capsys.readouterr().out)
     assert payload["speech"]["s2s"]["turn"]["max_speech_ms"] == 30000
+
+
+_VOLCANO = """
+config_version = 1
+[speech]
+provider = "volcano"
+[speech.s2s]
+llm_model = "our-s2t-v1"
+[speech.volcano]
+endpoint = ""
+api_key_ref = "env:volcano_api_key"
+model = "1.2.1.1"
+speaker = "zh_female_vv_jupiter_bigtts"
+[avatar]
+expression_source = "lexicon"
+"""
+
+
+@pytest.mark.parametrize("command", ["validate", "show"])
+def test_the_shipped_volcano_shape_is_not_refused_by_our_own_checks(
+    command: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two rules assumed 「not s2s」 meant 「therefore a HostedConfig」, which held
+    for exactly as long as there were three providers.
+
+    `validate` crashed on `hosted.turn.type` — VolcanoConfig has no turn section
+    — with an AttributeError that escaped main() as the traceback `_load`'s
+    docstring exists to prevent. And the blank-endpoint rule refused a config
+    the registry can answer from its own built-in address, which is what
+    config/bilisama.toml ships and what the runbook says to leave alone. Every
+    strict load exited 2 on it.
+    """
+    code = cli.main(["config", command, "--config", str(_write(tmp_path, _VOLCANO))])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "endpoint" not in out or "缺少地址" not in out
+    for jargon in ("AttributeError", "Traceback", "pydantic"):
+        assert jargon not in out
+
+
+def test_every_constraint_the_schema_can_refuse_speaks_chinese() -> None:
+    """§7.6: 「主播看到 pydantic.ValidationError，只会来问我们」.
+
+    The table used to hold two entries — a typo'd key and a missing one — so
+    the day a field grew `max_length` the streamer got 「String should have at
+    most 20 characters」 and no 怎么办 line. This walks the schema for the
+    constraint kinds actually in use and requires a sentence for each.
+    """
+    from pydantic import ValidationError
+
+    from bilisama.cli import _FIELD_ERROR_TEXT
+
+    attempts: list[dict[str, Any]] = [
+        {"persona": {"display_name": "长" * 200}},
+        {"persona": {"id": 5}},
+        {"speech": {"provider": "不存在的后端"}},
+        {"interaction": {"burst_uniques": -1}},
+        {"runtime": {"log_level": "喧哗"}},
+        {"memory": {"retain_event_days": "很多天"}},
+        {"runtime": {"log_viewer_content": "也许"}},
+    ]
+    seen: set[str] = set()
+    for payload in attempts:
+        try:
+            Settings.model_validate(payload)
+        except ValidationError as exc:
+            seen.update(err["type"] for err in exc.errors())
+
+    assert seen, "一条约束都没触发，这个测试没在测东西"
+    untranslated = sorted(seen - set(_FIELD_ERROR_TEXT))
+    assert not untranslated, f"这些约束还只会说英文：{untranslated}"

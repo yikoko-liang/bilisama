@@ -35,6 +35,7 @@ from bilisama.config import (
     load,
 )
 from bilisama.config.loader import layers, origins
+from bilisama.config.schema import HostedConfig
 from bilisama.config.ui_meta import DERIVED_META
 
 # Relative to the repo, not the working directory, so the CLI works from anywhere.
@@ -42,12 +43,33 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = _REPO_ROOT / "config" / "bilisama.toml"
 
 
-# The two schema errors everyone actually hits: a typo'd key and a deleted
-# required one. Anything else falls through to pydantic's English message,
-# which at least now arrives with its field path in front (D7).
+# Plan section 7.6: 「主播看到 pydantic.ValidationError，只会来问我们」. So every
+# constraint the schema can actually refuse gets a Chinese sentence here.
+# Anything else still falls through to pydantic's English, with its field path
+# in front (D7) — but that list should only ever hold constraints nobody has
+# put on a field yet.
+#
+# Length and range arrived the day a field grew `max_length`; before that the
+# streamer got 「String should have at most 20 characters」 with no 怎么办 line.
 _FIELD_ERROR_TEXT = {
     "extra_forbidden": "不认识这个字段，多半是拼错了。对照 `bilisama config show` 的字段名改过来。",
     "missing": "缺了这个必填字段。",
+    "string_too_long": "太长了，超过了这个字段的字数上限。",
+    "string_too_short": "太短了，没到这个字段的最少字数。",
+    "greater_than": "这个数太小了。",
+    "greater_than_equal": "这个数太小了。",
+    "less_than": "这个数太大了。",
+    "less_than_equal": "这个数太大了。",
+    "literal_error": "这个值不在允许的取值里。",
+    "enum": "这个值不在允许的取值里。",
+    "int_parsing": "这里要一个整数。",
+    "float_parsing": "这里要一个数字。",
+    "bool_parsing": "这里要 true 或 false。",
+    "string_type": "这里要一段文字，用引号括起来。",
+    "int_type": "这里要一个整数。",
+    "float_type": "这里要一个数字。",
+    "bool_type": "这里要 true 或 false。",
+    "list_type": "这里要一个列表，用方括号括起来。",
 }
 
 
@@ -60,7 +82,11 @@ def report_validation(exc: ValidationError, *, stream: TextIO | None = None) -> 
     for err in exc.errors():
         loc = ".".join(str(part) for part in err["loc"]) or "（顶层）"
         detail = _FIELD_ERROR_TEXT.get(err["type"], err["msg"])
-        print(f"[错误] {loc}：{detail}", file=stream)
+        # pydantic already knows the number the constraint is about; repeating
+        # it in Chinese would be a second place to keep it right.
+        limits = ", ".join(f"{k}={v}" for k, v in sorted((err.get("ctx") or {}).items()))
+        suffix = f"（{limits}）" if limits else ""
+        print(f"[错误] {loc}：{detail}{suffix}", file=stream)
 
 
 def report_problems(problems: list[ConfigProblem], *, stream: TextIO | None = None) -> None:
@@ -208,15 +234,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
     # This command exists to describe a broken config, so it has to be handed one.
     settings = _load(args.config, strict=False)
     problems = check(settings, config_dir=args.config.parent)
-    if settings.speech.provider is not ProviderName.S2S:
+    section = getattr(settings.speech, settings.speech.provider.value)
+    # `not S2S` used to stand in for "therefore a HostedConfig", which held
+    # exactly as long as there were three providers. Volcano is neither, and it
+    # has no `turn` section at all — the duck-typing raised AttributeError past
+    # main() as the traceback _load's docstring exists to prevent.
+    if isinstance(section, HostedConfig):
         # Turn-type support lives in the provider registry, which config/ cannot
         # import (dependency direction), so the wiring sits here (D14). Lazy so
         # `config validate` does not pay for the realtime stack unless needed.
         from bilisama.realtime.providers import turn_type_problems
 
-        hosted = getattr(settings.speech, settings.speech.provider.value)
         problems += turn_type_problems(
-            settings.speech.provider, hosted.turn.type, model=hosted.model
+            settings.speech.provider, section.turn.type, model=section.model
         )
     if not problems:
         print("配置没问题。")

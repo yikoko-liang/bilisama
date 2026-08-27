@@ -255,7 +255,19 @@ def test_the_llm_model_rule_ignores_a_hosted_provider() -> None:
     assert "speech.s2s.llm_model" not in _fields(hosted)
 
 
-@pytest.mark.parametrize("provider", [ProviderName.DASHSCOPE, ProviderName.OPENAI_GA])
+def _providers_needing_a_configured_endpoint() -> list[ProviderName]:
+    """Derived, never hand-listed.
+
+    The old list was `[DASHSCOPE, OPENAI_GA]`, exhaustive right up to the day a
+    fourth provider arrived — and then silently not, which is how the rule
+    below came to refuse the config the runbook tells people to write.
+    """
+    from bilisama.realtime.providers import PROFILES
+
+    return [p for p in ProviderName if p is not ProviderName.S2S and not PROFILES[p].default_url]
+
+
+@pytest.mark.parametrize("provider", _providers_needing_a_configured_endpoint())
 def test_hosted_provider_without_endpoint_is_fatal(provider: ProviderName) -> None:
     """Guards the `getattr(s.speech, provider.value)` indirection.
 
@@ -504,9 +516,11 @@ def test_openai_ga_is_flagged_as_a_reference_not_a_shipping_path() -> None:
 
 
 def test_the_sample_rate_note_is_only_for_openai_ga() -> None:
-    for provider in (ProviderName.S2S, ProviderName.DASHSCOPE):
+    """Every other provider, derived — the hand-written pair stopped meaning
+    「only」 the moment a fourth one existed."""
+    for provider in set(ProviderName) - {ProviderName.OPENAI_GA}:
         s = _settings(provider=provider, expression_source="lexicon")
-        assert "speech.provider" not in _fields(s)
+        assert "speech.provider" not in _fields(s), provider
 
 
 # ------------------------------------------------------------ the whole list
@@ -591,3 +605,37 @@ def test_every_problem_points_at_a_real_settings_field() -> None:
     for broken in BROKEN_ONE_WAY_EACH.values():
         for p in broken.problems():
             assert _resolves(p.field), f"{p.field} is not a Settings field"
+
+
+# --------------------------------------------- the fourth provider is not hosted
+
+
+def test_a_backend_with_a_built_in_address_is_not_refused_for_leaving_it_blank() -> None:
+    """`endpoint = ""` is the shipped value and what docs/runbook.md tells
+    people to leave alone (「地址留空就用内置的公网地址」), because the registry
+    carries a default and `resolve_endpoint` falls back to it. Refusing here
+    made every strict load — `config show`, `render-s2s`, `persona review` —
+    exit 2 on the config this repo ships.
+    """
+    from bilisama.realtime.providers import PROFILES
+
+    have_default = [p for p in ProviderName if PROFILES[p].default_url]
+    assert have_default, "没有任何 provider 自带地址，这条测试就没有对象了"
+    for provider in have_default:
+        s = _settings(provider=provider, endpoint="", expression_source="lexicon")
+        assert f"speech.{provider.value}.endpoint" not in _fields(s), provider
+
+
+def test_every_voice_fix_names_a_field_that_exists() -> None:
+    """The `[custom_tts]` advice used to hard-code `.voice`, which volcano does
+    not have — and its section forbids extras, so a streamer who followed the
+    instruction would have the file rejected. The fix has to point somewhere
+    real on every backend."""
+    import re
+
+    for provider in set(ProviderName) - {ProviderName.S2S}:
+        s = _settings(provider=provider, expression_source="lexicon", tts_voice="知性")
+        problem = _one(s, "custom_tts.engine")
+        named = re.findall(r"speech\.[a-z_0-9.]+", problem.fix)
+        assert named, problem.fix
+        assert _resolves(named[0]), f"{named[0]} 这个字段不存在（{provider}）"
