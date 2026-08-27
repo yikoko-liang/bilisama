@@ -63,21 +63,6 @@ __all__ = ["VolcanoLink"]
 
 log = get_logger(__name__)
 
-# Both fixed by the vendor's docs for the dialogue resource, and both sent on
-# every handshake. Neither is a secret or a credential: they name the API, the
-# way `socket_path` names a path, and the vendor publishes them in its own
-# quickstart. The name is theirs, not ours — an "app key" here identifies the
-# product, not the account, which is why the account's key travels separately
-# in `x-api-key`.
-#
-# Hardcoded rather than configurable, which is against the rule that
-# bilisama.toml is the single source of truth. The exception is the same one
-# `ProviderProfile.default_host` takes: a value that is identical for every
-# installation is a constant, and asking a streamer to type it is asking them
-# to get it wrong. If the vendor ever versions these, they move into PROFILES
-# beside the address.
-_APP_KEY = "PlgvMymc7f3tQnJ6"
-_RESOURCE_ID = "volc.speech.dialog"
 
 _WATCHDOG_S = 25.0
 
@@ -290,11 +275,7 @@ class VolcanoLink:
           rather than filling in whichever fields happen to be non-empty.
         * the App ID / Access Token pair → the documented older way.
         """
-        headers = {
-            "X-Api-Resource-Id": _RESOURCE_ID,
-            "X-Api-App-Key": _APP_KEY,
-            "X-Api-Connect-Id": str(uuid.uuid4()),
-        }
+        headers = {**wire.resource_headers(), "X-Api-Connect-Id": str(uuid.uuid4())}
         if self._api_key:
             headers["x-api-key"] = self._api_key
         else:

@@ -42,11 +42,35 @@ __all__ = [
     "audio_request",
     "client_request",
     "decode",
+    "resource_headers",
 ]
 
 # Below this number an event is connection-level and carries no session id.
 # See the note in decode() — it is the same line in both directions.
 _SESSION_SCOPED_FROM = 100
+
+
+# Which API these frames belong to. Published by the vendor in its own
+# quickstart and identical for every account — they identify the product, not
+# the caller, which is why the caller's own key travels separately in
+# `x-api-key`. They live here, with the frame layout and the event numbers,
+# because that is what they are: part of the protocol's identity, not a setting
+# anybody would ever change. A streamer typing them is a streamer getting them
+# wrong.
+_RESOURCE_ID = "volc.speech.dialog"
+_APP_KEY = "PlgvMymc7f3tQnJ6"
+
+
+def resource_headers() -> dict[str, str]:
+    """The two headers that say which API this socket is speaking.
+
+    A function rather than two exported constants so the adapter never handles
+    them individually — the field they went into was called `_APP_KEY` in a
+    module full of credentials, and the next reader had to work out from the
+    comment that it was not one.
+    """
+    return {"X-Api-Resource-Id": _RESOURCE_ID, "X-Api-App-Key": _APP_KEY}
+
 
 _VERSION = 0b0001
 _HEADER_WORDS = 0b0001  # 1 * 4 = 4 bytes

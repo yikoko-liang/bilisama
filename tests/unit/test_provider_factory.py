@@ -288,3 +288,89 @@ def test_every_link_answers_how_long_the_floor_holds() -> None:
         assert windows[provider] > 0, provider
 
     assert windows[ProviderName.S2S] != windows[ProviderName.DASHSCOPE], "两条路的判停完全不同"
+
+
+# ------------------------------------------------------- who may read what
+
+
+# LinkRequest is one shape for every arm, which keeps the factory uniform and
+# means nothing stops an arm reading a field that was meant for another
+# provider. That is a real cost of the union, and this table is what turns it
+# from "nobody has done it yet" into a rule. Shared fields are not listed;
+# only the ones with an owner.
+_FIELD_OWNERS = {
+    "text_replies": {"S2S"},
+    "bot_name": {"VOLCANO"},
+    "voice": {"DASHSCOPE", "OPENAI_GA", "VOLCANO"},
+}
+
+
+def _request_fields_by_arm() -> dict[str, set[str]]:
+    """Which `request.<field>` each arm of `build_link` reads, itself plus the
+    helpers it calls."""
+    import ast
+    import inspect
+    import textwrap
+
+    from bilisama.realtime.providers import factory as mod
+
+    module = ast.parse(textwrap.dedent(inspect.getsource(mod)))
+    helpers = {
+        node.name: node
+        for node in ast.walk(module)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+    }
+
+    def reads(node: ast.AST, seen: set[str]) -> set[str]:
+        found: set[str] = set()
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Attribute)
+                and isinstance(child.value, ast.Name)
+                and child.value.id == "request"
+            ):
+                found.add(child.attr)
+            # Only a helper handed the whole request can read its fields.
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id in helpers
+                and child.func.id not in seen
+                and any(isinstance(a, ast.Name) and a.id == "request" for a in child.args)
+            ):
+                found |= reads(helpers[child.func.id], seen | {child.func.id})
+        return found
+
+    build = helpers["build_link"]
+    match_stmt = next(n for n in ast.walk(build) if isinstance(n, ast.Match))
+    out: dict[str, set[str]] = {}
+    for case in match_stmt.cases:
+        body = ast.Module(body=case.body, type_ignores=[])
+        for name in ast.unparse(case.pattern).replace("ProviderName.", "").split(" | "):
+            out.setdefault(name.strip(), set())
+            out[name.strip()] |= reads(body, set())
+    return out
+
+
+def test_no_arm_reads_a_field_that_belongs_to_another_provider() -> None:
+    """`text_replies` is s2s's, `bot_name` is volcano's, and the request object
+    hands both to every arm. Nothing in the type system objects, and the
+    dependency gate cannot see it — a provider quietly reading another's field
+    would work, right up until the two disagree about what it means.
+    """
+    by_arm = _request_fields_by_arm()
+    assert "VOLCANO" in by_arm, f"没解析出 volcano 那一臂：{sorted(by_arm)}"
+
+    trespass = [
+        f"{arm} 读了 {field}（那是 {'/'.join(sorted(owners))} 的）"
+        for arm, fields in by_arm.items()
+        for field, owners in _FIELD_OWNERS.items()
+        if field in fields and arm not in owners
+    ]
+    assert not trespass, trespass
+
+
+def test_the_ownership_table_still_describes_real_fields() -> None:
+    """A table naming a field that no longer exists guards nothing."""
+    for field in _FIELD_OWNERS:
+        assert field in LinkRequest.__dataclass_fields__, field
