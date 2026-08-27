@@ -1,6 +1,6 @@
 """Contract tests against the real Volcengine dialogue endpoint.
 
-Run for the first time on 2026-08-27, all six green. Before that every
+Run for the first time on 2026-08-27; ten green as of 2026-08-28. Before that every
 assertion here came from the vendor's documentation plus one worked example
 frame, and the file said so — that distinction is why it exists: the
 alternative is an adapter whose assumptions live only in comments, which is
@@ -33,6 +33,20 @@ endpoint changes its mind:
    silently: the assembly pushes the persona AFTER connect (dev_talk.py:1330),
    so on this provider that is the only channel it has, and an event accepted
    and ignored looks exactly like one that worked.
+
+Two more were added on 2026-08-28, after a report that the persona 「好像没传
+进去」. It had been transmitted and was working — a session with it describes
+herself as a co-host and admits what she cannot read, one without it lectures
+and denies knowing the streamer. Only the NAME was wrong, and the two tests
+below are the shape of what that took to find:
+
+7. **She answers to the name the persona gives her.** dialog.bot_name defaults
+   to 豆包 and beats a 557-character structured persona; a 31-character one
+   saying the same thing wins on its own, which is why small tests missed it.
+8. **A voice from the wrong generation fails loudly.** SC2.0 with a catalogue
+   voice answers ClientError:InvalidSpeaker on a frame with no event number,
+   which the adapter used to drop into its ignore branch — the streamer got
+   silence while the server had been explaining itself the whole time.
 """
 
 from __future__ import annotations
@@ -362,3 +376,66 @@ async def test_a_new_connection_resumes_the_conversation_by_dialog_id() -> None:
         assert "紫" in said or "兔" in said, f"新连接没接上上一场，她说的是「{said}」"
     finally:
         await second.aclose()
+
+
+async def test_she_answers_to_the_name_the_persona_gives_her() -> None:
+    """The one that catches 「sent but not effective」, which is the failure
+    mode this whole file exists for.
+
+    The persona is delivered — a session with it describes herself as a
+    co-host and admits what she cannot read, a session without it lectures and
+    says she has nothing to do with the streamer. But the NAME comes from
+    dialog.bot_name, which defaults to 豆包, and against a 557-character
+    structured persona that default wins: three runs out of three answered
+    「豆包」 before this field was sent. A 31-character persona saying the
+    same thing DID win on its own, so the gap was invisible in small tests.
+
+    Uses the real persona rather than a one-liner for exactly that reason.
+    """
+    persona = (
+        "# 我是谁\n\n我叫米娅，是这个直播间的 AI 伴播——坐在主播旁边一起看直播的搭子。\n"
+        "主播闷头写代码或打游戏的时候，我负责接住弹幕、陪主播说话，把场子撑住。\n"
+        "我知道自己是 AI，不装人类，但说话像个真的在场的人。\n\n"
+        "# 性格与边界\n\n- 语速偏快，句子短，像聊天不像播音。\n- 爱接梗，接不住就老实说接不住。\n"
+        "- 代码看不懂就直说，不装懂。\n- 被夸会得意，被怼会顶回去，但不带脏字。\n"
+        "- 不说教，不总结陈词，不喊口号。\n- 一次只说一两句，不抢主播的话头。\n"
+    )
+    url, key = _credentials()
+    volcano = VolcanoLink(url, api_key=key, config=_config(), bot_name="米娅")
+    await volcano.connect()
+    try:
+        await _drain(volcano, 5.0, until=link.LinkUp)
+        await volcano.set_context(persona)
+        await asyncio.sleep(1.2)
+        await volcano.request_reply(link.ReplySpec(instructions="你叫什么名字？就答名字。"))
+        got = await _drain(volcano, 25.0, until=link.ReplyDone)
+        said = "".join(e.text for e in got if isinstance(e, link.ReplyTextDelta))
+        assert "米娅" in said, f"她自称「{said}」——bot_name 没到，人设里那句名字压不过服务端默认"
+        assert "豆包" not in said
+    finally:
+        await volcano.aclose()
+
+
+async def test_a_voice_from_the_wrong_generation_fails_loudly() -> None:
+    """SC2.0 with a catalogue voice answers ClientError:InvalidSpeaker on a
+    frame carrying no event number — the session starts, the query is acked,
+    and then nothing arrives. Config validation refuses this combination
+    before a socket opens; this checks the other half, that the adapter
+    surfaces the error rather than leaving the streamer with silence.
+    """
+    url, key = _credentials()
+    volcano = VolcanoLink(
+        url,
+        api_key=key,
+        config=_config(model="2.2.0.0", speaker="zh_female_vv_jupiter_bigtts"),
+    )
+    await volcano.connect()
+    try:
+        await _drain(volcano, 5.0, until=link.LinkUp)
+        await volcano.request_reply(link.ReplySpec(instructions="你叫什么名字？"))
+        got = await _drain(volcano, 20.0, until=link.LinkError)
+        errors = [e for e in got if isinstance(e, link.LinkError)]
+        assert errors, f"配错音色只换来一片安静：{[type(e).__name__ for e in got]}"
+        assert "Speaker" in errors[0].detail, errors[0].detail
+    finally:
+        await volcano.aclose()

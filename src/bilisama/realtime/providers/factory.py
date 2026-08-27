@@ -58,6 +58,16 @@ class LinkRequest:
     voice: str = ""
     """Command-line override. Empty falls back to the provider's config."""
 
+    bot_name: str = ""
+    """What she calls herself, for the one provider that takes it as a field
+    of its own rather than reading it out of the persona text.
+
+    Supplied by the caller rather than derived here: the answer is
+    persona.template_variables' {{agentName}}, and reaching for it from L2
+    would make the adapter layer depend on L3 — the direction plan section 2.3
+    only allows the other way round. The dependency gate does not watch this
+    direction, so it is a rule kept by hand."""
+
     model_explicit: bool = False
     """Whether --model supplied the name. Decides whether it may replace a
     model already written into the address (see with_model)."""
@@ -195,6 +205,7 @@ def build_link(request: LinkRequest) -> BuiltLink:
             return BuiltLink(
                 VolcanoLink(
                     request.endpoint.url,
+                    bot_name=request.bot_name,
                     api_key=api_key,
                     app_id=app_id,
                     access_key=legacy_key,

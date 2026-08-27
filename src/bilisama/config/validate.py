@@ -241,6 +241,47 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
             )
         )
 
+    # Voice family and model generation have to match, and neither mismatch
+    # announces itself. Probed against the real endpoint 2026-08-28:
+    #
+    # * SC2.0 with an empty or catalogue voice answers 「ClientError:
+    #   InvalidSpeaker」 on a frame that carries no event number — the session
+    #   starts, the query is acked, and then nothing. Silence.
+    # * O2.0 with a cloned voice DOES speak, as somebody else: the official
+    #   cloned voices ship with a server-side character that outranks
+    #   system_role, so she introduced herself as 夏栀 and wrote the stage
+    #   directions our persona forbids.
+    #
+    # Fatal on both counts. A persona that silently does not apply is worse
+    # than a refusal, and this one is decidable before a socket opens.
+    if s.speech.provider is ProviderName.VOLCANO:
+        speaker = s.speech.volcano.speaker
+        cloned = speaker.startswith(("saturn_", "ICL_", "S_"))
+        if s.speech.volcano.model == "2.2.0.0" and not cloned:
+            problems.append(
+                ConfigProblem(
+                    field="speech.volcano.speaker",
+                    message=(
+                        "SC2.0（2.2.0.0）只认克隆音色，这里"
+                        + (f"填的是「{speaker}」。" if speaker else "留空了。")
+                        + "配错了她会一声不吭——服务端回的是 InvalidSpeaker，不是拒绝启动。"
+                    ),
+                    fix="换成 saturn_ 开头的官方克隆音色，或你自己注册的 S_ 音色。",
+                )
+            )
+        if s.speech.volcano.model == "1.2.1.1" and cloned:
+            problems.append(
+                ConfigProblem(
+                    field="speech.volcano.speaker",
+                    message=(
+                        f"O2.0（1.2.1.1）配了克隆音色「{speaker}」。克隆音色自带服务端角色，"
+                        "会盖过人设——她会用别人的名字和口吻说话，而且不报错。"
+                    ),
+                    fix="换成官方音色（zh_female_vv_jupiter_bigtts 这类），"
+                    "或把模型版本改成 2.2.0.0。",
+                )
+            )
+
     # Either an API Key on its own, or the older App ID / Access Token pair —
     # and they are alternatives, not complements. Not fatal here because
     # path.sh can still supply one at run time; the factory refuses for real

@@ -590,3 +590,76 @@ async def test_a_genuinely_new_reply_after_a_timeout_still_gets_through() -> Non
             assert any(isinstance(e, link.ReplyTextDelta) for e in got)
         finally:
             await volcano.aclose()
+
+
+# ---------------------------------------------- what the name actually needs
+
+
+async def test_the_name_travels_as_its_own_field_on_the_o_generation() -> None:
+    """The persona says 「我叫米娅」 in its first line and that is not enough.
+
+    dialog.bot_name defaults to 豆包, and against our real 557-character
+    persona it wins: probed 2026-08-28, three answers out of three were
+    「豆包」 without this field and 「米娅」 with it. A 31-character persona
+    saying the same thing DID win on its own, which is exactly why the gap
+    survived early testing.
+    """
+    async with MockVolcanoServer() as server:
+        volcano = VolcanoLink(
+            server.url, api_key="k", config=_cfg(model="1.2.1.1"), bot_name="米娅"
+        )
+        await volcano.set_context("我叫米娅，是这个直播间的 AI 伴播。")
+        await volcano.connect()
+        await server.wait_ready()
+        try:
+            dialog = server.recorded.body_for(wire.ClientEvent.START_SESSION)["dialog"]
+            assert dialog["bot_name"] == "米娅"
+            assert dialog["system_role"], "名字有了，人设别丢了"
+        finally:
+            await volcano.aclose()
+
+
+async def test_the_sc_generation_takes_its_name_from_the_manifest_instead() -> None:
+    """bot_name is documented as 「只针对O版本生效」 and SC reads the name out
+    of its character manifest. Sending it there would put a field in the frame
+    that does nothing — and a field that does nothing is one the next reader
+    assumes does something."""
+    async with MockVolcanoServer() as server:
+        volcano = VolcanoLink(
+            server.url, api_key="k", config=_cfg(model="2.2.0.0"), bot_name="米娅"
+        )
+        await volcano.set_context("你叫米娅，直播间的 AI 伴播。")
+        await volcano.connect()
+        await server.wait_ready()
+        try:
+            dialog = server.recorded.body_for(wire.ClientEvent.START_SESSION)["dialog"]
+            assert "bot_name" not in dialog
+            assert dialog["character_manifest"]
+        finally:
+            await volcano.aclose()
+
+
+async def test_an_error_frame_with_no_event_number_is_not_swallowed() -> None:
+    """How a wrong voice presented before this: session started, query acked,
+    then nothing at all — while the server had been saying
+    「ClientError:InvalidSpeaker」 the whole time. Connection-level errors
+    carry no event number, and a dispatch keyed purely off `event` dropped
+    them into the ignore branch."""
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server)
+        try:
+            handle = await volcano.request_reply(link.ReplySpec())
+            await server.fail_hard(55000001, "sami error: ClientError:InvalidSpeaker")
+
+            got = await _collect(events, 2)
+            errors = [e for e in got if isinstance(e, link.LinkError)]
+            assert errors, f"错误帧被吞了，收到的是 {[type(e).__name__ for e in got]}"
+            assert errors[0].code == "55000001"
+            assert "InvalidSpeaker" in errors[0].detail
+            # And it must not leave the slot held by a reply that will never end.
+            assert any(
+                isinstance(e, link.ReplyDone) and e.status is link.ReplyStatus.FAILED for e in got
+            )
+            assert handle.stale
+        finally:
+            await volcano.aclose()

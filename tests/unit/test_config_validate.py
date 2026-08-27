@@ -54,6 +54,9 @@ def _settings(
     side_base_url: str = "",
     tts_voice: str = "",
     volcano_app_id_ref: str = "",
+    volcano_api_key_ref: str = "",
+    volcano_model: str = "1.2.1.1",
+    volcano_speaker: str = "",
     config_version: int = CURRENT_VERSION,
 ) -> Settings:
     """Shipped defaults with a model id, and one axis moved off it.
@@ -71,6 +74,9 @@ def _settings(
         speech[provider.value] = {"endpoint": endpoint}
     if provider is ProviderName.VOLCANO:
         speech[provider.value]["app_id_ref"] = volcano_app_id_ref
+        speech[provider.value]["api_key_ref"] = volcano_api_key_ref
+        speech[provider.value]["model"] = volcano_model
+        speech[provider.value]["speaker"] = volcano_speaker
     speech["side"] = {"base_url": side_base_url}
     return Settings.model_validate(
         {
@@ -165,6 +171,17 @@ BROKEN_ONE_WAY_EACH = {
     # Volcengine takes EITHER an api key on its own OR the older pair, so the
     # broken case is half a pair and no api key. Leaving everything blank would
     # also fire, but so would a rule that only ever looked at one field.
+    # Two ways to pair a voice with the wrong model generation, and neither
+    # announces itself at run time — one is silence, the other is her speaking
+    # as somebody else. The fixture uses the silent one.
+    "speech.volcano.speaker": _Broken(
+        _settings(
+            provider=ProviderName.VOLCANO,
+            expression_source="lexicon",
+            volcano_api_key_ref="volcano_api_key",
+            volcano_model="2.2.0.0",
+        )
+    ),
     "speech.volcano.api_key_ref": _Broken(
         _settings(
             provider=ProviderName.VOLCANO,

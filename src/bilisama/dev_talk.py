@@ -1231,6 +1231,10 @@ async def run_director(args: argparse.Namespace) -> int:
             endpoint=endpoint,
             settings=settings,
             voice=args.voice,
+            # {{agentName}}, the same expression the persona templates resolve,
+            # so she cannot introduce herself as one name and be addressed as
+            # another. Only volcano reads it — see LinkRequest.bot_name.
+            bot_name=variables["agentName"],
             model_explicit=bool(args.model),
             env=os.environ,
             # Audio replies, not the shipping default: this stands against the

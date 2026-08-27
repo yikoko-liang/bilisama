@@ -310,6 +310,18 @@ class MockVolcanoServer:
             wire.ServerEvent.DIALOG_COMMON_ERROR, {"error_code": code, "message": message}
         )
 
+    async def fail_hard(self, code: int, message: str) -> None:
+        """A connection-level error: message type ERROR, an error code in the
+        optional fields, and NO event number. That last part is the whole
+        point — a client dispatching on the event number alone never sees it.
+        """
+        assert self._conn is not None
+        payload = json.dumps({"error": message}, ensure_ascii=False).encode()
+        header = bytes((0x11, (wire.MessageKind.ERROR << 4) | 0b0000, 0b0001_0000, 0))
+        await self._conn.send(
+            header + struct.pack(">I", code) + struct.pack(">I", len(payload)) + payload
+        )
+
     async def send_garbage(self) -> None:
         """A frame no decoder can read. One of these is not a dead session."""
         assert self._conn is not None

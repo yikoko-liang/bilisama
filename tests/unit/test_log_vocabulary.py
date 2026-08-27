@@ -187,6 +187,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "volcano.interrupted",
         "volcano.chat_ended",
         "volcano.context_pushed",
+        "volcano.error_frame",
         "volcano.event_ignored",
         "volcano.frame_unreadable",
         "volcano.goodbye_skipped",

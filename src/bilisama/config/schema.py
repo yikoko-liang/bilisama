@@ -362,7 +362,10 @@ class PersonaConfig(BaseModel):
     # the spoken name should differ from the folder — a nickname, different
     # capitalisation, whatever the streamer wants. A ported persona keeping its
     # own name is the normal case, not something to translate away.
-    display_name: str = Field("")
+    # Also travels as volcano's dialog.bot_name, which the vendor caps at 20
+    # characters — a longer one is refused at StartSession, so the ceiling
+    # belongs here rather than in one adapter.
+    display_name: str = Field("", max_length=20)
     growth: GrowthSwitches = Field(default_factory=GrowthSwitches)
 
 

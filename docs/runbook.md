@@ -86,13 +86,32 @@ export volcano_api_key=...
 | 字段 | 说明 |
 |---|---|
 | `model` | `1.2.1.1` 用一段文字描述人设、配官方音色；`2.2.0.0` 用角色档案、配克隆音色。**两个版本的音色清单不通用**，换版本要跟着换 `speaker` |
-| `speaker` | 留空用服务端默认 |
+| `speaker` | **必须跟版本配对**，见下 |
 | `end_smooth_window_ms` | 停多久算一句说完了。这条路上唯一的判停旋钮——它没有 `server_vad` 之外的判停类型 |
 
-音色要跟版本配对，写错服务端会拒：`1.2.1.1` 用官方音色
-（`zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、
-`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts`），
-`2.2.0.0` 用 `saturn_` 开头的克隆音色。
+**音色配错不会报错，会安静或者换个人说话**（2026-08-28 真端点验的，`config validate`
+现在会在开播前拦下这两种）：
+
+| 组合 | 实际发生什么 |
+|---|---|
+| `1.2.1.1` ＋ 官方音色或留空 | 正常。官方音色是 `zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts` |
+| `1.2.1.1` ＋ 克隆音色 | **她变成别人**。克隆音色自带服务端角色，会盖过人设——实测她自称「夏栀」，还写了人设里明令禁止的动作描写 |
+| `2.2.0.0` ＋ 克隆音色（`saturn_` / `ICL_` / 自己的 `S_`） | 正常 |
+| `2.2.0.0` ＋ 官方音色或留空 | **一片安静**。会话建得起来、query 也 ack 了，然后什么都不回。服务端回的是 `ClientError:InvalidSpeaker`，在一帧不带事件号的错误帧上——adapter 以前会把它当未知事件丢掉 |
+
+### 名字为什么要单独配
+
+`[persona] display_name` 会作为火山的 `dialog.bot_name` 发过去，**必须填**。
+
+这个字段服务端默认是「豆包」，而它**压得过人设正文里的名字**。实测：557 字的真实人设开头就写着
+「我叫米娅」，不发 `bot_name` 时她三次都答「豆包」；发了就三次都答「米娅」。反过来，
+31 字的短人设不发 `bot_name` 也能答对——所以这个洞在小测试里看不出来，只有拿真人设才露头。
+
+人设的**其余部分一直是好的**：空人设对照下她说「我是字节开发的AI，和主播没啥关系」，
+有人设说「坐主播旁边的AI伴播…搭子」；问 Rust 生命周期，空人设长篇讲课，有人设「能看懂
+一点基础的…复杂的我得绕一会儿」。所以那次「人设好像没传进去」，传进去了，只有名字没生效。
+
+SC 版本（`2.2.0.0`）不看 `bot_name`——名字从 `character_manifest` 正文里取，我们已经这么发了。
 
 跑契约测试（没凭据会逐条跳过并说清楚怎么补）：
 

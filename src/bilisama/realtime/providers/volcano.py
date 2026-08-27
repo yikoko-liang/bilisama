@@ -85,6 +85,7 @@ class VolcanoLink:
         app_id: str = "",
         access_key: str = "",
         config: VolcanoConfig,
+        bot_name: str = "",
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
         session_id: str | None = None,
@@ -102,6 +103,15 @@ class VolcanoLink:
             complements: probed live 2026-08-27, an API Key put in the
             X-Api-Access-Key position draws 401 "requested grant not found".
         access_key: The older pair's second half, an Access Token.
+        bot_name: What she calls herself. Its own field because on this
+            protocol the NAME does not reliably come from the persona text:
+            probed 2026-08-28, our real 557-character persona opens with
+            「我叫米娅」 and she answered 「豆包」 three times out of three,
+            because dialog.bot_name defaults to 豆包 and a structured document
+            dilutes the one sentence that names her. A 31-character persona
+            saying the same thing DID win, which is why this looked fine in
+            early testing. O generation only — SC takes the name from its
+            character manifest.
         session_id: The id we choose for this session — the client picks it,
             not the server. Injectable so tests are not at the mercy of uuid4.
         dialog_id: A conversation to pick back up, from an earlier session's
@@ -114,6 +124,7 @@ class VolcanoLink:
         self._app_id = app_id
         self._access_key = access_key
         self._cfg = config
+        self._bot_name = bot_name
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
         self._session_id = session_id or str(uuid.uuid4())
@@ -290,6 +301,12 @@ class VolcanoLink:
         dialog: dict[str, Any] = {"extra": {"model": self._cfg.model}}
         if self._context:
             dialog[_PERSONA_KEY[self._cfg.model]] = self._context
+        # O generation only. The vendor documents bot_name as 「只针对O版本生效」
+        # and SC reads the name out of its character manifest, so sending it
+        # there would put a field in the frame that does nothing — and a field
+        # that does nothing is one the next reader assumes does something.
+        if self._bot_name and _PERSONA_KEY[self._cfg.model] == "system_role":
+            dialog["bot_name"] = self._bot_name
         if self._dialog_id:
             # Reconnecting. The server keeps the last 20 QA rounds against this
             # id, so a dropped socket comes back with the conversation intact
@@ -645,6 +662,28 @@ class VolcanoLink:
         knows an event is a number, and L3 sees the same vocabulary it sees
         from every other provider.
         """
+        if frame.kind is wire.MessageKind.ERROR:
+            # A connection-level error carries no event number, so a dispatch
+            # keyed purely off `event` dropped it into the ignore branch and
+            # the streamer got silence. That is how a wrong voice presented:
+            # session started, query acked, then nothing at all, while the
+            # server had said 「ClientError:InvalidSpeaker」 the whole time.
+            body = frame.json()
+            self._events.put_nowait(
+                link.LinkError(
+                    code=str(frame.error_code or "unknown"),
+                    detail=str(body.get("error") or body.get("message") or "")[:200],
+                )
+            )
+            log.warning(
+                "volcano.error_frame",
+                error_code=frame.error_code,
+                error_text=str(body.get("error") or "")[:200],
+            )
+            if self._active is not None:
+                self._settle(link.ReplyStatus.FAILED)
+            return
+
         event = frame.event
         if event == wire.ServerEvent.ASR_INFO:
             # The vendor's own words for this one are 「用于打断客户端的播报」 —
