@@ -112,25 +112,40 @@ def test_openai_ga_is_refused_for_the_reason_that_is_actually_blocking_it() -> N
 # ---------------------------------------------------------------- volcengine
 
 
-def test_volcano_takes_both_credentials_from_the_environment() -> None:
-    built = build_link(
-        _request(
-            ProviderName.VOLCANO,
-            env={"volcano_app_id": "app", "volcano_access_key": "key"},
-        )
+def test_volcano_accepts_the_older_pair_too() -> None:
+    """An account that predates API Key management only has these two."""
+    settings = _settings(
+        provider=ProviderName.VOLCANO,
+        volcano={"app_id_ref": "env:VOLC_APP", "access_key_ref": "env:VOLC_TOKEN"},
     )
-    assert isinstance(built.link, VolcanoLink)
+    import os
+
+    os.environ["VOLC_APP"], os.environ["VOLC_TOKEN"] = "123456789", "token"
+    try:
+        built = build_link(_request(ProviderName.VOLCANO, settings=settings))
+        assert isinstance(built.link, VolcanoLink)
+    finally:
+        del os.environ["VOLC_APP"], os.environ["VOLC_TOKEN"]
 
 
-def test_a_half_supplied_volcano_credential_says_which_half_is_missing() -> None:
-    """Two credentials, and one alone draws a refused handshake whose text is
-    about neither. Saying "缺凭据" when only the access key is absent sends
-    people re-checking an app id that was fine."""
+def test_half_a_legacy_pair_is_refused_with_both_shapes_named() -> None:
+    """Two credential shapes, and half of one is not a credential. Probed live
+    2026-08-27: an API Key put in the access-key slot draws 401 「requested
+    grant not found」, so the message has to describe both shapes rather than
+    let someone move a value into the wrong half of the other one."""
     with pytest.raises(SystemExit) as caught:
         build_link(_request(ProviderName.VOLCANO, env={"volcano_app_id": "app"}))
     message = str(caught.value)
-    assert "access_key_ref" in message
-    assert "app_id_ref" not in message, "把没问题的那个也报进去了"
+    assert "API Key" in message
+    assert "Access Token" in message
+
+
+def test_an_api_key_alone_is_a_whole_credential() -> None:
+    """The vendor's own words: 「在任意接口中，填入 header 即可，不用填写
+    appid」. Confirmed live 2026-08-27 — x-api-key plus the resource headers
+    completes the handshake with no App ID anywhere."""
+    built = build_link(_request(ProviderName.VOLCANO, env={"volcano_api_key": "key"}))
+    assert isinstance(built.link, VolcanoLink)
 
 
 def test_volcano_falls_back_to_the_public_address() -> None:

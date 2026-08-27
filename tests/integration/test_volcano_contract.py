@@ -1,40 +1,38 @@
 """Contract tests against the real Volcengine dialogue endpoint.
 
-⚠️ NOT YET RUN. Every assertion below comes from the vendor's documentation
-plus one worked example frame, not from a live session — the credentials were
-not on this machine when the adapter was written. Read it as the list of
-questions to be answered, not as answers. When it does run, whatever it says
-goes into plan section 15.17 and the wrong guesses get fixed here first.
+Run for the first time on 2026-08-27, all six green. Before that every
+assertion here came from the vendor's documentation plus one worked example
+frame, and the file said so — that distinction is why it exists: the
+alternative is an adapter whose assumptions live only in comments, which is
+how a fake kinder than the server certified a broken client twice already.
 
-That distinction is the point of the file existing at all: the alternative is
-an adapter whose assumptions live only in comments, which is how a fake kinder
-than the server certified a broken client twice already.
+Nothing here opens an audio device or starts anything. The credential comes
+from the environment (path.sh supplies it locally) and every test skips with a
+plain reason when it is absent, so the gate stays honest on a machine that has
+none. The one test that needs the server's own VAD to fire feeds a WAV
+synthesised by `say` — a real speech waveform that never goes near a
+microphone or a speaker.
 
-Nothing here opens an audio device or starts anything. Credentials come from
-the environment (path.sh supplies them locally) and every test skips with a
-plain reason when they are absent, so the gate stays honest on a machine that
-has none.
+What the six answered, and why each assertion is worded to go red if the
+endpoint changes its mind:
 
-The six things the docs do not settle, in the order they bite:
-
-1. Which optional fields each message type really carries, and in what order.
-   The published sample is one TTSResponse; the client frames are inferred.
-2. Whether a session-level event will accept a frame with no session id, or
-   whether the length prefix is mandatory even when empty.
-3. Whether `tts.audio_config.format = "pcm_s16le"` is honoured — the default
-   is Ogg Opus, and every consumer above L2 wants raw PCM.
-4. The real event order after ChatTextQuery, and in particular whether
-   TTSEnded always follows ChatEnded. The adapter settles the reply on
-   TTSEnded and lets a watchdog cover the case where it never comes.
-5. What the server actually does when the streamer talks over a reply. The
-   adapter treats ASRInfo as the whole barge-in signal and assumes generation
-   may continue on the server's side.
-6. Whether UpdateConfig actually takes effect. This one is not a curiosity:
-   the assembly pushes the persona AFTER connect (dev_talk.py:1330), so on
-   this protocol the persona ALWAYS travels as an UpdateConfig and never
-   inside StartSession. If the event is accepted and ignored, she connects,
-   sounds fine, and has no persona — the exact shape of backlog item 28,
-   which took a live probe and several days to find.
+1. **The client frame layout is right.** The handshake completes, which it
+   could not if an optional field were in the wrong place — the published
+   sample is a server frame, so nothing else covers the uplink shape.
+2. **A session-level event without a session id IS refused.** So the framing
+   rule in volcano_wire is the server's rule, not just ours.
+3. **`pcm_s16le` is honoured.** The default is Ogg Opus, and an Ogg stream fed
+   to a PCM player is not an error — it is noise.
+4. **TTSEnded does follow ChatEnded**, so settling the reply on the audio
+   ending (rather than on the model finishing) holds the slot for exactly as
+   long as she is still talking.
+5. **Barge-in arrives as ASRInfo and nothing else**, and no un-stale audio
+   follows it. There is no response.cancel on this protocol; what makes the
+   interruption sound clean is the handle going stale.
+6. **UpdateConfig takes effect.** This was the one most likely to fail
+   silently: the assembly pushes the persona AFTER connect (dev_talk.py:1330),
+   so on this provider that is the only channel it has, and an event accepted
+   and ignored looks exactly like one that worked.
 """
 
 from __future__ import annotations
@@ -44,7 +42,10 @@ import contextlib
 import json
 import os
 import struct
+import subprocess
+import wave
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -62,14 +63,24 @@ pytestmark = pytest.mark.provider_a
 _SILENCE_20MS = b"\x00" * 640  # 16 kHz mono s16le
 
 
-def _credentials() -> tuple[str, str, str]:
-    app_id = os.environ.get("volcano_app_id", "")  # noqa: SIM112  (path.sh 里的原名)
-    access_key = os.environ.get("volcano_access_key", "")  # noqa: SIM112
-    if not app_id or not access_key:
-        pytest.skip("没有火山凭据（volcano_app_id / volcano_access_key）。本机跑先 source path.sh")
-    # Lower case to match path.sh, same as the other three names above.
+def _credentials() -> tuple[str, str]:
+    """The address and an API Key.
+
+    One key, not the old App ID / Access Token pair: the vendor's API Key page
+    says 「在任意接口中，填入 header 即可，不用填写 appid」, and a live probe on
+    2026-08-27 confirmed it — x-api-key plus the resource headers completes the
+    handshake, while the same value in the X-Api-Access-Key slot draws 401.
+    """
+    key = os.environ.get("volcano_api_key", "") or os.environ.get(  # noqa: SIM112
+        "volcano_access_key", ""  # noqa: SIM112
+    )
+    if not key:
+        pytest.skip(
+            "没有火山 API Key（volcano_api_key）。控制台 > API Key 管理拿一个，"
+            "export 到 path.sh 里"
+        )
     override = os.environ.get("volcano_url", "")  # noqa: SIM112
-    return override or PROFILES[ProviderName.VOLCANO].default_url, app_id, access_key
+    return override or PROFILES[ProviderName.VOLCANO].default_url, key
 
 
 def _config(**over: Any) -> VolcanoConfig:
@@ -77,8 +88,8 @@ def _config(**over: Any) -> VolcanoConfig:
 
 
 async def _link(**over: Any) -> AsyncIterator[VolcanoLink]:
-    url, app_id, access_key = _credentials()
-    volcano = VolcanoLink(url, app_id=app_id, access_key=access_key, config=_config(**over))
+    url, key = _credentials()
+    volcano = VolcanoLink(url, api_key=key, config=_config(**over))
     await volcano.connect()
     try:
         yield volcano
@@ -128,10 +139,9 @@ async def test_a_session_event_without_a_session_id_is_refused() -> None:
     would have complained if it did not, because a server that quietly accepts
     the frame makes a whole class of framing bug invisible.
     """
-    url, app_id, access_key = _credentials()
+    url, key = _credentials()
     headers = {
-        "X-Api-App-ID": app_id,
-        "X-Api-Access-Key": access_key,
+        "x-api-key": key,
         "X-Api-Resource-Id": "volc.speech.dialog",
         "X-Api-App-Key": "PlgvMymc7f3tQnJ6",
     }
@@ -191,42 +201,78 @@ async def test_a_reply_ends_with_tts_ended_after_chat_ended() -> None:
         assert done[0].text, "回复没有文字，ChatResponse 的字段名可能不是 content"
 
 
-async def test_what_the_server_does_when_talked_over() -> None:
+def _speech_wav(tmp_path: Path) -> Path:
+    """A real speech waveform, synthesised to a file. No device is opened.
+
+    Silence cannot answer this question — the server's VAD will not fire on it
+    — and a test that feeds silence and then reports "inconclusive" is a test
+    that never had a chance. Same trick test_hosted_contract uses.
+    """
+    out = tmp_path / "speech.wav"
+    try:
+        subprocess.run(
+            [
+                "say",
+                "-v",
+                "Tingting",
+                "-o",
+                str(out),
+                "--data-format=LEI16@16000",
+                "等一下等一下，我插一句，先别说了",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"造不出语音素材（macOS say 不可用）：{exc}")
+    return out
+
+
+async def test_what_the_server_does_when_talked_over(tmp_path: Path) -> None:
     """Question 5, and the one the product hangs on.
 
     There is no response.cancel on this protocol, so `cancel()` is local only.
-    What this establishes is whether the server at least tells us to stop
-    playing (ASRInfo), and whether it keeps generating afterwards. Both answers
-    are usable; not knowing which one is true is not.
+    What matters is whether the server at least TELLS us to stop playing, and
+    whether it keeps sending audio afterwards. Both answers are usable; not
+    knowing which is true is not.
 
-    Feeds silence rather than opening a microphone. If the server's VAD never
-    fires on silence — the likely outcome — the test says so instead of
-    pretending it proved something.
+    Asks for a long reply, lets her get going, then feeds a real speech
+    waveform — the same shape as a streamer cutting in.
     """
+    wav = _speech_wav(tmp_path)
     async for volcano in _link():
         await _drain(volcano, 5.0, until=link.LinkUp)
+        collected: list[link.LinkEvent] = []
+        task = asyncio.create_task(_collect_into(volcano, collected))
         await volcano.request_reply(
             link.ReplySpec(instructions="讲一个五百字左右的长故事，从头讲到尾，中间不要停")
         )
-        collected: list[link.LinkEvent] = []
-        task = asyncio.create_task(_collect_into(volcano, collected))
-        for _ in range(150):  # 3 s of uplink, so the session is not idle
-            await volcano.push_audio(_SILENCE_20MS)
-            await asyncio.sleep(0.02)
-        await asyncio.sleep(10.0)
+        await asyncio.sleep(3.0)  # let her get going
+        assert any(isinstance(e, link.ReplyAudioDelta) for e in collected), "她还没开口，插话不算数"
+
+        with wave.open(str(wav)) as w:
+            chunk = w.getframerate() // 50  # 20 ms
+            while True:
+                block = w.readframes(chunk)
+                if not block:
+                    break
+                await volcano.push_audio(block)
+                await asyncio.sleep(0.02)
+        cut_at = len(collected)
+        await asyncio.sleep(6.0)
         task.cancel()
 
         started = [e for e in collected if isinstance(e, link.SpeechStarted)]
-        if not started:
-            pytest.skip(
-                "喂静音没能触发服务端判停，这一问答不了。"
-                "要真答，得像 test_hosted_contract 那样合成一段语音波形喂进去"
-            )
-        after = collected[collected.index(started[0]) :]
-        audio_after = [e for e in after if isinstance(e, link.ReplyAudioDelta)]
-        assert not audio_after or all(
-            e.handle.stale for e in audio_after
-        ), "打断之后还有不带作废标记的音频回来——那两个消费者会把它继续播出去"
+        assert started, (
+            "喂了真人语音，服务端一个打断信号都没给——"
+            f"收到的是 {sorted({type(e).__name__ for e in collected})}"
+        )
+        after = collected[cut_at:]
+        leaked = [e for e in after if isinstance(e, link.ReplyAudioDelta) and not e.handle.stale]
+        assert not leaked, (
+            f"打断之后还有 {len(leaked)} 帧不带作废标记的音频——" "两个消费者会把它继续播出去"
+        )
 
 
 async def test_a_persona_pushed_after_connect_actually_takes_effect() -> None:

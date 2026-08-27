@@ -240,25 +240,19 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
             )
         )
 
-    # Two credentials, and it is the pair that authenticates — one alone gets a
-    # refused handshake whose text is about neither. Not fatal here because
-    # path.sh can still supply them at run time; the factory refuses for real
-    # when both layers come up empty, and it names which half is missing.
+    # Either an API Key on its own, or the older App ID / Access Token pair —
+    # and they are alternatives, not complements. Not fatal here because
+    # path.sh can still supply one at run time; the factory refuses for real
+    # when no layer has any, and it names both shapes.
     if s.speech.provider is ProviderName.VOLCANO:
-        absent = [
-            name
-            for name, value in (
-                ("app_id_ref", s.speech.volcano.app_id_ref),
-                ("access_key_ref", s.speech.volcano.access_key_ref),
-            )
-            if not value
-        ]
-        if absent:
+        volcano = s.speech.volcano
+        has_pair = bool(volcano.app_id_ref and volcano.access_key_ref)
+        if not volcano.api_key_ref and not has_pair:
             problems.append(
                 ConfigProblem(
-                    field=f"speech.volcano.{absent[0]}",
-                    message=f"火山要 App ID 和 Access Key 两个凭据，这里少了 {'、'.join(absent)}。",
-                    fix="在设置里把两个都填上；开发机上也可以 source path.sh 兜底。",
+                    field="speech.volcano.api_key_ref",
+                    message="火山没配凭据：要么一个 API Key，要么 App ID ＋ Access Token 那一对。",
+                    fix="控制台 > API Key 管理拿一个填进 api_key_ref，最省事。",
                     fatal=False,
                 )
             )

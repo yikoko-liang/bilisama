@@ -149,6 +149,13 @@ class VolcanoConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     endpoint: str = Field("")
+    # The console's API Key, which authenticates on its own — the vendor's own
+    # words are 「在任意接口中，填入 header 即可，不用填写 appid」. Probed live
+    # 2026-08-27: it works on both the legacy and the duplex endpoints.
+    api_key_ref: str = Field("")
+    # The older pair, kept for an account that only has one. Alternatives to
+    # api_key_ref, not complements: an API Key in the access-key position
+    # draws a 401 whose text is about neither.
     app_id_ref: str = Field("")
     access_key_ref: str = Field("")
     # Which generation, and therefore which persona key: O2.0 takes a plain

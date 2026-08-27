@@ -72,18 +72,28 @@ class VolcanoLink:
         self,
         url: str,
         *,
-        app_id: str,
-        access_key: str,
+        api_key: str = "",
+        app_id: str = "",
+        access_key: str = "",
         config: VolcanoConfig,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
         session_id: str | None = None,
     ) -> None:
         """Args:
+        api_key: The console's API Key, which authenticates on its own — the
+            vendor's own words are 「在任意接口中，填入 header 即可，不用填写
+            appid」. Preferred when present.
+        app_id: The older pair's first half. Only consulted when no api_key
+            was supplied, because the two are alternatives rather than
+            complements: probed live 2026-08-27, an API Key put in the
+            X-Api-Access-Key position draws 401 "requested grant not found".
+        access_key: The older pair's second half, an Access Token.
         session_id: The id we choose for this session — the client picks it,
             not the server. Injectable so tests are not at the mercy of uuid4.
         """
         self._url = url
+        self._api_key = api_key
         self._app_id = app_id
         self._access_key = access_key
         self._cfg = config
@@ -116,13 +126,30 @@ class VolcanoLink:
     # ------------------------------------------------------------ lifecycle
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "X-Api-App-ID": self._app_id,
-            "X-Api-Access-Key": self._access_key,
+        """Two credential shapes, one of which is going away.
+
+        Probed against the real endpoint 2026-08-27, all four combinations:
+
+        * `x-api-key` alone → 403 「get resource id empty」. The resource id
+          is NOT optional just because the key is self-contained.
+        * `x-api-key` + resource headers → handshake accepted.
+        * an API Key in the X-Api-Access-Key position → 401 「load grant:
+          requested grant not found」. They are different credentials, and the
+          error says nothing about which — hence preferring one explicitly
+          rather than filling in whichever fields happen to be non-empty.
+        * the App ID / Access Token pair → the documented older way.
+        """
+        headers = {
             "X-Api-Resource-Id": _RESOURCE_ID,
             "X-Api-App-Key": _APP_KEY,
             "X-Api-Connect-Id": str(uuid.uuid4()),
         }
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
+        else:
+            headers["X-Api-App-ID"] = self._app_id
+            headers["X-Api-Access-Key"] = self._access_key
+        return headers
 
     async def connect(self) -> None:
         """Open the socket and climb both session levels.

@@ -59,17 +59,20 @@ export openai_compatible_url=...
 
 ### 火山引擎（豆包端到端语音）
 
-⚠️ **还没在真端点上跑过。** 协议是照文档 ＋ 官方那一帧样例实现的，假服务器全通、
-门禁全绿，但真端点的行为有六个问题还没答（清单在
+**2026-08-27 真端点跑通了**：握手 327ms、首个文字 685ms、首帧音频 1134ms、
+3.57 秒 PCM，人设生效、打断干净、收尾无残留。六条契约测试全绿（清单和结论在
 [tests/integration/test_volcano_contract.py](../tests/integration/test_volcano_contract.py)
-的文件头）。凭据一到先跑那套契约测试，答案跟实现对不上就先改实现。
+的文件头）。
 
-path.sh 里放两个（缺一个都连不上，报错会说少的是哪一个）：
+凭据**一个就够**——控制台 > API Key 管理里那个 API Key：
 
 ```bash
-export volcano_app_id=...
-export volcano_access_key=...
+export volcano_api_key=...
 ```
+
+老账号没有 API Key 的话可以用 App ID ＋ Access Token 那一对，填
+`[speech.volcano]` 的 `app_id_ref` 和 `access_key_ref`。**两套是二选一不是拼起来**：
+把 API Key 填进 Access Token 那一格，服务端只回一句 401 认不出这个凭据。
 
 然后：
 
@@ -84,6 +87,11 @@ export volcano_access_key=...
 | `model` | `1.2.1.1` 用一段文字描述人设、配官方音色；`2.2.0.0` 用角色档案、配克隆音色。**两个版本的音色清单不通用**，换版本要跟着换 `speaker` |
 | `speaker` | 留空用服务端默认 |
 | `end_smooth_window_ms` | 停多久算一句说完了。这条路上唯一的判停旋钮——它没有 `server_vad` 之外的判停类型 |
+
+音色要跟版本配对，写错服务端会拒：`1.2.1.1` 用官方音色
+（`zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、
+`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts`），
+`2.2.0.0` 用 `saturn_` 开头的克隆音色。
 
 跑契约测试（没凭据会逐条跳过并说清楚怎么补）：
 

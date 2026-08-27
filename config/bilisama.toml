@@ -59,11 +59,11 @@ api_key_ref = "dashscope"
 voice = "longanlingxin"
 
 # 火山引擎端到端语音（豆包 S2S）。地址留空就用内置的公网地址，一般不用改。
-# 两个凭据缺一不可：控制台上那对 App ID 和 Access Key。
+# 凭据一个就够：控制台 > API Key 管理里拿的那个 API Key。
+# 老账号没有 API Key 的话，改填 app_id_ref ＋ access_key_ref 那一对。
 [speech.volcano]
 endpoint = ""
-app_id_ref = "volcano_app_id"
-access_key_ref = "volcano_access_key"
+api_key_ref = "volcano_api_key"
 # 1.2.1.1 = O2.0，人设走一段文字描述，配官方音色；
 # 2.2.0.0 = SC2.0，人设走角色档案，配克隆音色。换版本要跟着换音色。
 model = "1.2.1.1"

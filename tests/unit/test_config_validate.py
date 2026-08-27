@@ -162,10 +162,10 @@ BROKEN_ONE_WAY_EACH = {
     "speech.provider": _Broken(
         _settings(provider=ProviderName.OPENAI_GA, expression_source="lexicon")
     ),
-    # Volcengine takes a PAIR of credentials, so the broken case is one of them
-    # present: with both blank the rule fires too, but so would a rule that only
-    # ever looked at the first field.
-    "speech.volcano.access_key_ref": _Broken(
+    # Volcengine takes EITHER an api key on its own OR the older pair, so the
+    # broken case is half a pair and no api key. Leaving everything blank would
+    # also fire, but so would a rule that only ever looked at one field.
+    "speech.volcano.api_key_ref": _Broken(
         _settings(
             provider=ProviderName.VOLCANO,
             expression_source="lexicon",

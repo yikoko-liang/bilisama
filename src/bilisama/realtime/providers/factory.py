@@ -175,30 +175,35 @@ def build_link(request: LinkRequest) -> BuiltLink:
             from bilisama.realtime.providers.volcano import VolcanoLink
 
             cfg = request.settings.speech.volcano
-            # Two credentials, not one, so the missing-credential message has
-            # to say WHICH — "缺凭据" when only the access key is absent sends
-            # people to re-check an app id that was fine.
-            app_id = secrets.resolve(cfg.app_id_ref) or request.env.get("volcano_app_id", "")
-            access_key = secrets.resolve(cfg.access_key_ref) or request.env.get(
-                "volcano_access_key", ""
+            # One credential or two, and they are alternatives rather than
+            # complements. Probed live 2026-08-27: an API Key placed in the
+            # X-Api-Access-Key slot draws 401 「requested grant not found」,
+            # so guessing which one a value is would fail in a way whose
+            # error text names neither.
+            api_key = (
+                secrets.resolve(cfg.api_key_ref)
+                or request.env.get("volcano_api_key", "")
+                or request.env.get("volcano_access_key", "")
             )
-            missing = [
-                name
-                for name, value in (("app_id_ref", app_id), ("access_key_ref", access_key))
-                if not value
-            ]
-            if missing:
+            app_id = secrets.resolve(cfg.app_id_ref) or request.env.get("volcano_app_id", "")
+            app_id = app_id or ""
+            legacy_key = secrets.resolve(cfg.access_key_ref) or ""
+            if not api_key and not (app_id and legacy_key):
                 raise SystemExit(
-                    f"缺火山凭据（{'、'.join(missing)}）：配 [speech.volcano] 里对应的引用，"
-                    "或先 source path.sh 设好 volcano_app_id / volcano_access_key。"
+                    "缺火山凭据。\n"
+                    "推荐：控制台 > API Key 管理里拿一个 API Key，填进 "
+                    "[speech.volcano] api_key_ref，或 export volcano_api_key。\n"
+                    "老账号也可以用 App ID ＋ Access Token 那一对，填 app_id_ref "
+                    "和 access_key_ref。"
                 )
             for problem in turn_type_problems(provider, "server_vad"):
                 raise SystemExit(f"{problem.message} {problem.fix}")
             return BuiltLink(
                 VolcanoLink(
                     request.endpoint.url,
+                    api_key=api_key,
                     app_id=app_id,
-                    access_key=access_key,
+                    access_key=legacy_key,
                     config=cfg,
                 ),
                 request.endpoint.url,
