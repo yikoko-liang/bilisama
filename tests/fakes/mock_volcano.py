@@ -20,17 +20,29 @@ What it insists on, and why each one can really bite:
   back on. A client that waits for one waits forever.
 * **It sends events we have no name for.** UsageResponse arrives unasked; a
   decoder that treats an unknown event as fatal takes the session down.
+* **One session per connection.** A second StartSession before the first is
+  retired is refused, the way the real one answers 「session number limit
+  exceeded: 1」.
+
+One thing this fake cannot model, said out loud so nobody assumes otherwise:
+it handles frames strictly in order, while the real server is concurrent. So
+a client that sends FinishSession and StartSession back to back without
+waiting for SessionFinished looks identical here to one that waits — the two
+frames never cross. That race is real (it broke the SC context swap under
+load, green on an idle box) and only the real-endpoint contract tests see it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import struct
 from dataclasses import dataclass, field
 from typing import Any
 
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
 
 from bilisama.realtime.providers import volcano_wire as wire
 
@@ -108,6 +120,10 @@ class MockVolcanoServer:
 
     async def _handle(self, ws: ServerConnection) -> None:
         self._conn = ws
+        # A session belongs to the connection that opened it. A reconnect
+        # therefore starts with none, which is what lets its StartSession past
+        # the one-session-per-connection rule below.
+        self._session_id = ""
         self.recorded.headers = dict(ws.request.headers) if ws.request else {}
         async for message in ws:
             data = message if isinstance(message, bytes) else str(message).encode()
@@ -138,6 +154,12 @@ class MockVolcanoServer:
             # Order matters, and a fast loopback is exactly where skipping it
             # would go unnoticed.
             assert self._connected, "还没建连接就开会话"
+            # One session per connection. The real endpoint answers a second
+            # one with 「session number limit exceeded: 1」, which is how a
+            # context swap that did not wait for SessionFinished presented:
+            # green on an idle box, timed out under load with the old persona
+            # still in place.
+            assert not self._session_id, "上一个会话还没收掉就开新的（真端点会拒）"
             assert frame.session_id, "会话级事件没带 session id"
             if self.refuse_session:
                 await self._emit(
@@ -168,6 +190,12 @@ class MockVolcanoServer:
                 session_id=frame.session_id,
             )
             self._ready.set()
+            return
+        if event == wire.ClientEvent.FINISH_SESSION:
+            # The connection survives; the docs are explicit that the socket
+            # is reusable, which is what makes a context swap cheap on SC.
+            finished, self._session_id = self._session_id, ""
+            await self._emit(wire.ServerEvent.SESSION_FINISHED, {}, session_id=finished)
             return
         if event == wire.ClientEvent.CLIENT_INTERRUPT:
             # The real one stops sending within a frame or two. Modelled as an
@@ -203,7 +231,12 @@ class MockVolcanoServer:
             parts.append(ident)
         parts.append(struct.pack(">I", len(payload)))
         parts.append(payload)
-        await self._conn.send(b"".join(parts))
+        # The client may have hung up first. A real server drops the frame and
+        # moves on; crashing here would turn every teardown race into a red
+        # test about nothing. Not kindness — kindness would be accepting a
+        # frame the real one refuses, and every rule above still refuses.
+        with contextlib.suppress(ConnectionClosed):
+            await self._conn.send(b"".join(parts))
 
     async def wait_for(self, event: wire.ClientEvent, *, count: int = 1) -> None:
         """Block until the client's frame has actually landed here.
@@ -232,6 +265,7 @@ class MockVolcanoServer:
         assert self._conn is not None
         self._connected = False
         self._speaking = False
+        self._session_id = ""
         self._ready = asyncio.Event()
         await self._conn.close(code=1011)
 

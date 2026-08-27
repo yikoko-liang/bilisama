@@ -68,6 +68,11 @@ _RESOURCE_ID = "volc.speech.dialog"
 
 _WATCHDOG_S = 25.0
 
+# A session swap is 114 ms against the real endpoint (measured 2026-08-28).
+# Ten seconds is not a tuning knob, it is a ceiling on how long a context
+# update may hold before it reports that it did not land.
+_SWAP_TIMEOUT_S = 10.0
+
 # Which key the persona goes under, per model generation. The two are not
 # aliases: O2.0 takes a plain instruction string, SC2.0 takes a character
 # manifest, and sending one under the other's key is accepted and ignored.
@@ -136,6 +141,20 @@ class VolcanoLink:
         self._ws: Any = None
         self._recv: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
+        self._swap_task: asyncio.Task[None] | None = None
+        # Set when SessionStarted lands. A swap sends StartSession while the
+        # receive loop owns the socket, so it cannot read the reply itself —
+        # without waiting here the next frame goes to a session the server
+        # has not built yet, which passes on an idle endpoint and fails
+        # under load.
+        self._session_ready = asyncio.Event()
+        # Set when SessionFinished lands. One connection holds ONE session:
+        # starting the next before the server has retired the last draws
+        # 「session number limit exceeded: 1」, and the swap then times out
+        # with the old persona still in place. Measured 2026-08-28 — the
+        # hand probe that made a swap look easy had waited for this event
+        # without anyone noticing it mattered.
+        self._session_closed = asyncio.Event()
         self._watchdog: asyncio.Task[None] | None = None
         self._events: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
         self._closing = False
@@ -154,6 +173,10 @@ class VolcanoLink:
         # own: ConversationCreate wants complete QA pairs, an even number of
         # them, which is a different thing entirely.
         self._pending_item = ""
+        # A context change that arrived mid-reply, waiting for the slot.
+        # SC only: it is the generation whose persona cannot be updated in
+        # place, so a change there costs a new session.
+        self._swap_pending = False
 
         # One reply at a time, and the model may claim the slot itself after
         # VAD — so this tracks whoever holds it, not just replies we asked for.
@@ -381,8 +404,17 @@ class VolcanoLink:
                 self._ws = None
 
     async def aclose(self) -> None:
+        """Say goodbye, then stop reading — in that order.
+
+        The reverse looks tidier and breaks the socket: FinishSession draws a
+        SessionFinished, and a reply arriving while the receive task is being
+        cancelled leaves the connection closing under the next send. The mock
+        did not answer that goodbye until it was taught to, and the bug was
+        invisible for as long as it did not.
+        """
         self._closing = True
-        for task in (self._watchdog, self._recv, self._reconnect_task):
+        # These two never read the socket; only the receive loop does.
+        for task in (self._watchdog, self._reconnect_task, self._swap_task):
             if task is not None:
                 task.cancel()
         if self._ws is not None and self._started:
@@ -398,6 +430,8 @@ class VolcanoLink:
                 await self._send(wire.client_request(wire.ClientEvent.FINISH_CONNECTION))
             except (websockets.ConnectionClosed, OSError) as exc:
                 log.debug("volcano.goodbye_skipped", detail=str(exc)[:120])
+        if self._recv is not None:
+            self._recv.cancel()
         await self._drop_socket()
         self._started = False
 
@@ -410,15 +444,28 @@ class VolcanoLink:
             await self._ws.send(frame)
 
     async def set_context(self, instructions: str) -> None:
-        """Push the persona.
+        """Push the persona, by whichever channel this generation has.
 
-        Before the session starts this only records it — it goes out inside
-        StartSession, where the persona belongs on this protocol. Afterwards it
-        needs UpdateConfig, which the vendor documents as a FULL replacement of
-        the session config, so the whole body is resent rather than a patch.
+        Before the session starts this only records it: it rides inside
+        StartSession, which is where the persona belongs on this protocol and
+        the only place SC will take one.
+
+        Afterwards the two generations diverge, and not in a way either of
+        them announces. O takes an UpdateConfig — the vendor documents it as a
+        FULL replacement, so the whole body goes rather than a patch. SC
+        ignores the manifest in an UpdateConfig entirely while still answering
+        ConfigUpdated; probed 2026-08-28, four ways round: a manifest sent
+        after the session started never applies, one sent at StartSession
+        always does, and a later one cannot even amend it. So SC gets a new
+        session instead — 114 ms on the same socket, carrying the same
+        dialog_id, and measured to keep both the new context and the old
+        conversation.
         """
         self._context = instructions
         if not self._started:
+            return
+        if _PERSONA_KEY[self._cfg.model] == "character_manifest":
+            await self._swap_session()
             return
         await self._send(
             wire.client_request(
@@ -427,7 +474,56 @@ class VolcanoLink:
                 body=self._session_body(),
             )
         )
-        log.info("volcano.context_pushed", context_len=len(instructions))
+        log.info("volcano.context_pushed", context_len=len(self._context))
+
+    async def _swap_session(self) -> None:
+        """End this session and start another carrying the current context.
+
+        Deferred while she is speaking. Swapping mid-reply would cut her off
+        for a context change nobody was waiting on, and the slot frees between
+        replies anyway — so the pending flag is checked again from _settle.
+        """
+        if self._active is not None:
+            self._swap_pending = True
+            log.debug("volcano.swap_deferred", context_len=len(self._context))
+            return
+        self._swap_pending = False
+        self._session_closed.clear()
+        await self._send(
+            wire.client_request(wire.ClientEvent.FINISH_SESSION, session_id=self._session_id)
+        )
+        try:
+            await asyncio.wait_for(self._session_closed.wait(), timeout=_SWAP_TIMEOUT_S)
+        except TimeoutError:
+            log.warning(
+                "volcano.swap_timed_out",
+                waited_s=_SWAP_TIMEOUT_S,
+                error_text="等不到服务端收掉上一个会话，这次人设更新没落地。",
+            )
+            return
+        self._session_id = str(uuid.uuid4())
+        self._session_ready.clear()
+        await self._send(
+            wire.client_request(
+                wire.ClientEvent.START_SESSION,
+                session_id=self._session_id,
+                body=self._session_body(),
+            )
+        )
+        try:
+            await asyncio.wait_for(self._session_ready.wait(), timeout=_SWAP_TIMEOUT_S)
+        except TimeoutError:
+            log.warning(
+                "volcano.swap_timed_out",
+                waited_s=_SWAP_TIMEOUT_S,
+                error_text="换会话之后等不到服务端确认，这次人设更新可能没落地。",
+            )
+            return
+        log.info(
+            "volcano.session_swapped",
+            context_len=len(self._context),
+            dialog_id=self._dialog_id,
+        )
 
     async def push_audio(self, pcm: bytes) -> None:
         await self._send(wire.audio_request(pcm, session_id=self._session_id))
@@ -552,6 +648,14 @@ class VolcanoLink:
         self._question = ""
         self._audio_muted = False
         self._active = None
+        if self._swap_pending:
+            # A context push landed while she was talking. Now that the slot is
+            # free the swap can happen — as a task, because settling is called
+            # from the receive loop and must not wait on the wire. Held in an
+            # attribute rather than let loose: CPython only keeps a weak
+            # reference to a running task, so a bare create_task can be
+            # collected mid-flight and the swap simply never happens.
+            self._swap_task = asyncio.create_task(self._swap_session(), name="volcano:swap")
         self._slot_free.set()
         if self._watchdog is not None:
             self._watchdog.cancel()
@@ -738,6 +842,15 @@ class VolcanoLink:
             return
         if event == wire.ServerEvent.CHAT_ENDED:
             log.debug("volcano.chat_ended", handle_id=self._handle_id())
+            return
+        if event == wire.ServerEvent.SESSION_FINISHED:
+            self._session_closed.set()
+            return
+        if event == wire.ServerEvent.SESSION_STARTED:
+            # Only a swap gets here; the first session is confirmed by _expect
+            # before this loop exists.
+            self._dialog_id = str(frame.json().get("dialog_id", "")) or self._dialog_id
+            self._session_ready.set()
             return
         if event in (wire.ServerEvent.DIALOG_COMMON_ERROR, wire.ServerEvent.SESSION_FAILED):
             body = frame.json()

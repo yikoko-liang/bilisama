@@ -39,7 +39,8 @@ async def _collect(source: AsyncIterator[link.LinkEvent], count: int) -> list[li
 async def _linked(
     server: MockVolcanoServer, **kw: Any
 ) -> tuple[VolcanoLink, AsyncIterator[link.LinkEvent]]:
-    volcano = VolcanoLink(server.url, app_id="app", access_key="key", config=_cfg(), **kw)
+    config = kw.pop("config", None) or _cfg()
+    volcano = VolcanoLink(server.url, app_id="app", access_key="key", config=config, **kw)
     await volcano.connect()
     await server.wait_ready()
     events = volcano.events()
@@ -661,5 +662,65 @@ async def test_an_error_frame_with_no_event_number_is_not_swallowed() -> None:
                 isinstance(e, link.ReplyDone) and e.status is link.ReplyStatus.FAILED for e in got
             )
             assert handle.stale
+        finally:
+            await volcano.aclose()
+
+
+# ------------------------------- the two generations push context differently
+
+
+async def test_the_o_generation_updates_its_persona_in_place() -> None:
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server, config=_cfg(model="1.2.1.1"))
+        try:
+            await volcano.set_context("你现在是海盗。")
+            await server.wait_for(wire.ClientEvent.UPDATE_CONFIG)
+            body = server.recorded.body_for(wire.ClientEvent.UPDATE_CONFIG)
+            assert body["dialog"]["system_role"] == "你现在是海盗。"
+            assert server.recorded.count(wire.ClientEvent.START_SESSION) == 1
+        finally:
+            await volcano.aclose()
+
+
+async def test_the_sc_generation_takes_a_new_session_instead() -> None:
+    """SC ignores a manifest sent in an UpdateConfig and answers ConfigUpdated
+    anyway, so a push that looked delivered was not. Probed 2026-08-28: the
+    manifest applies at StartSession and nowhere else, which makes a new
+    session the only channel a mid-stream context change has. It costs 114 ms
+    on the same socket and keeps the conversation, because the dialog_id goes
+    with it."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server, config=_cfg(model="2.2.0.0"))
+        try:
+            await volcano.set_context("你现在是海盗。")
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=2)
+
+            assert server.recorded.count(wire.ClientEvent.FINISH_SESSION) == 1
+            assert (
+                server.recorded.count(wire.ClientEvent.UPDATE_CONFIG) == 0
+            ), "SC 上 UpdateConfig 会被静默忽略，发它等于什么都没做"
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body["dialog"]["character_manifest"] == "你现在是海盗。"
+            assert body["dialog"]["dialog_id"] == server.dialog_id, "换会话丢了对话"
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_context_change_waits_until_she_stops_talking() -> None:
+    """Swapping mid-reply would cut her off for a change nobody was waiting on.
+    The slot frees between replies, so the swap rides on that."""
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, config=_cfg(model="2.2.0.0"))
+        try:
+            await volcano.request_reply(link.ReplySpec())
+            await volcano.set_context("你现在是海盗。")
+            await asyncio.sleep(0.05)
+            assert server.recorded.count(wire.ClientEvent.FINISH_SESSION) == 0, "说到一半就换会话了"
+
+            await server.say("说完啦")
+            await _collect(events, 4)
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=2)
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body["dialog"]["character_manifest"] == "你现在是海盗。"
         finally:
             await volcano.aclose()

@@ -97,6 +97,28 @@ def _credentials() -> tuple[str, str]:
     return override or PROFILES[ProviderName.VOLCANO].default_url, key
 
 
+# The two model generations, and the fact that decides everything else about
+# them: SC2.0 refuses any voice that is not a cloned one, and O2.0 loses its
+# persona to a cloned voice's built-in character. Neither mismatch announces
+# itself, so the pairing is baked in here rather than left to a caller.
+GENERATIONS = {
+    "O2.0": {"model": "1.2.1.1", "speaker": "zh_female_vv_jupiter_bigtts"},
+    "SC2.0": {"model": "2.2.0.0", "speaker": "saturn_zh_female_keainvsheng_tob"},
+}
+
+
+@pytest.fixture(params=sorted(GENERATIONS), ids=sorted(GENERATIONS))
+def generation(request: pytest.FixtureRequest) -> dict[str, str]:
+    """Every test in this file runs twice, once per model generation.
+
+    They used to run only against O2.0, which is the shipped default — so SC2.0
+    had nothing behind it but a handful of throwaway probes, and the two
+    behave differently in ways that do not announce themselves (the persona
+    key, the voice family, where the name comes from).
+    """
+    return dict(GENERATIONS[str(request.param)])
+
+
 def _config(**over: Any) -> VolcanoConfig:
     return VolcanoConfig(**over)
 
@@ -136,14 +158,14 @@ async def _collect_into(volcano: VolcanoLink, sink: list[link.LinkEvent]) -> Non
         sink.append(event)
 
 
-async def test_the_handshake_climbs_both_levels() -> None:
+async def test_the_handshake_climbs_both_levels(generation: dict[str, str]) -> None:
     """The floor under everything else: if this fails, read no further.
 
     It also answers question 1 by construction — the client frames this sends
     are the ones the adapter builds, so a wrong optional-field order shows up
     as a refusal right here rather than as a mystery three events later.
     """
-    async for volcano in _link():
+    async for volcano in _link(**generation):
         got = await _drain(volcano, 5.0, until=link.LinkUp)
         assert any(isinstance(e, link.LinkUp) for e in got), f"没建起会话：{got}"
 
@@ -180,14 +202,14 @@ async def test_a_session_event_without_a_session_id_is_refused() -> None:
         )
 
 
-async def test_the_downlink_really_comes_back_as_pcm() -> None:
+async def test_the_downlink_really_comes_back_as_pcm(generation: dict[str, str]) -> None:
     """Question 3, and the one that decides whether anything is audible.
 
     The vendor default is Ogg Opus. If the format request is ignored, this
     catches it here rather than as silence coming out of the speakers — an Ogg
     stream fed to a PCM player is not an error, it is noise.
     """
-    async for volcano in _link():
+    async for volcano in _link(**generation):
         await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.request_reply(link.ReplySpec(instructions="用五个字回答：你好吗"))
         got = await _drain(volcano, 25.0, until=link.ReplyDone)
@@ -198,12 +220,12 @@ async def test_the_downlink_really_comes_back_as_pcm() -> None:
         assert len(audio[0].pcm) % 2 == 0, "s16le 的字节数应当是偶数"
 
 
-async def test_a_reply_ends_with_tts_ended_after_chat_ended() -> None:
+async def test_a_reply_ends_with_tts_ended_after_chat_ended(generation: dict[str, str]) -> None:
     """Question 4. The adapter settles on TTSEnded, so if that event can go
     missing the single slot is held until the watchdog fires — 25 seconds of
     her not answering anybody.
     """
-    async for volcano in _link():
+    async for volcano in _link(**generation):
         await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.request_reply(link.ReplySpec(instructions="用五个字回答：你好吗"))
         got = await _drain(volcano, 25.0, until=link.ReplyDone)
@@ -243,7 +265,9 @@ def _speech_wav(tmp_path: Path) -> Path:
     return out
 
 
-async def test_what_the_server_does_when_talked_over(tmp_path: Path) -> None:
+async def test_what_the_server_does_when_talked_over(
+    tmp_path: Path, generation: dict[str, str]
+) -> None:
     """Question 5, and the one the product hangs on.
 
     There is no response.cancel on this protocol, so `cancel()` is local only.
@@ -255,7 +279,7 @@ async def test_what_the_server_does_when_talked_over(tmp_path: Path) -> None:
     waveform — the same shape as a streamer cutting in.
     """
     wav = _speech_wav(tmp_path)
-    async for volcano in _link():
+    async for volcano in _link(**generation):
         await _drain(volcano, 5.0, until=link.LinkUp)
         collected: list[link.LinkEvent] = []
         task = asyncio.create_task(_collect_into(volcano, collected))
@@ -289,7 +313,9 @@ async def test_what_the_server_does_when_talked_over(tmp_path: Path) -> None:
         )
 
 
-async def test_a_persona_pushed_after_connect_actually_takes_effect() -> None:
+async def test_a_persona_pushed_after_connect_actually_takes_effect(
+    generation: dict[str, str],
+) -> None:
     """Question 6, and the one most likely to fail silently.
 
     Production never puts the persona in StartSession: the assembly connects
@@ -301,7 +327,7 @@ async def test_a_persona_pushed_after_connect_actually_takes_effect() -> None:
     about the persona reaching her rather than about instruction-following in
     general.
     """
-    async for volcano in _link():
+    async for volcano in _link(**generation):
         await _drain(volcano, 5.0, until=link.LinkUp)
         await volcano.set_context("你叫豆腐。有人问你叫什么，你只回答「豆腐」两个字。")
         await asyncio.sleep(1.0)
@@ -313,7 +339,7 @@ async def test_a_persona_pushed_after_connect_actually_takes_effect() -> None:
         )
 
 
-async def test_client_interrupt_really_stops_the_server() -> None:
+async def test_client_interrupt_really_stops_the_server(generation: dict[str, str]) -> None:
     """The one that turns a local-only cancel into a real one.
 
     The docs qualify ClientInterrupt with 「在麦克风按键输入模式下即
@@ -321,7 +347,7 @@ async def test_client_interrupt_really_stops_the_server() -> None:
     plain server_vad and the audio stops. Without the frame the model keeps
     generating and the tokens are spent regardless of what the audience hears.
     """
-    async for volcano in _link():
+    async for volcano in _link(**generation):
         await _drain(volcano, 5.0, until=link.LinkUp)
         collected: list[link.LinkEvent] = []
         task = asyncio.create_task(_collect_into(volcano, collected))
@@ -344,7 +370,9 @@ async def test_client_interrupt_really_stops_the_server() -> None:
         )
 
 
-async def test_a_new_connection_resumes_the_conversation_by_dialog_id() -> None:
+async def test_a_new_connection_resumes_the_conversation_by_dialog_id(
+    generation: dict[str, str],
+) -> None:
     """What makes a reconnect resume rather than restart.
 
     Sets a passphrase on one connection and asks for it back on a brand new
@@ -353,7 +381,7 @@ async def test_a_new_connection_resumes_the_conversation_by_dialog_id() -> None:
     costing a beat and costing the whole stream's memory.
     """
     url, key = _credentials()
-    first = VolcanoLink(url, api_key=key, config=_config())
+    first = VolcanoLink(url, api_key=key, config=_config(**generation))
     await first.connect()
     try:
         await _drain(first, 5.0, until=link.LinkUp)
@@ -366,7 +394,7 @@ async def test_a_new_connection_resumes_the_conversation_by_dialog_id() -> None:
     finally:
         await first.aclose()
 
-    second = VolcanoLink(url, api_key=key, config=_config(), dialog_id=dialog_id)
+    second = VolcanoLink(url, api_key=key, config=_config(**generation), dialog_id=dialog_id)
     await second.connect()
     try:
         await _drain(second, 5.0, until=link.LinkUp)
@@ -378,7 +406,9 @@ async def test_a_new_connection_resumes_the_conversation_by_dialog_id() -> None:
         await second.aclose()
 
 
-async def test_she_answers_to_the_name_the_persona_gives_her() -> None:
+async def test_she_answers_to_the_name_the_persona_gives_her(
+    generation: dict[str, str],
+) -> None:
     """The one that catches 「sent but not effective」, which is the failure
     mode this whole file exists for.
 
@@ -401,7 +431,10 @@ async def test_she_answers_to_the_name_the_persona_gives_her() -> None:
         "- 不说教，不总结陈词，不喊口号。\n- 一次只说一两句，不抢主播的话头。\n"
     )
     url, key = _credentials()
-    volcano = VolcanoLink(url, api_key=key, config=_config(), bot_name="豆腐")
+    # O reads the name out of dialog.bot_name; SC reads it out of the
+    # character manifest and documents bot_name as not applying. The adapter
+    # picks per generation — passing it either way is what proves that.
+    volcano = VolcanoLink(url, api_key=key, config=_config(**generation), bot_name="豆腐")
     await volcano.connect()
     try:
         await _drain(volcano, 5.0, until=link.LinkUp)
