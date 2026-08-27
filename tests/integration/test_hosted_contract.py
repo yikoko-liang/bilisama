@@ -33,7 +33,6 @@ import asyncio
 import base64
 import json
 import os
-import subprocess
 import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -44,6 +43,7 @@ import websockets
 
 from bilisama.config.enums import ProviderName
 from bilisama.realtime.providers import PROFILES, _hosted_url
+from tests.integration.speech_fixture import speech_wav
 
 pytestmark = pytest.mark.provider_a
 
@@ -172,29 +172,6 @@ async def test_a_reply_carries_no_conversation_id_to_pair_on(session: _Session) 
         ), f"这次带上 conversation_id 了——#23 的结论要重新做：{frame}"
 
 
-def _speech_wav(tmp_path: Path) -> Path:
-    """A real speech waveform, synthesised to a file. No device is opened."""
-    out = tmp_path / "speech.wav"
-    try:
-        subprocess.run(
-            [
-                "say",
-                "-v",
-                "Tingting",
-                "-o",
-                str(out),
-                "--data-format=LEI16@16000",
-                "你好，我说句话打断一下，今天天气怎么样啊",
-            ],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        pytest.skip(f"造不出语音素材（macOS say 不可用）：{exc}")
-    return out
-
-
 async def _one_round(*, protect: bool, wav: Path) -> str:
     """Ask for a long spoken reply, talk over it, report how it ended."""
     turn: dict[str, Any] = {"type": "server_vad", "threshold": 0.5, "silence_duration_ms": 800}
@@ -253,7 +230,7 @@ async def test_protection_does_not_survive_being_talked_over(tmp_path: Path) -> 
     really did reach the server's VAD, so a 「completed」 here would mean
     something.
     """
-    wav = _speech_wav(tmp_path)
+    wav = speech_wav(tmp_path)
     control = await _one_round(protect=False, wav=wav)
     protected = await _one_round(protect=True, wav=wav)
     assert control == "cancelled", f"对照组没被打断，这一轮不算数：{control}"
