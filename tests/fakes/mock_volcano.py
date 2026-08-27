@@ -71,6 +71,12 @@ class MockVolcanoServer:
 
     def __init__(self, *, refuse_connection: bool = False, refuse_session: bool = False) -> None:
         self.recorded = Recorded()
+        # Handed out on the first session and expected back on the next. A fake
+        # that invented a new one each time would let a client forget to resume
+        # and still look correct.
+        self.dialog_id = "dlg-abc"
+        self.resumed_with: list[str] = []
+        self.interrupted = 0
         self.refuse_connection = refuse_connection
         self.refuse_session = refuse_session
         self._server: Any = None
@@ -78,6 +84,7 @@ class MockVolcanoServer:
         self._port = 0
         self._session_id = ""
         self._connected = False
+        self._speaking = False
         self._ready = asyncio.Event()
 
     async def __aenter__(self) -> MockVolcanoServer:
@@ -137,9 +144,17 @@ class MockVolcanoServer:
                 )
                 return
             self._session_id = frame.session_id
+            dialog = frame.json().get("dialog") or {}
+            if dialog.get("dialog_id"):
+                self.resumed_with.append(str(dialog["dialog_id"]))
+            # Both `extra` objects are required; the real server answers a null
+            # one with 42000020 rather than defaulting it.
+            assert (frame.json().get("asr") or {}).get("extra") is not None, "asr.extra 是空的"
+            assert (frame.json().get("tts") or {}).get("extra") is not None, "tts.extra 是空的"
+            assert dialog.get("extra", {}).get("model"), "dialog.extra.model 没传，它是必传参数"
             await self._emit(
                 wire.ServerEvent.SESSION_STARTED,
-                {"dialog_id": "dlg-abc"},
+                {"dialog_id": self.dialog_id},
                 session_id=frame.session_id,
             )
             # Unasked-for and undocumented in our event table. A decoder that
@@ -150,6 +165,13 @@ class MockVolcanoServer:
                 session_id=frame.session_id,
             )
             self._ready.set()
+            return
+        if event == wire.ClientEvent.CLIENT_INTERRUPT:
+            # The real one stops sending within a frame or two. Modelled as an
+            # immediate stop so a client that never sends this shows up as
+            # audio that keeps arriving.
+            self.interrupted += 1
+            self._speaking = False
             return
         if event in (wire.ClientEvent.TASK_REQUEST, wire.ClientEvent.UPDATE_CONFIG):
             assert frame.session_id, "会话级事件没带 session id"
@@ -196,6 +218,31 @@ class MockVolcanoServer:
 
     async def wait_ready(self) -> None:
         await asyncio.wait_for(self._ready.wait(), timeout=2.0)
+
+    async def drop(self) -> None:
+        """Lose the socket mid-session.
+
+        1011 rather than 1006: the latter is what the client OBSERVES on an
+        abnormal close and is reserved — sending it is a protocol error. Either
+        way the client sees ConnectionClosed, which is the thing under test.
+        """
+        assert self._conn is not None
+        self._connected = False
+        self._speaking = False
+        self._ready = asyncio.Event()
+        await self._conn.close(code=1011)
+
+    async def say_slowly(self, chunks: int = 20, *, gap: float = 0.02) -> None:
+        """Keep talking until something stops us. What a client that never
+        sends ClientInterrupt would go on hearing."""
+        self._speaking = True
+        for _ in range(chunks):
+            if not self._speaking:
+                return
+            await self._send(
+                wire.ServerEvent.TTS_RESPONSE, b"\x01\x02" * 160, session_id="", raw=True
+            )
+            await asyncio.sleep(gap)
 
     async def say(self, text: str, *, audio: bytes = b"") -> None:
         """One complete reply: text, then audio, then the two enders.

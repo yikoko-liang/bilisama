@@ -95,9 +95,15 @@ class ClientEvent(IntEnum):
     END_ASR = 400
     CHAT_TTS_TEXT = 500
     CHAT_TEXT_QUERY = 501
+    CHAT_RAG_TEXT = 502
     CONVERSATION_CREATE = 510
     CONVERSATION_TRUNCATE = 513
     CONVERSATION_DELETE = 514
+    # Stops the server mid-reply. The docs qualify it with 「在麦克风按键输入
+    # 模式下即 push_to_talk 模式」, which reads like a restriction and is not
+    # one: probed live 2026-08-27 in plain server_vad mode, 94 audio frames
+    # before it and 1 in-flight frame after, the last arriving 0.05 s later.
+    CLIENT_INTERRUPT = 515
 
 
 class ServerEvent(IntEnum):

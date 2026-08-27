@@ -16,17 +16,25 @@ assumes. None of them are hidden:
 1. **No response.create.** The model answers on its own after VAD. Our
    two-step inject (add_context_item, then request_reply) collapses into one
    ChatTextQuery: the item text is stashed locally and sent as the query.
-2. **No cancel.** `cancel()` is local only — the handle goes stale and late
-   frames stop being forwarded, so the barge-in the audience hears is correct,
-   but the model may still be generating on its side.
-3. **No per-turn instructions slot.** They ride in the query text. Note this
+2. **No per-turn instructions slot.** They ride in the query text. Note this
    does NOT use compose_instructions: that helper exists because the OpenAI
    protocol makes response.instructions REPLACE the session's, and here the
    persona sits in the session config where nothing displaces it. Re-sending
    it every turn would be waste, not safety.
-4. **No session cap, but a 10-minute idle timeout** (error 45000003). Our
+3. **No session cap, but a 10-minute idle timeout** (error 45000003). Our
    uplink never stops — plan section 3.3 rule 7 makes that an invariant, silent
    frames and all — so it is not reachable from here.
+
+There used to be a fourth: "no cancel". That was our misreading, not the
+protocol's gap — ClientInterrupt exists and works, see `cancel`.
+
+What this endpoint genuinely cannot do is take a text query on the CURRENT
+full-duplex protocol, which is why we stay on this one. Probed 2026-08-27: the
+duplex API drops ChatTextQuery entirely (it is absent from the vendor's own
+old-to-new event mapping table, ten plausible names all answer "unknown event
+name", and a lone user item in conversation.item.create is silently dropped).
+Injecting a danmaku and getting a reply she composed herself is the product's
+core loop, so the newer protocol cannot serve it. Backlog item 79.
 """
 
 from __future__ import annotations
@@ -79,6 +87,10 @@ class VolcanoLink:
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
         session_id: str | None = None,
+        dialog_id: str = "",
+        auto_reconnect: bool = True,
+        reconnect_backoff_s: float = 1.0,
+        max_reconnect_attempts: int = 6,
     ) -> None:
         """Args:
         api_key: The console's API Key, which authenticates on its own — the
@@ -91,6 +103,10 @@ class VolcanoLink:
         access_key: The older pair's second half, an Access Token.
         session_id: The id we choose for this session — the client picks it,
             not the server. Injectable so tests are not at the mercy of uuid4.
+        dialog_id: A conversation to pick back up, from an earlier session's
+            SessionStarted. Empty starts a new one. The reconnect ladder fills
+            this in for itself; a caller only needs it to resume across a
+            process restart.
         """
         self._url = url
         self._api_key = api_key
@@ -100,15 +116,27 @@ class VolcanoLink:
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
         self._session_id = session_id or str(uuid.uuid4())
+        self._pinned_session_id = session_id is not None
+        self._auto_reconnect = auto_reconnect
+        self._reconnect_backoff_s = reconnect_backoff_s
+        self._max_attempts = max_reconnect_attempts
 
         self._ws: Any = None
         self._recv: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
         self._watchdog: asyncio.Task[None] | None = None
         self._events: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
         self._closing = False
 
         self._context = ""
         self._started = False
+        # Handed back by SessionStarted. Sending it on a later StartSession
+        # reloads that conversation — the server keeps the last 20 QA rounds
+        # against it — which is what makes a reconnect resume rather than
+        # start over. Verified live 2026-08-27: a passphrase set on one
+        # connection came back on the next.
+        self._dialog_id = dialog_id
+        self._attempts = 0
         # What add_context_item was handed, waiting for a request_reply to
         # carry it. There is no wire event that writes one user message on its
         # own: ConversationCreate wants complete QA pairs, an even number of
@@ -122,6 +150,15 @@ class VolcanoLink:
         self._slot_free = asyncio.Event()
         self._slot_free.set()
         self._send_lock = asyncio.Lock()
+
+    @property
+    def dialog_id(self) -> str:
+        """The conversation this link is on, once a session has started.
+
+        Exposed so a caller can carry it across a process restart — the
+        adapter only reuses it within its own reconnect ladder.
+        """
+        return self._dialog_id
 
     # ------------------------------------------------------------ lifecycle
 
@@ -154,15 +191,28 @@ class VolcanoLink:
     async def connect(self) -> None:
         """Open the socket and climb both session levels.
 
-        Two levels, unlike every other provider here: a connection first, then
-        a session inside it. Each is acknowledged, and each acknowledgement is
-        waited for — starting a session on a connection the server has not
-        confirmed draws an error whose text is about the session.
-
         Raises:
             SessionRefused: The server declined the connection or the session.
         """
         self._closing = False
+        self._attempts = 0
+        await self._open()
+
+    async def _open(self) -> None:
+        """One attempt at a live session. Shared by connect and the reconnect
+        ladder, so a resumed session is assembled exactly like a fresh one —
+        the only difference being the dialog_id _session_body puts in.
+
+        Two levels, unlike every other provider here: a connection first, then
+        a session inside it. Each is acknowledged, and each acknowledgement is
+        waited for — starting a session on a connection the server has not
+        confirmed draws an error whose text is about the session.
+        """
+        # A fresh session id per attempt: it identifies the socket-level
+        # session, while dialog_id is what carries the conversation across.
+        # Reusing a spent one is asking the server to resume the wrong thing.
+        if not self._pinned_session_id:
+            self._session_id = str(uuid.uuid4())
         # close_timeout bounds the goodbye, not the conversation — same reason
         # RealtimeClient sets it: a wedged server otherwise holds aclose() for
         # the library's 10s default.
@@ -191,15 +241,18 @@ class VolcanoLink:
             what="会话",
         )
         self._started = True
+        resumed = bool(self._dialog_id)
+        self._dialog_id = str(frame.json().get("dialog_id", "")) or self._dialog_id
         log.info(
             "volcano.session_started",
             model=self._cfg.model,
             speaker=self._cfg.speaker,
-            dialog_id=str(frame.json().get("dialog_id", "")),
+            dialog_id=self._dialog_id,
+            resumed=resumed,
             context_len=len(self._context),
         )
         self._recv = asyncio.create_task(self._recv_loop(), name="volcano:recv")
-        await self._events.put(link.LinkUp())
+        await self._events.put(link.LinkUp(attempts=self._attempts + 1))
 
     def _session_body(self) -> dict[str, Any]:
         """The StartSession config: what it hears, what it sounds like, who it is.
@@ -207,18 +260,33 @@ class VolcanoLink:
         The audio shape is asked for explicitly rather than taken as given:
         the downlink default is Ogg Opus, and every consumer above us wants
         raw PCM.
+
+        Both `extra` objects are always present, even empty. The vendor lists
+        「StartSession event payload asr extra is null」 and the tts twin as
+        error 42000020 — a null there is a documented refusal, not a default.
+
+        `dialog.extra.model` is documented as required. It also carries real
+        meaning: it picks the model generation whose persona key this session
+        is about to use, so sending the key without the version is asking two
+        different questions.
         """
-        dialog: dict[str, Any] = {}
+        dialog: dict[str, Any] = {"extra": {"model": self._cfg.model}}
         if self._context:
             dialog[_PERSONA_KEY[self._cfg.model]] = self._context
+        if self._dialog_id:
+            # Reconnecting. The server keeps the last 20 QA rounds against this
+            # id, so a dropped socket comes back with the conversation intact
+            # rather than with amnesia halfway through a stream.
+            dialog["dialog_id"] = self._dialog_id
         body: dict[str, Any] = {
             "asr": {"extra": {"end_smooth_window_ms": self._cfg.end_smooth_window_ms}},
             "tts": {
+                "extra": {},
                 "audio_config": {
                     "channel": 1,
                     "format": "pcm_s16le",
                     "sample_rate": 24000,
-                }
+                },
             },
         }
         if self._cfg.speaker:
@@ -280,7 +348,7 @@ class VolcanoLink:
 
     async def aclose(self) -> None:
         self._closing = True
-        for task in (self._watchdog, self._recv):
+        for task in (self._watchdog, self._recv, self._reconnect_task):
             if task is not None:
                 task.cancel()
         if self._ws is not None and self._started:
@@ -364,16 +432,34 @@ class VolcanoLink:
         return handle
 
     async def cancel(self, handle: link.ReplyHandle) -> None:
-        """Drop it on our side. There is no wire event that stops generation.
+        """Stop her, on the wire and locally.
 
-        The audience hears the right thing — the handle goes stale and both
-        audio consumers drop its frames — but the model may keep generating,
-        and the tokens are spent either way.
+        This used to be local-only, on the reading that the protocol had no
+        cancel. It has one: ClientInterrupt, which the docs qualify with
+        「在麦克风按键输入模式下」 — a qualification that turns out not to be a
+        restriction. Probed live 2026-08-27 in plain server_vad mode: 94 audio
+        frames before the interrupt, one in-flight frame after, arriving 0.05 s
+        later. So the tokens stop being spent, not just being played.
+
+        The local settle still happens, and still first: the frames already in
+        flight are ours to drop, and marking the handle stale is what both
+        audio consumers key on.
         """
         if self._active is None or self._active is not handle:
             return
-        log.info("volcano.cancel_local_only", handle_id=handle.handle_id)
         self._settle(link.ReplyStatus.CANCELLED)
+        try:
+            await self._send(
+                wire.client_request(
+                    wire.ClientEvent.CLIENT_INTERRUPT, session_id=self._session_id, body={}
+                )
+            )
+        except (websockets.ConnectionClosed, OSError, ConnectionError) as exc:
+            # A dead socket has already stopped her more thoroughly than this
+            # frame would have. Worth a line, not worth raising into a barge-in.
+            log.debug("volcano.interrupt_unsent", detail=str(exc)[:120])
+            return
+        log.info("volcano.interrupted", handle_id=handle.handle_id)
 
     async def end_protection(self) -> None:
         """No-op, like the hosted adapter's.
@@ -439,6 +525,46 @@ class VolcanoLink:
         assert self._active is not None
         return self._active
 
+    async def _reconnect(self) -> None:
+        """Climb back, with the conversation intact.
+
+        Bounded on purpose: a ladder that never gives up turns a dead account
+        or a revoked key into an infinite quiet retry, and the streamer sees a
+        panel that says "connecting" forever. Six tries matches the hosted
+        client's budget.
+
+        The session resumes rather than restarts because StartSession carries
+        the dialog_id from last time (see _session_body), so she comes back
+        knowing what was already said instead of with amnesia mid-stream.
+        """
+        delay = self._reconnect_backoff_s
+        for attempt in range(1, self._max_attempts + 1):
+            if self._closing:
+                return
+            self._attempts = attempt
+            await self._clock.sleep(delay)
+            delay = min(delay * 2, 30.0)
+            try:
+                await self._open()
+            except (SessionRefused, OSError, websockets.WebSocketException) as exc:
+                log.warning(
+                    "volcano.reconnect_failed",
+                    attempt=attempt,
+                    error_text=str(exc)[:160],
+                    error_class=type(exc).__name__,
+                )
+                continue
+            log.info("volcano.reconnected", attempt=attempt, dialog_id=self._dialog_id)
+            return
+        log.error(
+            "volcano.reconnect_gave_up",
+            attempts=self._max_attempts,
+            error_text="重连试满了还是连不上，这条语音链路不会自己回来了。",
+        )
+        await self._events.put(
+            link.LinkDown(reason=f"重连 {self._max_attempts} 次都没成功", retrying=False)
+        )
+
     async def _recv_loop(self) -> None:
         try:
             async for raw in self._ws:
@@ -457,9 +583,17 @@ class VolcanoLink:
         except asyncio.CancelledError:
             raise
         except (websockets.ConnectionClosed, OSError) as exc:
-            if not self._closing:
-                self._settle(link.ReplyStatus.FAILED)
-                await self._events.put(link.LinkDown(reason=str(exc)[:120], retrying=False))
+            if self._closing:
+                return
+            # Everything in flight is gone with the socket. Settle first so no
+            # reply is left holding the single slot across the gap.
+            self._settle(link.ReplyStatus.FAILED)
+            await self._events.put(link.LinkDown(reason=str(exc)[:120], retrying=True))
+            self._ws = None
+            if self._auto_reconnect:
+                self._reconnect_task = asyncio.create_task(
+                    self._reconnect(), name="volcano:reconnect"
+                )
 
     def _dispatch(self, frame: wire.Frame) -> None:
         """One decoded frame to zero or more normalised events.

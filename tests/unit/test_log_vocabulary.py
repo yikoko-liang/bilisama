@@ -183,7 +183,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "ui.uplink_resumed",
         "ui.uplink_silence_filled",
         "ui.ws_origin_refused",
-        "volcano.cancel_local_only",
+        "volcano.interrupt_unsent",
+        "volcano.interrupted",
         "volcano.chat_ended",
         "volcano.context_pushed",
         "volcano.event_ignored",
@@ -194,6 +195,9 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "volcano.reply_requested",
         "volcano.reply_timed_out",
         "volcano.session_started",
+        "volcano.reconnect_failed",
+        "volcano.reconnect_gave_up",
+        "volcano.reconnected",
     }
 )
 

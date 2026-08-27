@@ -112,7 +112,11 @@ async def test_the_persona_goes_under_the_key_its_model_generation_reads(
         try:
             dialog = server.recorded.body_for(wire.ClientEvent.START_SESSION)["dialog"]
             assert dialog[key] == "你是米娅，主播的AI搭子。"
-            assert len(dialog) == 1, f"人设同时写进了两个键：{sorted(dialog)}"
+            other = {"system_role", "character_manifest"} - {key}
+            assert not (other & set(dialog)), f"人设同时写进了两个键：{sorted(dialog)}"
+            # The version rides along, because the key alone does not say which
+            # generation is meant to read it — and the vendor lists it required.
+            assert dialog["extra"]["model"] == model
         finally:
             await volcano.aclose()
 
@@ -432,3 +436,91 @@ async def test_closing_says_goodbye_at_both_levels() -> None:
         await server.wait_for(wire.ClientEvent.FINISH_CONNECTION)
         assert server.recorded.count(wire.ClientEvent.FINISH_SESSION) == 1
         assert server.recorded.count(wire.ClientEvent.FINISH_CONNECTION) == 1
+
+
+# ------------------------------------------- what the docs had that we missed
+
+
+async def test_cancel_reaches_the_wire_not_just_our_side() -> None:
+    """ClientInterrupt exists, and cancel used to be local-only because the
+    first read of the docs missed it. The difference is not cosmetic: without
+    the frame the model keeps generating and the tokens are still spent, so a
+    barge-in that only sounds clean still costs a full reply."""
+    async with MockVolcanoServer() as server:
+        volcano, _ = await _linked(server)
+        try:
+            handle = await volcano.request_reply(link.ReplySpec())
+            talking = asyncio.create_task(server.say_slowly())
+            await asyncio.sleep(0.05)
+            await volcano.cancel(handle)
+            await server.wait_for(wire.ClientEvent.CLIENT_INTERRUPT)
+
+            assert server.interrupted == 1
+            assert handle.stale, "线上停了，本地也得停：迟到的帧归消费者丢"
+            await asyncio.wait_for(talking, timeout=2.0)
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_dropped_socket_comes_back_resuming_the_same_conversation() -> None:
+    """Reconnect used to be absent here while the hosted adapter had it, and
+    the fix is the protocol's own: StartSession takes the dialog_id the server
+    handed out, and the server keeps the last twenty rounds against it. So she
+    comes back knowing what was said rather than with amnesia mid-stream."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
+        try:
+            await server.drop()
+            down = await _collect(events, 1)
+            assert isinstance(down[0], link.LinkDown)
+            assert down[0].retrying, "掉线了却说不再试，上层就不会等它回来"
+
+            await clock.advance(2.0)
+            up = await _collect(events, 1)
+            assert isinstance(up[0], link.LinkUp)
+            assert server.resumed_with == [
+                server.dialog_id
+            ], f"重连没带 dialog_id，她会忘掉这一场：{server.resumed_with}"
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_reply_in_flight_when_the_socket_dies_does_not_hold_the_slot() -> None:
+    """The single slot is held by whoever is speaking. Losing the socket while
+    she speaks must free it, or every request_reply after the reconnect waits
+    on a reply that died with the old connection."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
+        try:
+            await volcano.request_reply(link.ReplySpec())
+            await server.drop()
+            got = await _collect(events, 2)
+            done = [e for e in got if isinstance(e, link.ReplyDone)]
+            assert done and done[0].status is link.ReplyStatus.FAILED
+
+            await clock.advance(2.0)
+            await _collect(events, 1)  # LinkUp
+            await asyncio.wait_for(volcano.request_reply(link.ReplySpec()), timeout=2.0)
+        finally:
+            await volcano.aclose()
+
+
+async def test_reconnect_gives_up_out_loud_rather_than_retrying_forever() -> None:
+    """A revoked key would otherwise become an infinite quiet retry, and the
+    panel would say 「connecting」 for the rest of the stream."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
+        try:
+            server.refuse_connection = True
+            await server.drop()
+            await _collect(events, 1)  # the first LinkDown, retrying=True
+            for _ in range(8):
+                await clock.advance(40.0)
+            final = await _collect(events, 1)
+            assert isinstance(final[0], link.LinkDown)
+            assert not final[0].retrying, "试满了还说在重试"
+        finally:
+            await volcano.aclose()

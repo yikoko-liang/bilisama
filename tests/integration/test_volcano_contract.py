@@ -297,3 +297,68 @@ async def test_a_persona_pushed_after_connect_actually_takes_effect() -> None:
         assert "米娅" in said, (
             f"人设没生效，她说的是「{said}」——" "UpdateConfig 被收下然后忽略了，人设得改走别的路"
         )
+
+
+async def test_client_interrupt_really_stops_the_server() -> None:
+    """The one that turns a local-only cancel into a real one.
+
+    The docs qualify ClientInterrupt with 「在麦克风按键输入模式下即
+    push_to_talk 模式」, which reads like a restriction. It is not: this runs in
+    plain server_vad and the audio stops. Without the frame the model keeps
+    generating and the tokens are spent regardless of what the audience hears.
+    """
+    async for volcano in _link():
+        await _drain(volcano, 5.0, until=link.LinkUp)
+        collected: list[link.LinkEvent] = []
+        task = asyncio.create_task(_collect_into(volcano, collected))
+        handle = await volcano.request_reply(
+            link.ReplySpec(instructions="讲一个五百字左右的长故事，从头讲到尾，中间不要停")
+        )
+        await asyncio.sleep(5.0)
+        before = sum(1 for e in collected if isinstance(e, link.ReplyAudioDelta))
+        assert before > 10, f"她还没说开，打断了也证明不了什么（{before} 帧）"
+
+        await volcano.cancel(handle)
+        cut = len(collected)
+        await asyncio.sleep(6.0)
+        task.cancel()
+
+        after = sum(1 for e in collected[cut:] if isinstance(e, link.ReplyAudioDelta))
+        assert after <= 5, (
+            f"打断之后还收到 {after} 帧音频（打断前 {before} 帧）——"
+            "ClientInterrupt 没让服务端停下来"
+        )
+
+
+async def test_a_new_connection_resumes_the_conversation_by_dialog_id() -> None:
+    """What makes a reconnect resume rather than restart.
+
+    Sets a passphrase on one connection and asks for it back on a brand new
+    one. Without the dialog_id she has no idea; with it the server reloads the
+    last twenty rounds, which is the difference between a dropped socket
+    costing a beat and costing the whole stream's memory.
+    """
+    url, key = _credentials()
+    first = VolcanoLink(url, api_key=key, config=_config())
+    await first.connect()
+    try:
+        await _drain(first, 5.0, until=link.LinkUp)
+        await first.request_reply(
+            link.ReplySpec(instructions="记住一个暗号：紫色兔子。回一个「好」字就行。")
+        )
+        await _drain(first, 25.0, until=link.ReplyDone)
+        dialog_id = first.dialog_id
+        assert dialog_id, "SessionStarted 没给 dialog_id，接续就无从谈起"
+    finally:
+        await first.aclose()
+
+    second = VolcanoLink(url, api_key=key, config=_config(), dialog_id=dialog_id)
+    await second.connect()
+    try:
+        await _drain(second, 5.0, until=link.LinkUp)
+        await second.request_reply(link.ReplySpec(instructions="刚才那个暗号是什么？"))
+        got = await _drain(second, 25.0, until=link.ReplyDone)
+        said = "".join(e.text for e in got if isinstance(e, link.ReplyTextDelta))
+        assert "紫" in said or "兔" in said, f"新连接没接上上一场，她说的是「{said}」"
+    finally:
+        await second.aclose()
