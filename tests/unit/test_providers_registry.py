@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from bilisama.config.enums import ProviderName
+from bilisama.config.schema import Settings
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
 from bilisama.realtime.providers import PROFILES, profile_for, turn_type_problems
@@ -113,3 +114,42 @@ def test_dashscope_declares_smart_turn_and_the_single_slot() -> None:
     assert "smart_turn" in caps.turn_detection_types
     assert caps.single_response_slot
     assert not caps.out_of_band_exempt_from_slot
+
+
+def test_every_provider_gets_a_quiet_window_from_its_own_numbers() -> None:
+    """Plan section 3.3 rule 1, and the reason it moved out of the assembly.
+
+    dev_talk computed this with `if s2s: ... else: dashscope`, so a fourth
+    provider did not fail loudly — it silently got DashScope's endpointing.
+    Volcengine waits 1.5 s before it calls a pause finished against
+    DashScope's 300 ms, so the gate opened about 0.9 s early and she could cut
+    in while the streamer was still mid-pause.
+    """
+    from bilisama.realtime.providers import quiet_window_s
+
+    settings = Settings()
+    windows = {p: quiet_window_s(settings, p) for p in ProviderName}
+    assert all(w > 0 for w in windows.values())
+    # Not the same number for everyone, which is the whole point: a constant
+    # would pass a test that only checked "positive".
+    assert windows[ProviderName.VOLCANO] != windows[ProviderName.DASHSCOPE]
+    # Read off the shipped defaults, so a config change moves these with it.
+    assert windows[ProviderName.VOLCANO] == pytest.approx(
+        settings.speech.volcano.end_smooth_window_ms / 1000 + 0.3
+    )
+    assert windows[ProviderName.DASHSCOPE] == pytest.approx(
+        settings.speech.dashscope.turn.silence_duration_ms / 1000 + 0.3
+    )
+
+
+def test_the_quiet_window_covers_the_s2s_two_stage_grace() -> None:
+    """s2s is the one whose grace is two numbers, not one: the speculative
+    reopen window, plus the extra delay an 'incomplete' verdict adds. Using
+    either alone leaves a gap the rule exists to close."""
+    from bilisama.realtime.providers import quiet_window_s
+
+    settings = Settings()
+    turn = settings.speech.s2s.turn
+    assert quiet_window_s(settings, ProviderName.S2S) == pytest.approx(
+        (turn.smart_turn_max_wait_ms + turn.smart_turn_incomplete_delay_ms) / 1000 + 0.3
+    )

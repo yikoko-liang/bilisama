@@ -47,7 +47,13 @@ from bilisama.obs.health import LinkHealth
 from bilisama.obs.logging import bind, get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
-from bilisama.realtime.providers import codec_for, profile_for, resolve_endpoint, with_model
+from bilisama.realtime.providers import (
+    codec_for,
+    profile_for,
+    quiet_window_s,
+    resolve_endpoint,
+    with_model,
+)
 from bilisama.realtime.providers.factory import LinkRequest, build_link
 
 
@@ -1263,15 +1269,12 @@ async def run_director(args: argparse.Namespace) -> int:
         guard=guard.text_blocked,
     )
     floor = SpeakingFloor(clock)
-    # The quiet window must cover the WORST turn-grace branch plus margin
-    # (plan section 3.3 rule 1); a fixed 1.1 s left a gap into the rule-5
-    # pending window (A2/A3). The floor also holds while an implicit reply
-    # is generating, so this timer only carries the no-reply case.
-    if provider is ProviderName.S2S:
-        turn = settings.speech.s2s.turn
-        quiet_s = (turn.smart_turn_max_wait_ms + turn.smart_turn_incomplete_delay_ms) / 1000 + 0.3
-    else:
-        quiet_s = settings.speech.dashscope.turn.silence_duration_ms / 1000 + 0.3
+    # Plan section 3.3 rule 1. Which numbers make up the window is the
+    # provider's business and lives in the registry — computing it here meant
+    # a two-armed branch whose `else` handed volcano DashScope's endpointing.
+    # The floor also holds while an implicit reply is generating, so this timer
+    # only carries the no-reply case.
+    quiet_s = quiet_window_s(settings, provider)
 
     # The window health reports from (plan §4.12). Fed here rather than inside
     # the scheduler: this is already the one place every Verdict passes through.

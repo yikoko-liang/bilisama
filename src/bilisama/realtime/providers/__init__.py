@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import assert_never
 from urllib.parse import parse_qsl, urlencode
 
 from bilisama.config.enums import ProviderName
@@ -31,6 +32,7 @@ __all__ = [
     "codec_for",
     "compose_instructions",
     "profile_for",
+    "quiet_window_s",
     "resolve_endpoint",
     "turn_type_problems",
     "with_model",
@@ -174,6 +176,44 @@ def with_model(url: str, model: str, *, explicit: bool = False) -> str:
     kept = [(key, value) for key, value in named if key != "model"]
     kept.append(("model", model))
     return f"{base}?{urlencode(kept)}"
+
+
+def quiet_window_s(settings: Settings, provider: ProviderName) -> float:
+    """How long after the streamer stops before anything may be injected.
+
+    Plan section 3.3 rule 1. The window has to cover the provider's own
+    endpointing grace plus margin: inject inside it and the reply is counted
+    into a turn the streamer has not finished, which on s2s gets it silently
+    discarded and everywhere else just talks over them.
+
+    It lives here rather than in the assembly because every term in it is a
+    provider's private parameter, and plan section 4.3 is explicit that the
+    floor must not learn names like smart_turn_max_wait_ms. dev_talk computed
+    it inline with a two-armed branch whose `else` read DashScope's
+    silence_duration_ms — so adding a fourth provider did not fail loudly, it
+    quietly gave volcano a 0.6 s window against its own 1.5 s endpointing and
+    let her cut in while the streamer was still mid-pause.
+
+    Returns:
+        Seconds. The 0.3 margin is the same on every path — it covers the
+        round trip, not the endpointing.
+    """
+    margin = 0.3
+    match provider:
+        case ProviderName.S2S:
+            # Two stages upstream: the speculative reopen grace, then the extra
+            # delay an "incomplete" verdict adds before it starts over.
+            turn = settings.speech.s2s.turn
+            grace_ms = turn.smart_turn_max_wait_ms + turn.smart_turn_incomplete_delay_ms
+        case ProviderName.DASHSCOPE | ProviderName.OPENAI_GA:
+            grace_ms = getattr(settings.speech, provider.value).turn.silence_duration_ms
+        case ProviderName.VOLCANO:
+            # Its only endpointing knob, and a much longer default (1500 ms)
+            # than the hosted pair's 300.
+            grace_ms = settings.speech.volcano.end_smooth_window_ms
+        case _ as unhandled:
+            assert_never(unhandled)
+    return grace_ms / 1000 + margin
 
 
 def compose_instructions(context: str, turn: str | None) -> str | None:
