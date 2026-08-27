@@ -383,7 +383,8 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "persona.display_name": FieldMeta(
         label="AI 叫什么",
-        hint="它自称什么。留空就用人设的目录名，想换个写法或起个别名再填",
+        hint="它自称什么。出厂填着「豆腐」，而且不跟着人设走——换成 hanako 这类人设时"
+        "要连这一行一起改，否则她还是自称豆腐。留空才回落到人设的目录名",
         audience=Audience.STREAMER,
         reload=Reload.RESTART,
         group="人设",
@@ -931,6 +932,12 @@ _PROVIDERS = frozenset(p.value for p in ProviderName)
 
 def _scope_by_path(table: dict[str, FieldMeta]) -> None:
     """Anything under `speech.<provider>.` belongs to that provider. Say so.
+
+    Thirty entries take their scope from here today; the twenty-four under
+    `speech.s2s.` are invisible in practice because s2s is the shipped default
+    and `ui/server.py` only hides the sections that are NOT running. The six
+    that changed behaviour are dashscope's and openai_ga's endpoint, model and
+    key status, which the panel used to list while another backend was live.
 
     Eighteen entries had left `provider_scoped` blank — every endpoint, model
     and key under dashscope, openai_ga and s2s — so the panel listed all three

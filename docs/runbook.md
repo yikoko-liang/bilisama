@@ -26,6 +26,11 @@
 export dashscope_url=...    # 阿里 MaaS 实例地址
 export ali_api_key=...      # 它的 key
 
+# 火山引擎豆包端到端语音。地址不用填，注册表里带了内置的公网地址
+export volcano_api_key=...  # 控制台 > API Key 管理，一个就够
+# 老账号那对（二选一，不是拼起来）：
+# export volcano_app_id=... ; export volcano_access_key=...
+
 # 本地引擎要挂的对话模型（走公司内网那条路）
 export base_url=...         # OpenAI 兼容端点
 export api_key=...          # 它的 key
@@ -61,7 +66,8 @@ export openai_compatible_url=...
 ### 火山引擎（豆包端到端语音）
 
 **2026-08-27 真端点跑通了**：握手 327ms、首个文字 685ms、首帧音频 1134ms、
-3.57 秒 PCM，人设生效、打断干净、收尾无残留。六条契约测试全绿（清单和结论在
+3.57 秒 PCM，人设生效、打断干净、收尾无残留。当时六条契约测试全绿；现在是十条、
+其中八条对两个模型版本各跑一遍，共 18 个用例（清单和结论在
 [tests/integration/test_volcano_contract.py](../tests/integration/test_volcano_contract.py)
 的文件头）。
 
@@ -462,12 +468,14 @@ hanako/ming/butter 的身份和性格原样移植自 openhanako；各自的 yuan
 ```toml
 [persona]
 streamer_name = "阿强"      # 它怎么称呼你，默认「主播」
-display_name = ""           # 它自称什么，留空用人设的目录名
+display_name = "豆腐"       # 它自称什么。出厂就填着，留空才回落到人设的目录名
 ```
 
+⚠️ `display_name` 是全局的，不跟着 `--persona` 走：出厂填着「豆腐」，所以切到
+hanako / ming / butter 之后她仍然自称豆腐。换人设时这一行也要改。老账 #86。
+
 填了称呼之后，hanako 的开头从「# hanako／主播的个人助手」变成
-「# hanako／阿强的个人助手」。`display_name` 一般不用动——人设叫什么就是什么，
-只有想换个写法或起别名时才填。
+「# hanako／阿强的个人助手」。
 
 **置顶备忘（pinned.md，手动通道）**：想让 AI 永久记住某件事，直接往活人设目录的
 `pinned.md` 里写，一行一条，文件不存在就新建：
@@ -589,12 +597,14 @@ export BILI_SESSDATA=<浏览器 cookie 里的 SESSDATA>
 
 `--persona tofu` 和 `--skin tofu` 是两个不同的查找，改一个不影响另一个。
 
-**两条已知的毛刺，都不是这次改名引入的：**
+**两条已知的毛刺：**
 
 - `--persona hanako` 这类临时切换**只覆盖 `id`，不覆盖 `display_name`**
   （`dev_talk.py` 的 `overrides["persona"] = {"id": args.persona}`）。四个人设都用
-  `{{agentName}}`，所以切过去之后她仍然自称「豆腐」。`display_name` 本来就是全局的
-  「她自称什么」，这是既有设计——但改名之后更容易被当成 bug。
+  `{{agentName}}`，所以切过去之后她仍然自称「豆腐」，hanako / ming / butter 三个随包人设
+  的名字全都用不出来。**这条原来写的是「不是这次改名引入的」，2026-08-28 评审查证推翻了**：
+  取值是 `display_name or id`，`display_name` 出厂从 `""` 翻成 `"豆腐"` 正是这次改名做的，
+  在那之前空值会回落到各自的 `id`。老账 #86，改的时候默认值和两处文档要一起动。
 - `renderer` 那个三值枚举混了两个轴：`tofu` 是「哪个皮肤包」，`sprite` / `live2d`
   是「哪种机制」。老账 #40，跟名字无关。
 
