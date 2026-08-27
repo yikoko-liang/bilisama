@@ -24,6 +24,15 @@ What it insists on, and why each one can really bite:
   retired is refused, the way the real one answers 「session number limit
   exceeded: 1」.
 
+Every rule goes through `_refuse`, and none of them raise. They used to be
+plain `assert`s, which made all but the first decoration: websockets catches
+whatever a connection handler raises, logs "connection handler failed" and
+closes with 1011, so a violation surfaced as a stray reconnect (VolcanoLink
+retries by default) and the test stayed green. Now a broken rule lands in
+`violations`, `__aexit__` fails the test with it, and the two waiters check it
+so a test stops on the reason instead of on their timeout. Planted violations
+in tests/unit/test_volcano_link.py keep that machinery honest.
+
 One thing this fake cannot model, said out loud so nobody assumes otherwise:
 it handles frames strictly in order, while the real server is concurrent. So
 a client that sends FinishSession and StartSession back to back without
@@ -94,6 +103,14 @@ class MockVolcanoServer:
         self.question_id = "q1"
         self.refuse_connection = refuse_connection
         self.refuse_session = refuse_session
+        # Turn off to model a server that retires the session without saying
+        # so. The client is then waiting for a SessionFinished that is never
+        # coming, which is the state a swap has to survive.
+        self.answer_finish_session = True
+        # Every rule this fake broke on the client's behalf. Read by __aexit__,
+        # and by the two waiters so a violated rule fails fast instead of
+        # spending their whole timeout.
+        self.violations: list[str] = []
         self._server: Any = None
         self._conn: ServerConnection | None = None
         self._port = 0
@@ -111,6 +128,31 @@ class MockVolcanoServer:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
+        # Only when the test is otherwise passing. Raising over a live
+        # exception would replace the real failure with this one, and the
+        # violation is usually its consequence rather than its cause.
+        if exc[0] is None:
+            self.check()
+
+    def check(self) -> None:
+        """Fail if the client broke any rule this fake refuses.
+
+        Raises:
+            AssertionError: One or more rules were broken, listed in order.
+        """
+        if self.violations:
+            raise AssertionError("客户端违反了假服务器的规则：" + "；".join(self.violations))
+
+    def _refuse(self, rule: str, *, ok: bool) -> bool:
+        """Record a broken rule and say whether to carry on.
+
+        Returns:
+            True when the rule held. False means the caller should stop
+            handling this frame — the real endpoint would have errored out.
+        """
+        if not ok:
+            self.violations.append(rule)
+        return ok
 
     @property
     def url(self) -> str:
@@ -127,7 +169,13 @@ class MockVolcanoServer:
         self.recorded.headers = dict(ws.request.headers) if ws.request else {}
         async for message in ws:
             data = message if isinstance(message, bytes) else str(message).encode()
-            frame = wire.decode(data)
+            try:
+                frame = wire.decode(data)
+            except wire.VolcanoProtocolError as exc:
+                # Recorded, not raised: an exception here dies inside websockets
+                # and the test sees a reconnect instead of a reason.
+                self._refuse(f"发来的帧解不开：{exc}", ok=False)
+                continue
             self.recorded.events.append(frame.event or 0)
             self.recorded.session_ids.append(frame.session_id)
             if frame.kind is wire.MessageKind.AUDIO_CLIENT:
@@ -136,13 +184,20 @@ class MockVolcanoServer:
                 # Raw, never JSON. A client that set the JSON bit here built
                 # its header from the wrong branch, and the real server would
                 # try to parse PCM as text.
-                assert data[2] >> 4 == 0b0000, "上行音频不是 Raw 序列化"
+                self._refuse("上行音频不是 Raw 序列化", ok=data[2] >> 4 == 0b0000)
+                self._refuse("上行音频没带 session id", ok=bool(frame.session_id))
                 continue
             self.recorded.bodies.append(frame.json())
             await self._on_event(frame)
 
     async def _on_event(self, frame: wire.Frame) -> None:
         event = frame.event
+        # Everything from StartSession up is session-scoped. Checked once here
+        # for the whole range rather than per branch, so a newly used event is
+        # covered the day it is first sent — and so the branches that return
+        # early are covered too.
+        if event is not None and event >= wire.ClientEvent.START_SESSION:
+            self._refuse(f"会话级事件 {event} 没带 session id", ok=bool(frame.session_id))
         if event == wire.ClientEvent.START_CONNECTION:
             if self.refuse_connection:
                 await self._emit(wire.ServerEvent.CONNECTION_FAILED, {"error": "拒绝连接"})
@@ -153,14 +208,23 @@ class MockVolcanoServer:
         if event == wire.ClientEvent.START_SESSION:
             # Order matters, and a fast loopback is exactly where skipping it
             # would go unnoticed.
-            assert self._connected, "还没建连接就开会话"
+            if not self._refuse("还没建连接就开会话", ok=self._connected):
+                return
             # One session per connection. The real endpoint answers a second
             # one with 「session number limit exceeded: 1」, which is how a
             # context swap that did not wait for SessionFinished presented:
             # green on an idle box, timed out under load with the old persona
-            # still in place.
-            assert not self._session_id, "上一个会话还没收掉就开新的（真端点会拒）"
-            assert frame.session_id, "会话级事件没带 session id"
+            # still in place. Refused rather than merely recorded, so the
+            # client sees what the real one would send back.
+            if not self._refuse(
+                "上一个会话还没收掉就开新的（真端点会拒）", ok=not self._session_id
+            ):
+                await self._emit(
+                    wire.ServerEvent.SESSION_FAILED,
+                    {"error": "session number limit exceeded: 1"},
+                    session_id=frame.session_id,
+                )
+                return
             if self.refuse_session:
                 await self._emit(
                     wire.ServerEvent.SESSION_FAILED,
@@ -174,9 +238,16 @@ class MockVolcanoServer:
                 self.resumed_with.append(str(dialog["dialog_id"]))
             # Both `extra` objects are required; the real server answers a null
             # one with 42000020 rather than defaulting it.
-            assert (frame.json().get("asr") or {}).get("extra") is not None, "asr.extra 是空的"
-            assert (frame.json().get("tts") or {}).get("extra") is not None, "tts.extra 是空的"
-            assert dialog.get("extra", {}).get("model"), "dialog.extra.model 没传，它是必传参数"
+            self._refuse(
+                "asr.extra 是空的", ok=(frame.json().get("asr") or {}).get("extra") is not None
+            )
+            self._refuse(
+                "tts.extra 是空的", ok=(frame.json().get("tts") or {}).get("extra") is not None
+            )
+            self._refuse(
+                "dialog.extra.model 没传，它是必传参数",
+                ok=bool(dialog.get("extra", {}).get("model")),
+            )
             await self._emit(
                 wire.ServerEvent.SESSION_STARTED,
                 {"dialog_id": self.dialog_id},
@@ -195,6 +266,11 @@ class MockVolcanoServer:
             # The connection survives; the docs are explicit that the socket
             # is reusable, which is what makes a context swap cheap on SC.
             finished, self._session_id = self._session_id, ""
+            if not self.answer_finish_session:
+                # Retired on the server, never acknowledged. A client that
+                # simply gives up here is left addressing a session that no
+                # longer exists, on a link that still looks healthy.
+                return
             await self._emit(wire.ServerEvent.SESSION_FINISHED, {}, session_id=finished)
             return
         if event == wire.ClientEvent.CLIENT_INTERRUPT:
@@ -204,8 +280,8 @@ class MockVolcanoServer:
             self.interrupted += 1
             self._speaking = False
             return
-        if event in (wire.ClientEvent.TASK_REQUEST, wire.ClientEvent.UPDATE_CONFIG):
-            assert frame.session_id, "会话级事件没带 session id"
+        # UpdateConfig gets no acknowledgement at all — there is no
+        # session.updated here. A client that waits for one hangs.
         # UpdateConfig gets no acknowledgement at all — there is no
         # session.updated here. A client that waits for one hangs.
 
@@ -247,15 +323,22 @@ class MockVolcanoServer:
         assertion passes against the wrong data.
         """
         for _ in range(200):
+            # A broken rule usually means the frame we are waiting for is never
+            # coming. Say why now rather than after the full second.
+            self.check()
             if self.recorded.count(event) >= count:
                 return
             await asyncio.sleep(0.005)
         raise AssertionError(f"等不到客户端发 {event.name}（收到的是 {self.recorded.events}）")
 
     async def wait_ready(self) -> None:
-        await asyncio.wait_for(self._ready.wait(), timeout=2.0)
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=2.0)
+        except TimeoutError:
+            self.check()
+            raise
 
-    async def drop(self) -> None:
+    async def drop(self, code: int = 1011) -> None:
         """Lose the socket mid-session.
 
         1011 rather than 1006: the latter is what the client OBSERVES on an
@@ -267,7 +350,7 @@ class MockVolcanoServer:
         self._speaking = False
         self._session_id = ""
         self._ready = asyncio.Event()
-        await self._conn.close(code=1011)
+        await self._conn.close(code=code)
 
     async def say_slowly(self, chunks: int = 20, *, gap: float = 0.02) -> None:
         """Keep talking until something stops us. What a client that never
@@ -360,3 +443,41 @@ class MockVolcanoServer:
         """A frame no decoder can read. One of these is not a dead session."""
         assert self._conn is not None
         await self._conn.send(b"\xff\xff")
+
+    async def send_unparseable_body(self) -> None:
+        """A frame that decodes cleanly and whose BODY is not JSON.
+
+        Different from send_garbage in the one way that matters: the decoder
+        says yes, so the failure happens later, inside the dispatch — which is
+        where the receive loop's guard did not reach.
+        """
+        assert self._conn is not None
+        payload = b"not json at all"
+        header = bytes((0x11, (wire.MessageKind.FULL_SERVER << 4) | 0b0100, 0b0001_0000, 0))
+        ident = self._session_id.encode()
+        await self._conn.send(
+            header
+            + struct.pack(">i", int(wire.ServerEvent.CHAT_RESPONSE))
+            + struct.pack(">I", len(ident))
+            + ident
+            + struct.pack(">I", len(payload))
+            + payload
+        )
+
+    async def audio_only(self, audio: bytes = b"\x05\x06") -> None:
+        """Raw TTS audio with no sentence-start ahead of it.
+
+        The shape of a frame still in flight when we gave up on the reply it
+        belonged to — the vendor measured one arriving 0.05 s after an
+        interrupt.
+        """
+        await self._send(wire.ServerEvent.TTS_RESPONSE, audio, session_id="", raw=True)
+
+    async def sentence_start(self, question: str) -> None:
+        await self._emit(
+            wire.ServerEvent.TTS_SENTENCE_START,
+            {"question_id": question, "tts_type": "default"},
+        )
+
+    async def chat_delta(self, text: str, *, question: str) -> None:
+        await self._emit(wire.ServerEvent.CHAT_RESPONSE, {"content": text, "question_id": question})
