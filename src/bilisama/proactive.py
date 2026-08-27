@@ -79,6 +79,10 @@ class ProactiveTopicLoop:
         self._submitted: deque[float] = deque()
         self._refresh_task: asyncio.Task[None] | None = None
         self._topics_produced = 0
+        # The hourly cap is re-checked once a second while a topic sits ready,
+        # so the block is a STATE, not an event. Latched so the log records the
+        # flip into it once instead of once per tick.
+        self._budget_blocked = False
 
     # ------------------------------------------------------------ inputs
 
@@ -113,7 +117,15 @@ class ProactiveTopicLoop:
         if now - self._last_activity < self._idle_threshold_s:
             return
         if not self._budget_ok(now):
+            if not self._budget_blocked:
+                self._budget_blocked = True
+                log.info(
+                    "proactive.budget_exhausted",
+                    topics_this_hour=len(self._submitted),
+                    max_per_hour=self._max_per_hour,
+                )
             return
+        self._budget_blocked = False
         self._speak(now)
 
     def _speak(self, now: float) -> None:
@@ -122,6 +134,10 @@ class ProactiveTopicLoop:
         # cannot fake prompt structure, break wrapper tokens, cap the length;
         # the instructions text around it stays a fixed template.
         candidate = neutralize_tags(" ".join((self._candidate or "").split()))[:80]
+        # Read before _last_activity is reset below — after that the number is
+        # always zero, and "how long was the silence" is the whole reason a
+        # proactive topic went in at all.
+        idle_s = round(now - self._last_activity, 1)
         self._candidate = None
         # Force a regeneration next refresh even if no new events arrive: the
         # next dead-air stretch deserves a fresh angle, not this one reheated.
@@ -129,6 +145,20 @@ class ProactiveTopicLoop:
         self._last_activity = now
         self._submitted.append(now)
         self._topics_produced += 1
+        # The submit side only. Whether the intent survives the scheduler is
+        # scheduler.verdict's line to write, and this one must not pretend to
+        # know: a PROACTIVE intent is the lowest priority there is and gets
+        # pre-empted by anyone who speaks in the meantime.
+        #
+        # topic_text rather than topic: the candidate came out of a side model
+        # that read audience danmaku, so the scrubber folding it to a length is
+        # the correct treatment.
+        log.info(
+            "proactive.topic_submitted",
+            topic_text=candidate,
+            idle_s=idle_s,
+            topics_this_hour=len(self._submitted),
+        )
         self._submit(
             Intent(
                 source="proactive",
@@ -200,6 +230,12 @@ class ProactiveTopicLoop:
         if topic:
             self._fingerprint = fingerprint
             self._candidate = topic
+            # A ready candidate and a spoken one are different states, and the
+            # gap between them is where "she never says anything on her own"
+            # gets diagnosed: no topic_ready means the side model came back
+            # empty, topic_ready without topic_submitted means the floor was
+            # never idle long enough.
+            log.info("proactive.topic_ready", topic_text=topic, event_count=len(events))
 
     # ------------------------------------------------------------ health
 

@@ -183,6 +183,9 @@ class Scheduler:
         # anyway, and a reply that lands four minutes after its trigger reads
         # worse than no reply (user's call, 2026-08-17).
         self._link_down = False
+        # Which gate we last WROTE A LINE about, so a polled loop does not
+        # write it again every wake-up. See _note_gate.
+        self._gate_logged: SkipReason | None = None
         self._wake = asyncio.Event()
         self.controls: asyncio.Queue[PlaybackClear] = asyncio.Queue()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -215,6 +218,19 @@ class Scheduler:
             )
             return
         if intent.dedup_key and intent.dedup_key in self._queued_keys:
+            active = self._active
+            with bind(intent_id=intent.dedup_key):
+                # The verdict says "duplicate"; this says what it collided
+                # WITH. A copy still in the heap and a copy still being spoken
+                # read the same on the panel, and only the second is A15 — the
+                # gift that must not be thanked twice while the first thanks
+                # is still playing.
+                log.debug(
+                    "scheduler.dedup_dropped",
+                    source=intent.source,
+                    queue_depth=len(self._heap),
+                    active_source=active.intent.source if active is not None else "",
+                )
             self._emit(
                 Verdict(
                     intent_id=intent.dedup_key,
@@ -228,6 +244,19 @@ class Scheduler:
         heapq.heappush(self._heap, _Entry((-int(intent.priority), next(self._seq)), intent))
         if intent.dedup_key:
             self._queued_keys.add(intent.dedup_key)
+        with bind(intent_id=intent.dedup_key or intent.source):
+            # debug, not info: this fires once per intent that survived the
+            # funnel, which is tens per minute in a busy room. It is the line
+            # that turns 「这条弹幕根本没进来吧」 into a yes or a no, and the
+            # depth beside it says how long the line ahead of it was.
+            log.debug(
+                "scheduler.submitted",
+                source=intent.source,
+                priority=int(intent.priority),
+                queue_depth=len(self._heap),
+                has_item=intent.injection.item_text is not None,
+                requeue_on_interrupt=intent.requeue_on_interrupt,
+            )
         self._maybe_preempt(intent)
         self._wake.set()
 
@@ -244,6 +273,18 @@ class Scheduler:
 
     def panic_mute(self) -> None:
         """Kill everything, protected included — the one switch allowed to."""
+        victim = self._active
+        # Before the drain, or the counts all read zero and the line stops
+        # answering the question the red button raises afterwards: 「刚才那一下
+        # 扔掉了什么」. Every dropped intent still gets its own verdict below;
+        # this is the one line that says they went together and why.
+        log.info(
+            "scheduler.panic_muted",
+            queued=len(self._heap),
+            parked=len(self._parked),
+            active_source=victim.intent.source if victim is not None else "",
+            active_protected=victim is not None and self._protection_active(victim),
+        )
         self._panicked = True
         self.controls.put_nowait(PlaybackClear(reason="panic_mute"))
         # The clear above takes the parked replies' audio with it, so no
@@ -268,6 +309,7 @@ class Scheduler:
         self._wake.set()
 
     def release_panic(self) -> None:
+        log.info("scheduler.panic_released", queued=len(self._heap))
         self._panicked = False
         self._wake.set()
 
@@ -438,11 +480,49 @@ class Scheduler:
                     phase=Phase.GATED if gate is not None else Phase.QUEUED,
                 )
                 continue
-            if self._floor.is_blocked():
+            gate = self._floor.blocking_reason()
+            if gate is not None:
+                self._note_gate(gate, intent)
                 return None
             heapq.heappop(self._heap)
+            # The floor opened and this intent is on its way; the next close is
+            # news again. `scheduler.dispatched` carries the open edge, so
+            # there is nothing to write here.
+            self._gate_logged = None
             return intent
+        # Nothing waiting means nothing is being held back — whatever gate was
+        # reported has stopped costing anyone their turn.
+        self._gate_logged = None
         return None
+
+    def _note_gate(self, gate: SkipReason, top: Intent) -> None:
+        """Say which gate is sitting on the queue — once per change, not per poll.
+
+        This loop re-runs on every link event, text deltas included, so an
+        unlatched line here would be the busiest thing in the process and would
+        repeat one unchanging fact a hundred times. What answers 「为什么刚才没
+        说话」 is the TRANSITION: the gate that closed, and who it closed on.
+        The latch clears when the floor opens or the queue empties, so a second
+        stall for the same reason still gets its own line.
+
+        Args:
+            gate: The reason `SpeakingFloor.blocking_reason` just returned.
+            top: The intent at the head of the heap — the one paying for it.
+        """
+        if gate is self._gate_logged:
+            return
+        self._gate_logged = gate
+        log.info(
+            "scheduler.gate_blocked",
+            reason=str(gate),
+            queue_depth=len(self._heap),
+            top_source=top.source,
+            top_priority=int(top.priority),
+            # 0.0 for the state gates: those release on an event, not a clock,
+            # and promising a wait that no timer will honour reads worse than
+            # admitting we cannot say.
+            blocked_for_s=round(self._floor.blocked_for(), 2),
+        )
 
     async def _dispatch(self, intent: Intent) -> None:
         """Send one intent to the provider, honouring everything that fired
@@ -475,6 +555,17 @@ class Scheduler:
                 deadline = intent.expires_at
                 if deadline is None:
                     deadline = self._clock.monotonic() + _DISPATCH_RETRY_WINDOW_S
+                with bind(intent_id=intent.dedup_key or intent.source):
+                    # scheduler.dispatch_failed above says the send broke; this
+                    # says what happens next, which is the part a repeating
+                    # failure makes urgent — how much runway is left before
+                    # section 4.11's deadline retires the paid intent.
+                    log.debug(
+                        "scheduler.dispatch_retry",
+                        source=intent.source,
+                        item_written=wrote_item,
+                        deadline_in_s=round(deadline - self._clock.monotonic(), 2),
+                    )
                 await self._clock.sleep(_DISPATCH_RETRY_BACKOFF_S)
                 self._requeue(intent, item_written=wrote_item, deadline=deadline)
                 return
@@ -501,6 +592,22 @@ class Scheduler:
         if self._guard is not None:
             self._guard.reset()
 
+        with bind(intent_id=intent.dedup_key or intent.source):
+            # The 「她开口了」 line, and the counterpart to every gate_blocked
+            # above it: whoever won the slot, what it outranked, and whether
+            # the two-step actually wrote its history half. Written after the
+            # state is committed, so a recheck below that kills it lands
+            # AFTER it in the file and the order reads true.
+            log.info(
+                "scheduler.dispatched",
+                source=intent.source,
+                priority=int(intent.priority),
+                protected=reply.protected,
+                protect_ms=reply.protect_ms if reply.protected else 0,
+                has_item=wrote_item,
+                queue_depth=len(self._heap),
+            )
+
         # ---- post-dispatch rechecks: what fired during the await window ----
         if self._panicked:
             active.cleared = True
@@ -508,6 +615,7 @@ class Scheduler:
             self._settle_active(Outcome.CANCELLED, Phase.DISPATCHED, reason=SkipReason.PANIC_MUTE)
             return
         if self._floor.streamer_speaking and not self._protection_active(active):
+            self._note_barge(active, where="post_dispatch")
             active.cleared = True
             self.controls.put_nowait(PlaybackClear(reason="barge_in"))
             self._spawn(self._speech.cancel(handle), name="scheduler:barge-cancel")
@@ -611,10 +719,51 @@ class Scheduler:
         if active is None:
             return
         if self._protection_active(active):
+            assert active.protected_until is not None  # _protection_active said so
+            with bind(intent_id=active.intent.dedup_key or active.intent.source):
+                # The other half of the barge-in question, and the one that
+                # looks like a bug from the outside: the streamer talked and
+                # she kept going. Section 2.7 says paid protection outranks
+                # everything but panic, so this is the line that proves the
+                # rule fired rather than the cancel getting lost.
+                log.info(
+                    "scheduler.barge_survived",
+                    source=active.intent.source,
+                    priority=int(active.intent.priority),
+                    protected_for_ms=max(
+                        0, int((active.protected_until - self._clock.monotonic()) * 1000)
+                    ),
+                )
             return
+        self._note_barge(active, where="speech_started")
         active.cleared = True
         self.controls.put_nowait(PlaybackClear(reason="barge_in"))
         self._spawn(self._speech.cancel(active.handle), name="scheduler:barge-cancel")
+
+    def _note_barge(self, active: _Active, *, where: str) -> None:
+        """Name the reply the streamer just talked over.
+
+        Two callers because the barge-in has two catch points, and telling them
+        apart matters when the ordering is under suspicion: `speech_started` is
+        the event handler, `post_dispatch` is the recheck for a speech edge
+        that landed while the sends were still in the air (A1). The verdict
+        that follows says the same reply died; only this says who cut it off
+        and how much of it the room had already heard.
+
+        Args:
+            active: The reply being cut off.
+            where: Which catch point saw it — "speech_started" or "post_dispatch".
+        """
+        intent = active.intent
+        with bind(intent_id=intent.dedup_key or intent.source):
+            log.info(
+                "scheduler.barged_in",
+                source=intent.source,
+                priority=int(intent.priority),
+                where=where,
+                requeue=intent.requeue_on_interrupt,
+                spoken_ms=self._spoken_ms(active.started_at),
+            )
 
     # ------------------------------------------------------------ protection
 
@@ -629,12 +778,29 @@ class Scheduler:
         assert active.protected_until is not None
         delay = max(0.0, active.protected_until - self._clock.monotonic())
         await self._clock.sleep(delay)
-        self._end_protection(active)
+        self._end_protection(active, via="cap")
 
-    def _end_protection(self, active: _Active) -> None:
+    def _end_protection(self, active: _Active, *, via: str) -> None:
+        """Re-arm the provider's own barge-in, once, whichever half gets here first.
+
+        Args:
+            active: The protected reply whose window is closing.
+            via: Which half closed it — "settle" (the reply ended) or "cap"
+                (protect_ms ran out while it was still going). Forgetting
+                either was audit finding A4, and the pair being named on the
+                line is what makes 「保护段有没有正常收尾」 answerable without
+                a debugger.
+        """
         if active.protection_ended or active.protected_until is None:
             return
         active.protection_ended = True
+        with bind(intent_id=active.intent.dedup_key or active.intent.source):
+            log.info(
+                "scheduler.protection_ended",
+                source=active.intent.source,
+                via=via,
+                remaining_ms=max(0, int((active.protected_until - self._clock.monotonic()) * 1000)),
+            )
 
         async def rearm() -> None:
             try:
@@ -652,6 +818,19 @@ class Scheduler:
             return
         if int(incoming.priority) <= int(active.intent.priority):
             return
+        with bind(intent_id=active.intent.dedup_key or active.intent.source):
+            # Bound to the VICTIM: this is the answer to 「我那条怎么说到一半没了」,
+            # and the winner rides along as a field. The verdict right behind it
+            # carries scheduler.preempted as its reason but cannot name who won.
+            log.info(
+                "scheduler.preempted",
+                source=active.intent.source,
+                priority=int(active.intent.priority),
+                winner_source=incoming.source,
+                winner_priority=int(incoming.priority),
+                requeue=active.intent.requeue_on_interrupt,
+                spoken_ms=self._spoken_ms(active.started_at),
+            )
         # The victim may have audio queued at L1; claw it back like any death.
         active.cleared = True
         self.controls.put_nowait(PlaybackClear(reason="preempted"))
@@ -727,9 +906,29 @@ class Scheduler:
             return
         self._active = None
         self._floor.on_reply_active(False)
-        self._end_protection(active)
+        self._end_protection(active, via="settle")
         intent = active.intent
         self._free_key(intent)
+        parking = not requeue and outcome is Outcome.SPOKEN and self._floor.queued_audio
+        with bind(intent_id=intent.dedup_key or intent.source):
+            # debug and deliberately overlapping scheduler.verdict: this is the
+            # LINK side of the same moment — whether a PlaybackClear already
+            # went out, whether protection was in play, and whether the reply
+            # is leaving without a verdict for now. That last one is why the
+            # line exists: a settle with no verdict behind it looks like a lost
+            # intent until you can see it went to the playback park.
+            log.debug(
+                "scheduler.settled",
+                source=intent.source,
+                outcome=str(outcome),
+                phase=str(phase),
+                reason=str(reason) if reason else "",
+                requeue=requeue,
+                parked=parking,
+                cleared=active.cleared,
+                protected=active.protected_until is not None,
+                spoken_ms=self._spoken_ms(active.started_at),
+            )
         if requeue:
             # Paid messages must not vanish silently (section 4.2): back into
             # the queue they go, same priority, new place in line. The dedup
@@ -739,7 +938,7 @@ class Scheduler:
             # the same paid message arrived twice.
             self._requeue(intent, item_written=True)
             return
-        if outcome is Outcome.SPOKEN and self._floor.queued_audio:
+        if parking:
             # The model stopped producing tokens; the audience has not heard it
             # yet. Hold the verdict for the playback receipt so it can say
             # spoken@played — the 106-second playback backlog is what taught us

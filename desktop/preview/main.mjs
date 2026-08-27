@@ -14,7 +14,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, ipcMain, screen } from "electron";
+import { app, BrowserWindow, ipcMain, screen, shell } from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -206,6 +206,13 @@ function watchEndpoint() {
 
 // ------------------------------------------------------------ drag IPC
 
+function fromShell(event) {
+  for (const win of [petWindow, panelWindow]) {
+    if (win && !win.isDestroyed() && event.sender === win.webContents) return true;
+  }
+  return false;
+}
+
 function fromPet(event) {
   return petWindow && !petWindow.isDestroyed() && event.sender === petWindow.webContents;
 }
@@ -226,6 +233,19 @@ ipcMain.on("pet:drag-move", (event, x, y) => {
 
 ipcMain.on("pet:drag-end", (event) => {
   if (fromPet(event)) dragOrigin = null;
+});
+
+// The renderer asks to reveal the log; it does NOT get to say where. The path
+// is computed here from the same data home endpoint.json already uses, so a
+// compromised page cannot turn this into "open any file on the machine".
+function logPath() {
+  const base = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share");
+  return path.join(base, "bilisama", "logs", "dev-talk.jsonl");
+}
+
+ipcMain.on("shell:reveal-log", (event) => {
+  if (!fromShell(event)) return;
+  shell.showItemInFolder(logPath());
 });
 
 ipcMain.on("pet:open-panel", (event) => {

@@ -103,10 +103,26 @@ class S2SLink:
         across a reconnect is unverified (our own mock does), so the new
         socket is told rather than trusted.
         """
+        # Read before end_protection() clears it, so the line reports what this
+        # replay actually had to pay back.
+        owed_rearm = self._barge_in_disarmed
         if self._context:
             await self.set_context(self._context)
-        if self._barge_in_disarmed:
+        if owed_rearm:
             await self.end_protection()
+        # Logged after the sends, not before: a reconnect that dies mid-replay
+        # must not leave a line claiming the persona is back. The failure has
+        # its own line in the client (link.reconnect_failed).
+        log.info(
+            "s2s.session_replayed",
+            context_len=len(self._context),
+            rearmed_barge_in=owed_rearm,
+            # NOT a `text_replies=` flag: the scrubber folds any field whose
+            # name contains the word `text` down to `<bool>`, on the assumption
+            # that it holds danmaku (obs/logging.py:51). The answer rides in the
+            # VALUE, which is judged by nobody.
+            modality="text" if self._text_replies else "server_default",
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -160,6 +176,7 @@ class S2SLink:
         if spec.protected:
             await self._client.send_command(self._interrupt_patch(False))
             self._barge_in_disarmed = True
+            log.info("s2s.protection_armed", protect_ms=spec.protect_ms)
         frame = self._codec.response_create(
             out_of_band=True,
             text_only=self._text_replies,
@@ -193,10 +210,14 @@ class S2SLink:
     async def end_protection(self) -> None:
         """Re-arm barge-in after a protected reply. The scheduler calls this on
         ReplyDone, and a stage-2 hard cap makes sure it cannot be forgotten."""
+        was_armed = self._barge_in_disarmed
         await self._client.send_command(self._interrupt_patch(True))
         # Only after the frame is away: a raise here must leave the debt
         # standing so the next socket pays it.
         self._barge_in_disarmed = False
+        # was_armed separates "the paid reply is over" from the scheduler's
+        # belt-and-braces second call, which re-arms what is already armed.
+        log.info("s2s.protection_ended", was_armed=was_armed)
 
     async def cancel(self, handle: link.ReplyHandle) -> None:
         await self._client.cancel(handle)

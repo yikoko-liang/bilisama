@@ -19,6 +19,7 @@ import re
 from bilisama.config.schema import InteractionConfig
 from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.ingest.events import EventKind, LiveEvent
+from bilisama.obs.logging import bind, get_logger
 from bilisama.realtime.link import ReplySpec
 
 __all__ = [
@@ -33,6 +34,32 @@ __all__ = [
 WRAP_OPEN = "<bilisama_live_events>"
 WRAP_CLOSE = "</bilisama_live_events>"
 _TAG_TOKEN = re.compile(re.escape("bilisama_live_events"), re.IGNORECASE)
+
+log = get_logger(__name__)
+
+
+def _log_built(intent: Intent, *, now: float) -> None:
+    """Record the shape of an intent on its way to the scheduler.
+
+    Debug, not info: this is one line per event that gets a voice, and at
+    danmaku volume that would bury the handful of info lines a turn is meant
+    to leave behind. It is bound to the same id the scheduler stamps on its
+    verdict (director/scheduler.py:198), so 「这条后来怎么了」 joins the two
+    lines without matching on timestamps.
+
+    The four fields are the whole ruling this module makes: which rung the
+    event competes on, whether the model is told to trust it, whether an
+    interruption gets it back, and how long it stays worth saying.
+    """
+    with bind(intent_id=intent.dedup_key or intent.source):
+        log.debug(
+            "intents.built",
+            source=intent.source,
+            priority=intent.priority.name,
+            trusted=intent.trusted,
+            requeue_on_interrupt=intent.requeue_on_interrupt,
+            ttl_ms=None if intent.expires_at is None else round((intent.expires_at - now) * 1000),
+        )
 
 
 def neutralize_tags(text: str) -> str:
@@ -120,6 +147,10 @@ def intent_for(
     """
     priority = _PRIORITY.get(event.kind)
     if priority is None:
+        # 「关注了/点赞了怎么一点反应都没有」. These kinds are feed-only by
+        # design: they reach memory and the panel, never the microphone. Debug
+        # because entry and like events arrive in floods.
+        log.debug("intents.no_speaking_path", kind=event.kind.value)
         return None
     paid = event.kind in _REQUEUE
     protected = paid
@@ -149,7 +180,7 @@ def intent_for(
     # left behind. The dispatch floor keeps a slow window's winner from
     # arriving pre-expired.
     arrived = event.recv_at if event.recv_at > 0 else now
-    return Intent(
+    intent = Intent(
         source=event.kind.value,
         priority=priority,
         injection=Injection(reply=spec, item_text=wrap_events([_line_for(event)])),
@@ -160,6 +191,8 @@ def intent_for(
         expires_at=None if paid else max(arrived + _DANMAKU_TTL_S, now + _DISPATCH_FLOOR_S),
         requeue_on_interrupt=paid,
     )
+    _log_built(intent, now=now)
+    return intent
 
 
 def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> Intent:
@@ -174,7 +207,7 @@ def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> In
         instructions="刚进来一批新观众，用一句话热络地打个招呼，别逐个点名。",
         max_tokens=max_tokens,
     )
-    return Intent(
+    intent = Intent(
         source="entry",
         # DANMAKU, deliberately: under strict-greater preemption a hello must
         # QUEUE behind an answer being spoken, never cut it off mid-sentence
@@ -188,3 +221,7 @@ def burst_welcome_intent(count: int, *, now: float, max_tokens: int = 120) -> In
         created_at=now,
         expires_at=now + _DANMAKU_TTL_S,
     )
+    # Same event name as the danmaku path on purpose: one vocabulary for "an
+    # intent was built", told apart by source=entry.
+    _log_built(intent, now=now)
+    return intent

@@ -183,3 +183,26 @@ def test_the_probe_reads_the_shipped_shell() -> None:
     """A guard for the harness: if desktop/preview/ moves, every test above
     would pass on nothing at all."""
     assert _SHELL.exists(), f"壳的入口不在这儿了：{_SHELL}"
+
+
+def test_the_page_cannot_choose_which_path_the_shell_reveals() -> None:
+    """「打开日志目录」 must not become 「open anything you name」.
+
+    showItemInFolder does not execute what it points at, so this is not a
+    remote-code hole — but the renderer loads a page off disk, and a handler
+    that took a path from it would hand any page that got in a file browser
+    pointed wherever it liked. The main process computes the path from the same
+    data home endpoint.json already uses, so there is nothing to supply.
+
+    The probe asks twice: once from a real window naming /etc/passwd, once from
+    a stranger. Both answers come from the shell's own closure.
+    """
+    revealed = _probe()["revealed"]
+    assert len(revealed) == 1, f"该只有自己的窗口能打开目录：{revealed}"
+    target = revealed[0]
+    assert target.endswith("bilisama/logs/dev-talk.jsonl"), f"揭示的不是日志：{target}"
+    assert "passwd" not in target, f"页面点的名字被采纳了：{target}"
+
+    preload = (_SHELL.parent / "preload.cjs").read_text(encoding="utf-8")
+    bridge = next(line for line in preload.splitlines() if "revealLog" in line)
+    assert '"shell:reveal-log")' in bridge, f"preload 往这条 IPC 里塞了东西：{bridge.strip()}"

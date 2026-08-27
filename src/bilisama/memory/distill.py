@@ -185,6 +185,21 @@ class Distiller:
         fingerprint = hashlib.sha256("\n".join(events).encode()).hexdigest()
         if fingerprint == self._state.fingerprint:
             return DistillReport(ran=False, reason="fingerprint_unchanged")
+        # Logged here rather than at the top: the two early returns above are
+        # the normal case (a quiet stretch re-triggers the threshold with the
+        # same events), and a "started" line for a call that never went out
+        # would make the rolling rewrite look busier than it is.
+        log.info(
+            "distill.rolling_started",
+            stream_id=sid,
+            # A fixed word plus the number, not "every_40_events": a value that
+            # changes with the config cannot be grouped or counted, which is
+            # the same reason event names are constants (obs/logging.py:6).
+            trigger="event_threshold",
+            every_n=self._every_n,
+            event_count=len(events),
+            summary_chars=len(summary),
+        )
         try:
             raw = await self._side.complete(
                 system=_SYSTEM,
@@ -213,6 +228,7 @@ class Distiller:
         self._store.replace_facts("stream", str(sid), [(new_summary, "")])
         self._health.rolling_ok += 1
         self._health.rolling_last_wall = self._clock.wall().isoformat()
+        log.info("distill.rolling_done", stream_id=sid, summary_chars=len(new_summary))
         return DistillReport(ran=True, reason="ok")
 
     async def end_of_stream(self) -> DistillReport:
@@ -245,6 +261,7 @@ class Distiller:
                 ),
             )
         )
+        events = self._store.recent_events(limit=30)
         user = _BATCH_TEMPLATE.format(
             growth_rules=rules,
             viewers="\n".join(
@@ -254,8 +271,22 @@ class Distiller:
             )
             or "（没有跨过门槛的观众）",
             summary=self._session_summary() or "（无）",
-            events="\n".join(self._store.recent_events(limit=30)) or "（无）",
+            events="\n".join(events) or "（无）",
             assistant_lines="\n".join(self._state.assistant_lines) or "（无）",
+        )
+        # The highest-value call of the whole stream, and the one most likely
+        # to be blamed for a memory that "forgot everything". The three input
+        # sizes plus the growth modes say whether it was fed anything and
+        # whether it was even allowed to write the layers.
+        log.info(
+            "distill.batch_started",
+            stream_id=sid,
+            trigger="stream_end",
+            viewer_count=len(viewers),
+            event_count=len(events),
+            assistant_line_count=len(self._state.assistant_lines),
+            growth_relationship=self._growth.relationship.value,
+            growth_voice=self._growth.voice.value,
         )
         raw = ""
         for attempt in (1, 2):
@@ -294,6 +325,7 @@ class Distiller:
         # once-latch records, or a caller who ends the stream before the batch
         # files the summary under subject "0" while the latch holds the real one.
         dropped: list[str] = []
+        written = 0
 
         for item in _as_list(payload.get("viewer_facts")):
             if not isinstance(item, dict):
@@ -308,19 +340,34 @@ class Distiller:
                 dropped.append(f"viewer_fact:{identity}")
                 continue
             self._store.replace_facts("viewer", identity, [(fact, tags)])
+            written += 1
 
+        summary_chars = 0
         summary = str(payload.get("session_summary") or "").strip()
         if summary:
             clean, clipped = _clip(summary, _SUMMARY_MAX_CHARS)
             if clipped:
                 log.warning("distill.summary_clipped", chars=len(summary))
             self._store.replace_facts("stream", str(stream_id), [(clean, "")])
+            summary_chars = len(clean)
 
         self._apply_growth("relationship", _as_list(payload.get("relationship")), dropped)
         self._apply_growth("voice", _as_list(payload.get("voice")), dropped)
 
         for item in dropped:
             log.warning("distill.entry_dropped", entry_text=item)
+        # What the stream is actually worth, in one line. Everything the batch
+        # threw away already has a warning of its own; this is the other half,
+        # and without it a batch that wrote nothing looks exactly like a batch
+        # that never ran.
+        log.info(
+            "distill.batch_applied",
+            stream_id=stream_id,
+            viewer_fact_count=written,
+            growth_added=self._health.growth_added_last_batch,
+            dropped_count=len(dropped),
+            summary_chars=summary_chars,
+        )
         return dropped
 
     def _apply_growth(self, layer: str, raw_entries: list[Any], dropped: list[str]) -> None:

@@ -16,7 +16,10 @@ the two belong together.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+
+import pytest
 
 from bilisama.config.schema import Settings
 from bilisama.ui.config_edit import apply_panel_edits, speak_paths
@@ -180,6 +183,73 @@ def test_both_halves_of_one_payload_are_applied() -> None:
     assert changed == ["interaction.speak.danmaku", "interaction.speak.gift"]
     assert settings.interaction.speak.danmaku is False
     assert settings.interaction.speak.gift is False
+
+
+# ------------------------------------------------------------ the log copy
+
+
+def _fields(record: logging.LogRecord) -> dict[str, object]:
+    """The structured half of one line, as the formatter reads it."""
+    fields: dict[str, object] = getattr(record, "fields", {})
+    return fields
+
+
+def test_both_the_change_and_the_refusal_reach_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """「我在面板上改了为什么没用」 is answerable or it is not.
+
+    The receipt has always gone to the terminal and the feed, both of which
+    are gone by the time the question gets asked. Which field, and which of
+    the three gates said no, now survives in the log — at info, because a
+    refusal is the gate working, not a fault.
+    """
+    settings = Settings()
+    _, announce = _recorder()
+
+    with caplog.at_level(logging.INFO, logger="bilisama.ui.config_edit"):
+        apply_panel_edits(
+            settings,
+            {
+                "speak": {"danmaku": False},
+                # Reload.RECONNECT, so the panel may not touch it mid-run.
+                "config": {"path": "interaction.chattiness", "value": "high"},
+            },
+            announce=announce,
+        )
+
+    applied = [r for r in caplog.records if r.getMessage() == "ui.config_edit_applied"]
+    refused = [r for r in caplog.records if r.getMessage() == "ui.config_edit_refused"]
+    assert len(applied) == 1, [r.getMessage() for r in caplog.records]
+    assert _fields(applied[0])["path"] == "interaction.speak.danmaku"
+    assert _fields(applied[0])["applied"] == "False"
+    assert len(refused) == 1
+    assert _fields(refused[0])["path"] == "interaction.chattiness"
+    # error_text, not text: the scrubber folds audience content by field name
+    # and leaves the diagnostic names whole (obs/logging.py _DIAGNOSTIC). A
+    # refusal reason folded to 「<12 chars>」 is the field that answers WHY,
+    # deleted.
+    assert "直播中改不了" in str(_fields(refused[0])["error_text"])
+    assert all(r.levelno == logging.INFO for r in applied + refused)
+
+
+def test_an_unknown_switch_is_refused_in_the_log_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other refusal shape: a toggle this schema no longer has.
+
+    Same event as a rejected field — from the log's side both are 「面板要改的
+    东西没改成」, and two names would mean grepping twice for one question.
+    """
+    settings = Settings()
+    _, announce = _recorder()
+
+    with caplog.at_level(logging.INFO, logger="bilisama.ui.config_edit"):
+        apply_panel_edits(settings, {"speak": {"made_up": True}}, announce=announce)
+
+    refused = [r for r in caplog.records if r.getMessage() == "ui.config_edit_refused"]
+    assert len(refused) == 1
+    assert _fields(refused[0])["path"] == "speak.made_up"
 
 
 def test_an_empty_payload_says_nothing_and_changes_nothing() -> None:

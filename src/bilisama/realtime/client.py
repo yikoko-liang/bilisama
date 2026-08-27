@@ -87,6 +87,11 @@ class ReplyRecord:
     # then redundant (the beta dialect sends both) and must not double the text.
     saw_stream_text: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    # Monotonic seconds at the moment this reply entered the books. Read only by
+    # the log: "first token after 380 ms" and "done after 24 s" are the two
+    # numbers a stall investigation starts from, and neither is recoverable
+    # afterwards from the events alone.
+    opened_at: float = 0.0
 
 
 class RealtimeClient:
@@ -227,7 +232,7 @@ class RealtimeClient:
     async def send_command(self, frame: dict[str, Any]) -> None:
         """Send a control frame after the current reply, if any, has finished."""
         async with self._command_lock:
-            await self._wait_for_slot()
+            await self._wait_for_slot("command")
             await self._send_raw(frame)
 
     async def request_reply(self, frame: dict[str, Any]) -> link.ReplyHandle:
@@ -237,10 +242,12 @@ class RealtimeClient:
         what goes in it — out-of-band or not, text or audio — is provider
         policy, not transport.
         """
-        record = ReplyRecord(handle=link.ReplyHandle(), ours=True)
+        record = ReplyRecord(
+            handle=link.ReplyHandle(), ours=True, opened_at=self._clock.monotonic()
+        )
         async with self._command_lock:
-            await self._wait_for_slot()
-            self._slot_free.clear()
+            await self._wait_for_slot("reply")
+            self._take_slot("request")
             self._awaiting_created.append(record)
             try:
                 await self._send_raw(frame)
@@ -255,8 +262,9 @@ class RealtimeClient:
                 # should have said the link went down. Same guard as _settle.
                 if record in self._awaiting_created:
                     self._awaiting_created.remove(record)
-                self._slot_free.set()
+                self._free_slot("create_send_failed")
                 raise
+        log.debug("link.reply_requested", handle_id=record.handle.handle_id)
         watchdog = asyncio.create_task(self._watchdog(record), name="realtime:watchdog")
         self._tasks.add(watchdog)
         watchdog.add_done_callback(self._tasks.discard)
@@ -289,10 +297,43 @@ class RealtimeClient:
             raise ConnectionError("还没连接")
         await self._ws.send(json.dumps(frame))
 
-    async def _wait_for_slot(self) -> None:
+    async def _wait_for_slot(self, purpose: str) -> None:
         if not self.caps.single_response_slot:
             return
+        if self._slot_free.is_set():
+            return
+        # Only the contended path says anything. This is the whole answer to
+        # "the SC thank-you took nine seconds and nothing failed": it sat behind
+        # the reply that was already speaking. An uncontended wait is every
+        # session.update and every create, which at info would be a flood.
+        waited_since = self._clock.monotonic()
         await self._slot_free.wait()
+        log.info(
+            "link.slot_waited",
+            purpose=purpose,
+            waited_ms=round((self._clock.monotonic() - waited_since) * 1000),
+        )
+
+    def _take_slot(self, reason: str) -> None:
+        """Mark the single reply slot busy, logging only a real state flip.
+
+        All three callers can fire while it is already taken — a create whose
+        response.created then arrives takes it twice — and a flip that did not
+        happen is not worth a line.
+        """
+        if not self._slot_free.is_set():
+            return
+        self._slot_free.clear()
+        log.info("link.slot_taken", reason=reason)
+
+    def _free_slot(self, reason: str) -> None:
+        """Hand the slot back. Guarded for the same reason, and one more:
+        _on_disconnect settles every open record at once, and one dead link is
+        one flip, not one line per record."""
+        if self._slot_free.is_set():
+            return
+        self._slot_free.set()
+        log.info("link.slot_freed", reason=reason)
 
     async def _watchdog(self, record: ReplyRecord) -> None:
         # Sleep on the injected clock so tests can hold time still.
@@ -355,7 +396,7 @@ class RealtimeClient:
             record.handle.stale = True
             self._settle(record, link.ReplyStatus.FAILED)
         self._awaiting_created.clear()
-        self._slot_free.set()
+        self._free_slot("link_down")
         self._ws = None
         if self._closing:
             return
@@ -470,6 +511,7 @@ class RealtimeClient:
                 delta = str(payload.get("delta") or "")
                 record.text.append(delta)
                 if len(record.text) == 1:
+                    self._note_first_frame(record, "text")
                     emit(link.ReplyStarted(record.handle))
                 emit(link.ReplyTextDelta(record.handle, delta))
         elif kind is dia.ServerEvent.AUDIO_DELTA:
@@ -477,6 +519,7 @@ class RealtimeClient:
             if record is not None and not record.handle.stale:
                 if not record.text:
                     record.text.append("")
+                    self._note_first_frame(record, "audio")
                     emit(link.ReplyStarted(record.handle))
                 pcm = base64.b64decode(str(payload.get("delta") or ""))
                 emit(link.ReplyAudioDelta(record.handle, pcm))
@@ -504,6 +547,7 @@ class RealtimeClient:
                 fragment = str(payload.get("transcript") or "")
                 if fragment:
                     if not record.text:
+                        self._note_first_frame(record, "transcript")
                         emit(link.ReplyStarted(record.handle))
                     record.text.append(fragment)
                     emit(link.ReplyTextDelta(record.handle, fragment))
@@ -527,11 +571,26 @@ class RealtimeClient:
                 self._settle(record, link.ReplyStatus.FAILED)
         # session.updated / item.created / *.done terminators need no upward event.
 
+    def _note_first_frame(self, record: ReplyRecord, frame_kind: str) -> None:
+        """The one line the frame stream is allowed.
+
+        Deltas arrive every 20 ms and must never be logged one by one, so the
+        FIRST one carries the whole question: did this reply ever start
+        speaking, and how long after the create did it take to.
+        """
+        log.debug(
+            "link.reply_first_frame",
+            handle_id=record.handle.handle_id,
+            rid=record.rid,
+            frame_kind=frame_kind,
+            first_frame_ms=round((self._clock.monotonic() - record.opened_at) * 1000),
+        )
+
     def _on_created(self, rid: str) -> None:
         # Any created occupies the single slot, announced-by-us or not: hosted
         # dialects DO announce their implicit VAD replies, and leaving those
         # unbooked let an explicit create race straight into a rejection (C1).
-        self._slot_free.clear()
+        self._take_slot("response_created")
         # Serialisation means the next created after our create is USUALLY
         # ours. An implicit created can interleave and steal the pairing, so
         # this stays FIFO; the floor holding injections during speech (stage-3
@@ -550,9 +609,19 @@ class RealtimeClient:
         if self._awaiting_created:
             record = self._awaiting_created.pop(0)
         else:  # a created we never asked for — book it so its frames land somewhere
-            record = ReplyRecord(handle=link.ReplyHandle())
+            record = ReplyRecord(handle=link.ReplyHandle(), opened_at=self._clock.monotonic())
         record.rid = rid
         self._replies[rid] = record
+        # `ours` separates our create from the streamer's own VAD turn, which is
+        # the first thing to check when a reply's text landed on the wrong
+        # intent — the FIFO pairing above can be stolen by an implicit created.
+        log.debug(
+            "link.reply_created",
+            rid=rid,
+            handle_id=record.handle.handle_id,
+            ours=record.ours,
+            ack_ms=round((self._clock.monotonic() - record.opened_at) * 1000),
+        )
 
     def _record_for(self, payload: dict[str, Any] | Any) -> ReplyRecord | None:
         rid = payload.get("response_id")
@@ -564,9 +633,11 @@ class RealtimeClient:
         if record is None:
             # First frame of a reply that never announced itself: the implicit
             # VAD turn (rule 4). It occupies the slot from its first frame.
-            record = ReplyRecord(handle=link.ReplyHandle(), rid=rid)
+            record = ReplyRecord(
+                handle=link.ReplyHandle(), rid=rid, opened_at=self._clock.monotonic()
+            )
             self._replies[rid] = record
-            self._slot_free.clear()
+            self._take_slot("implicit_frame")
         return record
 
     def _bury(self, rid: str) -> None:
@@ -587,7 +658,7 @@ class RealtimeClient:
         if record is None:
             # A done we cannot match frees the slot anyway: wrong books held
             # open wedge us, not the server (rule 4).
-            self._slot_free.set()
+            self._free_slot("unmatched_done")
             return
         try:
             status = link.ReplyStatus(status_raw)
@@ -606,5 +677,17 @@ class RealtimeClient:
             self._replies.pop(record.rid, None)
         if record in self._awaiting_created:
             self._awaiting_created.remove(record)
-        self._slot_free.set()
+        self._free_slot("reply_done")
+        # The transport's own end of the reply, not the intent's — the scheduler
+        # already writes one scheduler.verdict per intent. This one answers the
+        # questions that verdict cannot: which wire id, how long the server took,
+        # and whether the status came from the server or from our watchdog.
+        log.debug(
+            "link.reply_done",
+            handle_id=record.handle.handle_id,
+            rid=record.rid,
+            status=status.value,
+            elapsed_ms=round((self._clock.monotonic() - record.opened_at) * 1000),
+            reply_chars=sum(len(chunk) for chunk in record.text),
+        )
         self._events.put_nowait(link.ReplyDone(record.handle, status, text="".join(record.text)))

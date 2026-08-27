@@ -137,10 +137,27 @@ class HostedLink:
         frame = self._bootstrap_frame()
         if frame is not None:
             await self._client.send_command(frame)
+            # Its absence is the failure that took a live probe to find: without
+            # this frame DashScope never runs server VAD, and the stream just
+            # sits there. Logged from the fields rather than the dict so the
+            # line says what was asked for, not how the dialect spells it.
+            log.info(
+                "hosted.bootstrap_sent",
+                provider=self._provider.value,
+                turn_type=self._turn.type if self._turn is not None else "",
+                voice=self._voice,
+            )
         if self._context:
             await self.set_context(self._context)
         # A reconnect (ours or theirs) starts the clock over.
         self._arm_rotation()
+        log.info(
+            "hosted.session_replayed",
+            provider=self._provider.value,
+            bootstrapped=frame is not None,
+            context_len=len(self._context),
+            rotate_in_s=round(self._session_cap_s),
+        )
 
     def _bootstrap_frame(self) -> dict[str, Any] | None:
         """The session bootstrap a hosted endpoint needs before audio flows.

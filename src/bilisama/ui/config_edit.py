@@ -27,6 +27,9 @@ from pydantic.fields import FieldInfo
 from bilisama.config._ui import Reload
 from bilisama.config.schema import Settings
 from bilisama.config.ui_meta import UI_META, FieldMeta
+from bilisama.obs.logging import get_logger
+
+log = get_logger(__name__)
 
 __all__ = [
     "ConfigEditError",
@@ -177,6 +180,10 @@ def apply_panel_edits(
                 edits.append((known[name], value))
             else:
                 announce(f"未知开关 {name}，忽略")
+                # Same event as a rejected field below: from the log's side
+                # both are 「面板要改的东西没改成」, and splitting them would
+                # mean grepping twice for one question.
+                log.info("ui.config_edit_refused", path=f"speak.{name}", error_text="未知开关")
     edit = data.get("config")
     if isinstance(edit, dict):
         edits.append((edit.get("path"), edit.get("value")))
@@ -185,9 +192,17 @@ def apply_panel_edits(
             meta, applied = apply_config_edit(settings, path, value)
         except ConfigEditError as exc:
             announce(str(exc))
+            # info, not warning: a refusal is the gate working. This is the
+            # answer to 「我在面板上改了为什么没用」 — which field, and which
+            # of the three gates said no (error_text carries the reason
+            # verbatim; the scrubber leaves that field alone).
+            log.info("ui.config_edit_refused", path=str(path), error_text=str(exc))
             continue
         shown = "开" if applied is True else "关" if applied is False else str(applied)
         announce(f"配置已改：{meta.label} → {shown}（本场生效，重启还原）")
+        # The value is safe to log verbatim: secrets are refused by
+        # apply_config_edit before they reach here (meta.secret).
+        log.info("ui.config_edit_applied", path=str(path), applied=str(applied))
         applied_paths.append(str(path))
     return applied_paths
 

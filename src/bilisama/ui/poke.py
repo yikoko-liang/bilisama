@@ -13,9 +13,12 @@ from collections.abc import Callable
 
 from bilisama.clock import Clock
 from bilisama.director.intent import Injection, Intent, Priority
+from bilisama.obs.logging import bind, get_logger
 from bilisama.realtime.link import ReplySpec
 
 __all__ = ["PokeResponder"]
+
+log = get_logger(__name__)
 
 # A poked reply is a throwaway quip: short, cheap, and worthless once late.
 _COOLDOWN_S = 15.0
@@ -73,20 +76,36 @@ class PokeResponder:
         """
         now = self._clock.monotonic()
         if self._last is not None and now - self._last < self._cooldown_s:
+            # The click still animates, so from the streamer's side a swallowed
+            # poke and a poke the floor refused look identical. This line is
+            # what tells the two apart — and it is the only record of the
+            # cooldown, since a poke that never becomes an Intent never reaches
+            # the scheduler and so never earns a verdict.
+            log.info(
+                "ui.poke_cooling_down",
+                since_last_ms=round((now - self._last) * 1000),
+                cooldown_ms=round(self._cooldown_s * 1000),
+            )
             return False
         self._last = now
-        self._submit(
-            Intent(
-                source="ui.poke",
-                priority=Priority.PROACTIVE,
-                injection=Injection(
-                    reply=ReplySpec(instructions=_INSTRUCTIONS, max_tokens=self._max_tokens),
-                    item_text=_ITEM,
-                ),
-                trusted=True,
-                dedup_key=f"ui.poke:{now}",
-                created_at=now,
-                expires_at=now + _EXPIRES_S,
-            )
+        intent = Intent(
+            source="ui.poke",
+            priority=Priority.PROACTIVE,
+            injection=Injection(
+                reply=ReplySpec(instructions=_INSTRUCTIONS, max_tokens=self._max_tokens),
+                item_text=_ITEM,
+            ),
+            trusted=True,
+            dedup_key=f"ui.poke:{now}",
+            created_at=now,
+            expires_at=now + _EXPIRES_S,
         )
+        self._submit(intent)
+        # Logged after the submit, so the line means "the scheduler has it",
+        # not "we were about to hand it over". Bound to the id the verdict will
+        # carry: the poke files at the lowest rung and expires in 8s, so 「戳了
+        # 没反应」 is usually answered by the verdict line, and this one is how
+        # you find it.
+        with bind(intent_id=intent.dedup_key):
+            log.info("ui.poke_filed", max_tokens=self._max_tokens, ttl_ms=round(_EXPIRES_S * 1000))
         return True

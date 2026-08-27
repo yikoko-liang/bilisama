@@ -1093,3 +1093,28 @@ async def test_an_empty_log_pane_explains_itself(page: Page, harness: Harness) -
     assert await page.locator("#loglines .empty").count() == 0, "来了日志，空状态没让位"
     text = await page.locator("#loglines").inner_text()
     assert "人话原因" in text, f"error_text 又被脱敏吃掉了：{text}"
+
+
+@pytest.mark.ui_browser
+async def test_the_log_pane_says_where_the_record_outlives_it(
+    browser: Browser, harness: Harness
+) -> None:
+    """The pane keeps 500 lines and dies with the tab.
+
+    「昨天那次她为什么没说话」 is only answerable from the file, so the path is on
+    screen rather than in a document somewhere. The 「打开目录」 button stays
+    hidden in a browser tab: a tab cannot open a directory, and a button that
+    does nothing is worse than no button.
+    """
+    harness.hello_override = {"log_path": "/tmp/probe/bilisama/logs/dev-talk.jsonl"}
+    context = await browser.new_context(bypass_csp=True)
+    page = await context.new_page()
+    try:
+        await page.goto(harness.url)
+        await _wait(page, "document.getElementById('log-path') !== null")
+        await _wait(page, "!document.getElementById('log-path').hidden")
+        shown = await page.locator("#log-path").inner_text()
+        assert "dev-talk.jsonl" in shown, f"日志页没说文件在哪：{shown}"
+        assert await page.locator("#log-reveal").is_hidden(), "浏览器标签页里不该有打开目录的按钮"
+    finally:
+        await context.close()

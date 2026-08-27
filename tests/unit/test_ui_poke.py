@@ -7,6 +7,10 @@ priority, short TTL) and that clicking enthusiastically cannot flood the heap.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from bilisama.clock import FakeClock
 from bilisama.director.intent import Intent, Priority
 from bilisama.ui.poke import PokeResponder
@@ -85,3 +89,53 @@ def test_a_poke_writes_something_into_the_conversation() -> None:
     PokeResponder(clock, submit=filed.append, max_tokens=120).poke()
     assert filed, "戳了一下却什么都没提交"
     assert filed[0].injection.item_text, "戳一戳没往会话里写任何东西，DashScope 上会被拒"
+
+
+# ------------------------------------------------------------ what it records
+
+
+def _lines(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.getMessage() == event]
+
+
+def test_a_filed_poke_is_recorded_at_info(caplog: pytest.LogCaptureFixture) -> None:
+    """The streamer's own click is a decision, not bookkeeping — a handful a
+    stream, so it belongs at the level the panel shows by default."""
+    caplog.set_level(logging.DEBUG)
+    responder, _ = _build(FakeClock(start=100.0))
+
+    assert responder.poke() is True
+
+    (record,) = _lines(caplog, "ui.poke_filed")
+    assert record.levelno == logging.INFO
+    fields = getattr(record, "fields", {})
+    assert fields["max_tokens"] == 40
+    assert fields["ttl_ms"] == 8000, "戳一戳过期得快，这是它经常没下文的原因"
+
+
+def test_a_swallowed_poke_says_the_cooldown_ate_it(caplog: pytest.LogCaptureFixture) -> None:
+    """「我戳了怎么没反应」, the case with no other trace at all.
+
+    A poke inside the cooldown never becomes an Intent, so the scheduler never
+    sees it and no verdict is ever written — while the pet animates exactly as
+    it does for a poke that went through. This line is the only record.
+    """
+    clock = FakeClock()
+    responder, submitted = _build(clock)
+    assert responder.poke() is True
+    caplog.set_level(logging.DEBUG)
+    # The first poke logged too, and whether caplog kept that record depends on
+    # the root level some earlier test left behind. Drop it explicitly so this
+    # test reads the same alone as it does in a full run.
+    caplog.clear()
+    clock._now += 3.0  # direct nudge; advance() needs a running loop
+
+    assert responder.poke() is False
+
+    assert len(submitted) == 1
+    (record,) = _lines(caplog, "ui.poke_cooling_down")
+    assert record.levelno == logging.INFO
+    fields = getattr(record, "fields", {})
+    assert fields["since_last_ms"] == 3000
+    assert fields["cooldown_ms"] == 15000, "不写死等多久，主播只能猜"
+    assert _lines(caplog, "ui.poke_filed") == [], "被冷却挡下的不该记成已提交"

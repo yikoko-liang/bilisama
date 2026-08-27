@@ -18,6 +18,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from bilisama.config import S2SConfig
+from bilisama.obs.logging import get_logger
+
+log = get_logger(__name__)
 
 # Upstream dataclasses, scanned to reconcile field names.
 _UPSTREAM_ARG_DIR = "arguments_classes"
@@ -196,18 +199,35 @@ def write(cfg: S2SConfig, dest: Path, *, s2s_root: Path | None = None) -> Render
     """
     result = render_checked(cfg, s2s_root)
     if result.reconciliation is Reconciliation.UNAVAILABLE:
+        log.warning("bootstrap.s2s_reconcile_unavailable", s2s_root=str(s2s_root))
         raise S2SConfigError(
             f"没能在这个目录里找到上游的参数定义，字段名对账没做成：{s2s_root}\n"
             f"怎么办：确认 --s2s-root 指向 speech-to-speech 的检出"
             f"（它应该有 src/speech_to_speech/{_UPSTREAM_ARG_DIR}/）。"
         )
     if result.unknown_keys:
+        log.warning("bootstrap.s2s_keys_unknown", unknown_keys="、".join(result.unknown_keys))
         raise S2SConfigError(
             "这些配置项上游不认识，会被静默忽略：" + "、".join(result.unknown_keys)
         )
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(
         json.dumps(result.payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    # What the engine was actually handed, in the one place that knows. The
+    # file is the only record otherwise, and it gets overwritten by the next
+    # run — so "which port/TTS/model was that session on" is unanswerable
+    # afterwards. missing_turn_fields rides along because a turn parameter
+    # upstream knows and we never sent is the difference between judged and
+    # default judging.
+    log.info(
+        "bootstrap.s2s_config_written",
+        dest=str(dest),
+        port=result.payload.get("port"),
+        tts=result.payload.get("tts"),
+        llm_model=result.payload.get("model_name"),
+        reconciliation=result.reconciliation.value,
+        missing_turn_fields="、".join(result.missing_turn_fields),
     )
     return result
 

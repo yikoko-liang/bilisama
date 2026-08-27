@@ -811,7 +811,23 @@ def director_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     # persona copies land in tmp instead of the developer's real data home.
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))  # closes at once, pump returns
-    yield _director_config(tmp_path / "conf")
+    # run_director installs logging for real (relog → obs.logging.setup), which
+    # clears the root handlers and leaves one pointed at capsys' stderr. That
+    # stream is closed when the test ends, so the NEXT test in the session to
+    # log anything at all got "--- Logging error --- ValueError: I/O operation
+    # on closed file" on its stderr — a failure in a file that never touched
+    # logging. Same restore the log_stream fixture above does.
+    root = logging.getLogger()
+    handlers = root.handlers[:]
+    level = root.level
+    quieted = {name: logging.getLogger(name).level for name in (*_QUIETED, "blivedm")}
+    try:
+        yield _director_config(tmp_path / "conf")
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+        for name, saved in quieted.items():
+            logging.getLogger(name).setLevel(saved)
 
 
 async def _run_until_ready(args: Any, *, ready: float = 5.0) -> _FakeLink:
@@ -860,6 +876,83 @@ async def test_the_director_stands_the_whole_stack_up_and_takes_it_down(
     assert "[蒸馏] ran=False" in printed
     assert printed.rstrip().endswith("再见。")
     assert speech.closed is True
+
+
+def _logged(err: str) -> list[dict[str, Any]]:
+    """The JSON log lines out of a director run's stderr.
+
+    run_director configures logging for real, and with --no-ui the console
+    keeps every level (obs/logging.py `console_level`), so its own handler
+    writes the JSON beside the Chinese narration. Non-JSON lines are the
+    narration — the prints this change is forbidden to remove.
+    """
+    lines: list[dict[str, Any]] = []
+    for line in err.splitlines():
+        try:
+            lines.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return lines
+
+
+async def test_the_start_banner_is_a_structured_line_too(
+    director_box: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Which provider, whose address, which persona, which room.
+
+    All four were on the terminal only, in a banner that scrolls away, and
+    every one of them has been guessed wrong reading a bug report afterwards.
+    The Chinese banner stays exactly where it was — this is the copy that
+    survives the session.
+    """
+    await _run_until_ready(_director_args(director_box))
+    captured = capsys.readouterr()
+
+    assert "已连接 s2s" in captured.out  # the human line, untouched
+    logged = _logged(captured.err)
+    started = [line for line in logged if line["event"] == "dev_talk.session_started"]
+    assert len(started) == 1, f"启动横幅没有对应的日志：{captured.err}"
+    assert started[0]["provider"] == "s2s"
+    assert started[0]["persona"] == "mia"
+    assert started[0]["chattiness"] == "low"
+    # No room in this config, and no credential to go with it.
+    assert started[0]["room_id"] == 0
+    assert started[0]["room_credentialed"] is False
+    # The address is logged with its query stripped, the same rule the banner
+    # follows: a hosted endpoint carries its model — and sometimes a token —
+    # in exactly that query.
+    assert "?" not in started[0]["endpoint"]
+
+
+async def test_a_swallowed_teardown_failure_keeps_its_traceback(
+    director_box: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The [收尾] chain's eight `print(..., file=sys.stderr)` arms.
+
+    Each of them turned an exception into one sentence and dropped the
+    traceback on the floor — and a shutdown that leaves the database or the
+    socket open is exactly the failure nobody can reproduce the next morning.
+    The sentence still goes to the terminal; the traceback now goes to the log.
+    """
+
+    class _StuckSpeaker(_SilentSpeaker):
+        def close(self) -> None:
+            raise RuntimeError("PortAudio 不肯撒手")
+
+    monkeypatch.setattr(dev_talk, "_Speaker", _StuckSpeaker)
+
+    await _run_until_ready(_director_args(director_box))
+    captured = capsys.readouterr()
+
+    assert "[收尾] 扬声器没关上" in captured.err  # the human line, still there
+    failures = [
+        line for line in _logged(captured.err) if line["event"] == "dev_talk.speaker_close_failed"
+    ]
+    assert len(failures) == 1, f"收尾异常又被吞了：{captured.err}"
+    assert failures[0]["error_text"] == "PortAudio 不肯撒手"
+    # The half the print threw away.
+    assert "RuntimeError" in failures[0]["exc"]
+    assert "NoneType: None" not in failures[0]["exc"]
 
 
 async def test_the_director_registers_every_health_probe(

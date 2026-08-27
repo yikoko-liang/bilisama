@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from bilisama.memory.store import STREAM_TZ, MemoryStore
+from bilisama.obs.logging import get_logger
 
 if TYPE_CHECKING:
     from bilisama.clock import Clock
 
 __all__ = ["MemorySegments", "memory_segments"]
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +87,25 @@ def session_progress_text(store: MemoryStore) -> str:
 def memory_segments(
     store: MemoryStore, clock: Clock, *, clock_granularity_min: int = 1
 ) -> MemorySegments:
-    return MemorySegments(
+    segments = MemorySegments(
         streamer_facts=streamer_facts_text(store),
         session_progress=session_progress_text(store),
         regulars=regulars_line(store),
         clock_line=clock_line(store, clock, granularity_min=clock_granularity_min),
     )
+    # Sizes only for the three memory-fed segments: their text is distilled
+    # FROM audience danmaku, so it belongs to the audience the same way the
+    # danmaku does. The clock line is ours end to end and goes in verbatim —
+    # it is the one segment where the value itself is the bug ("开播 0 分钟"
+    # three hours in means stream_started_at never moved).
+    #
+    # Debug for the same reason as persona.prompt_assembled: once per rebuild,
+    # not once per push.
+    log.debug(
+        "memory.segments_built",
+        streamer_fact_chars=len(segments.streamer_facts),
+        progress_chars=len(segments.session_progress),
+        regulars_chars=len(segments.regulars),
+        clock_line=segments.clock_line,
+    )
+    return segments

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
 
@@ -1074,3 +1075,199 @@ async def test_every_verdict_leaves_a_log_line_not_just_a_sink_call() -> None:
     fields = getattr(lines[0], "fields", {})
     assert fields["outcome"] == "skipped"
     assert fields["reason"] == "gate.host_speaking", "没说清是哪道闸挡的"
+
+
+# ------------------------------------------------- L1 的日志（面板的日志页）
+#
+# 这一层回答「为什么刚才没说话」。终局（scheduler.verdict）上面已经钉住了，
+# 下面钉的是通向终局的那条路：闸门为什么关着、谁抢到了名额、谁被打断了。
+
+
+class _ListSink(logging.Handler):
+    """Keep the records themselves; the caller decides what to read off them."""
+
+    def __init__(self, into: list[logging.LogRecord]) -> None:
+        super().__init__()
+        self._into = into
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._into.append(record)
+
+
+@contextlib.contextmanager
+def _capture_events(logger_name: str, into: list[logging.LogRecord]) -> Iterator[None]:
+    """Collect one logger's records, with its level forced down to DEBUG.
+
+    The level has to be forced. pytest leaves the root at WARNING and neither
+    module sets a level of its own, so every info and debug line under test
+    would be dropped inside `Logger.log` — and the assertions would then pass
+    or fail against an empty list for a reason that has nothing to do with the
+    code. Restored on the way out.
+    """
+    logger = logging.getLogger(logger_name)
+    sink = _ListSink(into)
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(sink)
+    try:
+        yield
+    finally:
+        logger.removeHandler(sink)
+        logger.setLevel(previous)
+
+
+def _named(records: list[logging.LogRecord], event: str) -> list[logging.LogRecord]:
+    return [record for record in records if record.getMessage() == event]
+
+
+def _fields(record: logging.LogRecord) -> dict[str, object]:
+    got = getattr(record, "fields", None)
+    assert isinstance(got, dict), f"{record.getMessage()} 没带字段"
+    return got
+
+
+# setup() lowers these to WARNING (src/bilisama/obs/logging.py:206-215); left
+# alone they would follow the test out and quiet an unrelated one.
+_QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn", "blivedm")
+
+
+@contextlib.contextmanager
+def _json_log_lines(into: list[str]) -> Iterator[None]:
+    """Run the real pipeline and keep every line it FORMATS.
+
+    Formatted rather than raw, because the two properties worth pinning here
+    only exist after the formatter runs: intent_id is read off a contextvar at
+    format time (src/bilisama/obs/logging.py:161-165), and folding 弹幕正文
+    down to a length is the formatter's job too (src/bilisama/obs/logging.py:130).
+    A test reading `record.fields` would see neither and would pass while the
+    viewer's message walked out into the log file.
+
+    setup() clears the root handlers, pytest's own included, so everything it
+    touches is put back afterwards.
+    """
+
+    class _JsonSink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            into.append(self.format(record))
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    saved_quiet = {name: logging.getLogger(name).level for name in _QUIETED}
+    obs_logging.setup(level="debug", stream=io.StringIO(), extra_handlers=(_JsonSink(),))
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+        for name, level in saved_quiet.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def _json_events(lines: list[str], event: str) -> list[dict[str, object]]:
+    payloads = [json.loads(line) for line in lines]
+    return [payload for payload in payloads if payload["event"] == event]
+
+
+async def test_the_gate_line_lands_on_the_change_not_on_every_poll() -> None:
+    """「为什么刚才没说话」 gets one answer per stall, not one per wake-up.
+
+    _next_dispatchable is polled: every link event sets the wake, text deltas
+    included, so an unlatched line here would be the busiest thing in the
+    process and would repeat one unchanging fact a hundred times over. It is
+    also the line the panel's log page exists for, so it has to be there
+    exactly once — naming the gate, and naming who is paying for it.
+    """
+    clock = FakeClock()
+    floor = SpeakingFloor(clock)
+    scheduler = Scheduler(_ScriptedLink(), floor, clock)
+    scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1"))
+    floor.on_speech_started()
+
+    records: list[logging.LogRecord] = []
+    with _capture_events("bilisama.director.scheduler", records):
+        for _ in range(20):
+            assert scheduler._next_dispatchable() is None
+        blocked = _named(records, "scheduler.gate_blocked")
+        assert len(blocked) == 1, f"轮询 20 次写了 {len(blocked)} 行——闩没锁住"
+        fields = _fields(blocked[0])
+        assert fields["reason"] == "gate.host_speaking", "没说清是哪道闸"
+        assert fields["top_source"] == "super_chat", "没说清谁在等"
+
+        # 换一道闸就是换一个答案，得单独记一行。
+        floor.on_speech_stopped(quiet_s=1.0)
+        assert scheduler._next_dispatchable() is None
+
+    assert [_fields(r)["reason"] for r in _named(records, "scheduler.gate_blocked")] == [
+        "gate.host_speaking",
+        "gate.injection_window",
+    ], "闸门换了原因，日志得跟着换"
+
+
+async def test_dispatch_and_barge_in_name_the_reply_without_quoting_the_viewer() -> None:
+    """派发和打断各留一行，而且都能顺着 intent_id 串起来。
+
+    这两行是终局的上游：`scheduler.verdict` 说「cancelled@speaking」，但说不出
+    是谁把它切了、切的时候已经说了多久。顺带钉住脱敏——弹幕正文一个字都不该
+    出现在日志文件里，而这条 SC 的正文正是从 item_text 一路走到派发的。
+    """
+    body = "祝你生日快乐我是观众阿强"
+    speech = _ScriptedLink()
+    lines: list[str] = []
+    with _json_log_lines(lines):
+        async with _scheduler_on(speech) as scheduler:
+            scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", text=body))
+            await _until(lambda: scheduler._active is not None, "没派发出去")
+            active = scheduler._active
+            assert active is not None
+
+            speech.feed.put_nowait(SpeechStarted(audio_ms=0))
+            await _until(lambda: bool(speech.cancels), "打断时没有取消回复")
+            # _barge_in only cancels; the books close on the done behind it,
+            # and _ScriptedLink sends nothing it was not handed.
+            speech.feed.put_nowait(ReplyDone(active.handle, ReplyStatus.CANCELLED, text=""))
+            await _until(lambda: scheduler._active is None, "打断后没结算")
+
+    sent = _json_events(lines, "scheduler.dispatched")
+    assert len(sent) == 1, f"派发没留下日志：{lines}"
+    assert sent[0]["source"] == "super_chat"
+    assert sent[0]["has_item"] is True, "两步注入写没写历史，日志得说"
+    assert sent[0]["intent_id"] == "sc_1", "串不起这条 SC 的链路"
+
+    barged = _json_events(lines, "scheduler.barged_in")
+    assert len(barged) == 1, f"被牺牲的是谁，没人记：{lines}"
+    assert barged[0]["intent_id"] == "sc_1"
+    assert barged[0]["where"] == "speech_started", "没说清是在哪个口子抓到的"
+
+    settled = _json_events(lines, "scheduler.settled")
+    assert len(settled) == 1, "链路侧怎么收的场，没人记"
+    assert settled[0]["cleared"] is True, "PlaybackClear 发没发，日志得说"
+
+    assert not any(body in line for line in lines), f"弹幕正文漏进日志了：{lines}"
+
+
+def test_the_floor_logs_its_flips_and_stays_silent_while_polled() -> None:
+    """floor.py 今天零日志；补的只能是状态翻转，不能是轮询。
+
+    blocking_reason() 每次派发唤醒都要读一遍，往里加一行就是刷屏——所以读一百
+    次必须一个字都不写。反过来，真正翻转的那几下（说话边沿、冷却、播放）一次
+    也不能少。
+    """
+    clock = FakeClock()
+    floor = SpeakingFloor(clock)
+    records: list[logging.LogRecord] = []
+    with _capture_events("bilisama.director.floor", records):
+        floor.on_speech_started()
+        floor.on_speech_started()  # 重复的 started 不是翻转
+        for _ in range(100):
+            floor.blocking_reason()
+        floor.on_speech_stopped(quiet_s=1.1)
+        floor.start_cooldown(2.0)
+        floor.on_playback(True)
+        floor.on_playback(True)  # 同一个值，没有边沿
+
+    assert len(records) == 4, f"轮询不该写日志：{[r.getMessage() for r in records]}"
+    assert len(_named(records, "floor.speech_started")) == 1
+    stopped = _named(records, "floor.speech_stopped")
+    assert _fields(stopped[0])["quiet_ms"] == 1100, "没说还要静默多久"
+    assert _fields(_named(records, "floor.cooldown_started")[0])["cooldown_ms"] == 2000
+    assert _fields(_named(records, "floor.playback_edge")[0])["queued"] is True

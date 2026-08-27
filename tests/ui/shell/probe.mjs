@@ -87,6 +87,13 @@ const panel = recorded.windows[1] ?? null;
 const secondInstance = recorded.appEvents.get("second-instance");
 if (secondInstance) secondInstance({}, ["electron", "."], process.cwd());
 
+// 「打开日志目录」, asked for twice: once from a real window, once from a
+// stranger, and the real one also tries to name the path. What comes back in
+// `revealed` is what the shell decided, not what the caller wanted.
+const revealLog = recorded.ipc.get("shell:reveal-log");
+if (revealLog && panel) revealLog({ sender: panel.webContents }, "/etc/passwd");
+if (revealLog) revealLog({ sender: { id: "somewhere else" } }, "/etc/passwd");
+
 console.log(
   JSON.stringify({
     lockRequested: recorded.lockRequested,
@@ -97,6 +104,7 @@ console.log(
     petFocused: pet ? pet.focused : 0,
     pet: battery(pet),
     panel: battery(panel),
+    revealed: recorded.revealed,
   }),
 );
 

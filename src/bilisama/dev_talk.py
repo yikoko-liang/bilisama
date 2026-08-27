@@ -470,6 +470,15 @@ class _Speaker:
             _close_audio_stream(stream)
             self._stream = None
             print(f"[音频] 扬声器起不来（{exc}），这场没有声音输出。", file=sys.stderr)
+            # Once per open, never per block — this is the device handshake,
+            # not the playback path. It answers the report that arrives as
+            # 「她不说话」 and is really 「没有输出设备」.
+            log.warning(
+                "dev_talk.speaker_unavailable",
+                device=self._device,
+                error_type=type(exc).__name__,
+                error_text=str(exc),
+            )
             return
         self._stream = stream
 
@@ -726,6 +735,12 @@ async def _consume_events(
                 if link_health is not None:
                     link_health.mark_error(event.code, event.detail)
                 print(f"[错误] {event.code}: {event.detail}", file=sys.stderr)
+                # The provider refusing something is the one link event with no
+                # log of its own: the client logs the drops and the reconnects
+                # (link.reconnected / link.fatal, client.py:367-453) and emits
+                # this one without a word. A wrong voice name arrives here and
+                # nowhere else, and what the streamer sees is a silent session.
+                log.warning("dev_talk.link_error", code=event.code, error_text=event.detail)
     finally:
         # A cancelled consumer must not leave the contextvar set: whatever logs
         # next on this task would inherit a turn that is over, which reads as
@@ -1067,7 +1082,10 @@ async def run_director(args: argparse.Namespace) -> int:
         raise SystemExit(2) from exc
     # strict=False keeps a half-configured dev box usable, but the problems
     # still get said out loud instead of silently shaping behaviour (D6).
-    for problem in check(settings, config_dir=config_path.parent):
+    # Kept as a list: the same problems are logged once logging exists, a few
+    # lines below. They cannot be logged here — nothing is configured yet.
+    config_problems = list(check(settings, config_dir=config_path.parent))
+    for problem in config_problems:
         tag = "错误" if problem.fatal else "提醒"
         fix = f"（{problem.fix}）" if problem.fix else ""
         print(f"[配置{tag}] {problem.field}：{problem.message}{fix}")
@@ -1127,6 +1145,21 @@ async def run_director(args: argparse.Namespace) -> int:
         )
 
     relog()
+    # Now that there is somewhere to write. The console said all of this
+    # already, in Chinese, before the file and the panel existed; this is the
+    # copy that survives the session. `detail` and `advice` are diagnostic
+    # field names, so the scrubber leaves them whole (obs/logging.py).
+    for problem in config_problems:
+        # Name kept clear of `report`: the distillation report at the bottom of
+        # this function owns that one, and the two would be the same variable.
+        say_problem = log.warning if problem.fatal else log.info
+        say_problem(
+            "dev_talk.config_problem",
+            field=problem.field,
+            fatal=problem.fatal,
+            detail=problem.message,
+            advice=problem.fix or "",
+        )
     thresholds = derive(settings.interaction.chattiness)
 
     stop = asyncio.Event()
@@ -1394,11 +1427,15 @@ async def run_director(args: argparse.Namespace) -> int:
     # kills regular-viewer memory, so say it out loud.
     bili_source = None
     room_id = args.room if args.room is not None else settings.room.room_id
+    # Whether a credential STRING was found, which is all anyone knows this
+    # early — _watch_credential corrects it once the platform has answered.
+    room_credentialed = False
     if room_id:
         from bilisama.ingest.bilibili import BilibiliEventSource
 
         # One truth: the config reference (shipped default env:BILI_SESSDATA).
         sessdata = secrets.resolve(settings.room.credential_ref) or ""
+        room_credentialed = bool(sessdata)
         bili_source = BilibiliEventSource(
             room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
         )
@@ -1524,6 +1561,17 @@ async def run_director(args: argparse.Namespace) -> int:
         money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
         body = f"：{event.text}" if event.text else ""
         print(f"[已注入 {label}] {event.viewer.name}{body}{money}")
+        # The head of the funnel, and the only entry point where the operator
+        # is the author. event_id is what ties this to whatever the selector
+        # and the scheduler decide about it further down; `text` is a viewer
+        # field name on purpose, so the body is folded to a length.
+        log.info(
+            "dev_talk.console_injected",
+            kind=str(event.kind),
+            event_id=event.event_id,
+            text=event.text,
+            value_cny=event.value_cny,
+        )
         if hub is not None:
             hub.broadcast(
                 ServerEvent.EVENT_FEED,
@@ -1647,6 +1695,9 @@ async def run_director(args: argparse.Namespace) -> int:
             def hello() -> dict[str, Any]:
                 return {
                     "protocol": 1,
+                    # Where the record outlives this window: the panel keeps
+                    # 500 lines and dies with the tab.
+                    "log_path": str(log_path) if file_tee else "",
                     "persona": {
                         "id": settings.persona.id,
                         "name": settings.persona.display_name or settings.persona.id,
@@ -1667,6 +1718,14 @@ async def run_director(args: argparse.Namespace) -> int:
                 print(
                     f"[界面] 端口 {settings.runtime.ui_port} 绑不上（{exc}），本场没有界面；"
                     "改 [runtime] ui_port 或空出端口。"
+                )
+                # Everything downstream reads "no panel" as a choice (--no-ui).
+                # This is the one line that says it was not one — and it is why
+                # the terminal switch /mute has to exist (backlog #47).
+                log.warning(
+                    "dev_talk.ui_port_unavailable",
+                    port=settings.runtime.ui_port,
+                    error_text=str(exc),
                 )
                 hub = None
             else:
@@ -1697,11 +1756,21 @@ async def run_director(args: argparse.Namespace) -> int:
                 )
                 ui_server = UiServer(app, ui_sock)
                 ui_server.start()
+                # Port only. The URL carries the session token, and a token in
+                # a log file is the token in every bug report attached to it.
+                log.info("dev_talk.ui_started", port=ui_port)
                 endpoint_file = default_endpoint_path()
                 try:
                     write_endpoint_file(endpoint_file, url=ui_url, pid=os.getpid())
                 except OSError as exc:
                     print(f"[界面] 端点文件写不了（{exc}）；壳这场要用 BILISAMA_UI_URL={ui_url}")
+                    # The shell finds the panel through this file and nothing
+                    # else, so this is the whole answer to 「壳一直停在等待卡片」.
+                    log.warning(
+                        "dev_talk.ui_endpoint_file_unwritable",
+                        path=str(endpoint_file),
+                        error_text=str(exc),
+                    )
                     endpoint_file = None
                 hub.broadcast(ServerEvent.PANEL_STATE, panel_state())  # seed the sticky state
                 if args.open:
@@ -1731,13 +1800,19 @@ async def run_director(args: argparse.Namespace) -> int:
                     # The shell is a passenger of a passenger; failing to spawn it
                     # must not touch the voice loop.
                     print(f"[桌宠] 壳拉不起来（{exc}）；手动 npm start 也行")
+                    log.warning("dev_talk.pet_spawn_failed", error_text=str(exc))
                 else:
                     print("[桌宠] 壳已拉起（关掉 dev-talk 会一并带走；不想要加 --no-pet）")
+                    log.info("dev_talk.pet_started", pid=pet_proc.pid)
             else:
                 print(
                     f"[桌宠] 桌面悬浮窗没装，这场只有浏览器界面。装一次就好："
                     f"cd {pet_dir} && npm install"
                 )
+                # Not a failure — but 「桌宠没出来」 is asked often enough that
+                # the answer belongs in the log rather than only in a line that
+                # scrolled past twenty minutes ago.
+                log.info("dev_talk.pet_not_installed", pet_dir=str(pet_dir))
 
         # A bottom-pinned input line when prompt_toolkit is installed: everything
         # the session prints (replies, verdicts, log lines) lands ABOVE the line
@@ -1856,6 +1931,11 @@ async def run_director(args: argparse.Namespace) -> int:
                     # without it the voice runs on past the text.
                     broker.flush()
                 print(f"[打断] playback.clear（{clear.reason}）")
+                # The scheduler decides to interrupt; this is the receipt that
+                # both speakers were actually emptied. The pair is what tells a
+                # barge-in that worked from one that only got as far as the
+                # decision — the two ends are different processes' buffers.
+                log.info("dev_talk.playback_cleared", reason=clear.reason, page=broker is not None)
                 if hub is not None:
                     # The bubble shatters on this; the queue stays single-consumer
                     # here and the hub only gets a copy.
@@ -1882,6 +1962,24 @@ async def run_director(args: argparse.Namespace) -> int:
             f"  生长层 relationship={settings.persona.growth.relationship.value} "
             f"voice={settings.persona.growth.voice.value}\n"
             "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
+        )
+        # The banner, structured. Every field here has been guessed wrong by
+        # somebody reading a bug report: which provider, whose address won
+        # (endpoint_source is the layer — flag, config or registry), which
+        # persona, which room, and whether a credential was found for it. The
+        # query is stripped for the same reason the banner strips it — an
+        # address can carry a credential — and SESSDATA becomes a yes/no.
+        log.info(
+            "dev_talk.session_started",
+            provider=provider.value,
+            endpoint=connect_url.split("?")[0],
+            endpoint_source=endpoint.source,
+            llm_model=endpoint.model,
+            persona=settings.persona.id,
+            chattiness=settings.interaction.chattiness.value,
+            room_id=room_id,
+            room_credentialed=room_credentialed,
+            console="prompt" if use_prompt else "plain",
         )
         if ui_url:
             print(
@@ -2041,6 +2139,12 @@ async def run_director(args: argparse.Namespace) -> int:
                 await ui_server.stop()
             except Exception as exc:
                 print(f"[收尾] 界面服务器没关上：{exc}", file=sys.stderr)
+                # log.exception, not log.warning: all seven teardown steps
+                # below used to end at that print, which keeps the sentence
+                # and throws the traceback away. A shutdown that
+                # leaves a socket or the database open is exactly the failure
+                # nobody can reproduce afterwards, and stderr scrolled past.
+                log.exception("dev_talk.ui_close_failed", error_text=str(exc))
         if endpoint_file is not None:
             # Only if it is still OURS. Two --director sessions share this path
             # (ui_port=0 gives each its own port but one endpoint file), the
@@ -2070,8 +2174,13 @@ async def run_director(args: argparse.Namespace) -> int:
         try:
             report = await distiller.end_of_stream()
             print(f"[蒸馏] ran={report.ran} reason={report.reason}")
+            # Whether the session left anything behind. ran=False is the normal
+            # answer for a short test run and the alarming one after four hours
+            # of stream, and only the reason tells them apart.
+            log.info("dev_talk.distill_done", ran=report.ran, reason=report.reason)
         except Exception as exc:
             print(f"[蒸馏] 失败：{exc}", file=sys.stderr)
+            log.exception("dev_talk.distill_failed", error_text=str(exc))
         try:
             store.end_stream()
             rel, voc = persona.growth_entries("relationship"), persona.growth_entries("voice")
@@ -2082,25 +2191,30 @@ async def run_director(args: argparse.Namespace) -> int:
                 )
         except Exception as exc:
             print(f"[收尾] 记忆收口失败：{exc}", file=sys.stderr)
+            log.exception("dev_talk.memory_finalize_failed", error_text=str(exc))
         try:
             store.close()
         except Exception as exc:
             print(f"[收尾] 记忆库没关上：{exc}", file=sys.stderr)
+            log.exception("dev_talk.memory_close_failed", error_text=str(exc))
         if side is not None:
             try:
                 await side.aclose()
             except Exception as exc:
                 print(f"[收尾] 侧路连接没关上：{exc}", file=sys.stderr)
+                log.exception("dev_talk.side_close_failed", error_text=str(exc))
         try:
             await speech.aclose()
         except Exception as exc:
             print(f"[收尾] 语音连接没关上：{exc}", file=sys.stderr)
+            log.exception("dev_talk.speech_close_failed", error_text=str(exc))
         try:
             # Off-loop: the PortAudio release blocks (see _close_audio_stream),
             # and left open it would stall interpreter teardown after 再见.
             await asyncio.to_thread(speaker.close)
         except Exception as exc:
             print(f"[收尾] 扬声器没关上：{exc}", file=sys.stderr)
+            log.exception("dev_talk.speaker_close_failed", error_text=str(exc))
         print("再见。")
     return 0
 
@@ -2166,6 +2280,13 @@ async def run(args: argparse.Namespace) -> int:
     finally:
         # One try per resource, same rule as director mode's teardown chain:
         # a raise from the socket goodbye must not skip the audio release.
+        #
+        # No log.exception beside these two prints, unlike run_director's copy
+        # of the same failures. Wire mode never calls logging setup() at all,
+        # so there is no file and no panel to write to — the record would go
+        # to logging.lastResort, which prints the event name and a raw
+        # traceback onto the terminal the streamer is reading. All cost, no
+        # reader. Give this mode a log destination and the calls belong here.
         try:
             await client.aclose()
         except Exception as exc:

@@ -16,6 +16,7 @@ error path here is as much the contract as the happy one.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -220,3 +221,102 @@ def test_text_blocked_leaves_the_streaming_state_alone() -> None:
     assert guard.text_blocked("完全无关的一句") is False
 
     assert guard.hit("词") == "违禁词", "the whole-text check ate the streaming tail"
+
+
+# ------------------------------------------------------------ what it records
+
+
+def _lines(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.getMessage() == event]
+
+
+def _fields(record: logging.LogRecord) -> dict[str, object]:
+    fields = getattr(record, "fields", {})
+    assert isinstance(fields, dict)
+    return fields
+
+
+def test_a_hit_is_recorded_as_a_warning_naming_our_own_word(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The backstop firing is a safety event, and safety events get read later.
+
+    Warning, so it survives the panel's default filter and reaches the terminal
+    even with a UI attached. The word is nameable because it came off our own
+    list; anything the audience or the model wrote around it does not.
+    """
+    caplog.set_level(logging.DEBUG)
+    guard = OutputGuard(["违禁词"], [])
+
+    assert guard.hit("刚才有人提到违禁词这个说法") == "违禁词"
+
+    (record,) = _lines(caplog, "guard.word_hit")
+    assert record.levelno == logging.WARNING
+    assert _fields(record) == {"word": "违禁词"}, "命中日志只该带我们自己的词"
+
+
+def test_a_clean_delta_records_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """Boundary: hit() runs on every text delta of every reply.
+
+    The common case is no hit, and the common case must stay silent — one line
+    per delta would be the loudest thing in the file.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    assert OutputGuard(["违禁词"], []).hit("今天天气不错") is None
+
+    assert caplog.records == [], f"干净的 delta 不该留日志：{caplog.records}"
+
+
+def test_a_word_the_allowlist_spared_is_recorded_too(caplog: pytest.LogCaptureFixture) -> None:
+    """The other half: 「词表里明明有，怎么还是播出去了」.
+
+    Debug, because it is per-delta bookkeeping rather than a decision — but
+    without it the allowlist is invisible and a spared word looks like a
+    backstop that failed.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    assert OutputGuard(["河"], ["河北"]).hit("河北的朋友们好") is None
+
+    (record,) = _lines(caplog, "guard.hit_allowed")
+    assert record.levelno == logging.DEBUG
+    assert _fields(record)["word"] == "河"
+    assert _lines(caplog, "guard.word_hit") == [], "白名单放行的不该同时报成命中"
+
+
+def test_loading_records_the_counts_and_the_files_it_read(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """「我改了词表怎么没生效」 — "auto" resolves against the config's own
+    directory (ledger #43), so the path that was read is half the answer."""
+    caplog.set_level(logging.INFO)
+    _lists(tmp_path, words="违禁词\n第二个\n", allow="河北\n")
+
+    load_guard(SafetyConfig(), config_dir=tmp_path)
+
+    (record,) = _lines(caplog, "guard.loaded")
+    assert record.levelno == logging.INFO
+    fields = _fields(record)
+    assert fields["word_count"] == 2
+    assert fields["allow_count"] == 1
+    assert fields["allowlist_found"] is True
+    assert fields["wordlist_path"] == str(tmp_path / "safety" / "wordlist.txt")
+
+
+def test_a_missing_allowlist_is_named_rather_than_inferred(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Boundary: no allowlist is legal, and looks exactly like an empty one.
+
+    An allow_count of 0 could mean either, and the difference is the whole
+    reason 「河北」 starts tripping a ban on 「河」 after a config moves.
+    """
+    caplog.set_level(logging.INFO)
+    _lists(tmp_path, words="违禁词\n")
+
+    load_guard(SafetyConfig(), config_dir=tmp_path)
+
+    fields = _fields(_lines(caplog, "guard.loaded")[0])
+    assert fields["allowlist_found"] is False
+    assert fields["allow_count"] == 0

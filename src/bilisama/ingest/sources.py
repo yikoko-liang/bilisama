@@ -115,6 +115,9 @@ class SupervisedSource:
             began = self._clock.monotonic()
             try:
                 await self._inner.start(emit)
+                # A clean return ends this source for the rest of the run, and
+                # nothing downstream says so — the events simply stop.
+                log.info("source.exited", source=self.name, restarts=restarts)
                 return  # a clean exit is a clean exit
             except asyncio.CancelledError:
                 raise
@@ -135,6 +138,10 @@ class SupervisedSource:
                     error_text=str(exc),
                 )
                 await self._clock.sleep(delay)
+                # The warning above is "about to"; this is "did". Between them
+                # sits the backoff, and a source stuck there looks exactly like
+                # one that came back and died again silently.
+                log.info("source.restarted", source=self.name, attempt=restarts)
 
     async def stop(self) -> None:
         await self._inner.stop()

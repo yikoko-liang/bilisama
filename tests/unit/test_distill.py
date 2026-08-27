@@ -12,6 +12,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -80,6 +81,13 @@ def _make(
         guard=guard,  # type: ignore[arg-type]
     )
     return distiller, store, persona, side
+
+
+def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]]:
+    """The `fields=` payload of every record carrying this event name."""
+    return [
+        getattr(record, "fields", {}) for record in caplog.records if record.getMessage() == event
+    ]
 
 
 class FailingSide:
@@ -406,6 +414,68 @@ async def test_swap_cap_holds_even_when_the_model_overdelivers(tmp_path: Path) -
     distiller, _store, persona, _side = _make(tmp_path, growth=growth, replies=[reply])
     await distiller.end_of_stream()
     assert persona.growth_entries("voice") == ["句一", "句二"], "two per stream, plan section 4.6"
+
+
+async def test_the_batch_says_what_it_was_fed_and_what_it_wrote(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """一场直播里最值钱的一次调用，之前只在失败时说话。
+
+    「她把今晚全忘了」的排查要分得清两件事：批处理没跑，和批处理跑了但一条都
+    没写下来。开始那条给的是喂进去多少料、生长层允不允许写；结束那条给的是
+    真的落了几条。
+    """
+    growth = GrowthSwitches.model_validate({"relationship": "on", "voice": "on"})
+    distiller, _store, _persona, _side = _make(tmp_path, growth=growth)
+
+    with caplog.at_level("INFO"):
+        report = await distiller.end_of_stream()
+
+    assert report.ran
+    started = _fields(caplog, "distill.batch_started")
+    assert len(started) == 1, "每场一次，重跑会被闩住"
+    assert started[0]["trigger"] == "stream_end"
+    assert started[0]["event_count"] == 1, "_make 只喂了一条弹幕"
+    assert started[0]["viewer_count"] == 1
+    assert started[0]["growth_voice"] == "on"
+
+    applied = _fields(caplog, "distill.batch_applied")
+    assert len(applied) == 1
+    assert applied[0]["viewer_fact_count"] == 1
+    assert applied[0]["growth_added"] == 2, "共同经历一条、口癖一条"
+    assert applied[0]["dropped_count"] == 0
+    assert applied[0]["summary_chars"] == len("聊了编译器和猫")
+
+    # 写库那一层自己也数了一遍：观众事实一条、本场摘要一条。
+    written = _fields(caplog, "memory.facts_written")
+    assert [f["scope"] for f in written] == ["viewer", "stream"]
+    assert all(f["fact_count"] == 1 for f in written)
+
+
+async def test_a_rolling_rewrite_says_why_it_woke_up(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """滚动摘要是每 N 条事件一次，不是每条弹幕一次——日志得能证明这一点。
+
+    指纹没变就直接返回，这时候不该有「开始」那条：一次没发出去的调用记成开始，
+    会让这条链路看起来比实际忙得多。
+    """
+    distiller, store, _persona, _side = _make(tmp_path, replies=["聊了猫和编译器"])
+
+    with caplog.at_level("INFO", logger="bilisama.memory.distill"):
+        assert (await distiller.rolling_summary()).ran is True
+        started = _fields(caplog, "distill.rolling_started")
+        assert len(started) == 1
+        assert started[0]["trigger"] == "event_threshold"
+        assert started[0]["every_n"] == 3, "阈值就是 every_n_events"
+        assert started[0]["event_count"] == 1
+        assert _fields(caplog, "distill.rolling_done")[0]["summary_chars"] == len("聊了猫和编译器")
+
+        caplog.clear()
+        assert (await distiller.rolling_summary()).reason == "fingerprint_unchanged"
+        assert _fields(caplog, "distill.rolling_started") == [], "没真的调模型就不该有开始"
+
+    assert store.facts("stream", str(store.stream_id))[-1].text == "聊了猫和编译器"
 
 
 async def test_a_budget_trim_says_so_out_loud(

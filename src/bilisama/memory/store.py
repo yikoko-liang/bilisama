@@ -24,11 +24,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bilisama.ingest.events import GuardLevel, LiveEvent
+from bilisama.obs.logging import get_logger
 
 if TYPE_CHECKING:
     from bilisama.clock import Clock
 
 __all__ = ["STREAM_TZ", "FactRow", "MemoryStore", "ViewerRow", "logical_date"]
+
+log = get_logger(__name__)
 
 _SCHEMA = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
@@ -120,6 +123,11 @@ class MemoryStore:
 
     def __init__(self, db_path: Path | str, clock: Clock, *, write_batch_ms: int = 0) -> None:
         self._clock = clock
+        # Asked BEFORE connect, because connect() is what creates the file.
+        # "created" is the answer to the only question a streamer ever asks of
+        # this layer when it looks amnesiac — 阿强 came back and she did not
+        # know him, because the room dir moved and this opened a fresh file.
+        created = not Path(db_path).exists()
         self._db = sqlite3.connect(str(db_path))
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -129,6 +137,12 @@ class MemoryStore:
         self._pending_events: list[tuple[object, ...]] = []
         self._pending_viewers: list[tuple[object, ...]] = []
         self._pending_since = 0.0
+        log.info(
+            "memory.opened",
+            db_path=str(db_path),
+            created=created,
+            write_batch_ms=write_batch_ms,
+        )
 
     def close(self) -> None:
         self._flush_pending()
@@ -160,18 +174,28 @@ class MemoryStore:
         )
         self._db.commit()
         self._stream_id = int(cur.lastrowid or 0)
+        log.info("memory.stream_begun", stream_id=self._stream_id)
         return self._stream_id
 
     def end_stream(self) -> None:
         if not self._stream_id:
             return
         self._flush_pending()
+        stream_id = self._stream_id
         self._db.execute(
             "UPDATE stream SET ended_at = ? WHERE id = ?",
-            (self._clock.wall().isoformat(), self._stream_id),
+            (self._clock.wall().isoformat(), stream_id),
         )
         self._db.commit()
         self._stream_id = 0
+        # One extra COUNT per stream, on the event_stream index, to answer the
+        # question the log pane cannot otherwise answer at all: did this stream
+        # record anything? Zero events with a healthy source is a silent
+        # ingest failure, and nothing else in the shutdown path would say so.
+        recorded = self._db.execute(
+            "SELECT COUNT(*) AS n FROM event WHERE stream_id = ?", (stream_id,)
+        ).fetchone()
+        log.info("memory.stream_ended", stream_id=stream_id, event_count=int(recorded["n"]))
 
     @property
     def stream_id(self) -> int:
@@ -359,3 +383,9 @@ class MemoryStore:
                 "INSERT INTO fact (scope, subject, text, tags, created_at) VALUES (?, ?, ?, ?, ?)",
                 [(scope, subject, text, tags, now) for text, tags in facts],
             )
+        # The one write in this module that gets a line each. Event rows do not
+        # (that is per-danmaku, the hot path); facts are the distiller's whole
+        # output, a handful per stream, and "what did she actually learn about
+        # 阿强 tonight" has nowhere else to be answered. Counts only — the fact
+        # text is distilled from audience danmaku and stays theirs.
+        log.info("memory.facts_written", scope=scope, subject=subject, fact_count=len(facts))

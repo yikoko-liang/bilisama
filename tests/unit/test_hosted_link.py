@@ -340,6 +340,74 @@ async def test_ending_protection_on_a_hosted_link_sends_nothing() -> None:
             await hosted.aclose()
 
 
+async def test_the_s2s_protection_window_has_two_visible_edges() -> None:
+    """Barge-in is disarmed for a paid reply and re-armed after it.
+
+    Both edges at info, because a session stuck at interrupt_response=false is
+    the failure where the streamer opens their mouth and nothing happens, for
+    hours, over one lost frame (ledger #46). Without the pair in the log there
+    is no way to tell that state from a quiet room.
+    """
+    from bilisama.realtime import link as link_mod
+    from bilisama.realtime.providers.s2s import S2SLink
+    from tests.unit.test_realtime_client import _capturing, _named
+
+    with _capturing("bilisama.realtime.providers.s2s") as records:
+        async with MockRealtimeServer(caps=caps_mod.S2S, script=Script(delta_chunks=1)) as server:
+            s2s = S2SLink(server.url)
+            await s2s.connect()
+            try:
+                await s2s.request_reply(link_mod.ReplySpec(protected=True, protect_ms=6000))
+                await _next_event(s2s.events(), link_mod.ReplyDone)
+                await s2s.end_protection()
+                # The scheduler's belt-and-braces second call, on the hard cap.
+                await s2s.end_protection()
+            finally:
+                await s2s.aclose()
+
+    armed = _named(records, "s2s.protection_armed")
+    ended = _named(records, "s2s.protection_ended")
+    assert len(armed) == 1, armed
+    assert armed[0]["protect_ms"] == 6000
+    assert len(ended) == 2, ended
+    assert ended[0]["was_armed"] is True, "the first call is the one that closed the window"
+    assert ended[1]["was_armed"] is False, "the cap's repeat must not read as a second window"
+
+
+async def test_the_s2s_replay_line_survives_the_scrubber() -> None:
+    """Field NAMES decide what the scrubber folds, and it fails closed.
+
+    `text_replies=True` reached the log as `<bool>`, because `text` is the word
+    that means danmaku (obs/logging.py:51) — a line that answers nothing while
+    looking like it does. Every field on this line is checked, not just that
+    one: the next person adding `reply_text=` here deserves to find out from a
+    test rather than from an empty panel.
+    """
+    from bilisama.obs.logging import _scrub
+    from bilisama.realtime.providers.s2s import S2SLink
+    from tests.unit.test_realtime_client import _capturing, _named
+
+    with _capturing("bilisama.realtime.providers.s2s") as records:
+        async with MockRealtimeServer(caps=caps_mod.S2S, script=Script()) as server:
+            s2s = S2SLink(server.url, text_replies=True)
+            await s2s.connect()
+            try:
+                await s2s.set_context("你是米娅。")
+            finally:
+                await s2s.aclose()
+
+    replays = _named(records, "s2s.session_replayed")
+    assert len(replays) == 1, replays
+    # The scrub check comes first, so a rename back to `text_replies=` fails
+    # here — with the reason — rather than on a missing key further down.
+    for key, value in replays[0].items():
+        assert (
+            _scrub(key, value, log_viewer_content=False) == value
+        ), f"{key} is folded by the scrubber, so this line loses it"
+    assert replays[0]["modality"] == "text"
+    assert replays[0]["rearmed_barge_in"] is False
+
+
 async def test_a_voice_alone_is_worth_a_bootstrap() -> None:
     """GA sends no turn config, but a named voice still has to get through.
 

@@ -36,7 +36,7 @@ from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.errors import ErrorClass, classify_error, describe
 from bilisama.realtime.providers.hosted import HostedLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
-from tests.unit.test_realtime_client import _next_event
+from tests.unit.test_realtime_client import _capturing, _named, _next_event
 
 
 async def test_a_dropped_socket_comes_back_and_the_session_is_restored() -> None:
@@ -85,6 +85,56 @@ async def test_a_dropped_socket_comes_back_and_the_session_is_restored() -> None
             assert done.status is link.ReplyStatus.COMPLETED
         finally:
             await hosted.aclose()
+
+
+async def test_a_replay_says_what_it_pushed_back() -> None:
+    """The test above proves the replay happened by reading the mock's traffic.
+
+    The streamer has no mock. When they come back to a session that has been
+    answering in the wrong voice for ten minutes, the only place that can say
+    whether the persona was ever re-sent is the log — so the replay states what
+    it carried: the bootstrap, the context length, and when the next rotation
+    is due.
+    """
+    clock = FakeClock()
+    with _capturing("bilisama.realtime.providers.hosted") as records:
+        async with MockRealtimeServer(
+            caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=Script(delta_chunks=1)
+        ) as server:
+            hosted = HostedLink(
+                server.url,
+                ProviderName.DASHSCOPE,
+                clock=clock,
+                turn=HostedTurnConfig(),
+                voice="longanqian",
+                auto_reconnect=True,
+                reconnect_backoff_s=1.0,
+            )
+            await hosted.connect()
+            try:
+                events = hosted.events()
+                await hosted.set_context("你是米娅。")
+                await server.drop_connection()
+                await _next_event(events, link.LinkDown)
+                await clock.advance(1.5)
+                await _next_event(events, link.LinkUp)
+            finally:
+                await hosted.aclose()
+
+    bootstraps = _named(records, "hosted.bootstrap_sent")
+    replays = _named(records, "hosted.session_replayed")
+    # Once on connect, once on the reconnect — and the second one is the whole
+    # point of the line.
+    assert len(bootstraps) == 2, bootstraps
+    assert bootstraps[-1]["turn_type"] == "server_vad"
+    assert (
+        bootstraps[-1]["voice"] == "longanqian"
+    ), "a dropped voice is inaudible until someone asks"
+    assert len(replays) == 2, replays
+    assert replays[0]["context_len"] == 0, "nothing had been pushed yet on the first connect"
+    assert replays[-1]["context_len"] == len("你是米娅。")
+    assert replays[-1]["bootstrapped"] is True
+    assert replays[-1]["provider"] == "dashscope"
 
 
 async def test_a_deliberate_close_does_not_reconnect() -> None:

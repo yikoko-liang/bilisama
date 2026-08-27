@@ -507,7 +507,7 @@ class BilibiliEventSource:
 
     # ---- Source protocol ----
 
-    def _reset_run_state(self) -> None:
+    def _reset_run_state(self) -> int:
         # Kept out of start()'s body: an inline `self._client_error = None`
         # makes mypy narrow the attribute to None for the whole function, and
         # the callback assignments it can't see turn the final error check
@@ -527,11 +527,24 @@ class BilibiliEventSource:
         self._breaker.reset()
         # Stale chatter from the dead connection is worthless; paid events
         # survive the restart and the assembly dedup ring absorbs replays.
+        # Counted on the way out: those danmaku are gone, and a restart that
+        # ate a viewer's message is exactly what the log has to be able to say.
+        discarded = 0
         while not self._queue.empty():
-            self._queue.get_nowait()
+            if self._queue.get_nowait() is not None:
+                discarded += 1
+        return discarded
 
     async def start(self, emit: EventSink) -> None:
-        self._reset_run_state()
+        discarded = self._reset_run_state()
+        # Paired with bilibili.connected below: an attempt that never gets
+        # there is a hung init_room, which otherwise looks like silence.
+        log.info(
+            "bilibili.connecting",
+            room_id=self._room_id_arg,
+            generation=self._generation,
+            discarded_count=discarded,
+        )
         session = self._build_session()
         # uid=None asks blivedm to fetch the logged-in uid (needs SESSDATA);
         # 0 skips that round trip for the anonymous path.
@@ -710,6 +723,16 @@ class BilibiliEventSource:
         self._popularity = value
 
     def on_client_stopped(self, exception: BaseException | None) -> None:
+        # blivedm's own reconnection never reaches here — this fires when the
+        # wire is down for good, so it is the moment the room went quiet.
+        # `requested` separates our shutdown from a drop; an unrequested one
+        # goes on to raise out of start() for the supervisor to log.
+        log.info(
+            "bilibili.client_stopped",
+            requested=self._stop_requested,
+            generation=self._generation,
+            error_text=str(exception)[:200] if exception is not None else "",
+        )
         self._client_error = exception
         self._client_dead = True
         self._nudge()

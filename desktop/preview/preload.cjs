@@ -14,4 +14,6 @@ contextBridge.exposeInMainWorld("bilisamaShell", {
   fit: (w, h) => ipcRenderer.send("pet:fit", w, h),
   // ...and to stop swallowing clicks everywhere the pet is not.
   setInteractive: (on) => ipcRenderer.send("pet:interactive", Boolean(on)),
+  // No argument on purpose: the main process computes the log path itself.
+  revealLog: () => ipcRenderer.send("shell:reveal-log"),
 });

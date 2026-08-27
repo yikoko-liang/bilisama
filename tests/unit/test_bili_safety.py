@@ -7,6 +7,10 @@ loop and no sleeping — time is just an argument.
 from __future__ import annotations
 
 import dataclasses
+import logging
+from typing import Any
+
+import pytest
 
 from bilisama.ingest.bilibili.safety import (
     CircuitBreaker,
@@ -16,6 +20,21 @@ from bilisama.ingest.bilibili.safety import (
 )
 from bilisama.ingest.events import Gift, LiveEvent
 from tests.fakes.bili import gift_event as _gift_event
+
+
+def _logged(caplog: pytest.LogCaptureFixture, event: str) -> list[tuple[str, dict[str, Any]]]:
+    """(level, fields) for every `event` record, in order.
+
+    The event name is the log MESSAGE and the payload rides in `record.fields`
+    (obs/logging.py's EventLogger), so a plain `in caplog.text` check would pass
+    on a line that carries none of the fields these tests are about.
+    """
+    return [
+        (record.levelname.lower(), dict(getattr(record, "fields", {})))
+        for record in caplog.records
+        if record.getMessage() == event
+    ]
+
 
 # ------------------------------------------------------------------ DedupRing
 
@@ -174,3 +193,111 @@ def test_masked_viewer_combo_keys_on_the_hash() -> None:
     settled = _drain(agg, 12.0)
     assert len(settled) == 1
     assert settled[0].gift is not None and settled[0].gift.aggregated_count == 2
+
+
+# ------------------------------------------------------------------ what the log says
+#
+# These four components drop danmaku and gifts for a living, and until now they
+# did it without a word. What is pinned below is that the drop LEAVES A RECORD —
+# the tallies in selector.status() can only ever say how many.
+
+
+def test_dedup_hit_is_logged_without_the_key_that_carries_the_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ring sees a key, not an event, and that key embeds the danmaku text
+    when the platform gave us no id (events.py's dedup_key). So the hit is
+    logged by shape — age, window, ring size — and the key stays out."""
+    caplog.set_level(logging.DEBUG)
+    ring = DedupRing(window_s=0.35)
+    key = "danmaku:uid:42:主播今天玩什么:1755000000"
+
+    assert not ring.seen(key, now=10.0)
+    assert _logged(caplog, "safety.dedup_hit") == [], "a first sighting is not a hit"
+
+    assert ring.seen(key, now=10.2)
+    hits = _logged(caplog, "safety.dedup_hit")
+    assert len(hits) == 1
+    level, fields = hits[0]
+    assert level == "debug"
+    assert fields["age_ms"] == pytest.approx(200.0)
+    assert fields["window_ms"] == pytest.approx(350.0)
+    assert all("主播今天玩什么" not in str(value) for value in fields.values())
+
+
+def test_cooldown_block_says_who_and_for_how_much_longer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 刚才还回我、现在不理我了 case is a cooldown, and identity plus the
+    time left is the whole answer. Asking without being blocked says nothing."""
+    caplog.set_level(logging.DEBUG)
+    cooldown = PerUidCooldown(cooldown_s=60.0)
+
+    assert not cooldown.blocked("uid:42", now=5.0)
+    assert _logged(caplog, "safety.uid_cooldown_blocked") == [], "nobody was blocked"
+
+    cooldown.mark("uid:42", now=6.0)
+    assert cooldown.blocked("uid:42", now=36.0)
+    blocked = _logged(caplog, "safety.uid_cooldown_blocked")
+    assert len(blocked) == 1
+    level, fields = blocked[0]
+    assert level == "debug"
+    assert fields["identity"] == "uid:42"
+    assert fields["remaining_ms"] == pytest.approx(30_000.0)
+
+
+def test_breaker_logs_the_flip_once_when_it_opens_and_once_when_it_closes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A latched breaker is why the room went silent, so the flip is a warning.
+
+    Once per flip, not once per failure: the fourth failure changes nothing and
+    must not say anything. Neither must a reset() on a breaker that was already
+    closed — every supervised run calls one (source.py's _reset_run_state).
+    """
+    caplog.set_level(logging.DEBUG)
+    breaker = CircuitBreaker(threshold=3, window_s=60.0)
+
+    breaker.record_failure(10.0, "映射炸了")
+    breaker.record_failure(10.1, "映射炸了")
+    assert _logged(caplog, "safety.breaker_opened") == [], "still under the threshold"
+
+    breaker.record_failure(10.2, "映射炸了")
+    breaker.record_failure(10.3, "又炸了一次")
+    opened = _logged(caplog, "safety.breaker_opened")
+    assert len(opened) == 1, "the flip, not every failure after it"
+    level, fields = opened[0]
+    assert level == "warning"
+    assert fields["failures"] == 3
+    assert fields["error_text"] == "映射炸了", "the reason that tripped it"
+
+    breaker.reset()
+    breaker.reset()
+    assert [level for level, _ in _logged(caplog, "safety.breaker_reset")] == ["info"]
+
+
+def test_combo_settle_logs_how_many_hits_were_merged_and_for_how_much(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fifty hits leave the aggregator as one thank-you carrying no trace of the
+    merge, so this is the only place that can say the other forty-nine landed."""
+    caplog.set_level(logging.DEBUG)
+    agg = GiftComboAggregator()
+    for i in range(50):
+        agg.add(_gift_event(coin=100, event_id=f"gift:t{i}"), now=10.0 + i * 0.02)
+    assert len(_drain(agg, 10.0 + 49 * 0.02 + 1.0)) == 1
+
+    settled = _logged(caplog, "safety.combo_settled")
+    assert len(settled) == 1
+    level, fields = settled[0]
+    assert level == "debug"
+    assert fields["hits"] == 50
+    assert fields["gift_num"] == 50
+    assert fields["value_cny"] == 5.0
+
+    # The same combo again inside the suppress window buys no second thank-you.
+    agg.add(_gift_event(coin=100, event_id="gift:again"), now=12.0)
+    suppressed = _logged(caplog, "safety.combo_suppressed")
+    assert len(suppressed) == 1
+    assert suppressed[0][0] == "debug"
+    assert suppressed[0][1]["suppressed_total"] == 1

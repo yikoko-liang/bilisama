@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,6 +52,13 @@ def store(clock: FakeClock) -> MemoryStore:
     s = MemoryStore(":memory:", clock)
     s.begin_stream()
     return s
+
+
+def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]]:
+    """The `fields=` payload of every record carrying this event name."""
+    return [
+        getattr(record, "fields", {}) for record in caplog.records if record.getMessage() == event
+    ]
 
 
 # ------------------------------------------------------------ tier 0 counters
@@ -116,6 +124,42 @@ def test_recent_events_come_back_oldest_first_with_a_limit(store: MemoryStore) -
     lines = store.recent_events(limit=3)
     assert len(lines) == 3
     assert "第3条" in lines[0] and "第5条" in lines[-1]
+
+
+def test_the_db_says_where_it_is_and_whether_it_had_to_create_it(
+    tmp_path: Path, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """「阿强来了她却不认识」大多不是记忆坏了，是开了另一个文件。
+
+    第二条断言比第一条更要紧：事件写库是每条弹幕一次的热路径，一条日志都不能
+    有。这里把这一层允许出现的 event 名整个钉死，多一条就红。
+    """
+    db = tmp_path / "memory.db"
+    with caplog.at_level("INFO", logger="bilisama.memory.store"):
+        first = MemoryStore(db, clock)
+        first.begin_stream()
+        for _ in range(5):
+            first.on_event(_event())
+        first.end_stream()
+        first.close()
+
+        again = MemoryStore(db, clock)
+        again.close()
+
+    opened = _fields(caplog, "memory.opened")
+    assert [f["created"] for f in opened] == [True, False], "第二次开的是同一个文件"
+    assert opened[0]["db_path"] == str(db)
+
+    ended = _fields(caplog, "memory.stream_ended")
+    assert ended[0]["event_count"] == 5
+    assert _fields(caplog, "memory.stream_begun")[0]["stream_id"] == ended[0]["stream_id"]
+
+    assert [r.getMessage() for r in caplog.records if r.name == "bilisama.memory.store"] == [
+        "memory.opened",
+        "memory.stream_begun",
+        "memory.stream_ended",
+        "memory.opened",
+    ], "五条事件写库，一行日志都不该多出来"
 
 
 def test_prune_drops_old_events_but_never_viewers(store: MemoryStore, clock: FakeClock) -> None:

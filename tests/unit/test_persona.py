@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,13 @@ TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "pers
 @pytest.fixture()
 def store(tmp_path: Path) -> PersonaStore:
     return PersonaStore(tmp_path / "live", TEMPLATE_ROOT)
+
+
+def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]]:
+    """The `fields=` payload of every record carrying this event name."""
+    return [
+        getattr(record, "fields", {}) for record in caplog.records if record.getMessage() == event
+    ]
 
 
 # ------------------------------------------------------------ fallback chain
@@ -76,6 +84,53 @@ def test_unknown_variables_stay_visible(store: PersonaStore) -> None:
     """A typo'd {{name}} should read as a typo, not vanish."""
     text = store.anchor("identity", {"wrongName": "x"})
     assert "{{userName}}" in text
+
+
+def test_the_fallback_chain_says_which_copy_it_took(
+    store: PersonaStore, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """「我改了她的性格，怎么一点变化都没有」——回退是静悄悄的，得有条记录。
+
+    空的、读不出来的活副本都会退回随包模板（_live_anchor_text 解释了为什么该
+    这样），静悄悄地退。这条日志是那份沉默唯一露头的地方。
+    """
+    with caplog.at_level("INFO", logger="bilisama.persona.loader"):
+        store.anchors({"userName": "主播"})
+        fresh = _fields(caplog, "persona.anchor_loaded")
+        assert [f["source"] for f in fresh] == ["template", "template"], "新装机两条都走模板"
+        assert all(f["chars"] > 0 for f in fresh)
+
+        live = tmp_path / "live"
+        live.mkdir(parents=True, exist_ok=True)
+        (live / "identity.md").write_text("# 我是谁\n我是测试人设。", encoding="utf-8")
+        caplog.clear()
+        store.anchors()
+
+    taken = {f["anchor"]: f["source"] for f in _fields(caplog, "persona.anchor_loaded")}
+    assert taken == {"identity": "live", "personality": "template"}
+
+
+def test_the_proactive_prompt_says_which_of_the_three_answered(
+    store: PersonaStore, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """主动话题的提示词有三级回退，一个字都没有也是合法状态。
+
+    「配置全开了，她还是不主动说话」的第一个排查点就是这里——三个候选一个都
+    没命中的时候，它也得说话，而不是返回空串走人。
+    """
+    default = tmp_path / "prompts" / "proactive.md"
+    with caplog.at_level("INFO", logger="bilisama.persona.loader"):
+        assert store.proactive_prompt(default) == ""
+        assert _fields(caplog, "persona.proactive_prompt_loaded")[0]["source"] == "none"
+
+        caplog.clear()
+        default.parent.mkdir(parents=True, exist_ok=True)
+        default.write_text("想一个话题", encoding="utf-8")
+        assert store.proactive_prompt(default) == "想一个话题"
+
+    hit = _fields(caplog, "persona.proactive_prompt_loaded")[0]
+    assert hit["source"] == "default"
+    assert hit["chars"] == 5
 
 
 # ------------------------------------------------------------ growth files

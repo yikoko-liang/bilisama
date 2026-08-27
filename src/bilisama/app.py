@@ -254,6 +254,26 @@ class Assembly:
             return False
         await self._push_context(text)
         self._last_pushed = text
+        # lstrip rather than a minus-two: the separator assemble() puts between
+        # the halves belongs to neither, and this number has to mean the same
+        # thing as persona.prompt_assembled's tail_chars or comparing the two
+        # lines teaches a two-character lie.
+        tail = text[len(self._prefix) :].lstrip("\n")
+        # One line per PUSH, not per build: the ticker rebuilds every
+        # _refresh_s and most builds are byte-identical, so logging in
+        # build_context() would put six lines a minute on the panel that say
+        # nothing happened. The per-segment breakdown is the debug line in
+        # persona/prompt.py. Growth modes ride along because "did the growth
+        # layers reach her this time" is the first question asked of a push
+        # that looks too short.
+        log.info(
+            "assembly.context_pushed",
+            total_chars=len(text),
+            prefix_chars=len(self._prefix),
+            tail_chars=len(tail),
+            growth_voice=self._growth.voice.value,
+            growth_relationship=self._growth.relationship.value,
+        )
         return True
 
     # ------------------------------------------------------------ running
@@ -264,6 +284,20 @@ class Assembly:
         # Kept on self so status() can answer "which source gave up" (D3) —
         # the whole point of supervision is that an outage stays visible.
         self._supervised = supervised
+        # Once per stream. The switches are READ through the same callable the
+        # emit path uses, not copied off the config: a profile, a panel edit
+        # and a --flag all end up here, and only the callable knows the answer
+        # that actually silences a lane. ROOM_STATE has no switch of its own
+        # and so reads as off, which is what it is — it never speaks.
+        log.info(
+            "assembly.started",
+            source_names=",".join(s.name for s in supervised),
+            speak_on=",".join(k.value for k in EventKind if self._speak_enabled(k.value)),
+            speak_off=",".join(k.value for k in EventKind if not self._speak_enabled(k.value)),
+            growth_voice=self._growth.voice.value,
+            growth_relationship=self._growth.relationship.value,
+            refresh_s=self._refresh_s,
+        )
         ticker = asyncio.create_task(self._context_ticker(), name="assembly:context")
         tasks = [ticker]
         if self._selector is not None:

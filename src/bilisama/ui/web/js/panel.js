@@ -69,6 +69,9 @@ export function createPanel({ send }) {
   const logsTab = document.getElementById("tab-btn-logs");
   const levelSel = document.getElementById("log-level");
   const pauseBtn = document.getElementById("log-pause");
+  const logPathEl = document.getElementById("log-path");
+  const logRevealEl = document.getElementById("log-reveal");
+  logRevealEl?.addEventListener("click", () => window.bilisamaShell?.revealLog?.());
   const injectForm = document.getElementById("inject");
   const injectInput = document.getElementById("inject-input");
 
@@ -740,6 +743,16 @@ export function createPanel({ send }) {
       // inside the shell mounts no pet at all and would otherwise never hear
       // that the configured renderer did not take.
       notice(unsupportedRenderer(data.avatar));
+      // Where the record outlives this window. The pane keeps 500 lines and
+      // dies with the tab; 「昨天那次她为什么没说话」 is only answerable from
+      // the file, so the path is on screen rather than in a doc somewhere.
+      if (data.log_path && logPathEl) {
+        logPathEl.textContent = `日志文件：${data.log_path}`;
+        logPathEl.hidden = false;
+        // Only the shell can open a directory. A button that does nothing in a
+        // browser tab is worse than no button, so it appears where it works.
+        if (logRevealEl && window.bilisamaShell?.revealLog) logRevealEl.hidden = false;
+      }
       if (data.panel) this.handleFrame("panel.state", data.panel);
     },
     setVisual(visual) {

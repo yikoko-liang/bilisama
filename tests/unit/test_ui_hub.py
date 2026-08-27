@@ -118,6 +118,41 @@ async def test_full_queue_drops_the_oldest_frame_and_keeps_the_newest() -> None:
     assert texts == ["2", "3", "4"]
 
 
+async def test_a_wedged_client_is_reported_once_not_once_per_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dropping frames has to be sayable, and saying it must not feed itself.
+
+    A line logged from broadcast() is staged, drained by run() and broadcast
+    again as log.line — straight back into the queue that is still full. One
+    line per drop would make the wedge its own source of frames, one more each
+    tick. So the report is edge-triggered: once when the dropping starts, once
+    when it stops.
+    """
+    hub = UiHub(FakeClock(), queue_max=2)
+    _, queue = hub.attach()
+    with caplog.at_level(logging.DEBUG, logger="bilisama.ui.hub"):
+        for n in range(6):  # two fit, four are dropped
+            hub.broadcast(ServerEvent.REPLY_DELTA, {"text": str(n)})
+        dropping = [r for r in caplog.records if r.getMessage() == "ui.frames_dropping"]
+        assert len(dropping) == 1, [r.getMessage() for r in caplog.records]
+        assert dropping[0].levelno == logging.WARNING
+        # `frame_kind`, not `event`: the formatter owns `event` for the event
+        # name and renames a field that collides (obs/logging.py _OWNED_KEYS).
+        assert dropping[0].fields["frame_kind"] == "reply.delta"  # type: ignore[attr-defined]
+
+        _drain(queue)  # the tab caught up
+        hub.broadcast(ServerEvent.REPLY_DELTA, {"text": "赶上了"})
+        restored = [r for r in caplog.records if r.getMessage() == "ui.frame_flow_restored"]
+        assert len(restored) == 1
+        assert restored[0].levelno == logging.DEBUG
+        # And a second wedge is reported again — the flag is a state, not a
+        # one-shot mute.
+        for n in range(6):
+            hub.broadcast(ServerEvent.REPLY_DELTA, {"text": str(n)})
+        assert len([r for r in caplog.records if r.getMessage() == "ui.frames_dropping"]) == 2
+
+
 async def test_detached_client_receives_nothing_further() -> None:
     hub = UiHub(FakeClock())
     _, queue = hub.attach()

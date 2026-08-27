@@ -216,15 +216,24 @@ class PersonaStore:
 
     def anchor(self, name: AnchorName, variables: Mapping[str, str] | None = None) -> str:
         text = self._live_anchor_text(name)
+        source, path = "live", self._data_dir / f"{name}.md"
         if text is None:
-            template = self._template_dir / f"{name}.md"
+            source, path = "template", self._template_dir / f"{name}.md"
             try:
-                text = template.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8")
             except OSError as exc:
                 raise FileNotFoundError(
-                    f"人设文件缺失：{template}。"
+                    f"人设文件缺失：{path}。"
                     "随包模板应该在 config/personas/ 下，检查 persona id 是否拼对。"
                 ) from exc
+        # Twice per stream, once per anchor. Which branch this took is the
+        # first thing to check when the streamer says "I edited her personality
+        # and nothing changed": a live copy that is blank, or unreadable, falls
+        # back silently by design (_live_anchor_text explains why), and this
+        # line is the only place that silence becomes visible.
+        log.info(
+            "persona.anchor_loaded", anchor=name, source=source, path=str(path), chars=len(text)
+        )
         return _substitute(text, variables or {})
 
     def anchors(self, variables: Mapping[str, str] | None = None) -> PersonaAnchors:
@@ -317,15 +326,25 @@ class PersonaStore:
         the global default under config/prompts/. Empty means none anywhere.
         """
         candidates = (
-            self._data_dir / "proactive.md",
-            self._template_dir / "proactive.md",
-            default_path,
+            ("live", self._data_dir / "proactive.md"),
+            ("template", self._template_dir / "proactive.md"),
+            ("default", default_path),
         )
-        for path in candidates:
+        for source, path in candidates:
             if path.is_file():
                 text = path.read_text(encoding="utf-8").strip()
                 if text:
+                    log.info(
+                        "persona.proactive_prompt_loaded",
+                        source=source,
+                        path=str(path),
+                        chars=len(text),
+                    )
                     return _substitute(text, variables or {})
+        # Not a warning: none anywhere is a legal state. It is also the reason
+        # the topic loop can be fully configured and still produce nothing, so
+        # it says so rather than returning an empty string in silence.
+        log.info("persona.proactive_prompt_loaded", source="none", path="", chars=0)
         return ""
 
     # ------------------------------------------------------------ pinned

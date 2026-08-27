@@ -25,9 +25,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from bilisama.clock import Clock
+from bilisama.obs.logging import get_logger
 from bilisama.ui.events import ServerEvent, frame
 
 __all__ = ["UiHub", "VoiceSignals", "resolve_voice_state"]
+
+log = get_logger(__name__)
 
 # Sticky events: only the latest frame matters, and every client must have it.
 # audio.owner earns its place the hard way — the audio socket routinely opens
@@ -123,6 +126,8 @@ class UiHub:
         self._log_staging: deque[str] = deque(maxlen=log_keep)
         self._log_handler = _StagingHandler(self._log_staging)
         self._closed = False
+        # Edge, not level: see the drop report in broadcast().
+        self._dropping = False
 
     # ------------------------------------------------------------ clients
 
@@ -145,11 +150,17 @@ class UiHub:
             queue.put_nowait(None)
             return replay, queue
         self._clients.append(queue)
+        # debug: a page that reloads attaches again every time, and none of it
+        # says anything about whether the stream is working. It answers the one
+        # question the panel cannot answer about itself — was anybody actually
+        # connected when the frames the operator went looking for went out.
+        log.debug("ui.client_attached", clients=len(self._clients), replay_frames=len(replay))
         return replay, queue
 
     def detach(self, queue: asyncio.Queue[str | None]) -> None:
         with contextlib.suppress(ValueError):
             self._clients.remove(queue)
+            log.debug("ui.client_detached", clients=len(self._clients))
 
     @property
     def clients(self) -> int:
@@ -178,11 +189,30 @@ class UiHub:
             self._feed_ring.append(line)
         elif event is ServerEvent.LOG_LINE:
             self._log_ring.append(line)
+        dropped = False
         for queue in self._clients:
-            self._offer(queue, line)
+            dropped |= self._offer(queue, line)
+        # Edge-triggered on purpose, and the edge is what keeps this from
+        # feeding itself: a line logged here is staged, drained by run() and
+        # broadcast as log.line — straight back into the queue that is still
+        # full. Reporting every drop would make the wedge its own source of
+        # frames. One line when the dropping starts, one when it stops.
+        if dropped and not self._dropping:
+            self._dropping = True
+            # frame_kind, not `event`: the formatter owns that key for the
+            # event NAME and renames a field that collides (obs/logging.py).
+            log.warning("ui.frames_dropping", frame_kind=str(event), clients=len(self._clients))
+        elif not dropped and self._dropping:
+            self._dropping = False
+            log.debug("ui.frame_flow_restored", clients=len(self._clients))
 
     @staticmethod
-    def _offer(queue: asyncio.Queue[str | None], line: str) -> None:
+    def _offer(queue: asyncio.Queue[str | None], line: str) -> bool:
+        """Deliver one line, dropping the oldest if the client is full.
+
+        Returns:
+            Whether a frame was dropped to make room.
+        """
         try:
             queue.put_nowait(line)
         except asyncio.QueueFull:
@@ -190,6 +220,8 @@ class UiHub:
                 queue.get_nowait()
             with contextlib.suppress(asyncio.QueueFull):
                 queue.put_nowait(line)
+            return True
+        return False
 
     # ------------------------------------------------------------ logging
 

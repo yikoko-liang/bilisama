@@ -11,13 +11,17 @@ when it changed enough to re-push, is the assembly loop's job.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
+
+from bilisama.obs.logging import get_logger
 
 if TYPE_CHECKING:
     from bilisama.persona.loader import PersonaAnchors
 
 __all__ = ["LIVE_RULES", "DynamicContext", "assemble", "dynamic_tail", "static_prefix"]
+
+log = get_logger(__name__)
 
 # The live-stream rules. The three memory rules are copied whole from
 # openhanako (core/agent.ts:1344-1346) — plan section 4.6 explains why only
@@ -90,4 +94,17 @@ def dynamic_tail(ctx: DynamicContext) -> str:
 
 def assemble(prefix: str, ctx: DynamicContext) -> str:
     tail = dynamic_tail(ctx)
+    # Debug, not info: this runs on every rebuild (the assembly ticker calls it
+    # every few seconds) while a push only happens when the text changed, and
+    # the push is what info records. Which segments are present is the answer
+    # to "she never mentions the regulars" — an empty field is omitted from the
+    # prompt entirely, so a missing name here means a missing section there.
+    log.debug(
+        "persona.prompt_assembled",
+        prefix_chars=len(prefix),
+        tail_chars=len(tail),
+        sections=",".join(f.name for f in fields(ctx) if getattr(ctx, f.name)),
+        voice_line_count=len(ctx.voice_lines),
+        relationship_count=len(ctx.relationship),
+    )
     return f"{prefix}\n\n{tail}" if tail else prefix

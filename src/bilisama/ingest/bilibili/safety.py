@@ -40,6 +40,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 from bilisama.ingest.events import LiveEvent, cny_from_gold
+from bilisama.obs.logging import get_logger
 
 __all__ = [
     "CircuitBreaker",
@@ -47,6 +48,8 @@ __all__ = [
     "GiftComboAggregator",
     "PerUidCooldown",
 ]
+
+log = get_logger(__name__)
 
 DEDUP_WINDOW_S = 0.35
 DEDUP_CAPACITY = 4096
@@ -79,7 +82,21 @@ class DedupRing:
         stamp = self._last_seen.get(key)
         self._last_seen[key] = now
         self._last_seen.move_to_end(key)
-        return stamp is not None and now - stamp <= self._window_s
+        if stamp is None or now - stamp > self._window_s:
+            return False
+        # The key is NOT logged: LiveEvent.dedup_key falls back to embedding the
+        # danmaku body (events.py:207), and this formatter scrubs by field name,
+        # so any name carrying it would either leak the text or fold to `***`.
+        # The shape of the hit is what a reader needs anyway, and `window_ms`
+        # says which ring spoke — the selector's 350ms one or the source's
+        # guard-merge ring.
+        log.debug(
+            "safety.dedup_hit",
+            age_ms=round((now - stamp) * 1000, 1),
+            window_ms=round(self._window_s * 1000, 1),
+            ring_size=len(self._last_seen),
+        )
+        return True
 
     def contains(self, key: str, now: float) -> bool:
         """Like `seen`, but records nothing.
@@ -122,7 +139,16 @@ class PerUidCooldown:
 
     def blocked(self, identity: str, now: float) -> bool:
         stamp = self._marked.get(identity)
-        return stamp is not None and now - stamp < self._cooldown_s
+        if stamp is None or now - stamp >= self._cooldown_s:
+            return False
+        # `identity` is a uid or a per-room hash, never a name or a message —
+        # and it is the only thing that answers "为什么刚回过我又不回了".
+        log.debug(
+            "safety.uid_cooldown_blocked",
+            identity=identity,
+            remaining_ms=round((self._cooldown_s - (now - stamp)) * 1000, 1),
+        )
+        return True
 
     def mark(self, identity: str, now: float) -> None:
         self._marked[identity] = now
@@ -168,9 +194,23 @@ class CircuitBreaker:
         if len(self._failures) >= self._threshold:
             self._open = True
             self._reason = reason or "repeated pipeline failures"
+            # Logged on the TRANSITION only — the early return above means an
+            # already-open breaker never reaches here, so this fires once per
+            # breaker lifetime however many failures follow.
+            log.warning(
+                "safety.breaker_opened",
+                failures=len(self._failures),
+                window_s=self._window_s,
+                error_text=self._reason,
+            )
         return self._open
 
     def reset(self) -> None:
+        if self._open:
+            # Only the real close is a state flip. reset() also runs at the
+            # start of every supervised run (source.py's _reset_run_state), and
+            # a line per healthy restart would say nothing.
+            log.info("safety.breaker_reset", error_text=self._reason)
         self._open = False
         self._reason = ""
         self._failures.clear()
@@ -231,6 +271,12 @@ class GiftComboAggregator:
         self._purge_settled(now)
         if combo_id in self._settled_at:
             self._suppressed_events += 1
+            log.debug(
+                "safety.combo_suppressed",
+                since_settle_ms=round((now - self._settled_at[combo_id]) * 1000, 1),
+                suppress_s=self._suppress_s,
+                suppressed_total=self._suppressed_events,
+            )
             return
         combo = self._pending.get(combo_id)
         if combo is None:
@@ -258,8 +304,24 @@ class GiftComboAggregator:
 
     def commit(self, combo_id: str, now: float) -> None:
         """Delivery succeeded: drop the combo and arm its suppress window."""
-        if self._pending.pop(combo_id, None) is not None:
-            self._settled_at[combo_id] = now
+        combo = self._pending.pop(combo_id, None)
+        if combo is None:
+            return
+        self._settled_at[combo_id] = now
+        gift = combo.last.gift
+        assert gift is not None  # add() enforced it
+        # The merge is invisible downstream — one thank-you carries no trace of
+        # the fifty hits behind it — so this is the only place that can say how
+        # many were folded together and for how much.
+        log.debug(
+            "safety.combo_settled",
+            hits=combo.hits,
+            gift_name=gift.name,
+            gift_num=combo.num,
+            value_cny=(
+                round(cny_from_gold(combo.total_coin), 3) if gift.coin_type == "gold" else 0.0
+            ),
+        )
 
     def _aggregate(self, combo: _Combo) -> LiveEvent:
         gift = combo.last.gift

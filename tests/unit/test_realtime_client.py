@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+import logging
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import pytest
@@ -55,6 +56,44 @@ async def _next_event(
         return await asyncio.wait_for(pull(), timeout=timeout)
     except TimeoutError:
         raise AssertionError(f"没等到 {wanted}，只看到 {seen}") from None
+
+
+@contextmanager
+def _capturing(logger_name: str) -> Iterator[list[logging.LogRecord]]:
+    """Collect one logger's records at DEBUG, fields and all.
+
+    A handler rather than caplog, for two reasons: the assertions are about the
+    structured fields (`first_frame_ms`, `status`), which live on
+    `record.fields` and never reach the formatted message; and caplog's own
+    handler is installed on the root, which `obs.logging.setup()` clears.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger(logger_name)
+    sink = _Sink()
+    logger.addHandler(sink)
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        logger.setLevel(previous)
+        logger.removeHandler(sink)
+
+
+def _named(records: list[logging.LogRecord], event: str) -> list[dict[str, Any]]:
+    """Every logged `event`'s fields, in order."""
+    out: list[dict[str, Any]] = []
+    for record in records:
+        if record.getMessage() != event:
+            continue
+        fields = getattr(record, "fields", {})
+        out.append(fields if isinstance(fields, dict) else {})
+    return out
 
 
 def _profiles() -> list[tuple[str, caps_mod.Capabilities, dia.Codec, Callable[[str], AnyLink]]]:
@@ -628,3 +667,104 @@ async def test_a_refused_handshake_leaks_no_socket() -> None:
             assert linkobj._client._ws is None
         finally:
             await linkobj.aclose()
+
+
+# ------------------------------------------------------------ the log
+
+
+async def test_a_reply_leaves_a_full_lifecycle_in_the_log() -> None:
+    """The panel's log page has to answer "did the reply ever start speaking".
+
+    Four debug lines per reply — requested, created, first frame, done — and
+    exactly ONE first-frame line no matter how many deltas arrive. Deltas run at
+    the audio cadence, so a line per frame is the one shape that must never
+    appear here.
+    """
+    with _capturing("bilisama.realtime.client") as records:
+        async with MockRealtimeServer(
+            caps=caps_mod.S2S, script=Script(delta_chunks=6, delta_interval_s=0.01)
+        ) as server:
+            linkobj = S2SLink(server.url)
+            await linkobj.connect()
+            try:
+                await linkobj.request_reply(link.ReplySpec(instructions="打个招呼"))
+                done = await _next_event(linkobj.events(), link.ReplyDone)
+                assert isinstance(done, link.ReplyDone)
+            finally:
+                await linkobj.aclose()
+
+    assert len(_named(records, "link.reply_requested")) == 1
+    created = _named(records, "link.reply_created")
+    assert len(created) == 1
+    assert created[0]["ours"] is True, "our own create must not read as the streamer's VAD turn"
+
+    first = _named(records, "link.reply_first_frame")
+    assert len(first) == 1, f"one line per reply, not one per delta: {first}"
+    assert first[0]["frame_kind"] == "text"
+    assert first[0]["rid"] == created[0]["rid"]
+    assert first[0]["first_frame_ms"] >= 0
+
+    settled = _named(records, "link.reply_done")
+    assert len(settled) == 1
+    assert settled[0]["status"] == "completed"
+    assert settled[0]["reply_chars"] == len(server.script.reply_text)
+    assert settled[0]["handle_id"] == created[0]["handle_id"]
+
+
+async def test_the_slot_flip_is_logged_once_each_way() -> None:
+    """Taking and freeing the single slot is a state flip, so it sits at info.
+
+    Once each per reply, not once per caller that touches the event: the create
+    takes it and the response.created takes it again, and _on_disconnect frees
+    it once per open record. A line per call would put four lines on the
+    streamer's default filter for one thing happening.
+    """
+    with _capturing("bilisama.realtime.client") as records:
+        async with MockRealtimeServer(caps=caps_mod.S2S, script=Script(delta_chunks=2)) as server:
+            linkobj = S2SLink(server.url)
+            await linkobj.connect()
+            try:
+                await linkobj.request_reply(link.ReplySpec(instructions="一"))
+                await _next_event(linkobj.events(), link.ReplyDone)
+            finally:
+                await linkobj.aclose()
+
+    taken = _named(records, "link.slot_taken")
+    freed = _named(records, "link.slot_freed")
+    assert len(taken) == 1, taken
+    assert taken[0]["reason"] == "request"
+    assert len(freed) == 1, freed
+    assert freed[0]["reason"] == "reply_done"
+    # An uncontended wait is every session.update and every create on a quiet
+    # link. Only the queue that actually formed is news.
+    assert _named(records, "link.slot_waited") == []
+
+
+async def test_a_queued_request_says_how_long_it_waited() -> None:
+    """Rule 5 serialises two creates. The second one's delay is invisible from
+    outside — no failure, no event — so the wait itself has to say so, or "the
+    SC thank-you came a beat late" has no answer anywhere."""
+    with _capturing("bilisama.realtime.client") as records:
+        async with MockRealtimeServer(
+            caps=caps_mod.S2S, script=Script(delta_chunks=3, delta_interval_s=0.02)
+        ) as server:
+            linkobj = S2SLink(server.url)
+            await linkobj.connect()
+            try:
+                first = asyncio.create_task(
+                    linkobj.request_reply(link.ReplySpec(instructions="一"))
+                )
+                second = asyncio.create_task(
+                    linkobj.request_reply(link.ReplySpec(instructions="二"))
+                )
+                events = linkobj.events()
+                await _next_event(events, link.ReplyDone)
+                await _next_event(events, link.ReplyDone, timeout=10.0)
+                await asyncio.gather(first, second)
+            finally:
+                await linkobj.aclose()
+
+    waited = _named(records, "link.slot_waited")
+    assert waited, "the second create queued behind the first and said nothing"
+    assert waited[0]["purpose"] == "reply"
+    assert waited[0]["waited_ms"] >= 0

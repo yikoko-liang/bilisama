@@ -21,12 +21,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from bilisama.obs.logging import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from bilisama.config.schema import SafetyConfig
 
 __all__ = ["OutputGuard", "load_guard"]
+
+log = get_logger(__name__)
 
 
 class OutputGuard:
@@ -61,6 +65,10 @@ class OutputGuard:
             at = window.find(word)
             while at != -1:
                 if self._allowed_at(window, at, word):
+                    # The other half of the safety record. A word that IS on the
+                    # list and went out anyway reads as a broken backstop until
+                    # you can see the allowlist spared it on purpose.
+                    log.debug("guard.hit_allowed", word=word)
                     at = window.find(word, at + 1)
                     continue
                 if self._could_still_allow(window, at, word):
@@ -69,6 +77,12 @@ class OutputGuard:
                     self._tail = window[max(0, at - self._keep) :]
                     return None
                 self._tail = ""
+                # Warning, not info: the backstop is firing mid-stream and the
+                # scheduler is about to claw back audio the room already heard.
+                # The word is ours — it came off our own list — so it can be
+                # named. The sentence around it belongs to the audience and
+                # stays out, which is why nothing here carries the window.
+                log.warning("guard.word_hit", word=word)
                 return word
         self._tail = window[-self._keep :] if self._keep else ""
         return None
@@ -135,5 +149,20 @@ def load_guard(cfg: SafetyConfig, *, config_dir: Path) -> OutputGuard:
     )
     if not wordlist_path.is_file():
         raise FileNotFoundError(f"敏感词表不存在：{wordlist_path}")
-    allow = _read_list(allowlist_path) if allowlist_path.is_file() else []
-    return OutputGuard(_read_list(wordlist_path), allow)
+    allow_found = allowlist_path.is_file()
+    allow = _read_list(allowlist_path) if allow_found else []
+    words = _read_list(wordlist_path)
+    # Once per start, and the answer to 「我改了词表怎么没生效」: "auto" resolves
+    # against the config file's own directory (ledger #43), so which file was
+    # read matters as much as how many words came out of it. A missing
+    # allowlist is legal and silent otherwise — it is named here rather than
+    # left to be inferred from allow_count being 0.
+    log.info(
+        "guard.loaded",
+        word_count=len(words),
+        allow_count=len(allow),
+        allowlist_found=allow_found,
+        wordlist_path=str(wordlist_path),
+        allowlist_path=str(allowlist_path),
+    )
+    return OutputGuard(words, allow)

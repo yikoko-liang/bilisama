@@ -9,14 +9,24 @@ cooldown (plan section 4.3).
 The floor never reads provider knobs. The quiet window arrives as a duration
 from whoever knows the turn's real branch value — handing smart_turn field
 names to L3 would leak the engine into the orchestration layer.
+
+Logging here covers the UPDATERS only, and only where they flip something.
+`blocking_reason` is deliberately silent: the dispatch loop polls it on every
+link event, deltas included, so a line there would be the busiest in the
+process and would repeat one unchanging fact. Which gate closed on a waiting
+queue is the scheduler's line to write (scheduler.gate_blocked), because only
+the scheduler knows there was anything waiting.
 """
 
 from __future__ import annotations
 
 from bilisama.clock import Clock
+from bilisama.obs.logging import get_logger
 from bilisama.obs.outcome import SkipReason
 
 __all__ = ["SpeakingFloor"]
+
+log = get_logger(__name__)
 
 
 class SpeakingFloor:
@@ -39,6 +49,11 @@ class SpeakingFloor:
     # ------------------------------------------------------------ updaters
 
     def on_speech_started(self) -> None:
+        # Logged on the edge only. A repeated start is not news, and this is
+        # the top answer to 「为什么刚才没说话」 — it should be one line per
+        # utterance, so it stays readable in a log full of them.
+        if not self.streamer_speaking:
+            log.info("floor.speech_started", awaited_edge=self._speech_edge_until > 0.0)
         self.streamer_speaking = True
         self._speech_edge_until = 0.0  # the promised edge arrived
 
@@ -49,6 +64,10 @@ class SpeakingFloor:
         incomplete 2.0s plus margin) — taking the max of both branches would
         make every turn wait for the worst case (plan section 2.8).
         """
+        # Not edge-guarded like the start, because the quiet window is re-armed
+        # on every call and that window IS the fact people ask about — 「她为什
+        # 么等了一秒才接话」. A stop with no matching start still moves the gate.
+        log.info("floor.speech_stopped", quiet_ms=int(quiet_s * 1000))
         self.streamer_speaking = False
         self._speech_edge_until = 0.0  # an edge is an edge, whichever came
         self._quiet_until = self._clock.monotonic() + quiet_s
@@ -60,6 +79,10 @@ class SpeakingFloor:
         frames and is instantly cancelled again — ledger #29's wasted
         generation. Bounded: a shape that never sends the edge must not wedge
         the gate."""
+        # debug: a 300ms latch is below the resolution of anything a streamer
+        # would ask about, but it is exactly what makes ledger #29 legible when
+        # someone is chasing a redispatch that got cancelled instantly.
+        log.debug("floor.speech_edge_expected", grace_ms=int(grace_s * 1000))
         self._speech_edge_until = self._clock.monotonic() + grace_s
 
     def on_reply_active(self, active: bool) -> None:
@@ -78,17 +101,34 @@ class SpeakingFloor:
         server before this existed). The same reasoning covers the implicit
         hold and any queued audio: both describe a session that is gone.
         """
+        # Which flags this actually forced open is the whole question after a
+        # reconnect: 「重连之后她怎么又不说话了」 versus 「她说了，是这里放开的」.
+        # Reported before the reset, or every line would read all-False.
+        log.info(
+            "floor.link_lost",
+            was_speaking=self.streamer_speaking,
+            was_pending=self.turn_pending,
+            was_implicit=self.implicit_active,
+            had_audio=self.queued_audio,
+        )
         self.streamer_speaking = False
         self.implicit_active = False
         self.turn_pending = False
         self.queued_audio = False
 
     def on_playback(self, queued: bool) -> None:
+        # Edge-guarded twice over: both producers already report on the edge
+        # (ui/audio.py:299-314, PlaybackTally counting 0↔1; and dev_talk's
+        # speaker poll, which fires only on `busy != last`), and this keeps a
+        # future third one from turning a gate flip into a per-chunk line.
+        if queued != self.queued_audio:
+            log.debug("floor.playback_edge", queued=queued)
         self.queued_audio = queued
 
     def start_cooldown(self, seconds: float) -> None:
         """Chattiness throttle: after speaking, hold the floor a while so the
         assistant does not become a greeting machine."""
+        log.info("floor.cooldown_started", cooldown_ms=int(seconds * 1000))
         self._cooldown_until = self._clock.monotonic() + seconds
 
     # ------------------------------------------------------------ the gate

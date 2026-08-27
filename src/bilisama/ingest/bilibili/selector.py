@@ -120,6 +120,13 @@ class DanmakuSelector:
             # Rules are snapshotted here: one window, one bar, one length.
             self._window_opened = now
             self._window_rules = self._thresholds()
+            # The bar is snapshotted here, so this is the one line that can say
+            # what the chattiness slider was worth for THIS window.
+            log.debug(
+                "selector.window_opened",
+                window_s=self._window_rules.danmaku_window_s,
+                score_bar=self._window_rules.score_threshold,
+            )
         rules = self._window_rules
         assert rules is not None  # set whenever a window is open
         if score < rules.score_threshold:
@@ -174,7 +181,7 @@ class DanmakuSelector:
         if now - self._window_opened < rules.danmaku_window_s:
             return
         best, self._best = self._best, None
-        self._best_score = 0.0
+        best_score, self._best_score = self._best_score, 0.0
         self._window_opened = None
         self._window_rules = None
         if best is None:
@@ -187,6 +194,17 @@ class DanmakuSelector:
             # put the loss on the books before the breaker hears about it.
             self._skip(SkipReason.DELIVER_FAILED, best)
             raise
+        # The one decision this layer makes, and the only side of it the panel
+        # cannot already see: the scheduler's verdict says what happened to the
+        # winner, never that it beat anyone. `text` folds to a length unless an
+        # operator turns viewer content on (obs/logging.py).
+        log.info(
+            "selector.window_won",
+            score=round(best_score, 4),
+            score_bar=rules.score_threshold,
+            identity=best.viewer.identity,
+            text=best.text,
+        )
         # Armed by the reply, not the attempt (safety.PerUidCooldown).
         self._uid_cooldown.mark(best.viewer.identity, now)
         self._delivered += 1
@@ -196,6 +214,15 @@ class DanmakuSelector:
     def _skip(self, reason: SkipReason, event: LiveEvent | None = None) -> None:
         """One account for one dropped event: the tally, then the record."""
         self._skips[reason.value] = self._skips.get(reason.value, 0) + 1
+        # The sink already carries this to the panel; the log line is for the
+        # session nobody was watching. `event` is None for WINDOW_EMPTY, the
+        # one reason that belongs to a window rather than to a danmaku.
+        log.debug(
+            "selector.skipped",
+            reason=reason.value,
+            identity=event.viewer.identity if event is not None else "",
+            text=event.text if event is not None else None,
+        )
         if self._on_skip is None:
             return
         try:

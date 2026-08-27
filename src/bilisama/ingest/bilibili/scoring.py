@@ -22,8 +22,11 @@ clears LOW.
 from __future__ import annotations
 
 from bilisama.ingest.events import GuardLevel, LiveEvent
+from bilisama.obs.logging import get_logger
 
 __all__ = ["danmaku_score"]
+
+log = get_logger(__name__)
 
 _GUARD_BONUS: dict[GuardLevel, float] = {
     GuardLevel.GOVERNOR: 0.4,
@@ -62,14 +65,38 @@ def danmaku_score(event: LiveEvent) -> float:
     Returns:
         0.0..1.0; bigger means more worth answering.
     """
-    score = min(_substance(event.text), _TEXT_FULL_AT) / _TEXT_FULL_AT * _TEXT_WEIGHT
-    if _looks_like_question(event.text):
-        score += _QUESTION_BONUS
     viewer = event.viewer
-    score += _GUARD_BONUS.get(viewer.guard_level, 0.0)
-    if viewer.is_admin:
-        score += _ADMIN_BONUS
-    if viewer.medal is not None and viewer.medal.is_this_room(event.room_id):
-        score += min(viewer.medal.level, 40) * _MEDAL_SCALE
-    score += min(viewer.user_level, 50) * _USER_LEVEL_SCALE
-    return min(score, 1.0)
+    substance = _substance(event.text)
+    # Broken out rather than accumulated in place so the debug line below can
+    # say WHICH term carried the score. Same terms in the same order, so the
+    # float result is unchanged — the worked examples in the module docstring
+    # still hold. `text`-flavoured field names are avoided on purpose: the
+    # formatter scrubs by name (obs/logging.py:_VIEWER_CONTENT) and would fold
+    # a float called `text_score` into `<float>`.
+    substance_score = min(substance, _TEXT_FULL_AT) / _TEXT_FULL_AT * _TEXT_WEIGHT
+    question_score = _QUESTION_BONUS if _looks_like_question(event.text) else 0.0
+    guard_score = _GUARD_BONUS.get(viewer.guard_level, 0.0)
+    admin_score = _ADMIN_BONUS if viewer.is_admin else 0.0
+    medal_score = (
+        min(viewer.medal.level, 40) * _MEDAL_SCALE
+        if viewer.medal is not None and viewer.medal.is_this_room(event.room_id)
+        else 0.0
+    )
+    level_score = min(viewer.user_level, 50) * _USER_LEVEL_SCALE
+    score = min(
+        substance_score + question_score + guard_score + admin_score + medal_score + level_score,
+        1.0,
+    )
+    log.debug(
+        "scoring.danmaku_scored",
+        score=round(score, 4),
+        identity=viewer.identity,
+        substance_chars=substance,
+        substance_score=round(substance_score, 4),
+        question_score=question_score,
+        guard_score=guard_score,
+        admin_score=admin_score,
+        medal_score=round(medal_score, 4),
+        level_score=round(level_score, 4),
+    )
+    return score

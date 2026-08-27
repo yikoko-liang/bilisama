@@ -10,8 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
+import json
+import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from bilisama.app import Assembly
 from bilisama.clock import FakeClock
@@ -26,15 +33,59 @@ from bilisama.ingest.events import (
     LiveEvent,
     Viewer,
 )
+from bilisama.obs.logging import setup as logging_setup
 from bilisama.obs.outcome import SkipReason
 from tests.fakes.bili import danmaku_event as _dm
 from tests.fakes.bili import gift_event
 from tests.fakes.replay import FIXTURE_DIR, replay_driving_clock
 from tests.unit.conftest import build_assembly_kit
 
+# setup() lowers these and never puts them back (src/bilisama/obs/logging.py).
+_QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn", "blivedm")
+
 
 def _gift(uid: int, *, coin: int = 20000, event_id: str = "") -> LiveEvent:
     return gift_event(uid=uid, coin=coin, event_id=event_id)
+
+
+@contextlib.contextmanager
+def _json_log() -> Iterator[io.StringIO]:
+    """The real setup() and the real formatter, writing into memory.
+
+    Not caplog: what is under test is what the FORMATTER does to a field —
+    audience text is folded by FIELD NAME (obs/logging.py's _VIEWER_CONTENT) —
+    and caplog sees the record before any of that runs. Everything setup()
+    stamps on global logging state goes back on the way out; it clears the root
+    handlers, which would otherwise take caplog's own handler down with it for
+    the rest of the session.
+    """
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    quieted = {name: logging.getLogger(name).level for name in _QUIETED}
+    stream = io.StringIO()
+    try:
+        logging_setup(level="info", stream=stream)
+        yield stream
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+        for name, saved in quieted.items():
+            logging.getLogger(name).setLevel(saved)
+
+
+def _lines(stream: io.StringIO, event: str) -> list[dict[str, Any]]:
+    """Parsed log lines for one event name."""
+    parsed = [json.loads(line) for line in stream.getvalue().splitlines() if line]
+    return [line for line in parsed if line["event"] == event]
+
+
+def _fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]]:
+    """Unformatted fields of every `event` record, in order."""
+    return [
+        dict(getattr(record, "fields", {}))
+        for record in caplog.records
+        if record.getMessage() == event
+    ]
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "mia"
@@ -366,3 +417,89 @@ async def test_event_flood_one_danmaku_intent_per_window_paid_immediate(tmp_path
         assert per_event_skips + delivered == 203, "every event ends in exactly one account"
     finally:
         await _finish(loop)
+
+
+# ------------------------------------------------------------ what the log says
+
+
+async def test_window_winner_is_logged_with_its_score_and_no_danmaku_body() -> None:
+    """The one info line this layer owes the panel: who won a window, at what
+    score, against what bar. The scheduler's verdict says what happened to the
+    winner afterwards — never that it beat anyone.
+
+    The body must not ride along. `text` is a folded field name on purpose
+    (obs/logging.py's _VIEWER_CONTENT); renaming it to something like `body`
+    would walk the audience's words into the log file and past the panel.
+    """
+    body = "主播这局到底怎么打"
+    with _json_log() as stream:
+        selector, clock, delivered, task = await _selector(window_s=2, score=0.35)
+        try:
+            selector.offer(_dm(body, uid=1, medal_level=20))
+            await clock.advance(2.5)
+        finally:
+            await _finish(task)
+
+    assert [event.viewer.uid for event in delivered] == [1]
+    won = _lines(stream, "selector.window_won")
+    assert len(won) == 1, "one window, one decision line"
+    assert won[0]["level"] == "info"
+    assert won[0]["score"] >= won[0]["score_bar"]
+    assert won[0]["identity"] == "uid:1"
+    assert won[0]["text"] == f"<{len(body)} chars>"
+    assert body not in stream.getvalue(), "the danmaku body never reaches the log"
+
+
+async def test_every_funnel_drop_leaves_a_debug_line_carrying_its_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The skip sink answers "为什么没回我" while someone is watching the panel.
+
+    This is the same account for the session nobody watched: one line per drop,
+    at debug, with the SkipReason the tally uses.
+    """
+    caplog.set_level(logging.DEBUG)
+    selector, clock, delivered, task = await _selector(window_s=2, score=0.35)
+    try:
+        selector.offer(_dm("主播这局到底怎么打", uid=1))
+        selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # dethrones uid 1
+        selector.offer(_dm("666", uid=3))  # under the bar
+        await clock.advance(2.5)
+        selector.offer(_dm("那个参数为什么是零", uid=2))  # answered a moment ago
+        selector.offer(_dm("6666", uid=3))  # opens a window it cannot fill
+        await clock.advance(2.5)
+    finally:
+        await _finish(task)
+
+    reasons = [fields["reason"] for fields in _fields(caplog, "selector.skipped")]
+    assert reasons == [
+        SkipReason.LOST_WINDOW.value,
+        SkipReason.LOW_VALUE.value,
+        SkipReason.UID_COOLDOWN.value,
+        SkipReason.LOW_VALUE.value,
+        SkipReason.WINDOW_EMPTY.value,
+    ]
+    dropped = _fields(caplog, "selector.skipped")
+    assert dropped[0]["identity"] == "uid:1", "the dethroned incumbent, not the newcomer"
+    assert dropped[-1]["identity"] == "", "an empty window belongs to no one"
+    assert [event.viewer.uid for event in delivered] == [2]
+
+
+async def test_the_score_the_window_used_is_the_score_the_log_shows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Score constituents are debug-only, and they have to add up to the number
+    the window actually compared against the bar — a breakdown that disagrees
+    with the decision is worse than none."""
+    caplog.set_level(logging.DEBUG)
+    event = _dm("主播这个参数为什么是零", uid=7, medal_level=20)
+
+    assert danmaku_score(event) > 0.0
+    scored = _fields(caplog, "scoring.danmaku_scored")
+    assert len(scored) == 1
+    parts = {key: value for key, value in scored[0].items() if key.endswith("_score")}
+    assert sum(parts.values()) == pytest.approx(scored[0]["score"], abs=1e-4)
+    assert scored[0]["score"] == pytest.approx(danmaku_score(event), abs=1e-4)
+    assert scored[0]["identity"] == "uid:7"
+    assert parts["question_score"] > 0.0, "为什么 is a question"
+    assert parts["medal_score"] > 0.0, "this room's medal"

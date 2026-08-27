@@ -9,8 +9,12 @@ what makes this loop testable at all.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import io
+import json
+import logging
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 
@@ -19,7 +23,39 @@ from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Intent, Priority
 from bilisama.ingest.events import EventKind, LiveEvent, Viewer
 from bilisama.memory.store import MemoryStore
+from bilisama.obs.logging import setup
 from bilisama.proactive import ProactiveTopicLoop
+
+_QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn")
+
+
+@pytest.fixture
+def log_stream() -> Iterator[io.StringIO]:
+    """The real setup()/formatter, writing into memory.
+
+    Through the formatter rather than caplog because the property under test is
+    what comes out the far end: the candidate was written by a model that READ
+    audience danmaku, and only the formatter's scrubber folds it. A LogRecord
+    still holds the raw string. setup() clears the root handlers
+    (obs/logging.py:318), pytest's own included, so this puts them back.
+    """
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    quieted = {name: logging.getLogger(name).level for name in _QUIETED}
+    stream = io.StringIO()
+    setup(level="info", stream=stream)
+    try:
+        yield stream
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+        for name, saved in quieted.items():
+            logging.getLogger(name).setLevel(saved)
+
+
+def _lines(stream: io.StringIO, event: str) -> list[dict[str, Any]]:
+    parsed = [json.loads(line) for line in stream.getvalue().splitlines() if line]
+    return [line for line in parsed if line["event"] == event]
 
 
 class FakeSide:
@@ -152,6 +188,54 @@ async def test_hourly_budget_caps_topics() -> None:
     ):
         await clock.advance(120.0)
         assert len(intents) == 2
+
+
+async def test_a_topic_is_logged_ready_then_submitted_without_its_text(
+    log_stream: io.StringIO,
+) -> None:
+    """「她怎么从来不主动说话」得能分成两段来查。
+
+    没有 topic_ready 就是侧路模型没给出候选；有 ready 没 submitted 就是场子
+    一直没静到阈值。至于话题正文——它是侧路模型读着观众弹幕写出来的，属于观众
+    的二手内容，只以字数进日志。
+    """
+    async with _running(side=FakeSide(topic="聊聊主播的新键盘")) as (
+        _loop,
+        _floor,
+        intents,
+        clock,
+    ):
+        await clock.advance(11.0)
+        assert len(intents) == 1
+
+    ready = _lines(log_stream, "proactive.topic_ready")
+    submitted = _lines(log_stream, "proactive.topic_submitted")
+    # 说完一次会清指纹，下一轮刷新必然重新生成一条候选（见上面那条指纹用例），
+    # 所以 ready 只保证不少于一条。
+    assert len(ready) >= 1 and len(submitted) == 1
+    assert submitted[0]["topic_text"] == "<8 chars>", "正文只能是个长度"
+    assert "新键盘" not in log_stream.getvalue(), "观众二手内容一个字都不许落盘"
+    assert submitted[0]["idle_s"] >= 10.0, "冷场了多久，是这条唯一说得清的事"
+    assert submitted[0]["topics_this_hour"] == 1
+
+
+async def test_a_spent_hourly_budget_says_so_once_not_once_a_second(
+    log_stream: io.StringIO,
+) -> None:
+    """闸门是个状态，不是个事件——每秒复查一次，日志不能跟着响一秒一条。"""
+    async with _running(side=FakeSide(), idle_threshold_s=2.0, max_per_hour=1) as (
+        _loop,
+        _floor,
+        intents,
+        clock,
+    ):
+        await clock.advance(60.0)
+        assert len(intents) == 1, "配额就是一条"
+
+    blocked = _lines(log_stream, "proactive.budget_exhausted")
+    assert len(blocked) == 1, f"翻转一次记一条，实际记了 {len(blocked)} 条"
+    assert blocked[0]["topics_this_hour"] == 1
+    assert blocked[0]["max_per_hour"] == 1
 
 
 async def test_no_side_model_stays_silent_but_alive() -> None:

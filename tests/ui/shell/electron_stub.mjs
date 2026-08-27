@@ -20,6 +20,9 @@ export const recorded = {
   windows: [],
   ipc: new Map(), // channel -> handler
   intervals: [],
+  // Paths the shell asked the OS to reveal. Recorded rather than ignored so a
+  // future test can assert WHAT it revealed, not just that it compiled.
+  revealed: [],
 };
 
 class FakeWebContents {
@@ -134,6 +137,15 @@ export const ipcMain = {
   },
 };
 
+// Only showItemInFolder is stubbed: it is the one member main.mjs reaches for,
+// and a stub that answered more would let the shell grow a dependency nothing
+// here is watching.
+export const shell = {
+  showItemInFolder: (target) => {
+    recorded.revealed.push(target);
+  },
+};
+
 export const screen = {
   getPrimaryDisplay() {
     return { workArea: { x: 0, y: 0, width: 1920, height: 1080 } };
@@ -143,4 +155,4 @@ export const screen = {
   },
 };
 
-export default { app, BrowserWindow, ipcMain, screen };
+export default { app, BrowserWindow, ipcMain, screen, shell };
