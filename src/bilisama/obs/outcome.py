@@ -65,11 +65,16 @@ class SkipReason(StrEnum):
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat
     # The danmaku funnel's accounts (selector.py). LOW_VALUE and DUPLICATE
     # above serve the funnel too — one vocabulary, not a parallel one.
-    UID_COOLDOWN = "selection.uid_cooldown"
+    UID_COOLDOWN = (
+        "selection.uid_cooldown"  # legacy: the cooldown is gone, old records keep reading
+    )
     LOST_WINDOW = "selection.lost_window"
     WINDOW_EMPTY = "selection.window_empty"
     BREAKER_OPEN = "selection.breaker_open"
     DELIVER_FAILED = "selection.deliver_failed"
+    LOW_INFORMATION = "selection.low_information"  # "666"-grade text, rejected before scoring
+    REPEATED_CONTENT = "selection.repeated_content"  # cross-viewer copy spam
+    LOST_DEFERRED = "selection.lost_deferred"  # held during host speech, beaten on release
 
 
 @dataclass(frozen=True, slots=True)

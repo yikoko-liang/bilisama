@@ -16,7 +16,6 @@ from bilisama.ingest.bilibili.safety import (
     CircuitBreaker,
     DedupRing,
     GiftComboAggregator,
-    PerUidCooldown,
 )
 from bilisama.ingest.events import Gift, LiveEvent
 from tests.fakes.bili import gift_event as _gift_event
@@ -59,26 +58,6 @@ def test_dedup_capacity_evicts_the_oldest_first() -> None:
     # k0 was evicted by capacity even though the window would keep it.
     assert not ring.seen("k0", now=1.05)
     assert ring.seen("k3", now=1.05)
-
-
-# ------------------------------------------------------------------ PerUidCooldown
-
-
-def test_cooldown_is_armed_by_mark_not_by_asking() -> None:
-    cd = PerUidCooldown(cooldown_s=60.0)
-    assert not cd.blocked("uid:42", now=5.0)
-    assert not cd.blocked("uid:42", now=6.0), "asking twice must not lock anyone out"
-    cd.mark("uid:42", now=6.0)
-    assert cd.blocked("uid:42", now=65.9)
-    assert not cd.blocked("uid:42", now=66.0)
-    assert not cd.blocked("uid:7", now=10.0), "someone else is unaffected"
-
-
-def test_cooldown_capacity_stays_bounded() -> None:
-    cd = PerUidCooldown(cooldown_s=1000.0, capacity=8)
-    for i in range(20):
-        cd.mark(f"uid:{i}", now=float(i))
-    assert len(cd._marked) <= 8
 
 
 # ------------------------------------------------------------------ CircuitBreaker
@@ -223,27 +202,6 @@ def test_dedup_hit_is_logged_without_the_key_that_carries_the_body(
     assert fields["age_ms"] == pytest.approx(200.0)
     assert fields["window_ms"] == pytest.approx(350.0)
     assert all("主播今天玩什么" not in str(value) for value in fields.values())
-
-
-def test_cooldown_block_says_who_and_for_how_much_longer(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The 刚才还回我、现在不理我了 case is a cooldown, and identity plus the
-    time left is the whole answer. Asking without being blocked says nothing."""
-    caplog.set_level(logging.DEBUG)
-    cooldown = PerUidCooldown(cooldown_s=60.0)
-
-    assert not cooldown.blocked("uid:42", now=5.0)
-    assert _logged(caplog, "safety.uid_cooldown_blocked") == [], "nobody was blocked"
-
-    cooldown.mark("uid:42", now=6.0)
-    assert cooldown.blocked("uid:42", now=36.0)
-    blocked = _logged(caplog, "safety.uid_cooldown_blocked")
-    assert len(blocked) == 1
-    level, fields = blocked[0]
-    assert level == "debug"
-    assert fields["identity"] == "uid:42"
-    assert fields["remaining_ms"] == pytest.approx(30_000.0)
 
 
 def test_breaker_logs_the_flip_once_when_it_opens_and_once_when_it_closes(

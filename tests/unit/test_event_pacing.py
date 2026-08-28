@@ -1,7 +1,9 @@
-"""Dynamic live-event pacing: room load bands and the shared ordinary budget."""
+"""Dynamic live-event pacing: room load, ordinary budget and entry coalescing."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from datetime import UTC, datetime
 
 import pytest
@@ -9,6 +11,8 @@ import pytest
 from bilisama.clock import FakeClock
 from bilisama.config.enums import Chattiness
 from bilisama.event_pacing import EventPacer, RoomActivity
+from bilisama.ingest.bilibili.selector import EntryCoalescer
+from bilisama.ingest.events import LiveEvent
 from tests.fakes.bili import danmaku_event, entry_event, gift_event
 
 
@@ -135,6 +139,91 @@ def test_downshift_holds_for_thirty_seconds_before_relaxing() -> None:
 
     clock._now += 31.0
     assert pacer.snapshot().activity is RoomActivity.QUIET
+
+
+async def _run_entries(
+    coalescer: EntryCoalescer,
+) -> tuple[list[tuple[LiveEvent, ...]], asyncio.Task[None]]:
+    delivered: list[tuple[LiveEvent, ...]] = []
+
+    async def deliver(events: tuple[LiveEvent, ...]) -> None:
+        delivered.append(events)
+
+    task = asyncio.create_task(coalescer.run(deliver))
+    await asyncio.sleep(0)
+    return delivered, task
+
+
+async def _finish(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_three_quiet_room_entries_become_one_prompt_welcome() -> None:
+    pacer, clock = _pacer()
+    coalescer = EntryCoalescer(clock, policy=pacer.snapshot)
+    delivered, task = await _run_entries(coalescer)
+    try:
+        for uid in (1, 2, 3):
+            coalescer.offer(entry_event(uid))
+        await clock.advance(1.5)
+        assert len(delivered) == 1
+        assert [event.viewer.uid for event in delivered[0]] == [1, 2, 3]
+    finally:
+        await _finish(task)
+
+
+async def test_a_single_quiet_room_arrival_is_welcomed_within_seconds() -> None:
+    """The whole point of replacing the batch-of-5: a small room's one viewer
+    used to wait forever; now they wait about a second."""
+    pacer, clock = _pacer()
+    coalescer = EntryCoalescer(clock, policy=pacer.snapshot)
+    delivered, task = await _run_entries(coalescer)
+    try:
+        coalescer.offer(entry_event(7))
+        await clock.advance(1.5)
+        assert [[e.viewer.uid for e in batch] for batch in delivered] == [[7]]
+    finally:
+        await _finish(task)
+
+
+async def test_entry_is_suppressed_when_the_same_viewer_immediately_speaks() -> None:
+    pacer, clock = _pacer()
+    coalescer = EntryCoalescer(clock, policy=pacer.snapshot)
+    delivered, task = await _run_entries(coalescer)
+    try:
+        for uid in (1, 2, 3):
+            coalescer.offer(entry_event(uid))
+            coalescer.note_danmaku(f"uid:{uid}")
+        await clock.advance(1.5)
+        assert delivered == []
+        assert coalescer.status()["cancelled_by_danmaku"] == 3
+    finally:
+        await _finish(task)
+
+
+async def test_a_viewer_is_welcomed_once_per_stream() -> None:
+    pacer, clock = _pacer()
+    coalescer = EntryCoalescer(clock, policy=pacer.snapshot)
+    delivered, task = await _run_entries(coalescer)
+    try:
+        coalescer.offer(entry_event(7))
+        await clock.advance(1.5)
+        coalescer.offer(entry_event(7))  # bounced out and back in
+        await clock.advance(1.5)
+        assert len(delivered) == 1
+    finally:
+        await _finish(task)
+
+
+def test_busy_room_records_but_does_not_queue_ordinary_entry_speech() -> None:
+    pacer, clock = _pacer()
+    _load(pacer, 31)
+    coalescer = EntryCoalescer(clock, policy=pacer.snapshot)
+    coalescer.offer(entry_event(99))
+    assert coalescer.status()["suppressed_busy"] == 1
+    assert coalescer.status()["pending"] == 0
 
 
 def test_three_minute_policy_matrix_livens_empty_rooms_without_crowding_busy_ones() -> None:

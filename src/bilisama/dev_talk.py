@@ -1349,7 +1349,6 @@ async def run_director(args: argparse.Namespace) -> int:
     selector = DanmakuSelector(
         clock,
         thresholds=lambda: thresholds,
-        per_uid_cooldown_s=float(settings.interaction.danmaku.per_uid_cooldown_s),
     )
     presence = PresenceWelcomer(
         uniques=settings.interaction.burst_uniques,

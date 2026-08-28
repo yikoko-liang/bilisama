@@ -484,9 +484,7 @@ async def test_console_events_skip_the_crowd_funnel(tmp_path: Path) -> None:
         submit=intents.append,
         push_context=push,
         clock=clock,
-        selector=DanmakuSelector(
-            clock, thresholds=lambda: derive(Chattiness.MEDIUM), per_uid_cooldown_s=60.0
-        ),
+        selector=DanmakuSelector(clock, thresholds=lambda: derive(Chattiness.MEDIUM)),
     )
     console = LiveEvent(
         kind=EventKind.DANMAKU,

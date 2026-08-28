@@ -1,10 +1,15 @@
-"""Ingest-side safety pieces: dedup, per-viewer cooldown, breaker, combo merge.
+"""Ingest-side safety pieces: dedup, breaker, combo merge.
 
-Four small components, wired between the raw event stream and the selector
-(stage 6 B4). The dedup window, the per-viewer cooldown and the combo timers
-are N.E.K.O's production-tuned values (plan section 5.3); only the per-viewer
-cooldown is a config knob (`[interaction.danmaku] per_uid_cooldown_s`), the
-rest are constants here.
+Three small components, wired between the raw event stream and the selector
+(stage 6 B4). The dedup window and the combo timers are N.E.K.O's
+production-tuned values (plan section 5.3); all are constants here.
+
+A fourth piece used to live here: PerUidCooldown, N.E.K.O's 60s
+one-reply-per-viewer window. Removed with the dynamic pacing rework — an
+answered viewer's follow-up question is the best danmaku a co-host can pick,
+and blocking it for a minute read as being ignored. Content-level spam is now
+the selector's job (text signal + cross-viewer repetition in scoring.py), and
+overall rate is the event pacer's.
 
 The breaker's numbers are not from that list, and three of section 5.3's
 constants have no home in this tree at all. Spelled out because the sentence
@@ -24,7 +29,7 @@ above used to cover the whole module, which invited the opposite reading
 All three belong to the scheduler's output side rather than to this module,
 so landing them is a director-layer change, not an ingest one.
 
-All four are synchronous and take `now` — the injected clock's monotonic
+All three are synchronous and take `now` — the injected clock's monotonic
 seconds — as an argument. They never sleep and never look at a wall clock,
 so tests pin them with plain floats and stay deterministic.
 
@@ -46,7 +51,6 @@ __all__ = [
     "CircuitBreaker",
     "DedupRing",
     "GiftComboAggregator",
-    "PerUidCooldown",
 ]
 
 log = get_logger(__name__)
@@ -121,42 +125,6 @@ class DedupRing:
             if len(self._last_seen) <= self._capacity and now - oldest <= self._window_s:
                 break
             self._last_seen.popitem(last=False)
-
-
-class PerUidCooldown:
-    """One reply per viewer per window.
-
-    The REPLY arms it, not the attempt: the selector calls `mark()` only for
-    the danmaku it actually picks, so a viewer whose messages keep losing the
-    window never gets locked out. Keyed on Viewer.identity, which falls back
-    to uid_hash — masked viewers cool down too.
-    """
-
-    def __init__(self, cooldown_s: float = 60.0, capacity: int = 8192) -> None:
-        self._cooldown_s = cooldown_s
-        self._capacity = capacity
-        self._marked: OrderedDict[str, float] = OrderedDict()
-
-    def blocked(self, identity: str, now: float) -> bool:
-        stamp = self._marked.get(identity)
-        if stamp is None or now - stamp >= self._cooldown_s:
-            return False
-        # `identity` is a uid or a per-room hash, never a name or a message —
-        # and it is the only thing that answers "为什么刚回过我又不回了".
-        log.debug(
-            "safety.uid_cooldown_blocked",
-            identity=identity,
-            remaining_ms=round((self._cooldown_s - (now - stamp)) * 1000, 1),
-        )
-        return True
-
-    def mark(self, identity: str, now: float) -> None:
-        self._marked[identity] = now
-        self._marked.move_to_end(identity)
-        while len(self._marked) > self._capacity or (
-            self._marked and now - next(iter(self._marked.values())) >= self._cooldown_s
-        ):
-            self._marked.popitem(last=False)
 
 
 class CircuitBreaker:

@@ -13,7 +13,7 @@ import contextlib
 import io
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,9 @@ from bilisama.clock import FakeClock
 from bilisama.config.derive import DerivedThresholds, derive
 from bilisama.config.enums import Chattiness
 from bilisama.director.intent import Intent
-from bilisama.ingest.bilibili.scoring import danmaku_score
+from bilisama.director.intents import intent_for
+from bilisama.event_pacing import EventPacer
+from bilisama.ingest.bilibili.scoring import TextSignal, danmaku_score, danmaku_text_signal
 from bilisama.ingest.bilibili.selector import DanmakuSelector, SkipSink
 from bilisama.ingest.events import (
     EventKind,
@@ -130,6 +132,45 @@ def test_repetition_is_discounted_not_rewarded() -> None:
     assert substance > spam
 
 
+# ------------------------------------------------------------------ text signal
+
+
+def test_actionable_short_text_is_admitted_without_a_model_call() -> None:
+    for text in (
+        "为什么",
+        "主播看下",
+        "主播你说错了",
+        "没声音了",
+        "能不能试试",
+    ):
+        assert danmaku_text_signal(text) is TextSignal.HARD_ACCEPT, text
+
+
+def test_the_assistants_configured_name_is_a_mention() -> None:
+    """The default list carries role words only; the actual persona name
+    arrives per-config through mention_terms, so a rename keeps working."""
+    assert danmaku_text_signal("豆腐在吗") is TextSignal.HARD_ACCEPT, "吗 already admits it"
+    assert danmaku_text_signal("hanako看这里") is TextSignal.SCORE
+    assert danmaku_text_signal("hanako看这里", mention_terms=("hanako",)) is TextSignal.HARD_ACCEPT
+    assert danmaku_text_signal("规划一下行程", mention_terms=("hana",)) is TextSignal.SCORE
+
+
+def test_recent_dialogue_or_stream_topic_can_admit_a_short_relevant_comment() -> None:
+    assert (
+        danmaku_text_signal("芯片有意思", context_lines=("今晚介绍国产芯片和推理框架",))
+        is TextSignal.HARD_ACCEPT
+    )
+    assert (
+        danmaku_text_signal("量化挺稳", context_lines=("刚才主播说这个量化方案终于跑稳了",))
+        is TextSignal.HARD_ACCEPT
+    )
+
+
+def test_low_information_text_is_rejected_before_scoring() -> None:
+    for text in ("12345", "！！！！", "😂😂😂", "哈哈哈哈哈哈", "666", "来了", "好"):
+        assert danmaku_text_signal(text) is TextSignal.REJECT, text
+
+
 # ------------------------------------------------------------------ selector
 
 
@@ -147,14 +188,16 @@ async def _selector(
     *,
     window_s: int = 2,
     score: float = 0.35,
-    cooldown_s: float = 60.0,
+    context_lines: tuple[str, ...] = (),
+    delivery_blocked: Callable[[], bool] | None = None,
     on_skip: SkipSink | None = None,
 ) -> tuple[DanmakuSelector, FakeClock, list[LiveEvent], asyncio.Task[None]]:
     clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
     selector = DanmakuSelector(
         clock,
         thresholds=lambda: _thresholds(window_s, score),
-        per_uid_cooldown_s=cooldown_s,
+        context_lines=lambda: context_lines,
+        delivery_blocked=delivery_blocked,
         on_skip=on_skip,
     )
     delivered: list[LiveEvent] = []
@@ -184,12 +227,14 @@ async def test_one_window_one_winner_and_losers_are_accounted() -> None:
         skips = selector.status()["skips"]
         assert isinstance(skips, dict)
         assert skips["selection.lost_window"] == 1
-        assert skips["selection.low_value"] == 1
+        assert skips["selection.low_information"] == 1
     finally:
         await _finish(task)
 
 
-async def test_answered_viewer_cools_down_and_someone_else_wins() -> None:
+async def test_answered_viewer_can_win_again_without_a_uid_cooldown() -> None:
+    """The 60s per-viewer cooldown is gone: an answered viewer's follow-up is
+    the best danmaku a co-host can pick, and it competes immediately."""
     selector, clock, delivered, task = await _selector()
     try:
         selector.offer(_dm("主播这个怎么设置的", uid=1))
@@ -198,9 +243,9 @@ async def test_answered_viewer_cools_down_and_someone_else_wins() -> None:
         selector.offer(_dm("那这个参数为什么是零", uid=1))  # same viewer, better message
         selector.offer(_dm("什么时候开新档", uid=2))
         await clock.advance(2.5)
-        assert [e.viewer.uid for e in delivered] == [1, 2]
+        assert [e.viewer.uid for e in delivered] == [1, 1]
         skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.uid_cooldown"] == 1
+        assert isinstance(skips, dict) and "selection.uid_cooldown" not in skips
     finally:
         await _finish(task)
 
@@ -208,11 +253,125 @@ async def test_answered_viewer_cools_down_and_someone_else_wins() -> None:
 async def test_empty_window_is_a_counter_not_a_mystery() -> None:
     selector, clock, delivered, task = await _selector()
     try:
-        selector.offer(_dm("666", uid=1))  # opens the window, fails the bar
+        # A plain statement: real content (passes the text signal) but under
+        # the score bar — it opens the window and cannot fill it.
+        selector.offer(_dm("这波操作还行", uid=1))
         await clock.advance(2.5)
         assert delivered == []
         skips = selector.status()["skips"]
         assert isinstance(skips, dict) and skips["selection.window_empty"] == 1
+    finally:
+        await _finish(task)
+
+
+async def test_low_information_does_not_open_an_empty_window() -> None:
+    selector, clock, delivered, task = await _selector()
+    try:
+        selector.offer(_dm("666", uid=1))
+        await clock.advance(2.5)
+        assert delivered == []
+        skips = selector.status()["skips"]
+        assert isinstance(skips, dict) and skips["selection.low_information"] == 1
+        assert selector.status()["window_open"] is False
+        assert "selection.window_empty" not in skips
+    finally:
+        await _finish(task)
+
+
+async def test_streamer_speech_defers_window_winners_then_releases_only_the_best() -> None:
+    speaking = True
+    selector, clock, delivered, task = await _selector(
+        window_s=1,
+        delivery_blocked=lambda: speaking,
+    )
+    try:
+        selector.offer(_dm("这个参数为什么是零", uid=1))
+        await clock.advance(1.5)
+        selector.offer(_dm("能不能解释一下这里的竞态", uid=2, medal_level=20))
+        await clock.advance(1.5)
+
+        assert delivered == []
+        assert selector.status()["deferred_count"] == 2
+        assert selector.status()["delivered"] == 0
+
+        speaking = False
+        await clock.advance(0.5)
+
+        assert [event.viewer.uid for event in delivered] == [2]
+        assert selector.status()["deferred_count"] == 0
+        skips = selector.status()["skips"]
+        assert isinstance(skips, dict) and skips["selection.lost_deferred"] == 1
+    finally:
+        await _finish(task)
+
+
+async def test_blocked_delivery_does_not_report_success_or_lose_the_candidate() -> None:
+    blocked = True
+    selector, clock, delivered, task = await _selector(
+        window_s=1,
+        delivery_blocked=lambda: blocked,
+    )
+    try:
+        selector.offer(_dm("没声音了，能检查一下吗", uid=1))
+        await clock.advance(3.0)
+
+        assert delivered == []
+        assert selector.status()["delivered"] == 0
+        assert selector.status()["deferred_count"] == 1
+
+        blocked = False
+        await clock.advance(0.5)
+        assert [event.viewer.uid for event in delivered] == [1]
+        assert selector.status()["delivered"] == 1
+    finally:
+        await _finish(task)
+
+
+async def test_streamer_speech_starts_neither_event_budget_nor_intent_ttl() -> None:
+    """A winner held during host speech is a candidate, not an intent: its TTL
+    starts when it is released, and the ordinary budget is charged then too —
+    otherwise a 25s monologue expires the reply before it can be spoken."""
+    clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
+    speaking = True
+    pacer = EventPacer(clock, chattiness=lambda: Chattiness.MEDIUM)
+    intents: list[Intent] = []
+    selector = DanmakuSelector(
+        clock,
+        thresholds=lambda: _thresholds(window_s=1),
+        delivery_blocked=lambda: speaking or not pacer.can_consume("danmaku"),
+    )
+
+    async def deliver(event: LiveEvent) -> None:
+        assert pacer.try_consume("danmaku")
+        intent = intent_for(event, now=clock.monotonic())
+        assert intent is not None
+        intents.append(intent)
+
+    task = asyncio.create_task(selector.run(deliver))
+    await asyncio.sleep(0)
+    try:
+        selector.offer(_dm("这个参数为什么是零", uid=1))
+        await clock.advance(25.0)
+
+        assert intents == []
+        assert selector.status()["deferred_count"] == 1
+        held = pacer.status()
+        assert held["ordinary_tokens"] == 2.0
+        assert held["consumed"] == {}
+        assert held["denied"] == {}
+
+        speaking = False
+        await clock.advance(0.5)
+
+        assert len(intents) == 1
+        assert intents[0].created_at >= 25.0
+        assert intents[0].expires_at is not None
+        assert intents[0].expires_at >= clock.monotonic() + 4.5
+        released = pacer.status()
+        released_tokens = released["ordinary_tokens"]
+        assert isinstance(released_tokens, float)
+        assert 1.0 <= released_tokens < 1.1
+        assert released["consumed"] == {"danmaku": 1}
     finally:
         await _finish(task)
 
@@ -227,6 +386,58 @@ async def test_transport_replay_is_deduped_by_the_ring() -> None:
         assert len(delivered) == 1
         skips = selector.status()["skips"]
         assert isinstance(skips, dict) and skips["selection.duplicate"] == 1
+    finally:
+        await _finish(task)
+
+
+async def test_hard_accept_bypasses_score_bar_but_still_uses_the_window() -> None:
+    selector, clock, delivered, task = await _selector(score=0.95)
+    try:
+        selector.offer(_dm("没声音了", uid=1))
+        assert delivered == []
+        await clock.advance(2.5)
+        assert [event.text for event in delivered] == ["没声音了"]
+        assert selector.status()["passes"] == {"rule": 1}
+    finally:
+        await _finish(task)
+
+
+async def test_context_related_text_bypasses_score_bar() -> None:
+    selector, clock, delivered, task = await _selector(
+        score=0.95, context_lines=("本场正在介绍国产芯片架构",)
+    )
+    try:
+        selector.offer(_dm("芯片有意思", uid=1))
+        await clock.advance(2.5)
+        assert [event.text for event in delivered] == ["芯片有意思"]
+    finally:
+        await _finish(task)
+
+
+async def test_same_content_from_different_viewers_is_accounted_as_repeated_content() -> None:
+    selector, clock, delivered, task = await _selector(score=0.1)
+    try:
+        selector.offer(_dm("这个模型的推理速度挺快", uid=1, event_id="dm:one"))
+        selector.offer(_dm("这个模型的推理速度挺快", uid=2, event_id="dm:two"))
+        await clock.advance(2.5)
+        assert len(delivered) == 1
+        skips = selector.status()["skips"]
+        assert isinstance(skips, dict)
+        assert skips["selection.repeated_content"] == 1
+    finally:
+        await _finish(task)
+
+
+async def test_repeated_content_filter_expires_after_two_minutes() -> None:
+    selector, clock, delivered, task = await _selector(score=0.1)
+    try:
+        text = "这个模型的推理速度挺快"
+        selector.offer(_dm(text, uid=1, event_id="dm:early"))
+        await clock.advance(2.5)
+        await clock.advance(121.0)
+        selector.offer(_dm(text, uid=2, event_id="dm:later"))
+        await clock.advance(2.5)
+        assert [event.viewer.uid for event in delivered] == [1, 2]
     finally:
         await _finish(task)
 
@@ -248,7 +459,7 @@ async def test_three_delivery_failures_latch_the_breaker_for_the_run() -> None:
     are bugs, not weather, so the latch holds until restart — and the failed
     combo stays pending rather than being silently discarded."""
     clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
-    selector = DanmakuSelector(clock, thresholds=lambda: _thresholds(), per_uid_cooldown_s=60.0)
+    selector = DanmakuSelector(clock, thresholds=lambda: _thresholds())
 
     async def deliver(event: LiveEvent) -> None:
         raise RuntimeError("下游炸了")
@@ -279,12 +490,12 @@ async def test_every_funnel_drop_hands_out_the_event_it_dropped() -> None:
     try:
         selector.offer(_dm("主播这局到底怎么打", uid=1))
         selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # higher score
-        selector.offer(_dm("666", uid=3))  # below the bar
+        selector.offer(_dm("666", uid=3))  # low information, rejected pre-window
         await clock.advance(2.5)
         assert [e.viewer.uid for e in delivered] == [2]
         assert [(e.viewer.uid, r) for e, r in records if e is not None] == [
             (1, SkipReason.LOST_WINDOW),
-            (3, SkipReason.LOW_VALUE),
+            (3, SkipReason.LOW_INFORMATION),
         ]
         skips = selector.status()["skips"]
         assert isinstance(skips, dict)
@@ -299,7 +510,7 @@ async def test_an_empty_window_reports_the_reason_with_no_event() -> None:
     records: list[tuple[LiveEvent | None, SkipReason]] = []
     selector, clock, _delivered, task = await _selector(on_skip=lambda e, r: records.append((e, r)))
     try:
-        selector.offer(_dm("666", uid=1))  # opens the window, fails the bar
+        selector.offer(_dm("这波操作还行", uid=1))  # opens the window, fails the bar
         await clock.advance(2.5)
         assert (None, SkipReason.WINDOW_EMPTY) in records
         assert [r for _e, r in records] == [SkipReason.LOW_VALUE, SkipReason.WINDOW_EMPTY]
@@ -320,13 +531,13 @@ async def test_a_broken_skip_sink_never_takes_the_funnel_down_with_it() -> None:
 
     selector, clock, delivered, task = await _selector(on_skip=exploding)
     try:
-        selector.offer(_dm("666", uid=1))  # low value: the first sink call
+        selector.offer(_dm("666", uid=1))  # low information: the first sink call
         selector.offer(_dm("主播这个怎么设置的", uid=2))  # must still win the window
         await clock.advance(2.5)
         assert [e.viewer.uid for e in delivered] == [2], "水槽炸了，漏斗照常出货"
         assert calls >= 1
         skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.low_value"] == 1, "账还是记下了"
+        assert isinstance(skips, dict) and skips["selection.low_information"] == 1, "账还是记下了"
     finally:
         await _finish(task)
 
@@ -340,7 +551,7 @@ async def test_no_sink_configured_is_still_a_working_funnel() -> None:
         await clock.advance(2.5)
         assert delivered == []
         skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.window_empty"] == 1
+        assert isinstance(skips, dict) and skips["selection.low_information"] == 1
     finally:
         await _finish(task)
 
@@ -352,9 +563,7 @@ def _assembly(
     tmp_path: Path, *, chattiness: Chattiness = Chattiness.HIGH
 ) -> tuple[Assembly, DanmakuSelector, list[Intent], FakeClock]:
     kit_clock = FakeClock(wall=datetime(2026, 8, 13, 20, 0, tzinfo=UTC))
-    selector = DanmakuSelector(
-        kit_clock, thresholds=lambda: derive(chattiness), per_uid_cooldown_s=60.0
-    )
+    selector = DanmakuSelector(kit_clock, thresholds=lambda: derive(chattiness))
     kit = build_assembly_kit(tmp_path, selector=selector)
     # One clock: the selector was built first, so rebind it to the kit's.
     selector._clock = kit.clock
@@ -463,10 +672,9 @@ async def test_every_funnel_drop_leaves_a_debug_line_carrying_its_reason(
     try:
         selector.offer(_dm("主播这局到底怎么打", uid=1))
         selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # dethrones uid 1
-        selector.offer(_dm("666", uid=3))  # under the bar
+        selector.offer(_dm("666", uid=3))  # low information, pre-window reject
         await clock.advance(2.5)
-        selector.offer(_dm("那个参数为什么是零", uid=2))  # answered a moment ago
-        selector.offer(_dm("6666", uid=3))  # opens a window it cannot fill
+        selector.offer(_dm("这波操作还行", uid=3))  # opens a window it cannot fill
         await clock.advance(2.5)
     finally:
         await _finish(task)
@@ -474,8 +682,7 @@ async def test_every_funnel_drop_leaves_a_debug_line_carrying_its_reason(
     reasons = [fields["reason"] for fields in _fields(caplog, "selector.skipped")]
     assert reasons == [
         SkipReason.LOST_WINDOW.value,
-        SkipReason.LOW_VALUE.value,
-        SkipReason.UID_COOLDOWN.value,
+        SkipReason.LOW_INFORMATION.value,
         SkipReason.LOW_VALUE.value,
         SkipReason.WINDOW_EMPTY.value,
     ]
