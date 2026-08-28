@@ -73,6 +73,7 @@ def parse_line(raw: dict[str, Any], *, room_id: int = 0) -> LiveEvent:
             combo_id=str(g.get("combo_id", "")),
             combo_count=int(g.get("combo_count", 0)),
             combo_end=g.get("combo_end"),
+            unit_battery=int(g.get("unit_battery", 0)),
         )
         if not value_cny and gift.is_paid:
             value_cny = cny_from_gold(total_coin)

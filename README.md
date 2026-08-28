@@ -58,7 +58,8 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | 计划归档（同目录 `*.archive.md`） | 每一轮的完整过程记录，回溯用 |
 | [CLAUDE.md](CLAUDE.md) | 会话准则：指导原则、代码规范、文风、流程纪律 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 提交门禁、代码语言分界、commit 写法 |
-| [docs/runbook.md](docs/runbook.md) | 操作手册：起服务器、dev-talk、测试、常见坑 |
+| [docs/runbook.md](docs/runbook.md) | 操作手册：一键启动、起服务器、dev-talk、面板六页、直播 Mock、常见坑 |
+| [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：四道门、测试卡、业务评分标准、历次回归记录 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |
 | [docs/live2d-licensing.md](docs/live2d-licensing.md) | Live2D 对外发布前必须先办完的五件事，以及现在走到哪 |

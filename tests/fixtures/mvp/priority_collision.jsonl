@@ -1,0 +1,8 @@
+# MVP 优先级碰撞：同一秒内让不同档位竞争。主播语音和主动话题由人工测试卡触发。
+{"at_s": 0.00, "kind": "danmaku", "room_id": 990002, "text": "先回答我这个普通问题", "viewer": {"uid": 10201, "name": "普通观众"}, "event_id": "pc-dm-1", "ts_ms": 1000}
+{"at_s": 0.10, "kind": "gift", "room_id": 990002, "viewer": {"uid": 10202, "name": "普通礼物观众"}, "gift": {"gift_id": 2, "name": "小花花", "num": 1, "coin_type": "gold", "total_coin": 100, "unit_battery": 1, "combo_id": "pc-normal", "combo_count": 1, "combo_end": true}, "event_id": "pc-gift-normal", "ts_ms": 1100}
+{"at_s": 0.20, "kind": "gift", "room_id": 990002, "viewer": {"uid": 10203, "name": "中额礼物观众"}, "gift": {"gift_id": 3, "name": "牛哇牛哇", "num": 1, "coin_type": "gold", "total_coin": 10000, "unit_battery": 100, "combo_id": "pc-medium", "combo_count": 1, "combo_end": true}, "event_id": "pc-gift-medium", "ts_ms": 1200}
+{"at_s": 0.30, "kind": "vip_enter", "room_id": 990002, "viewer": {"uid": 10204, "name": "老舰长", "guard_level": 3}, "event_id": "pc-vip-1", "ts_ms": 1300}
+{"at_s": 0.40, "kind": "guard_buy", "room_id": 990002, "viewer": {"uid": 10205, "name": "新舰长", "guard_level": 3}, "value_cny": 138.0, "event_id": "pc-guard-1", "ts_ms": 1400}
+{"at_s": 0.50, "kind": "gift", "room_id": 990002, "viewer": {"uid": 10206, "name": "大额礼物观众"}, "gift": {"gift_id": 4, "name": "梦幻城堡", "num": 1, "coin_type": "gold", "total_coin": 100000, "unit_battery": 1000, "combo_id": "pc-high", "combo_count": 1, "combo_end": true}, "event_id": "pc-gift-high", "ts_ms": 1500}
+{"at_s": 0.60, "kind": "super_chat", "room_id": 990002, "text": "付费问题：刚才演示的结论是什么？", "value_cny": 30.0, "viewer": {"uid": 10207, "name": "SC观众"}, "event_id": "pc-sc-1", "ts_ms": 1600}

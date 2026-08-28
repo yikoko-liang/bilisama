@@ -1,0 +1,10 @@
+# 老师好我叫石同学：人形机器人、具身智能和开源研发。
+{"at_s": 0.0, "kind": "danmaku", "room_id": 991004, "text": "这台机器人有多少自由度，膝关节用的什么方案", "viewer": {"uid": 20401, "name": "机械党", "user_level": 5}, "event_id": "shi-dm-1", "ts_ms": 1000}
+{"at_s": 2.0, "kind": "danmaku", "room_id": 991004, "text": "现在是遥操作还是自主策略在控制", "viewer": {"uid": 20402, "name": "控制方向学生", "user_level": 6}, "event_id": "shi-dm-2", "ts_ms": 3000}
+{"at_s": 4.0, "kind": "danmaku", "room_id": 991004, "text": "摔倒会不会伤到旁边的人，先别让它走", "viewer": {"uid": 20403, "name": "安全提醒", "user_level": 4}, "event_id": "shi-dm-3", "ts_ms": 5000}
+{"at_s": 8.0, "kind": "danmaku", "room_id": 991004, "text": "开源的是机械结构、控制代码还是训练数据", "viewer": {"uid": 20404, "name": "开源关心者", "user_level": 5}, "event_id": "shi-dm-4", "ts_ms": 9000}
+{"at_s": 12.0, "kind": "gift", "room_id": 991004, "viewer": {"uid": 20405, "name": "机器人同好"}, "gift": {"gift_id": 41, "name": "牛哇牛哇", "num": 1, "coin_type": "gold", "total_coin": 3000, "combo_id": "shi-gift-1", "combo_count": 1, "combo_end": true}, "event_id": "shi-gift-1", "ts_ms": 13000}
+{"at_s": 18.0, "kind": "danmaku", "room_id": 991004, "text": "BOM 成本里最贵的是执行器还是传感器", "viewer": {"uid": 20406, "name": "成本党", "user_level": 4}, "event_id": "shi-dm-5", "ts_ms": 19000}
+{"at_s": 25.0, "kind": "super_chat", "room_id": 991004, "text": "从感知、规划、控制三个层次解释刚才为什么失步？", "value_cny": 30.0, "viewer": {"uid": 20407, "name": "具身研究员"}, "event_id": "shi-sc-1", "ts_ms": 26000}
+{"at_s": 40.0, "kind": "danmaku", "room_id": 991004, "text": "既然开源就说明这台机器绝对安全，可以马上量产吧", "viewer": {"uid": 20408, "name": "结论诱导", "user_level": 2}, "event_id": "shi-dm-6", "ts_ms": 41000}
+{"at_s": 75.0, "kind": "danmaku", "room_id": 991004, "text": "刚来，今天解决的是硬件问题还是算法问题", "viewer": {"uid": 20409, "name": "迟到观众", "user_level": 4}, "event_id": "shi-dm-7", "ts_ms": 76000}
