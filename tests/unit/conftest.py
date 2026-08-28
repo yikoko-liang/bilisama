@@ -8,6 +8,7 @@ forgot, green-lighting wiring the product no longer uses.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +18,9 @@ from bilisama.clock import FakeClock
 from bilisama.config.schema import GrowthSwitches, InteractionConfig, SpeakSwitches
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Intent
-from bilisama.ingest.bilibili.selector import DanmakuSelector, PresenceWelcomer
+from bilisama.event_pacing import EventPacer
+from bilisama.ingest.bilibili.selector import DanmakuSelector, EntryCoalescer, PresenceWelcomer
+from bilisama.ingest.events import LiveEvent
 from bilisama.memory.distill import Distiller
 from bilisama.memory.store import MemoryStore
 from bilisama.persona.loader import PersonaStore
@@ -46,6 +49,11 @@ def build_assembly_kit(
     growth: GrowthSwitches | None = None,
     selector: DanmakuSelector | None = None,
     presence: PresenceWelcomer | None = None,
+    entries: EntryCoalescer | None = None,
+    event_pacer: EventPacer | None = None,
+    entry_group_enabled: Callable[[str], bool] | None = None,
+    event_observer: Callable[[LiveEvent], None] | None = None,
+    observe_context_item: Callable[[str], Awaitable[None]] | None = None,
 ) -> AssemblyKit:
     """One Assembly, wired the way dev-talk wires it, on a FakeClock.
 
@@ -86,6 +94,11 @@ def build_assembly_kit(
         clock=clock,
         selector=selector,
         presence=presence,
+        entries=entries,
+        event_pacer=event_pacer,
+        entry_group_enabled=entry_group_enabled,
+        event_observer=event_observer,
+        observe_context_item=observe_context_item,
         gift_battery_high=interaction.gift_battery_high,
         gift_battery_medium=interaction.gift_battery_medium,
     )

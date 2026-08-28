@@ -1311,7 +1311,10 @@ async def run_director(args: argparse.Namespace) -> int:
         speech,
         floor,
         clock,
-        cooldown_s=float(thresholds.cooldown_s),
+        # No global cooldown: the pacer's token bucket owns the rate of
+        # ordinary speech now, and a fixed post-reply wait on top of it is
+        # exactly the dead air the dynamic pacing exists to remove.
+        cooldown_s=0.0,
         quiet_after_speech_s=quiet_s,
         verdict_sink=verdict_sink,
         guard=guard,
@@ -1344,17 +1347,50 @@ async def run_director(args: argparse.Namespace) -> int:
         if args.show_context:
             print("─" * 40 + f"\n{text}\n" + "─" * 40)
 
-    from bilisama.ingest.bilibili.selector import DanmakuSelector, PresenceWelcomer
+    from bilisama.config.derive import DerivedThresholds, effective_thresholds
+    from bilisama.event_pacing import EventPacer
+    from bilisama.ingest.bilibili.selector import DanmakuSelector, EntryCoalescer
+
+    event_pacer = EventPacer(clock, chattiness=lambda: settings.interaction.chattiness)
+
+    def live_thresholds() -> DerivedThresholds:
+        """The selector's rules for the NEXT window: chattiness × room load,
+        reply length riding its own slider. Read per window-open."""
+        pacing = event_pacer.snapshot()
+        return effective_thresholds(
+            settings.interaction.chattiness,
+            reply_length=settings.interaction.reply_length,
+            danmaku_window_s=max(1, round(pacing.danmaku_window_s)),
+        )
+
+    def selector_context_lines() -> tuple[str, ...]:
+        # What the stream is about, for the relevance hard-accept. Recent
+        # dialogue joins this tuple with the proactive rework (stage 5).
+        intro = settings.room.stream_intro.strip()
+        return (intro,) if intro else ()
+
+    def selector_mention_terms() -> tuple[str, ...]:
+        cfg = settings.persona
+        return tuple(
+            term
+            for term in (cfg.display_name.strip(), cfg.id.strip(), cfg.streamer_name.strip())
+            if term
+        )
 
     selector = DanmakuSelector(
         clock,
-        thresholds=lambda: thresholds,
+        thresholds=live_thresholds,
+        context_lines=selector_context_lines,
+        mention_terms=selector_mention_terms,
+        # Window winners wait out the streamer AND an empty bucket: no intent
+        # exists while blocked, so no TTL burns during a monologue.
+        delivery_blocked=lambda: floor.streamer_speaking or not event_pacer.can_consume("danmaku"),
     )
-    presence = PresenceWelcomer(
-        uniques=settings.interaction.burst_uniques,
-        window_s=float(settings.interaction.burst_window_s),
-        cooldown_s=float(settings.interaction.burst_cooldown_s),
-    )
+    entries = EntryCoalescer(clock, policy=event_pacer.snapshot)
+
+    async def observe_context_item(text: str) -> None:
+        await speech.add_context_item(text)
+
     assembly = Assembly(
         store=store,
         distiller=distiller,
@@ -1365,12 +1401,17 @@ async def run_director(args: argparse.Namespace) -> int:
         submit=scheduler.submit,
         push_context=push_context,
         clock=clock,
-        max_tokens=thresholds.max_output_tokens,
+        max_tokens=live_thresholds().max_output_tokens,
         protect_ms=settings.interaction.sc_protect_ms,
         variables=variables,
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
-        presence=presence,
+        entries=entries,
+        event_pacer=event_pacer,
+        entry_group_enabled=lambda group: bool(
+            getattr(settings.interaction.entry_welcome, group, False)
+        ),
+        observe_context_item=observe_context_item,
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
     )
@@ -1420,6 +1461,8 @@ async def run_director(args: argparse.Namespace) -> int:
     lag_monitor = LoopLagMonitor()
     registry.register("loop", lag_monitor.status)
     registry.register("selector", selector.status)
+    registry.register("pacing", event_pacer.status)
+    registry.register("entries", lambda: dict(entries.status()))
     if bili_source is not None:
         registry.register("bilibili", bili_source.status)
 

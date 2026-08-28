@@ -21,10 +21,15 @@ from typing import TYPE_CHECKING
 
 from bilisama.config.enums import GrowthMode
 from bilisama.config.schema import InteractionConfig
-from bilisama.director.intents import burst_welcome_intent, intent_for
+from bilisama.director.intents import (
+    anchor_danmaku_context_item,
+    burst_welcome_intent,
+    entry_welcome_intent,
+    intent_for,
+)
 from bilisama.ingest.bilibili.safety import DedupRing
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
-from bilisama.ingest.events import EventKind, is_vip_entry
+from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
 from bilisama.memory.context import memory_segments
 from bilisama.obs.logging import get_logger
@@ -34,7 +39,12 @@ if TYPE_CHECKING:
     from bilisama.clock import Clock
     from bilisama.config.schema import GrowthSwitches
     from bilisama.director.intent import Intent
-    from bilisama.ingest.bilibili.selector import DanmakuSelector, PresenceWelcomer
+    from bilisama.event_pacing import EventPacer
+    from bilisama.ingest.bilibili.selector import (
+        DanmakuSelector,
+        EntryCoalescer,
+        PresenceWelcomer,
+    )
     from bilisama.ingest.events import LiveEvent
     from bilisama.memory.distill import Distiller
     from bilisama.memory.store import MemoryStore
@@ -70,6 +80,11 @@ class Assembly:
         clock_granularity_min: int = 1,
         selector: DanmakuSelector | None = None,
         presence: PresenceWelcomer | None = None,
+        entries: EntryCoalescer | None = None,
+        event_pacer: EventPacer | None = None,
+        entry_group_enabled: Callable[[str], bool] | None = None,
+        event_observer: Callable[[LiveEvent], None] | None = None,
+        observe_context_item: Callable[[str], Awaitable[None]] | None = None,
         # Defaults READ the schema rather than repeating its numbers: retuning
         # the tier ladder in one place must not leave shadow defaults behind.
         gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
@@ -90,6 +105,17 @@ class Assembly:
         self._clock_granularity_min = clock_granularity_min
         self._selector = selector
         self._presence = presence
+        self._entries = entries
+        self._event_pacer = event_pacer
+        # None means every group is welcome — the shipped default. The
+        # callable reads [interaction.entry_welcome] live, so a panel flip
+        # applies to the next arrival without a rebuild.
+        self._entry_group_enabled = entry_group_enabled or (lambda _group: True)
+        self._event_observer = event_observer
+        self._observe_context_item = observe_context_item
+        # The pause gate. Events keep landing in memory and the panel while
+        # it is off — pausing is not amnesia — but nothing speech-ward runs.
+        self._event_input_enabled = True
         self._gift_battery_high = gift_battery_high
         self._gift_battery_medium = gift_battery_medium
         # Anchors are read once: editing an anchor is a restart-level change
@@ -100,10 +126,9 @@ class Assembly:
         # Callers pass persona.template_variables(cfg); this is only the floor.
         # One greeting per VIP per stream (plan section 2.7's acceptance):
         # the fixture's captain walks in twice and gets named once. Assembly
-        # lives for one stream, so these need no reset hook; both are bounded
-        # because a marathon mega-room stream must not grow them forever.
+        # lives for one stream, so it needs no reset hook; bounded because a
+        # marathon mega-room stream must not grow it forever.
         self._vip_greeted: OrderedDict[str, None] = OrderedDict()
-        self._promoted: OrderedDict[str, bool] = OrderedDict()
         # Replay shield for the direct lane (SC / guard / VIP and selector
         # winners): blivedm's inner reconnect re-delivers recent packets, and
         # the paid kinds never pass the selector's 0.35s ring. 30s covers the
@@ -118,6 +143,7 @@ class Assembly:
         self._supervised: list[SupervisedSource] = []
         self.events_seen = 0
         self.intents_submitted = 0
+        self.anchor_context_written = 0
 
     # ------------------------------------------------------------ emit path
 
@@ -127,15 +153,39 @@ class Assembly:
         self._distiller.note_event()
         self._proactive.note_activity()
         self.events_seen += 1
+        if self._event_pacer is not None:
+            self._event_pacer.note_event(event)
+        if self._event_observer is not None:
+            # Adopted platform events, straight to the panel's feed. Before
+            # every gate below on purpose: a paused or silenced room must
+            # still SHOW its events — visibility is not speech.
+            try:
+                self._event_observer(event)
+            except Exception as exc:
+                log.warning("assembly.event_observer_failed", error_text=str(exc)[:200])
+        if event.kind is EventKind.DANMAKU and event.viewer.is_anchor:
+            # The streamer typing in their own room: shared context, never a
+            # reply. Ahead of the speak switches — this is observation.
+            await self._write_anchor_context(event)
+            return
+        if event.kind is EventKind.DANMAKU and self._entries is not None:
+            # An arrival who speaks earns the reply path; a welcome on top
+            # would greet them twice. Ahead of the speak check on purpose —
+            # danmaku speech being off must not resurrect the double hello.
+            self._entries.note_danmaku(event.viewer.identity)
+        if not self._event_input_enabled:
+            return
         if event.kind is EventKind.ENTRY:
             event = self._promote_entry(event)
         if not self._speak_enabled(event.kind.value):
             return
         if event.kind is EventKind.ENTRY:
-            # The entry lane's one voice is the batched hello — individual
-            # arrivals never speak — so speak.entry (checked above) is the
-            # switch that makes chat/observe mode genuinely silent.
-            if self._presence is not None:
+            if self._entries is not None:
+                if self._entry_group_enabled("ordinary"):
+                    self._entries.offer(event)
+            elif self._presence is not None:
+                # The legacy batch-of-5 lane, kept only for wiring that has
+                # not adopted the coalescer.
                 burst = self._presence.note(event.viewer.identity, self._clock.monotonic())
                 if burst is not None:
                     self.intents_submitted += 1
@@ -146,6 +196,9 @@ class Assembly:
                     )
             return
         if event.kind is EventKind.VIP_ENTER:
+            group = "naval" if event.viewer.guard_level is not GuardLevel.NONE else "ranking"
+            if not self._entry_group_enabled(group):
+                return
             if event.viewer.identity in self._vip_greeted:
                 return
             self._vip_greeted[event.viewer.identity] = None
@@ -161,8 +214,48 @@ class Assembly:
         self._submit_event(event)
 
     async def deliver_selected(self, event: LiveEvent) -> None:
-        """Selector winners re-enter here — memory already saw the raw hits."""
+        """Selector winners re-enter here — memory already saw the raw hits.
+
+        The ordinary budget is charged HERE, not when the window closed: a
+        deferred winner held through a monologue pays on release, and the
+        selector's delivery_blocked already guaranteed a token is waiting.
+        Gift and paid lanes pass the bucket untouched.
+        """
+        if self._event_pacer is not None and not self._event_pacer.try_consume(
+            "danmaku" if event.kind is EventKind.DANMAKU else "gift"
+        ):
+            return
         self._submit_event(event)
+
+    async def deliver_entries(self, events: tuple[LiveEvent, ...]) -> None:
+        """Coalesced arrivals from the EntryCoalescer become one welcome."""
+        if not events or not self._speak_enabled(EventKind.ENTRY.value):
+            return
+        if not self._event_input_enabled:
+            return
+        if self._event_pacer is not None and not self._event_pacer.try_consume("entry"):
+            return
+        self.intents_submitted += 1
+        self._submit(
+            entry_welcome_intent(events, now=self._clock.monotonic(), max_tokens=self._max_tokens)
+        )
+
+    async def _write_anchor_context(self, event: LiveEvent) -> None:
+        if self._observe_context_item is None:
+            return
+        try:
+            await self._observe_context_item(anchor_danmaku_context_item(event))
+            self.anchor_context_written += 1
+        except Exception as exc:
+            # Losing one context line must not take the emit path down; the
+            # danmaku is already in memory either way.
+            log.warning("assembly.anchor_context_write_failed", error_text=str(exc)[:200])
+
+    def set_event_input_enabled(self, enabled: bool) -> None:
+        """The pause gate. Off: events still land in memory, the pacer and
+        the panel; nothing reaches the selector, the coalescer or the
+        scheduler until it is back on."""
+        self._event_input_enabled = enabled
 
     def _submit_event(self, event: LiveEvent) -> None:
         # Re-checked here because selector winners arrive up to a window
@@ -195,32 +288,14 @@ class Assembly:
     def _promote_entry(self, event: LiveEvent) -> LiveEvent:
         """ENTRY → VIP_ENTER for current guards and high local-medal wearers.
 
-        The wire identity comes first and costs nothing: the locally extended
-        InteractWordV2 model (VENDOR.md) now carries guard level and fan
-        medal, so a first-time captain is greeted THIS stream. The store
-        lookup below is the legacy past-spender lane and still pays a read
-        per unseen arrival.
+        Wire identity only: the locally extended InteractWordV2 model
+        (VENDOR.md) carries guard level and fan medal, so a first-time
+        captain is greeted THIS stream and no arrival costs a store read.
+        The old store-backed past-spender lane is gone with its cache — it
+        promoted a first-ever gift one stream late, flushed the write batch
+        per arrival, and made spending an identity signal, which it is not.
         """
         if is_vip_entry(event.viewer, room_id=event.room_id):
-            return dataclasses.replace(event, kind=EventKind.VIP_ENTER)
-        identity = event.viewer.identity
-        if identity == "anon":
-            return event  # masked arrivals carry no lookupable history
-        cached = self._promoted.get(identity)
-        if cached is None:
-            record = self._store.viewer(identity)
-            cached = record is not None and (
-                record.guard_level.is_patron
-                or is_vip_entry(event.viewer, lifetime_gift_cny=record.gift_value_cny)
-            )
-            # Cached per stream: without this, every arrival costs a store
-            # read that flushes the write batch — 40/s at the presence budget,
-            # on the loop the voice pipeline shares. The price is that a
-            # first-ever gift mid-stream promotes on the NEXT stream.
-            self._promoted[identity] = cached
-            if len(self._promoted) > 4096:
-                self._promoted.popitem(last=False)
-        if cached:
             return dataclasses.replace(event, kind=EventKind.VIP_ENTER)
         return event
 
@@ -310,6 +385,12 @@ class Assembly:
                     self._selector.run(self.deliver_selected), name="assembly:selector"
                 )
             )
+        if self._entries is not None:
+            tasks.append(
+                asyncio.create_task(
+                    self._entries.run(self.deliver_entries), name="assembly:entries"
+                )
+            )
         try:
             await merge(list(supervised), self._sink())
         finally:
@@ -328,6 +409,30 @@ class Assembly:
                 log.warning("assembly.context_push_failed", error_text=str(exc))
             await self._clock.sleep(self._refresh_s)
 
+    # ------------------------------------------------------------ live edits
+
+    def configure_interaction(
+        self,
+        *,
+        max_tokens: int | None = None,
+        protect_ms: int | None = None,
+        gift_battery_high: int | None = None,
+        gift_battery_medium: int | None = None,
+    ) -> None:
+        """Apply panel edits to the knobs this assembly snapshotted at build.
+
+        Only the named argument changes; None leaves a knob alone, so the
+        caller can forward exactly what the panel touched.
+        """
+        if max_tokens is not None:
+            self._max_tokens = max_tokens
+        if protect_ms is not None:
+            self._protect_ms = protect_ms
+        if gift_battery_high is not None:
+            self._gift_battery_high = gift_battery_high
+        if gift_battery_medium is not None:
+            self._gift_battery_medium = gift_battery_medium
+
     # ------------------------------------------------------------ health
 
     def status(self) -> dict[str, object]:
@@ -335,6 +440,8 @@ class Assembly:
             "events_seen": self.events_seen,
             "intents_submitted": self.intents_submitted,
             "events_deduped": self.events_deduped,
+            "anchor_context_written": self.anchor_context_written,
+            "event_input_enabled": self._event_input_enabled,
             "context_chars": len(self._last_pushed),
             "sources": {s.name: ("gave_up" if s.gave_up else "ok") for s in self._supervised},
         }

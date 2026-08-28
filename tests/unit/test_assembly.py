@@ -438,3 +438,138 @@ async def test_one_danmaku_leaves_a_readable_trail_in_the_log(tmp_path: Path) ->
     formatter = obs_logging._JsonFormatter(log_viewer_content=False)
     rendered = "\n".join(formatter.format(r) for r in records)
     assert "主播今天玩什么啊" not in rendered, f"弹幕正文漏进日志了：\n{rendered}"
+
+
+# ------------------------------------------------------------ stage-3c lanes
+
+
+async def test_anchor_danmaku_is_observed_remembered_and_shared_without_reply(
+    tmp_path: Path,
+) -> None:
+    """The streamer's own danmaku: panel sees it, memory keeps it, the model
+    reads it as shared context — and nothing ever answers it."""
+    observed: list[LiveEvent] = []
+    history_items: list[str] = []
+
+    async def observe_context_item(text: str) -> None:
+        history_items.append(text)
+
+    kit = build_assembly_kit(
+        tmp_path, event_observer=observed.append, observe_context_item=observe_context_item
+    )
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=9,
+        viewer=Viewer(uid=42, name="主播本人", is_anchor=True),
+        text="这个参数先调低一点",
+        event_id="anchor-dm-1",
+    )
+
+    await kit.assembly.on_event(event)
+
+    assert observed == [event], "the control-centre feed still sees the anchor message"
+    assert kit.store.viewer("uid:42") is not None, "memory still saw it"
+    assert len(history_items) == 1
+    assert "[主播弹幕] 主播本人: 这个参数先调低一点" in history_items[0]
+    assert "不需要单独回复" in history_items[0]
+    assert kit.intents == [], "the anchor message must never enter reply selection"
+    assert kit.assembly.status()["anchor_context_written"] == 1
+
+
+async def test_pause_gate_keeps_memory_and_feed_but_silences_everything(tmp_path: Path) -> None:
+    """Pausing is not amnesia: events keep landing in memory and the panel
+    while the gate is closed; only the speech-ward paths stop."""
+    observed: list[LiveEvent] = []
+    kit = build_assembly_kit(tmp_path, event_observer=observed.append)
+    kit.assembly.set_event_input_enabled(False)
+    await kit.assembly.on_event(_event("暂停期间"))
+    assert kit.assembly.events_seen == 1
+    assert kit.store.viewer("uid:1") is not None, "memory still records"
+    assert len(observed) == 1, "the panel still sees the room"
+    assert kit.intents == [], "but nothing reaches the scheduler"
+
+    kit.assembly.set_event_input_enabled(True)
+    await kit.assembly.on_event(_event("恢复之后"))
+    assert [intent.source for intent in kit.intents] == ["danmaku"]
+
+
+async def test_coalesced_entries_become_one_welcome_through_the_pacer(tmp_path: Path) -> None:
+    """The full quiet-room path: three arrivals coalesce for ~1s, pass the
+    speak switch and the entry budget, and come out as ONE welcome intent."""
+    from bilisama.config.enums import Chattiness
+    from bilisama.event_pacing import EventPacer
+    from bilisama.ingest.bilibili.selector import EntryCoalescer
+    from tests.fakes.bili import entry_event
+
+    kit = build_assembly_kit(tmp_path)
+    pacer = EventPacer(kit.clock, chattiness=lambda: Chattiness.MEDIUM)
+    entries = EntryCoalescer(kit.clock, policy=pacer.snapshot)
+    kit.assembly._entries = entries
+    kit.assembly._event_pacer = pacer
+
+    loop = asyncio.create_task(entries.run(kit.assembly.deliver_entries))
+    await asyncio.sleep(0)
+    try:
+        for uid in (1, 2, 3):
+            await kit.assembly.on_event(entry_event(uid))
+        await kit.clock.advance(1.5)
+        assert [i.source for i in kit.intents] == ["entry"]
+        item = kit.intents[0].injection.item_text or ""
+        assert item.count("[进房]") == 3
+    finally:
+        loop.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop
+
+
+async def test_an_arrival_who_speaks_is_never_double_greeted(tmp_path: Path) -> None:
+    """The danmaku cancels the pending welcome even when danmaku speech is
+    OFF — the cancellation is bookkeeping, not speech."""
+    from bilisama.config.enums import Chattiness
+    from bilisama.event_pacing import EventPacer
+    from bilisama.ingest.bilibili.selector import EntryCoalescer
+    from tests.fakes.bili import danmaku_event, entry_event
+
+    kit = build_assembly_kit(tmp_path, speak=SpeakSwitches(danmaku=False))
+    pacer = EventPacer(kit.clock, chattiness=lambda: Chattiness.MEDIUM)
+    entries = EntryCoalescer(kit.clock, policy=pacer.snapshot)
+    kit.assembly._entries = entries
+    kit.assembly._event_pacer = pacer
+
+    loop = asyncio.create_task(entries.run(kit.assembly.deliver_entries))
+    await asyncio.sleep(0)
+    try:
+        await kit.assembly.on_event(entry_event(7))
+        await kit.assembly.on_event(danmaku_event("主播好，刚来", uid=7))
+        await kit.clock.advance(1.5)
+        assert kit.intents == []
+        assert entries.status()["cancelled_by_danmaku"] == 1
+    finally:
+        loop.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop
+
+
+async def test_entry_group_switches_gate_by_verified_identity(tmp_path: Path) -> None:
+    """entry_welcome.naval off silences captains while ranking fans still get
+    their name — the groups choose WITHIN the lane the speak switch opens."""
+    from bilisama.ingest.events import GuardLevel, Medal
+
+    groups = {"ordinary": True, "naval": False, "ranking": True}
+    kit = build_assembly_kit(tmp_path, entry_group_enabled=lambda g: groups[g])
+    captain = LiveEvent(
+        kind=EventKind.ENTRY,
+        room_id=777,
+        viewer=Viewer(uid=1, name="舰长", guard_level=GuardLevel.CAPTAIN),
+        event_id="iw:1",
+    )
+    fan = LiveEvent(
+        kind=EventKind.ENTRY,
+        room_id=777,
+        viewer=Viewer(uid=2, name="铁粉", medal=Medal(name="豆腐", level=9, anchor_room_id=777)),
+        event_id="iw:2",
+    )
+    await kit.assembly.on_event(captain)
+    await kit.assembly.on_event(fan)
+    assert [i.source for i in kit.intents] == ["vip_enter"]
+    assert "铁粉" in (kit.intents[0].injection.item_text or "")

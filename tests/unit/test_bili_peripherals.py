@@ -97,7 +97,12 @@ async def test_entry_off_silences_the_burst_for_observe_mode(tmp_path: Path) -> 
     assert store.viewer("uid:3") is not None, "memory still saw everyone"
 
 
-async def test_known_spender_walking_in_is_promoted_to_vip(tmp_path: Path) -> None:
+async def test_wire_identity_promotes_an_arrival_to_vip(tmp_path: Path) -> None:
+    """Promotion reads the arrival's own wire identity — guard level or a
+    level-5+ current-room medal — never spend history: a first-time captain
+    is greeted THIS stream, and no arrival costs a store read."""
+    from bilisama.ingest.events import GuardLevel, Medal
+
     assembly, store, intents, _clock = _assembly(tmp_path)
     store.on_event(
         LiveEvent(
@@ -110,9 +115,23 @@ async def test_known_spender_walking_in_is_promoted_to_vip(tmp_path: Path) -> No
         )
     )
     await assembly.on_event(_entry(55))
-    assert [i.source for i in intents] == ["vip_enter"], "memory promoted the arrival"
-    await assembly.on_event(_entry(56))
-    assert len(intents) == 1, "a stranger's entry stays feed-only"
+    assert intents == [], "past spending is not an identity signal any more"
+
+    captain = LiveEvent(
+        kind=EventKind.ENTRY,
+        room_id=777,
+        viewer=Viewer(uid=57, name="舰长", guard_level=GuardLevel.CAPTAIN),
+        event_id="iw:57",
+    )
+    fan = LiveEvent(
+        kind=EventKind.ENTRY,
+        room_id=777,
+        viewer=Viewer(uid=58, name="铁粉", medal=Medal(name="豆腐", level=6, anchor_room_id=777)),
+        event_id="iw:58",
+    )
+    await assembly.on_event(captain)
+    await assembly.on_event(fan)
+    assert [i.source for i in intents] == ["vip_enter", "vip_enter"]
 
 
 async def test_presence_replay_one_hello_and_one_named_greeting(tmp_path: Path) -> None:
@@ -433,10 +452,12 @@ async def test_replayed_super_chat_is_deduped_at_the_assembly(tmp_path: Path) ->
     assert assembly.events_deduped == 1
 
 
-async def test_captain_by_tier_is_promoted_even_with_zero_gifts(tmp_path: Path) -> None:
-    """The scenario the upsert guard unblocks: tier recorded from danmaku,
-    wallet empty, and the ENTRY (which carries no guard field) must not wipe
-    the tier before the promotion reads it."""
+async def test_a_remembered_tier_no_longer_promotes_a_bare_entry(tmp_path: Path) -> None:
+    """Promotion reads the ARRIVAL's wire identity only. A tier that memory
+    recorded from an earlier danmaku stays in memory (the upsert guard still
+    protects it from the bare ENTRY) but buys no greeting: the wire carries
+    guard level on entries now, so the entry that deserves a name brings its
+    own proof."""
     from bilisama.ingest.events import GuardLevel
 
     assembly, store, intents, _clock = _assembly(tmp_path)
@@ -450,7 +471,9 @@ async def test_captain_by_tier_is_promoted_even_with_zero_gifts(tmp_path: Path) 
         )
     )
     await assembly.on_event(_entry(55))
-    assert [i.source for i in intents] == ["vip_enter"]
+    assert intents == []
+    record = store.viewer("uid:55")
+    assert record is not None and record.guard_level is GuardLevel.CAPTAIN
 
 
 async def test_console_events_skip_the_crowd_funnel(tmp_path: Path) -> None:

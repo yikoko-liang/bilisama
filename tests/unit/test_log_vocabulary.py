@@ -29,6 +29,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
     {
         "assembly.context_push_failed",
         "assembly.context_pushed",
+        "assembly.anchor_context_write_failed",
+        "assembly.event_observer_failed",
         "assembly.started",
         "audio.claim_refused",
         "audio.claimed",
