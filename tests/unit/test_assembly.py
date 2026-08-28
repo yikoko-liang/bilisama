@@ -573,3 +573,55 @@ async def test_entry_group_switches_gate_by_verified_identity(tmp_path: Path) ->
     await kit.assembly.on_event(fan)
     assert [i.source for i in kit.intents] == ["vip_enter"]
     assert "铁粉" in (kit.intents[0].injection.item_text or "")
+
+
+# ------------------------------------------------------------ prompt scoping
+
+
+async def test_voice_and_event_turns_share_public_context_but_not_source_rules(
+    tmp_path: Path,
+) -> None:
+    """One shared body of material, two input contracts: the session carries
+    voice rules (its implicit turn IS the microphone), each event intent
+    carries event rules as its scoped base, and neither leaks into the
+    other."""
+    kit = build_assembly_kit(tmp_path)
+    kit.assembly._voice_rules = "# 当前输入：主播语音\n- 语音规则"
+    kit.assembly._event_rules = "# 当前输入：直播间事件\n- 事件规则"
+
+    public = kit.assembly.build_public_context()
+    voice = kit.assembly.build_context()
+    event = kit.assembly.build_event_context()
+    assert "当前输入：主播语音" not in public
+    assert "当前输入：直播间事件" not in public
+    assert "当前输入：主播语音" in voice and "当前输入：直播间事件" not in voice
+    assert "当前输入：直播间事件" in event and "当前输入：主播语音" not in event
+    assert voice.startswith(public.rstrip()) and event.startswith(public.rstrip())
+
+    await kit.assembly.on_event(_event("今天用什么模型？"))
+    assert len(kit.intents) == 1
+    reply = kit.intents[0].injection.reply
+    assert reply.base_instructions == event
+    assert reply.write_history is True
+
+
+async def test_no_per_reply_scope_keeps_event_rules_off_the_wire(tmp_path: Path) -> None:
+    """volcano's shape: the session is the only carrier, so intents ride bare
+    (their per-kind instructions still travel) instead of carrying a base the
+    adapter would ignore."""
+    kit = build_assembly_kit(tmp_path)
+    kit.assembly._voice_rules = "语音规则"
+    kit.assembly._event_rules = "事件规则"
+    kit.assembly._per_reply_scope = False
+
+    assert kit.assembly.build_event_context() == ""
+    await kit.assembly.on_event(_event("这个显存怎么算？"))
+    assert kit.intents[0].injection.reply.base_instructions is None
+
+
+async def test_stream_intro_has_its_own_dynamic_context_section(tmp_path: Path) -> None:
+    kit = build_assembly_kit(tmp_path)
+    kit.assembly._stream_intro = lambda: "今晚先做 ComfyUI 工作流，再排查显存"
+    text = kit.assembly.build_context()
+    assert "# 直播简介" in text
+    assert "ComfyUI 工作流" in text

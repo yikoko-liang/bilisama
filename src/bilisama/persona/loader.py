@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Literal
 
+from bilisama.config.enums import Chattiness
 from bilisama.obs.logging import get_logger
 from bilisama.paths import data_home
 
@@ -38,6 +39,8 @@ __all__ = [
     "PersonaAnchors",
     "PersonaStore",
     "default_data_dir",
+    "live_event_rules",
+    "live_voice_rules",
     "template_variables",
 ]
 
@@ -65,17 +68,61 @@ def default_data_dir(persona_id: str) -> Path:
     return data_home() / "personas" / persona_id
 
 
-def template_variables(cfg: PersonaConfig) -> dict[str, str]:
+_REPLY_LENGTH_INSTRUCTIONS: dict[Chattiness, str] = {
+    Chattiness.LOW: (
+        "短档：只说一个短句，通常不超过 20 个汉字；只保留最直接的反应或结论，不解释、不铺垫。"
+    ),
+    Chattiness.MEDIUM: "中档：通常说一到两句，先回应重点，再补一条必要说明或接话点。",
+    Chattiness.HIGH: (
+        "长档：通常说两到四句，复杂问题可以多解释一层，但仍保持口语化，不写成长篇文章。"
+    ),
+}
+
+
+def template_variables(
+    cfg: PersonaConfig,
+    *,
+    reply_length: Chattiness = Chattiness.MEDIUM,
+) -> dict[str, str]:
     """Every {{name}} a persona template may use, resolved from config.
 
     One place decides this mapping so no caller can supply half of it: a
-    missing key is not an error, it leaves the raw `{{agentName}}` sitting in
-    the system prompt for the model to read aloud.
+    missing key is not an error, it leaves the raw placeholder sitting in the
+    system prompt for the model to read aloud. Reply length renders from the
+    same validated setting that controls the provider token cap, so the prose
+    and the cap cannot disagree. An empty streamer name maps to the neutral
+    「主播」— the panel field may be blank, the templates never lose their
+    addressee.
     """
+    streamer_name = cfg.streamer_name.strip() or "主播"
     return {
-        "userName": cfg.streamer_name,
+        "userName": streamer_name,
+        "username": streamer_name,
         "agentName": cfg.display_name or cfg.id,
+        "replyLength": _REPLY_LENGTH_INSTRUCTIONS[reply_length],
     }
+
+
+def _live_rules(config_dir: Path, filename: str, variables: Mapping[str, str]) -> str:
+    path = config_dir / "personas" / "live" / filename
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # Loud, not a silent downgrade: without these rules the model cannot
+        # tell the streamer's voice from a danmaku, which is the identity
+        # confusion this whole file pair exists to prevent.
+        raise FileNotFoundError(f"直播输入规则缺失：{path}") from exc
+    return _substitute(text, variables)
+
+
+def live_event_rules(config_dir: Path, variables: Mapping[str, str]) -> str:
+    """Load and render the audience-event turn contract."""
+    return _live_rules(config_dir, "event_responses.md", variables)
+
+
+def live_voice_rules(config_dir: Path, variables: Mapping[str, str]) -> str:
+    """Load and render the streamer-voice turn contract."""
+    return _live_rules(config_dir, "voice_responses.md", variables)
 
 
 @contextlib.contextmanager
@@ -262,6 +309,21 @@ class PersonaStore:
             identity=self.anchor("identity", variables),
             personality=self.anchor("personality", variables),
         )
+
+    def write_anchor(self, name: AnchorName, text: str) -> Path:
+        """Persist a human edit to the live anchor copy atomically.
+
+        The live copy only — the shipped template stays untouched, which is
+        what makes an edit recoverable by deleting the live file.
+        """
+        if not text.strip():
+            raise ValueError("人设文件不能保存为空")
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        target = self._data_dir / f"{name}.md"
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text.rstrip() + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+        return target
 
     # ------------------------------------------------------------ growth
 

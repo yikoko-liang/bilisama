@@ -33,7 +33,7 @@ from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
 from bilisama.memory.context import memory_segments
 from bilisama.obs.logging import get_logger
-from bilisama.persona.prompt import DynamicContext, assemble, static_prefix
+from bilisama.persona.prompt import DynamicContext, assemble, assemble_scoped, static_prefix
 
 if TYPE_CHECKING:
     from bilisama.clock import Clock
@@ -85,6 +85,16 @@ class Assembly:
         entry_group_enabled: Callable[[str], bool] | None = None,
         event_observer: Callable[[LiveEvent], None] | None = None,
         observe_context_item: Callable[[str], Awaitable[None]] | None = None,
+        # The two turn contracts (config/personas/live/). Empty strings keep
+        # the pre-scoping behaviour, which is what every test harness that
+        # does not care gets.
+        voice_rules: str = "",
+        event_rules: str = "",
+        stream_intro: Callable[[], str] | None = None,
+        # capabilities.per_reply_base_instructions. False (volcano) means the
+        # session context is the only carrier: event turns keep their per-kind
+        # instructions but no per-reply base rides the wire.
+        per_reply_scope: bool = True,
         # Defaults READ the schema rather than repeating its numbers: retuning
         # the tier ladder in one place must not leave shadow defaults behind.
         gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
@@ -116,6 +126,10 @@ class Assembly:
         # The pause gate. Events keep landing in memory and the panel while
         # it is off — pausing is not amnesia — but nothing speech-ward runs.
         self._event_input_enabled = True
+        self._voice_rules = voice_rules
+        self._event_rules = event_rules
+        self._stream_intro = stream_intro or (lambda: "")
+        self._per_reply_scope = per_reply_scope
         self._gift_battery_high = gift_battery_high
         self._gift_battery_medium = gift_battery_medium
         # Anchors are read once: editing an anchor is a restart-level change
@@ -191,7 +205,10 @@ class Assembly:
                     self.intents_submitted += 1
                     self._submit(
                         burst_welcome_intent(
-                            burst, now=self._clock.monotonic(), max_tokens=self._max_tokens
+                            burst,
+                            now=self._clock.monotonic(),
+                            max_tokens=self._max_tokens,
+                            base_instructions=self.build_event_context() or None,
                         )
                     )
             return
@@ -237,7 +254,12 @@ class Assembly:
             return
         self.intents_submitted += 1
         self._submit(
-            entry_welcome_intent(events, now=self._clock.monotonic(), max_tokens=self._max_tokens)
+            entry_welcome_intent(
+                events,
+                now=self._clock.monotonic(),
+                max_tokens=self._max_tokens,
+                base_instructions=self.build_event_context() or None,
+            )
         )
 
     async def _write_anchor_context(self, event: LiveEvent) -> None:
@@ -273,6 +295,7 @@ class Assembly:
             protect_ms=self._protect_ms,
             gift_battery_high=self._gift_battery_high,
             gift_battery_medium=self._gift_battery_medium,
+            base_instructions=self.build_event_context() or None,
         )
         if intent is not None:
             self.intents_submitted += 1
@@ -301,9 +324,11 @@ class Assembly:
 
     # ------------------------------------------------------------ context
 
-    def build_context(self) -> str:
-        """Prefix plus current tail. Growth injects on ON only — collect
-        grows files silently, off contributes nothing at all."""
+    def build_public_context(self) -> str:
+        """The source-neutral half: persona prefix plus the shared dynamic
+        tail. Growth injects on ON only — collect grows files silently, off
+        contributes nothing at all. Voice and event turns both read exactly
+        this material; only the input-rules block differs."""
         segments = memory_segments(
             self._store, self._clock, clock_granularity_min=self._clock_granularity_min
         )
@@ -320,11 +345,29 @@ class Assembly:
             ),
             pinned=self._persona.pinned_text(),
             streamer_facts=segments.streamer_facts,
+            stream_intro=self._stream_intro().strip(),
             session_progress=segments.session_progress,
             regulars=segments.regulars,
             clock_line=segments.clock_line,
         )
         return assemble(self._prefix, ctx)
+
+    def build_context(self) -> str:
+        """What the SESSION carries — the implicit microphone turn's rules.
+
+        The session's instructions govern whatever the provider generates on
+        its own VAD turn, and that input is always the streamer's voice, so
+        the voice contract rides here.
+        """
+        return assemble_scoped(self.build_public_context(), self._voice_rules)
+
+    def build_event_context(self) -> str:
+        """What one event reply carries as its scoped base, or "" when the
+        provider has no per-reply channel (volcano) — the per-kind
+        instructions still travel, only the full event contract stays home."""
+        if not self._per_reply_scope or not self._event_rules:
+            return ""
+        return assemble_scoped(self.build_public_context(), self._event_rules)
 
     async def refresh_context(self) -> bool:
         """Push the instructions when they changed. Returns whether it pushed."""
@@ -410,6 +453,30 @@ class Assembly:
             await self._clock.sleep(self._refresh_s)
 
     # ------------------------------------------------------------ live edits
+
+    def replace_persona(
+        self,
+        persona: PersonaStore,
+        growth: GrowthSwitches,
+        variables: Mapping[str, str],
+        *,
+        voice_rules: str | None = None,
+        event_rules: str | None = None,
+    ) -> None:
+        """Swap the persona live: new anchors, new growth wiring, new rules.
+
+        The static prefix is rebuilt (it was snapshotted at construction) and
+        the last-pushed cache cleared, so the next refresh_context pushes
+        unconditionally — a persona change must never be deduplicated away.
+        """
+        self._persona = persona
+        self._growth = growth
+        self._prefix = static_prefix(persona.anchors(variables))
+        if voice_rules is not None:
+            self._voice_rules = voice_rules
+        if event_rules is not None:
+            self._event_rules = event_rules
+        self._last_pushed = ""
 
     def configure_interaction(
         self,

@@ -124,7 +124,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "persona.proactive_prompt_loaded",
         "persona.prompt_assembled",
         "proactive.budget_exhausted",
-        "proactive.no_side_model",
+        "proactive.side_model_missing_fallback",
         "proactive.refresh_failed",
         "proactive.topic_ready",
         "proactive.topic_submitted",

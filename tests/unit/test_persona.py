@@ -422,7 +422,11 @@ def test_template_variables_come_from_config() -> None:
     from bilisama.persona.loader import template_variables
 
     cfg = PersonaConfig.model_validate({"id": "hanako", "streamer_name": "阿强"})
-    assert template_variables(cfg) == {"userName": "阿强", "agentName": "hanako"}
+    variables = template_variables(cfg)
+    assert variables["userName"] == "阿强"
+    assert variables["username"] == "阿强", "the live rule files use the lowercase alias"
+    assert variables["agentName"] == "hanako"
+    assert variables["replyLength"].startswith("中档"), "MEDIUM is the rendering default"
 
     # A persona keeping its own name is the normal case; display_name is for
     # when the spoken name should differ from the folder name, whatever the
@@ -633,3 +637,42 @@ def test_a_hand_edited_file_we_cannot_read_does_not_wedge_the_context(tmp_path: 
     assert store.growth_entries("voice") == []
     # And the anchors still load, so one bad file costs one section, not the run.
     assert store.anchors({"agentName": "豆腐", "userName": "主播"}).identity
+
+
+def test_live_rule_files_render_names_and_never_leak_a_placeholder(tmp_path: Path) -> None:
+    """The shipped contracts must survive substitution whole: any raw
+    {{name}} left standing gets read aloud by the model."""
+    import re
+    import shutil
+
+    from bilisama.persona.loader import live_event_rules, live_voice_rules
+
+    repo = Path(__file__).resolve().parents[2]
+    shutil.copytree(repo / "config" / "personas" / "live", tmp_path / "personas" / "live")
+    variables = {"username": "阿强", "userName": "阿强", "agentName": "豆腐", "replyLength": "短"}
+    for text in (
+        live_voice_rules(tmp_path, variables),
+        live_event_rules(tmp_path, variables),
+    ):
+        assert "阿强" in text and "豆腐" in text
+        assert not re.search(r"\{\{\w+\}\}", text), "raw placeholder left in a shipped contract"
+
+
+def test_missing_live_rules_refuse_loudly(tmp_path: Path) -> None:
+    from bilisama.persona.loader import live_voice_rules
+
+    with pytest.raises(FileNotFoundError, match="直播输入规则缺失"):
+        live_voice_rules(tmp_path, {})
+
+
+def test_write_anchor_updates_the_live_copy_and_refuses_empty(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    store = PersonaStore(tmp_path / "live", repo / "config" / "personas" / "tofu")
+    target = store.write_anchor("identity", "# 新身份\n她换了个说法")
+    assert target == tmp_path / "live" / "identity.md"
+    assert "新身份" in store.anchor("identity")
+    assert "新身份" not in (repo / "config" / "personas" / "tofu" / "identity.md").read_text(
+        encoding="utf-8"
+    ), "the shipped template stays untouched"
+    with pytest.raises(ValueError, match="不能保存为空"):
+        store.write_anchor("identity", "   ")

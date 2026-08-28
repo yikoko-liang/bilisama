@@ -19,7 +19,14 @@ from bilisama.obs.logging import get_logger
 if TYPE_CHECKING:
     from bilisama.persona.loader import PersonaAnchors
 
-__all__ = ["LIVE_RULES", "DynamicContext", "assemble", "dynamic_tail", "static_prefix"]
+__all__ = [
+    "LIVE_RULES",
+    "DynamicContext",
+    "assemble",
+    "assemble_scoped",
+    "dynamic_tail",
+    "static_prefix",
+]
 
 log = get_logger(__name__)
 
@@ -48,6 +55,7 @@ class DynamicContext:
     relationship: tuple[str, ...] = ()
     pinned: str = ""
     streamer_facts: str = ""
+    stream_intro: str = ""
     session_progress: str = ""
     regulars: str = ""
     clock_line: str = ""
@@ -83,6 +91,10 @@ def dynamic_tail(ctx: DynamicContext) -> str:
         sections.append(_section("# 置顶记忆（主播让你记的，始终保留）", ctx.pinned.strip()))
     if ctx.streamer_facts:
         sections.append(_section("# 主播", ctx.streamer_facts.strip()))
+    if ctx.stream_intro:
+        # Slow-changing, so it sits ahead of the per-stream progress: the
+        # intro is what the streamer typed once, not what tonight produced.
+        sections.append(_section("# 直播简介", ctx.stream_intro.strip()))
     if ctx.session_progress:
         sections.append(_section("# 本场进展", ctx.session_progress.strip()))
     if ctx.regulars:
@@ -108,3 +120,14 @@ def assemble(prefix: str, ctx: DynamicContext) -> str:
         relationship_count=len(ctx.relationship),
     )
     return f"{prefix}\n\n{tail}" if tail else prefix
+
+
+def assemble_scoped(public_context: str, turn_rules: str) -> str:
+    """Add current-input rules without creating a second conversation context.
+
+    ``public_context`` already contains the stable persona and the shared
+    dynamic tail. Voice, audience-event and product-trigger replies all read
+    that same material; only this final input-rules block changes per turn.
+    """
+    rules = turn_rules.strip()
+    return f"{public_context.rstrip()}\n\n{rules}" if rules else public_context

@@ -539,6 +539,7 @@ async def _consume_events(
     *,
     stream_text: bool = True,
     link_health: LinkHealth | None = None,
+    on_transcript: Callable[[str], None] | None = None,
 ) -> None:
     """Print what she says and play what she sends.
 
@@ -639,6 +640,8 @@ async def _consume_events(
                 awaiting = False
                 open_turn()
                 print(f"你说：{event.text}")
+                if on_transcript is not None and event.text:
+                    on_transcript(event.text)
                 release()
             elif isinstance(event, link.ReplyTextDelta):
                 open_turn()  # a proactive reply starts a turn with no speech before it
@@ -1014,7 +1017,13 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
     from bilisama.obs.outcome import Outcome, OutcomeWindow, Verdict
-    from bilisama.persona.loader import PersonaStore, default_data_dir, template_variables
+    from bilisama.persona.loader import (
+        PersonaStore,
+        default_data_dir,
+        live_event_rules,
+        live_voice_rules,
+        template_variables,
+    )
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.side import OpenAICompatSideModel, SideModel
     from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
@@ -1187,7 +1196,12 @@ async def run_director(args: argparse.Namespace) -> int:
     store.begin_stream()
 
     persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
-    variables = template_variables(settings.persona)
+    variables = template_variables(settings.persona, reply_length=settings.interaction.reply_length)
+    # The two turn contracts (config/personas/live/). Loaded once here; a
+    # missing file is a packaging error and refuses to start rather than
+    # running a stream that cannot tell the streamer's voice from a danmaku.
+    voice_rules = live_voice_rules(config_path.parent, variables)
+    event_rules = live_event_rules(config_path.parent, variables)
 
     # Side-model resolution, most reliable first: explicit config wins, then
     # the aliyun compatible-mode endpoint from path.sh (public network, no VPN
@@ -1315,6 +1329,10 @@ async def run_director(args: argparse.Namespace) -> int:
                 },
             )
 
+    def spoken_line(text: str) -> None:
+        distiller.note_assistant_line(text)
+        proactive.note_dialogue("assistant", text)
+
     scheduler = Scheduler(
         speech,
         floor,
@@ -1327,33 +1345,10 @@ async def run_director(args: argparse.Namespace) -> int:
         verdict_sink=verdict_sink,
         guard=guard,
         on_hit=settings.safety.on_hit,
-        spoken_sink=distiller.note_assistant_line,
+        # One clean spoken line, two readers: the distiller's voice-exemplar
+        # buffer and the proactive loop's dialogue material.
+        spoken_sink=spoken_line,
     )
-
-    def proactive_submit(intent: Intent) -> None:
-        # Read the switch at submit time, not at wiring time: panel.set flips
-        # it mid-stream, and ui_meta already promises Reload.LIVE for it.
-        if settings.interaction.speak.proactive:
-            scheduler.submit(intent)
-
-    proactive = ProactiveTopicLoop(
-        side,
-        store,
-        floor,
-        clock,
-        submit=proactive_submit,
-        prompt=persona.proactive_prompt(config_path.parent / "prompts" / "proactive.md", variables),
-        idle_threshold_s=float(thresholds.idle_threshold_s),
-        wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
-        max_per_hour=settings.interaction.proactive.max_per_hour,
-        max_tokens=thresholds.max_output_tokens,
-    )
-
-    async def push_context(text: str) -> None:
-        await speech.set_context(text)
-        print(f"[上下文] 已推送（{len(text)} 字）")
-        if args.show_context:
-            print("─" * 40 + f"\n{text}\n" + "─" * 40)
 
     from bilisama.config.derive import DerivedThresholds, effective_thresholds
     from bilisama.event_pacing import EventPacer
@@ -1399,6 +1394,44 @@ async def run_director(args: argparse.Namespace) -> int:
     async def observe_context_item(text: str) -> None:
         await speech.add_context_item(text)
 
+    def proactive_submit(intent: Intent) -> None:
+        # Read the switch at submit time, not at wiring time: panel.set flips
+        # it mid-stream, and ui_meta already promises Reload.LIVE for it.
+        if settings.interaction.speak.proactive:
+            scheduler.submit(intent)
+
+    proactive = ProactiveTopicLoop(
+        side,
+        store,
+        floor,
+        clock,
+        submit=proactive_submit,
+        prompt=persona.proactive_prompt(config_path.parent / "prompts" / "proactive.md", variables),
+        idle_threshold_s=float(thresholds.idle_threshold_s),
+        wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
+        max_per_hour=settings.interaction.proactive.max_per_hour,
+        max_tokens=thresholds.max_output_tokens,
+        assistant_label=settings.persona.display_name or settings.persona.id,
+        event_pacer=event_pacer,
+        # Real interaction about to speak outranks an icebreaker before either
+        # queues: an open danmaku window, a held deferred winner, or a pending
+        # welcome batch all wave the topic off this tick.
+        ordinary_pending=lambda: bool(
+            selector.status()["window_open"]
+            or selector.status()["deferred_count"]
+            or entries.status()["pending"]
+        ),
+        # Late-bound on purpose: `assembly` is built a page below, and the
+        # loop only calls this once it is running.
+        reply_base_instructions=lambda: assembly.build_public_context(),
+    )
+
+    async def push_context(text: str) -> None:
+        await speech.set_context(text)
+        print(f"[上下文] 已推送（{len(text)} 字）")
+        if args.show_context:
+            print("─" * 40 + f"\n{text}\n" + "─" * 40)
+
     assembly = Assembly(
         store=store,
         distiller=distiller,
@@ -1420,6 +1453,10 @@ async def run_director(args: argparse.Namespace) -> int:
             getattr(settings.interaction.entry_welcome, group, False)
         ),
         observe_context_item=observe_context_item,
+        voice_rules=voice_rules,
+        event_rules=event_rules,
+        stream_intro=lambda: settings.room.stream_intro,
+        per_reply_scope=profile_for(provider).caps.per_reply_base_instructions,
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
     )
@@ -2029,6 +2066,9 @@ async def run_director(args: argparse.Namespace) -> int:
                     None,
                     stream_text=not use_prompt,
                     link_health=link_health,
+                    # Completed streamer turns are topic material — never a
+                    # reset of the live-event dead-air clock (proactive.py).
+                    on_transcript=lambda text: proactive.note_dialogue("streamer", text),
                 ),
                 name="director:play",
             ),

@@ -162,6 +162,17 @@ class Distiller:
         task.add_done_callback(_log_task_failure)
         self._state.inflight = task
 
+    def replace_persona(self, persona: PersonaStore, growth: GrowthSwitches) -> None:
+        """Swap the persona the growth layers write into, live.
+
+        The buffered voice-exemplar lines go with the old persona: distilling
+        one character's spoken style into another's voice.md is exactly the
+        cross-contamination the growth files exist to avoid.
+        """
+        self._persona = persona
+        self._growth = growth
+        self._state.assistant_lines.clear()
+
     def note_assistant_line(self, text: str) -> None:
         """A cleanly spoken reply — voice-exemplar raw material. The caller
         only feeds lines that completed without a guard hit."""

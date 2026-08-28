@@ -238,11 +238,17 @@ class MemoryStore:
             raise RuntimeError("begin_stream() 还没调用，事件不知道该记到哪一场")
         now = self._clock.wall().isoformat()
         viewer = event.viewer
+        # The streamer's own danmaku must stay distinguishable after the
+        # event kind is folded into prose: a distilled summary that reads the
+        # room owner's line as a viewer's request invents an audience member.
+        recorded_name = viewer.name
+        if viewer.is_anchor and not recorded_name.startswith("主播本人·"):
+            recorded_name = f"主播本人·{recorded_name}" if recorded_name else "主播本人"
         event_row = (
             self._stream_id,
             event.kind.value,
             viewer.identity,
-            viewer.name,
+            recorded_name,
             event.text,
             event.value_cny,
             now,

@@ -21,6 +21,7 @@ import pytest
 from bilisama.clock import FakeClock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Intent, Priority
+from bilisama.event_pacing import EventPacer
 from bilisama.ingest.events import EventKind, LiveEvent, Viewer
 from bilisama.memory.store import MemoryStore
 from bilisama.obs.logging import setup
@@ -114,7 +115,8 @@ async def test_candidate_is_flattened_neutralized_and_capped() -> None:
         instructions = intents[0].injection.reply.instructions or ""
         assert "bilisama_live_events" not in instructions
         assert "bilisama·live·events" in instructions
-        candidate = instructions.split("：", 1)[1]
+        topic_line = next(line for line in instructions.splitlines() if "候选话题是：" in line)
+        candidate = topic_line.split("候选话题是：", 1)[1]
         assert "  " not in candidate, "whitespace runs must flatten"
         assert len(candidate) <= 80, "the 80-char cap must hold"
 
@@ -298,3 +300,111 @@ async def test_recent_events_feed_the_candidate_material(kind: EventKind) -> Non
         store.close()
 
     assert side.users and "键盘怎么样" in side.users[0]
+
+
+# ------------------------------------------------------------ pacer-driven rework
+
+
+@asynccontextmanager
+async def _running_paced(
+    *,
+    side: FakeSide | None,
+    chattiness_level: str = "medium",
+) -> AsyncIterator[tuple[ProactiveTopicLoop, SpeakingFloor, list[Intent], FakeClock, EventPacer]]:
+    from bilisama.config.enums import Chattiness
+
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    floor = SpeakingFloor(clock)
+    pacer = EventPacer(clock, chattiness=lambda: Chattiness(chattiness_level))
+    intents: list[Intent] = []
+    loop = ProactiveTopicLoop(
+        side,
+        store,
+        floor,
+        clock,
+        submit=intents.append,
+        prompt="想一个话题",
+        idle_threshold_s=10.0,
+        wake_interval_s=5.0,
+        event_pacer=pacer,
+        reply_base_instructions=lambda: "公共上下文",
+    )
+    task = asyncio.create_task(loop.run())
+    try:
+        yield loop, floor, intents, clock, pacer
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        store.close()
+
+
+async def test_without_a_side_model_the_realtime_link_still_breaks_the_ice() -> None:
+    """No side model used to mean no proactive topics at all; the fallback
+    asks the Realtime model to pick straight from its shared history."""
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        await clock.advance(31.0)  # the quiet-room idle target
+        assert len(intents) == 1
+        rules = intents[0].injection.reply.instructions or ""
+        assert "后台候选暂不可用" in rules
+        assert intents[0].injection.reply.base_instructions == "公共上下文"
+        assert intents[0].injection.reply.write_history is True
+        assert loop.status()["fallback_topics"] == 1
+
+
+async def test_streamer_speech_does_not_reset_the_live_event_clock() -> None:
+    """A monologue is topic material, not room activity: with a pacer wired
+    the dead-air clock keeps running under the floor."""
+    async with _running_paced(side=None) as (loop, floor, intents, clock, _pacer):
+        loop.note_dialogue("streamer", "我先把这段跑通")
+        floor.on_speech_started()
+        await clock.advance(25.0)
+        floor.on_speech_stopped(quiet_s=0.0)
+        await clock.advance(7.0)  # 25 + 7 > 30: the quiet-room target passed under speech
+        assert len(intents) == 1
+
+
+async def test_unanswered_topics_count_up_and_a_danmaku_resets() -> None:
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        await clock.advance(31.0)
+        assert len(intents) == 2
+        assert "连续 1 次" in (intents[1].injection.reply.instructions or "")
+        loop.note_activity(responds_to_topic=True)
+        await clock.advance(31.0)
+        assert "连续 0 次" in (intents[2].injection.reply.instructions or "")
+
+
+async def test_pending_funnel_work_waves_the_topic_off() -> None:
+    pending = True
+    from bilisama.config.enums import Chattiness
+
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    pacer = EventPacer(clock, chattiness=lambda: Chattiness.MEDIUM)
+    intents: list[Intent] = []
+    loop = ProactiveTopicLoop(
+        None,
+        store,
+        SpeakingFloor(clock),
+        clock,
+        submit=intents.append,
+        prompt="想一个话题",
+        idle_threshold_s=10.0,
+        event_pacer=pacer,
+        ordinary_pending=lambda: pending,
+    )
+    task = asyncio.create_task(loop.run())
+    try:
+        await clock.advance(62.0)
+        assert intents == [], "an open window or pending welcome outranks an icebreaker"
+        pending = False
+        await clock.advance(1.5)  # already past the idle target: the next tick speaks
+        assert len(intents) == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        store.close()
