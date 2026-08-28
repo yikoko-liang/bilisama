@@ -433,6 +433,55 @@ async def test_a_voice_alone_is_worth_a_bootstrap() -> None:
             await hosted.aclose()
 
 
+async def test_an_assistant_history_item_uses_the_output_content_type() -> None:
+    """Realtime items carry role-matched content types: user text is
+    `input_text`, assistant text is `output_text`. Writing a reply back into
+    history with the user's type is a protocol error a strict endpoint
+    rejects — and a lenient one records the assistant's own words as a
+    viewer's, which is worse. Both adapters share the shape, so both are
+    pinned here."""
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+        hosted = HostedLink(server.url, ProviderName.DASHSCOPE, session_cap_min=0)
+        await hosted.connect()
+        try:
+            await hosted.add_context_item("[弹幕] 阿强: 你好")
+            await hosted.add_context_item("欢迎阿强！", role="assistant")
+            for _ in range(50):
+                if server.recorded.count("conversation.item.create") >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            items = [
+                e["item"]
+                for e in server.recorded.events
+                if e.get("type") == "conversation.item.create"
+            ]
+            assert [i["role"] for i in items] == ["user", "assistant"]
+            assert items[0]["content"][0]["type"] == "input_text"
+            assert items[1]["content"][0]["type"] == "output_text"
+        finally:
+            await hosted.aclose()
+
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script()) as server:
+        s2s = S2SLink(server.url)
+        await s2s.connect()
+        try:
+            await s2s.add_context_item("说得不错，下一题。", role="assistant")
+            for _ in range(50):
+                if server.recorded.count("conversation.item.create"):
+                    break
+                await asyncio.sleep(0.01)
+            items = [
+                e["item"]
+                for e in server.recorded.events
+                if e.get("type") == "conversation.item.create"
+            ]
+            assert items and items[0]["content"][0]["type"] == "output_text"
+        finally:
+            await s2s.aclose()
+
+
 async def test_a_chunk_too_short_to_convert_is_not_sent_as_an_empty_frame() -> None:
     """`Resampler.feed` returns b"" when a chunk cannot produce one output
     sample at this ratio. Forwarding that base64s an empty buffer into an

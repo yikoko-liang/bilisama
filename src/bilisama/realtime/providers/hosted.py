@@ -228,13 +228,16 @@ class HostedLink:
         await self._client.push_audio(converted)
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        # Content types are role-matched in the Realtime item schema: assistant
+        # text is output_text, everyone else's is input_text.
+        content_type = "output_text" if role == "assistant" else "input_text"
         await self._client.send_command(
             {
                 "type": dia.ClientEvent.ITEM_CREATE.value,
                 "item": {
                     "type": "message",
                     "role": role,
-                    "content": [{"type": "input_text", "text": text}],
+                    "content": [{"type": content_type, "text": text}],
                 },
             }
         )
