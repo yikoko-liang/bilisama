@@ -564,6 +564,7 @@ async def _consume_events(
     stream_text: bool = True,
     link_health: LinkHealth | None = None,
     on_transcript: Callable[[str], None] | None = None,
+    output_enabled: Callable[[], bool] | None = None,
 ) -> None:
     """Print what she says and play what she sends.
 
@@ -682,7 +683,7 @@ async def _consume_events(
                     continue
                 open_turn()
                 collected.append(event.pcm)
-                if speaker is not None:
+                if speaker is not None and (output_enabled is None or output_enabled()):
                     speaker.play(event.pcm)
             elif isinstance(event, link.SpeechStopped):
                 awaiting = transcribes is not False
@@ -1300,6 +1301,7 @@ async def run_director(args: argparse.Namespace) -> int:
         )
     )
     from bilisama.realtime.providers.hosted import HostedLink
+    from bilisama.ui.audio import AudioInputSwitch
 
     inner: link.SpeechLink = built.link
     hosted_link = inner if isinstance(inner, HostedLink) else None
@@ -1312,6 +1314,26 @@ async def run_director(args: argparse.Namespace) -> int:
     print(f"[语音] {provider.value} @ {_endpoint_line(connect_url)}（来自{endpoint.source}）")
     speech = _Fanout(inner)
     await _connect_or_exit(speech, provider, connect_url)
+    # Every uplink frame — page socket or local sounddevice — passes this one
+    # switch: pause gate, input toggle (silence-substituted), noise gate, and
+    # the live-mock source election all live here (ui/audio.py).
+    audio_input = AudioInputSwitch(
+        speech.push_audio, noise_sensitivity=settings.audio.noise_sensitivity
+    )
+
+    # The pause total-gate's state, shared by the panel handler and hello().
+    runtime_paused = False
+    # Which panic the PAUSE triggered, so resume releases only its own: a
+    # streamer who hit 紧急叫停 first keeps her red button held through a
+    # pause/resume cycle.
+    panic_by_pause: set[str] = set()
+
+    def output_enabled() -> bool:
+        """The downlink gate, read at both sinks (page broker and local
+        speaker). Off keeps the text flowing — the chat page still shows the
+        reply — only the sound stays home."""
+        return settings.audio.output_enabled
+
     speech.start()
 
     from bilisama.director.output_guard import load_guard
@@ -1568,6 +1590,24 @@ async def run_director(args: argparse.Namespace) -> int:
         if path.startswith("interaction."):
             refresh_interaction_settings()
             return True
+        if path == "audio.noise_sensitivity":
+            audio_input.set_noise_sensitivity(settings.audio.noise_sensitivity)
+            return True
+        if path == "audio.input_enabled":
+            if not audio_input.paused:
+                audio_input.set_enabled(settings.audio.input_enabled)
+            return True
+        if path == "audio.output_enabled":
+            if not settings.audio.output_enabled:
+                # Stop the sentence in the air, not just the next one. Both
+                # sinks may not exist yet this early in startup; a missing one
+                # simply has nothing to flush.
+                with contextlib.suppress(NameError):
+                    speaker.flush()
+                with contextlib.suppress(NameError):
+                    if broker is not None:
+                        broker.flush()
+            return True
         if path.startswith("speech.dashscope.") and hosted_link is not None:
             await hosted_link.reconfigure_session(
                 voice=settings.speech.dashscope.voice,
@@ -1659,6 +1699,7 @@ async def run_director(args: argparse.Namespace) -> int:
     registry.register("loop", lag_monitor.status)
     registry.register("selector", selector.status)
     registry.register("pacing", event_pacer.status)
+    registry.register("audio_input", audio_input.status)
     registry.register("entries", lambda: dict(entries.status()))
     if bili_source is not None:
         registry.register("bilibili", bili_source.status)
@@ -1805,11 +1846,25 @@ async def run_director(args: argparse.Namespace) -> int:
 
             async def uplink(pcm: bytes) -> None:
                 echo.note_captured(pcm)
-                await speech.push_audio(pcm)
+                await audio_input.push_audio(pcm)
 
             # The gate SpeakingFloor has always had and nothing ever fed with
             # real receipts. Counting segments rather than watching the last
             # one is the whole point — see PlaybackTally (ledger #41).
+            async def ui_audio_level() -> None:
+                """~5 Hz, change-driven: the system page's live meter reads
+                what the PROVIDER actually hears (post noise gate metering),
+                not the page's own analyser."""
+                last = -1
+                while True:
+                    await clock.sleep(0.2)
+                    level = audio_input.signal_level
+                    if level != last:
+                        last = level
+                        live_hub.broadcast(
+                            ServerEvent.AUDIO_LEVEL, {"source": "uplink", "level": level}
+                        )
+
             tally = PlaybackTally(on_playback=floor.on_playback, notify=scheduler.notify)
             # Built after the tally, not before, so on_handoff can name it
             # outright: a late-bound closure would work at runtime and hide the
@@ -1840,10 +1895,38 @@ async def run_director(args: argparse.Namespace) -> int:
 
             def panel_state() -> dict[str, Any]:
                 speak = settings.interaction.speak
+                interaction = settings.interaction
                 return {
                     "panicked": bool(scheduler.status().get("panicked")),
+                    "paused": runtime_paused,
                     "speak": {
                         name: bool(getattr(speak, name)) for name in type(speak).model_fields
+                    },
+                    "audio": {
+                        "input_enabled": settings.audio.input_enabled,
+                        "output_enabled": settings.audio.output_enabled,
+                        "noise_sensitivity": settings.audio.noise_sensitivity,
+                        "signal_level": audio_input.signal_level,
+                    },
+                    "interaction": {
+                        "chattiness": interaction.chattiness.value,
+                        "reply_length": interaction.reply_length.value,
+                        "gift_battery_high": interaction.gift_battery_high,
+                        "gift_battery_medium": interaction.gift_battery_medium,
+                        "entry_welcome": {
+                            "ordinary": interaction.entry_welcome.ordinary,
+                            "naval": interaction.entry_welcome.naval,
+                            "ranking": interaction.entry_welcome.ranking,
+                        },
+                        "event_pacing": event_pacer.status()["activity"],
+                    },
+                    "room": {
+                        "stream_intro": settings.room.stream_intro,
+                        "streamer_name": settings.persona.streamer_name,
+                    },
+                    "persona": {
+                        "id": settings.persona.id,
+                        "name": settings.persona.display_name or settings.persona.id,
                     },
                 }
 
@@ -1859,6 +1942,45 @@ async def run_director(args: argparse.Namespace) -> int:
                 poke.poke()  # False = cooldown; the page animates either way
 
             async def on_panel_set(data: dict[str, Any]) -> None:
+                nonlocal runtime_paused
+                if "paused" in data:
+                    want = bool(data["paused"])
+                    if want and not runtime_paused:
+                        # The order is the design (plan A2): gate events, gate
+                        # the microphone, silence the mouth, then hang up.
+                        runtime_paused = True
+                        assembly.set_event_input_enabled(False)
+                        audio_input.set_paused(True)
+                        if not scheduler.status().get("panicked"):
+                            panic_by_pause.add("pause")
+                            scheduler.panic_mute()
+                        await speech.suspend()
+                        print("[面板] 已暂停：事件、麦克风、播报和语音连接都停了")
+                    elif not want and runtime_paused:
+                        try:
+                            await speech.resume()
+                        except Exception as exc:
+                            print(f"[面板] 恢复失败，保持暂停：{str(exc)[:120]}")
+                            if hub is not None:
+                                hub.broadcast(
+                                    ServerEvent.EVENT_FEED,
+                                    {
+                                        "kind": "error",
+                                        "code": "resume_failed",
+                                        "detail": "语音连接没能恢复，先保持暂停；稍后再试一次",
+                                    },
+                                )
+                            hub_state = panel_state()
+                            if hub is not None:
+                                hub.broadcast(ServerEvent.PANEL_STATE, hub_state)
+                            return
+                        audio_input.set_paused(False)
+                        if "pause" in panic_by_pause:
+                            panic_by_pause.discard("pause")
+                            scheduler.release_panic()
+                        assembly.set_event_input_enabled(True)
+                        runtime_paused = False
+                        print("[面板] 已恢复")
                 if "panic_mute" in data:
                     if bool(data["panic_mute"]):
                         scheduler.panic_mute()
@@ -2201,7 +2323,7 @@ async def run_director(args: argparse.Namespace) -> int:
             # outlive the session.
             task = _watch(
                 asyncio.create_task(
-                    _pump_mic(speech, args.input_device, speaker, args.mute_while_speaking),
+                    _pump_mic(audio_input, args.input_device, speaker, args.mute_while_speaking),
                     name="director:mic",
                 )
             )
@@ -2233,6 +2355,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     # Completed streamer turns are topic material — never a
                     # reset of the live-event dead-air clock (proactive.py).
                     on_transcript=lambda text: proactive.note_dialogue("streamer", text),
+                    output_enabled=output_enabled,
                 ),
                 name="director:play",
             ),
@@ -2298,7 +2421,8 @@ async def run_director(args: argparse.Namespace) -> int:
                             # had been emptied, which is a whole second of her
                             # talking over the streamer.
                             continue
-                        live_broker.play(ev.pcm)
+                        if output_enabled():
+                            live_broker.play(ev.pcm)
                         continue
                     if isinstance(ev, link.SpeechStarted):
                         # The same instant the local speaker flushes on
@@ -2312,6 +2436,7 @@ async def run_director(args: argparse.Namespace) -> int:
             tasks += [
                 _watch(asyncio.create_task(ui_feed(), name="director:ui-feed")),
                 _watch(asyncio.create_task(live_hub.run(read_signals), name="director:ui-state")),
+                _watch(asyncio.create_task(ui_audio_level(), name="director:ui-level")),
             ]
         await stop.wait()
     finally:

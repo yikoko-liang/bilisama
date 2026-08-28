@@ -568,3 +568,74 @@ async def test_the_health_card_stays_calm_about_a_suspicion() -> None:
     card = loud.status()
     assert card["ok"] is False
     assert "漏" in str(card["state"]), card
+
+
+# ------------------------------------------------------------ AudioInputSwitch
+
+
+def _loud_frame(amplitude: int = 12000, samples: int = 320) -> bytes:
+    import struct as _struct
+
+    return b"".join(_struct.pack("<h", amplitude) for _ in range(samples))
+
+
+async def test_noise_gate_substitutes_silence_and_never_drops_frames() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    switch = AudioInputSwitch(sink, noise_sensitivity=0)
+    quiet = _loud_frame(amplitude=10)  # ~-70 dBFS, under any threshold
+    for _ in range(12):
+        await switch.push_audio(quiet)
+    assert len(sent) == 12, "the provider's audio clock never misses a frame"
+    assert all(frame == bytes(len(quiet)) for frame in sent[9:]), "gated frames are silence"
+
+    sent.clear()
+    await switch.push_audio(_loud_frame())
+    assert sent[-1] != bytes(len(sent[-1])), "speech passes"
+    for _ in range(8):
+        await switch.push_audio(quiet)
+    assert all(frame != bytes(len(frame)) for frame in sent), "the 8-frame hold keeps word endings"
+
+
+async def test_disabled_input_sends_silence_but_keeps_metering() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    switch = AudioInputSwitch(sink)
+    switch.set_enabled(False)
+    await switch.push_audio(_loud_frame())
+    assert sent == [bytes(640)], "off means silence on the wire, not a hole in the clock"
+    assert switch.signal_level > 0, "the meter still shows the microphone is alive"
+
+
+async def test_pause_drops_everything_and_browser_election_is_exclusive() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    switch = AudioInputSwitch(sink)
+    switch.set_paused(True)
+    await switch.push_audio(_loud_frame())
+    assert sent == [], "a paused transport must see nothing — the socket is closed"
+    switch.set_paused(False)
+
+    switch.use_browser(True)
+    await switch.push_audio(_loud_frame())
+    assert sent == [] and switch.blocked_microphone_frames == 1
+    await switch.push_browser_audio(_loud_frame())
+    assert len(sent) == 1 and switch.browser_frames == 1
+    switch.use_browser(False)
+    await switch.push_browser_audio(_loud_frame())
+    assert switch.blocked_browser_frames == 1

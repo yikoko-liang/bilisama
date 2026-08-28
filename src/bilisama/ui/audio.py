@@ -27,9 +27,11 @@ that it is watching rather than left looking broken.
 from __future__ import annotations
 
 import asyncio
+import math
+import struct
 from array import array
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -38,6 +40,7 @@ from bilisama.obs.logging import get_logger
 
 __all__ = [
     "AudioBroker",
+    "AudioInputSwitch",
     "AudioOwner",
     "EchoProbe",
     "EchoReading",
@@ -583,3 +586,144 @@ def _correlate(left: list[int], right: list[int]) -> float:
     if var_l <= 0 or var_r <= 0:
         return 0.0
     return max(0.0, float(cov / (var_l * var_r) ** 0.5))
+
+
+AudioSink = Callable[[bytes], Awaitable[None]]
+
+
+class AudioInputSwitch:
+    """Route exactly one uplink into the already-connected speech backend.
+
+    Three gates in one place, in order of severity: the pause gate (drop
+    everything while the transport is suspended — a frame pushed into a
+    closed socket raises into the pump), the enable gate (send equal-length
+    SILENCE, because dropping frames freezes an in-progress server-VAD turn
+    forever), and the noise gate (a local dBFS threshold with an 8-frame
+    hold, silence-substituted for the same clock reason). It also elects the
+    active source: microphone by default, the live-mock browser track when
+    told — the loser's frames are counted, never mixed.
+
+    Lives Python-side rather than in the page's worklet on purpose: the
+    server already treats the page as untrustworthy for audio continuity
+    (its silence filler exists because "every reason the page cannot deliver
+    is a reason it cannot be trusted"), the threshold comes from config and
+    applies instantly here, and the sounddevice fallback path shares the
+    same implementation.
+    """
+
+    def __init__(self, sink: AudioSink, *, noise_sensitivity: int = 50) -> None:
+        self._sink = sink
+        self._browser_active = False
+        self._enabled = True
+        self._paused = False
+        self._noise_sensitivity = max(0, min(100, noise_sensitivity))
+        self._signal_level = 0
+        self._voice_hold_frames = 0
+        self.microphone_frames = 0
+        self.browser_frames = 0
+        self.blocked_microphone_frames = 0
+        self.blocked_browser_frames = 0
+        self.silenced_frames = 0
+
+    @property
+    def browser_active(self) -> bool:
+        return self._browser_active
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the active input may reach the speech backend."""
+        return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Pause or resume user audio without changing the selected source."""
+        self._enabled = enabled
+
+    def set_paused(self, paused: bool) -> None:
+        """Gate all uplink traffic while the speech transport is closed."""
+        self._paused = paused
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @property
+    def noise_sensitivity(self) -> int:
+        return self._noise_sensitivity
+
+    @property
+    def signal_level(self) -> int:
+        """Latest PCM RMS mapped to the UI's 0-100 meter."""
+        return self._signal_level
+
+    def set_noise_sensitivity(self, value: int) -> None:
+        self._noise_sensitivity = max(0, min(100, value))
+
+    def _noise_filtered(self, pcm: bytes) -> bytes:
+        """Gate background noise while preserving the provider audio clock."""
+        if len(pcm) < 2 or len(pcm) % 2:
+            return pcm
+        samples = struct.iter_unpack("<h", pcm)
+        total = 0
+        count = 0
+        for (sample,) in samples:
+            total += sample * sample
+            count += 1
+        rms = math.sqrt(total / max(1, count)) / 32768.0
+        dbfs = 20.0 * math.log10(max(rms, 1e-8))
+        self._signal_level = round(max(0.0, min(100.0, (dbfs + 60.0) / 0.6)))
+        # Sensitivity raises the acceptance of quiet speech: -28 dBFS at zero,
+        # -58 dBFS at one hundred. A short hold avoids chopping word endings.
+        threshold_dbfs = -28.0 - self._noise_sensitivity * 0.3
+        if dbfs >= threshold_dbfs:
+            self._voice_hold_frames = 8
+            return pcm
+        if self._voice_hold_frames > 0:
+            self._voice_hold_frames -= 1
+            return pcm
+        self.silenced_frames += 1
+        return bytes(len(pcm))
+
+    def use_browser(self, enabled: bool) -> None:
+        self._browser_active = enabled
+
+    async def _forward(self, pcm: bytes) -> None:
+        if self._paused:
+            return
+        # Metered before the enable gate, deliberately: with the input off the
+        # device panel must still show the microphone is ALIVE — a frozen
+        # meter reads as a broken mic, not a closed switch.
+        filtered = self._noise_filtered(pcm)
+        if self._enabled:
+            await self._sink(filtered)
+            return
+        self.silenced_frames += 1
+        await self._sink(bytes(len(pcm)))
+
+    async def push_audio(self, pcm: bytes) -> None:
+        """Microphone-compatible method used by the existing audio pumps."""
+        if self._browser_active:
+            self.blocked_microphone_frames += 1
+            return
+        self.microphone_frames += 1
+        await self._forward(pcm)
+
+    async def push_browser_audio(self, pcm: bytes) -> None:
+        if not self._browser_active:
+            self.blocked_browser_frames += 1
+            return
+        self.browser_frames += 1
+        await self._forward(pcm)
+
+    def status(self) -> dict[str, object]:
+        return {
+            "enabled": self._enabled,
+            "paused": self._paused,
+            "browser_active": self._browser_active,
+            "noise_sensitivity": self._noise_sensitivity,
+            "signal_level": self._signal_level,
+            "microphone_frames": self.microphone_frames,
+            "browser_frames": self.browser_frames,
+            "blocked_microphone_frames": self.blocked_microphone_frames,
+            "blocked_browser_frames": self.blocked_browser_frames,
+            "silenced_frames": self.silenced_frames,
+        }
