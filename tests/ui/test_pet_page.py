@@ -1124,3 +1124,96 @@ async def test_the_log_pane_says_where_the_record_outlives_it(
         assert await page.locator("#log-reveal").is_hidden(), "浏览器标签页里不该有打开目录的按钮"
     finally:
         await context.close()
+
+
+async def _wait_for_call(harness: Harness, event: ClientEvent, match: Any) -> None:
+    """Poll until the recorder holds a matching client call, or fail loudly."""
+    for _ in range(400):
+        if any(evt is event and match(data) for evt, data in harness.calls):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"等不到 {event} 帧：{harness.calls[-5:]}")
+
+
+@pytest.mark.ui_browser
+async def test_pet_controls_strip_offers_pause_and_the_exit_dialog(
+    page: Page, harness: Harness
+) -> None:
+    """The control-centre rework: four quick controls beside the pet, pause
+    asks the server (panel.set {paused}), and right-clicking the pet opens
+    the exit dialog whose confirm sends app.quit."""
+    await _wait(page, "document.title.includes('豆腐')")
+    for control in ("voice-input-toggle", "voice-output-toggle", "pause-toggle", "corner"):
+        await _wait(page, f"document.getElementById('{control}') !== null")
+
+    await page.click("#pause-toggle")
+    await _wait_for_call(harness, ClientEvent.PANEL_SET, lambda d: d.get("paused") is True)
+
+    # The server's echo drives the button state, not the click itself.
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {"paused": True, "audio": {"input_enabled": True, "output_enabled": True}, "speak": {}},
+    )
+    await _wait(page, "document.getElementById('pause-toggle').classList.contains('active')")
+    await _wait(page, "document.getElementById('voice-input-toggle').disabled === true")
+
+    await page.click("#pet-mount", button="right")
+    await _wait(page, "document.getElementById('exit-dialog').hidden === false")
+    await page.click("#exit-confirm")
+    await _wait_for_call(harness, ClientEvent.APP_QUIT, lambda _d: True)
+
+
+@pytest.mark.ui_browser
+async def test_system_page_room_card_connects_and_streams_room_events(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await _wait(page, "document.getElementById('room-id') !== null")
+    await page.fill("#room-id", "9617619")
+    await page.click("#room-connect")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("room") or {}).get("action") == "connect"
+        and (d.get("room") or {}).get("room_id") == 9617619,
+    )
+
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED,
+        {
+            "kind": "danmaku",
+            "name": "阿强",
+            "text": "显存怎么算",
+            "guard_level": "captain",
+            "user_level": 12,
+            "medal": {"name": "豆腐", "level": 7, "this_room": True},
+        },
+    )
+    await _wait(page, "document.querySelector('#room-events .room-event') !== null")
+    await _wait(
+        page,
+        "document.querySelector('#room-events .room-event .body')" ".textContent.includes('舰长')",
+    )
+
+
+@pytest.mark.ui_browser
+async def test_reply_reference_names_the_danmaku_it_answers(page: Page, harness: Harness) -> None:
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='chat']")
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED,
+        {
+            "kind": "reply",
+            "status": "completed",
+            "text": "显存按参数量乘精度算",
+            "source": "danmaku",
+            "reference": {"kind": "danmaku", "name": "阿强", "text": "显存怎么算"},
+        },
+    )
+    await _wait(page, "document.querySelector('#timeline .reply-reference') !== null")
+    await _wait(
+        page,
+        "document.querySelector('#timeline .reply-reference')" ".textContent.includes('阿强')",
+    )

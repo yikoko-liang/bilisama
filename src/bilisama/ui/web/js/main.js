@@ -29,6 +29,79 @@ let everConnected = false;
 
 const send = (event, data) => socket.send(event, data);
 const panel = createPanel({ send });
+
+// ---- pet-side quick controls: voice input / voice output / pause / settings.
+const inputToggleBtn = document.getElementById("voice-input-toggle");
+const outputToggleBtn = document.getElementById("voice-output-toggle");
+const pauseToggleBtn = document.getElementById("pause-toggle");
+const controlState = { paused: false, input: true, output: true };
+
+function paintControls() {
+  const set = (btn, on, onTip, offTip) => {
+    if (!btn) return;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", String(on));
+    btn.dataset.tooltip = on ? onTip : offTip;
+    btn.title = on ? onTip : offTip;
+  };
+  set(inputToggleBtn, controlState.input, "点击关闭语音输入", "点击打开语音输入");
+  set(outputToggleBtn, controlState.output, "点击关闭语音播报", "点击打开语音播报");
+  if (pauseToggleBtn) {
+    pauseToggleBtn.classList.toggle("active", controlState.paused);
+    pauseToggleBtn.setAttribute("aria-pressed", String(controlState.paused));
+    const tip = controlState.paused ? "恢复伴播助手" : "暂停伴播助手";
+    pauseToggleBtn.dataset.tooltip = tip;
+    pauseToggleBtn.title = tip;
+    // While paused the two voice switches are moot — the transport is down.
+    inputToggleBtn?.toggleAttribute("disabled", controlState.paused);
+    outputToggleBtn?.toggleAttribute("disabled", controlState.paused);
+  }
+}
+
+inputToggleBtn?.addEventListener("click", () => {
+  send("panel.set", { audio: { input_enabled: !controlState.input } });
+});
+outputToggleBtn?.addEventListener("click", () => {
+  send("panel.set", { audio: { output_enabled: !controlState.output } });
+});
+pauseToggleBtn?.addEventListener("click", () => {
+  if (!send("panel.set", { paused: !controlState.paused })) {
+    bubble.showTransient?.("语音连接已断开，暂停开关没有生效。");
+  }
+});
+
+// panel.state is the one truth for all three; the buttons only ASK.
+panel.setOnPanelState((state) => {
+  controlState.paused = Boolean(state.paused);
+  controlState.input = Boolean(state.audio?.input_enabled ?? true);
+  controlState.output = Boolean(state.audio?.output_enabled ?? true);
+  paintControls();
+  if (controlState.paused) bubble.shatter?.();
+});
+paintControls();
+
+// ---- the exit handshake: right-click the pet, confirm, app.quit → the
+// server broadcasts app.exiting and starts its slow teardown while every
+// window closes itself.
+const exitDialog = document.getElementById("exit-dialog");
+if (!panelOnly && exitDialog) {
+  const exitConfirm = document.getElementById("exit-confirm");
+  const exitCancel = document.getElementById("exit-cancel");
+  document.getElementById("pet-mount")?.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    exitDialog.hidden = false;
+  });
+  exitCancel?.addEventListener("click", () => {
+    exitDialog.hidden = true;
+  });
+  exitConfirm?.addEventListener("click", () => {
+    exitDialog.hidden = true;
+    if (!send("app.quit")) {
+      // The backend is already gone; nothing will answer. Close what we can.
+      window.bilisamaShell?.close?.();
+    }
+  });
+}
 // The panel asks over the wire rather than reaching for a module that may
 // live in another window: inside the shell, settings and devices are two
 // separate windows.
@@ -103,6 +176,11 @@ function fitToSkin() {
 // Only the pet, its bubble and the corner icon take the mouse; the same
 // pointer tracking reveals the corner icon, which otherwise floats alone in
 // empty space and reads as a smudge on the desktop.
+const cornerBtn = document.getElementById("corner");
+window.bilisamaShell?.onPanelState?.((open) => {
+  cornerBtn?.classList.toggle("active", Boolean(open));
+});
+
 if (!panelOnly && window.bilisamaShell?.setInteractive) {
   const shell = window.bilisamaShell;
   let interactive = true; // the window starts live: a page that never runs
@@ -118,7 +196,9 @@ if (!panelOnly && window.bilisamaShell?.setInteractive) {
     const dragging = document.querySelector(".pet-mount.dragging") !== null;
     const over =
       dragging ||
-      ["pet-mount", "bubble", "corner"].some((id) => hits(document.getElementById(id), x, y));
+      ["pet-mount", "bubble", "pet-controls", "exit-dialog", "confirm-dialog"].some((id) =>
+        hits(document.getElementById(id), x, y),
+      );
     document.body.classList.toggle("pointer-inside", x >= 0 && y >= 0);
     if (over === interactive) return;
     interactive = over;
@@ -207,6 +287,19 @@ const handlers = {
   "transcript.final": () => {
     // Already mirrored into event.feed by the server; the stage shows nothing
     // extra for it today.
+  },
+  "app.exiting": () => {
+    // The backend acknowledged the quit (or someone else asked for it).
+    // Close before the socket dies so the window never enters its reconnect
+    // loop against a server that is deliberately going away.
+    socket.close?.();
+    if (window.bilisamaShell?.close) {
+      window.bilisamaShell.close();
+    } else {
+      // A browser tab cannot always close itself; a blank page beats a
+      // spinner that reconnects forever.
+      location.replace("about:blank");
+    }
   },
 };
 

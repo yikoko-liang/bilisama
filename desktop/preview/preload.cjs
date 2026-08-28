@@ -16,4 +16,14 @@ contextBridge.exposeInMainWorld("bilisamaShell", {
   setInteractive: (on) => ipcRenderer.send("pet:interactive", Boolean(on)),
   // No argument on purpose: the main process computes the log path itself.
   revealLog: () => ipcRenderer.send("shell:reveal-log"),
+  // The exit handshake: the page confirmed with the streamer already.
+  close: () => ipcRenderer.send("pet:close-shell"),
+  // The pet's settings button glows while the panel window is open. Returns
+  // an unsubscribe, though the pet page never bothers — it lives as long as
+  // the window does.
+  onPanelState: (callback) => {
+    const listener = (_event, open) => callback(open);
+    ipcRenderer.on("panel:state", listener);
+    return () => ipcRenderer.removeListener("panel:state", listener);
+  },
 });

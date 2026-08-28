@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -125,6 +126,21 @@ def _director_session_overrides() -> dict[str, Any]:
     return {
         "audio": {"input_enabled": True, "output_enabled": True},
     }
+
+
+# Where an "as live" console injection claims to be from when no real room is
+# connected. Any positive id engages the crowd funnel; this one is obviously
+# fake in every log line.
+_MANUAL_MOCK_ROOM_ID = 1
+
+
+def _as_live_mock_event(event: LiveEvent, room_id: int) -> LiveEvent:
+    """Mark a panel injection so Assembly applies the real-room funnel."""
+    return dataclasses.replace(
+        event,
+        room_id=room_id if room_id > 0 else _MANUAL_MOCK_ROOM_ID,
+        raw={**(event.raw or {}), "manual_mock": True},
+    )
 
 
 def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
@@ -1060,7 +1076,7 @@ async def run_director(args: argparse.Namespace) -> int:
         apply_runtime_config_edit,
         speak_paths,
     )
-    from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
+    from bilisama.ui.events import ClientEvent, ServerEvent, link_frames, live_event_payload
     from bilisama.ui.hub import UiHub, VoiceSignals
     from bilisama.ui.poke import PokeResponder
     from bilisama.ui.server import (
@@ -1450,6 +1466,13 @@ async def run_director(args: argparse.Namespace) -> int:
     async def observe_context_item(text: str) -> None:
         await speech.add_context_item(text)
 
+    def publish_room_event(event: LiveEvent) -> None:
+        """Mirror each adopted platform event to the control-centre timeline —
+        the wiring half of ledger #49: real room events finally reach the
+        panel, not just console injections."""
+        if hub is not None:
+            hub.broadcast(ServerEvent.EVENT_FEED, live_event_payload(event))
+
     def proactive_submit(intent: Intent) -> None:
         # Read the switch at submit time, not at wiring time: panel.set flips
         # it mid-stream, and ui_meta already promises Reload.LIVE for it.
@@ -1509,6 +1532,7 @@ async def run_director(args: argparse.Namespace) -> int:
             getattr(settings.interaction.entry_welcome, group, False)
         ),
         observe_context_item=observe_context_item,
+        event_observer=publish_room_event,
         voice_rules=voice_rules,
         event_rules=event_rules,
         stream_intro=lambda: settings.room.stream_intro,
@@ -1788,7 +1812,7 @@ async def run_director(args: argparse.Namespace) -> int:
     # NameError there would take the console down with it.
     sync_panel: Callable[[], None] = _no_panel
 
-    async def handle_line(line: str) -> None:
+    async def handle_line(line: str, *, as_live: bool = False) -> None:
         if not line.strip():
             return  # a bare Enter injects nothing and lectures nobody
         panic = _panic_command(line)
@@ -1804,6 +1828,12 @@ async def run_director(args: argparse.Namespace) -> int:
                 # The panel's inject box needs the same feedback the console gets.
                 hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": _USAGE})
             return
+        if as_live:
+            # The system page's mock box: run the injection through the same
+            # crowd funnel a real room event takes, instead of the console's
+            # direct lane — that is the whole point of testing with it.
+            active_room_id = int(room_source.status().get("active_room_id") or 0)
+            event = _as_live_mock_event(event, active_room_id)
         label = {EventKind.SUPER_CHAT: "SC", EventKind.GIFT: "礼物"}.get(event.kind, "弹幕")
         money = f"（¥{event.value_cny:.0f}）" if event.value_cny else ""
         body = f"：{event.text}" if event.text else ""
@@ -2032,10 +2062,24 @@ async def run_director(args: argparse.Namespace) -> int:
                 if hub is not None:
                     hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
 
+            async def on_app_quit(_data: dict[str, Any]) -> None:
+                """The right-click exit: acknowledge first, tear down after.
+
+                Broadcast app.exiting, give the local WS pumps one delivery
+                window, then trip the same stop event Ctrl-C uses — every
+                window closes itself while distillation and closing run on
+                with no UI to wait for.
+                """
+                if hub is not None:
+                    hub.broadcast(ServerEvent.APP_EXITING, {})
+                await asyncio.sleep(0.05)
+                print("[面板] 收到退出请求，开始收尾")
+                stop.set()
+
             async def on_console_line(data: dict[str, Any]) -> None:
                 text = data.get("text")
                 if isinstance(text, str):
-                    await handle_line(text)
+                    await handle_line(text, as_live=bool(data.get("as_live")))
 
             def hello() -> dict[str, Any]:
                 return {
@@ -2091,6 +2135,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.PLAYBACK_STARTED: on_playback_started,
                         ClientEvent.PLAYBACK_ENDED: on_playback_ended,
                         ClientEvent.PLAYBACK_CANCELLED: on_playback_cancelled,
+                        ClientEvent.APP_QUIT: on_app_quit,
                     },
                     broker=broker,
                     on_audio=uplink,
@@ -2447,7 +2492,17 @@ async def run_director(args: argparse.Namespace) -> int:
                         # playback.clear to come round would add a whole
                         # dispatch hop to how long she talks over the streamer.
                         live_broker.flush()
-                    for name, data in link_frames(ev):
+                    reply_context: dict[str, Any] | None = None
+                    if isinstance(ev, link.ReplyTextDelta | link.ReplyDone):
+                        intent = scheduler.reply_intent(ev.handle.handle_id)
+                        if intent is not None:
+                            reference = (
+                                live_event_payload(intent.event)
+                                if intent.event is not None
+                                else {"kind": intent.source}
+                            )
+                            reply_context = {"source": intent.source, "reference": reference}
+                    for name, data in link_frames(ev, reply_context=reply_context):
                         live_hub.broadcast(name, data)
 
             tasks += [

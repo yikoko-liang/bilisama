@@ -1,7 +1,9 @@
-// The control panel: live (health + speak switches + inject), chat timeline,
-// log stream, read-only config. It consumes event.feed / log.line /
-// panel.state frames routed from main.js and pulls /health and /config over
-// plain fetch — health only while someone is actually looking.
+// The control centre: system page (mic check, devices, speak matrix, room,
+// reply strategy, manual mock), chat timeline with reply references, the
+// assistant page (stage 10), logs, and the demoted advanced page (health +
+// full config). It consumes event.feed / log.line / panel.state frames routed
+// from main.js and pulls /health and /config over plain fetch — health only
+// while someone is actually looking.
 
 import { VISUAL_LABEL } from "./presentation.js";
 import { unsupportedRenderer } from "./renderer.js";
@@ -27,6 +29,24 @@ const SPEAK_LABEL = {
 };
 
 const FEED_WHO = { sc: "SC", gift: "礼物", danmaku: "弹幕" };
+
+// Room-feed rows the system page renders; everything else in event.feed
+// belongs to the chat timeline or the log.
+const LIVE_KINDS = new Set([
+  "danmaku", "gift", "super_chat", "guard_buy", "vip_enter",
+  "entry", "follow", "like", "share", "room_state",
+]);
+const LIVE_LABEL = {
+  danmaku: "弹幕", gift: "礼物", super_chat: "SC", guard_buy: "上舰",
+  vip_enter: "VIP进房", entry: "进房", follow: "关注", like: "点赞",
+  share: "分享", room_state: "房间状态",
+};
+const GUARD_ZH = { captain: "舰长", admiral: "提督", governor: "总督" };
+const SOURCE_ZH = {
+  danmaku: "弹幕", super_chat: "SC", gift: "礼物", guard_buy: "上舰",
+  vip_enter: "VIP进房", entry: "进房", proactive: "主动话题", voice: "语音",
+};
+const ROOM_EVENT_CAP = 100;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -74,10 +94,33 @@ export function createPanel({ send }) {
   logRevealEl?.addEventListener("click", () => window.bilisamaShell?.revealLog?.());
   const injectForm = document.getElementById("inject");
   const injectInput = document.getElementById("inject-input");
+  // System page.
+  const inputToggle = document.getElementById("audio-input-enabled");
+  const outputToggle = document.getElementById("audio-output-enabled");
+  const signalMeter = document.getElementById("audio-signal-meter");
+  const signalValue = document.getElementById("audio-signal-value");
+  const noiseSlider = document.getElementById("noise-sensitivity");
+  const noiseValue = document.getElementById("noise-value");
+  const roomIdInput = document.getElementById("room-id");
+  const roomConnectBtn = document.getElementById("room-connect");
+  const roomDisconnectBtn = document.getElementById("room-disconnect");
+  const streamerNameInput = document.getElementById("streamer-name");
+  const streamerNameSave = document.getElementById("streamer-name-save");
+  const streamIntroInput = document.getElementById("stream-intro");
+  const roomInfoSave = document.getElementById("room-info-save");
+  const roomInfoHint = document.getElementById("room-info-hint");
+  const roomStatusEl = document.getElementById("room-status");
+  const roomEventsEl = document.getElementById("room-events");
+  const chattinessSel = document.getElementById("chattiness");
+  const replyLengthSel = document.getElementById("reply-length");
+  const giftMediumInput = document.getElementById("gift-medium");
+  const giftHighInput = document.getElementById("gift-high");
+  const entryGroupBoxes = [...document.querySelectorAll("[data-entry-group]")];
 
   const panelOnly = document.body.classList.contains("panel-only");
   let isOpen = panelOnly;
   let panicked = false;
+  let onPanelState = null;
   let healthTimer = null;
   let configLoaded = false;
   let logPaused = false;
@@ -240,13 +283,206 @@ export function createPanel({ send }) {
     e.preventDefault();
     const text = injectInput.value.trim();
     if (!text) return;
-    if (send("console.line", { text })) {
+    // as_live: the mock box exists to exercise the REAL room funnel — window,
+    // budget, coalescing — not the console's direct lane.
+    if (send("console.line", { text, as_live: true })) {
       injectInput.value = "";
     } else {
       // Disconnected: keep the text instead of silently eating it.
       feedEntry({ kind: "system", text: "连接断开，这条没发出去" });
     }
   });
+
+  // ------------------------------------------------------------ system page
+
+  const sendConfig = (path, value) => {
+    if (!send("panel.set", { config: { path, value } })) {
+      feedEntry({ kind: "system", text: "连接断开，这条修改没发出去" });
+    }
+  };
+
+  inputToggle?.addEventListener("change", () => {
+    send("panel.set", { audio: { input_enabled: inputToggle.checked } });
+  });
+  outputToggle?.addEventListener("change", () => {
+    send("panel.set", { audio: { output_enabled: outputToggle.checked } });
+  });
+  noiseSlider?.addEventListener("input", () => {
+    if (noiseValue) noiseValue.textContent = noiseSlider.value;
+  });
+  // change, not input: committing every drag tick would spam the edit channel.
+  noiseSlider?.addEventListener("change", () => {
+    send("panel.set", { audio: { noise_sensitivity: Number(noiseSlider.value) } });
+  });
+
+  chattinessSel?.addEventListener("change", () => {
+    sendConfig("interaction.chattiness", chattinessSel.value);
+  });
+  replyLengthSel?.addEventListener("change", () => {
+    sendConfig("interaction.reply_length", replyLengthSel.value);
+  });
+  const giftEdit = (input, path) => {
+    input?.addEventListener("change", () => {
+      const value = Number(input.value);
+      if (!Number.isFinite(value) || value < 1) return;
+      sendConfig(path, Math.round(value));
+    });
+  };
+  giftEdit(giftMediumInput, "interaction.gift_battery_medium");
+  giftEdit(giftHighInput, "interaction.gift_battery_high");
+  for (const box of entryGroupBoxes) {
+    box.addEventListener("change", () => {
+      sendConfig(`interaction.entry_welcome.${box.dataset.entryGroup}`, box.checked);
+    });
+  }
+
+  // ---- room card ----
+
+  let roomPending = false;
+  let lastRoomState = null;
+
+  const setRoomPending = (pending, hint) => {
+    roomPending = pending;
+    if (roomConnectBtn) roomConnectBtn.disabled = pending;
+    if (roomInfoHint && hint) roomInfoHint.textContent = hint;
+  };
+
+  roomConnectBtn?.addEventListener("click", () => {
+    const id = Number((roomIdInput?.value ?? "").trim());
+    if (!Number.isInteger(id) || id <= 0) {
+      if (roomStatusEl) roomStatusEl.textContent = "直播间号要是正整数";
+      return;
+    }
+    setRoomPending(true, "正在连接…");
+    if (roomStatusEl) roomStatusEl.textContent = `正在连接直播间 ${id}…`;
+    send("panel.set", { room: { action: "connect", room_id: id } });
+  });
+  roomDisconnectBtn?.addEventListener("click", () => {
+    setRoomPending(true, "正在断开…");
+    send("panel.set", { room: { action: "disconnect" } });
+  });
+
+  const refreshRoomInfoDirty = () => {
+    const server = lastRoomState ?? {};
+    if (streamerNameSave && streamerNameInput) {
+      streamerNameSave.disabled =
+        streamerNameInput.value.trim() === String(server.streamer_name ?? "");
+    }
+    if (roomInfoSave && streamIntroInput) {
+      roomInfoSave.disabled = streamIntroInput.value === String(server.stream_intro ?? "");
+    }
+  };
+  streamerNameInput?.addEventListener("input", refreshRoomInfoDirty);
+  streamIntroInput?.addEventListener("input", refreshRoomInfoDirty);
+  streamerNameSave?.addEventListener("click", () => {
+    sendConfig("persona.streamer_name", streamerNameInput?.value.trim() ?? "");
+  });
+  roomInfoSave?.addEventListener("click", () => {
+    sendConfig("room.stream_intro", streamIntroInput?.value ?? "");
+  });
+
+  const identityBits = (data) => {
+    const bits = [];
+    if (data.is_anchor) bits.push("主播本人");
+    const guard = GUARD_ZH[data.guard_level];
+    if (guard) bits.push(guard);
+    if (data.is_admin) bits.push("房管");
+    const medal = data.medal;
+    if (medal && medal.name) {
+      bits.push(`${medal.this_room ? "本房" : "外房"}粉丝牌${medal.name}·Lv${medal.level}`);
+    }
+    if (data.user_level) bits.push(`用户Lv${data.user_level}`);
+    return bits.join(" · ");
+  };
+
+  const roomEvent = (data) => {
+    if (!roomEventsEl) return;
+    roomEventsEl.querySelector(".empty")?.remove();
+    const row = el("div", `room-event ${data.kind}`);
+    row.appendChild(el("span", "when", new Date().toTimeString().slice(0, 8)));
+    row.appendChild(el("span", "pill", LIVE_LABEL[data.kind] ?? data.kind));
+    let body = data.name ?? "?";
+    if (data.gift) body += `：${data.gift.name} ×${data.gift.num}`;
+    else if (data.text) body += `：${data.text}`;
+    const identity = identityBits(data);
+    if (identity) body += `（${identity}）`;
+    if (data.mock) body += "〔Mock〕";
+    row.appendChild(el("span", "body", body));
+    roomEventsEl.appendChild(row);
+    while (roomEventsEl.children.length > ROOM_EVENT_CAP) roomEventsEl.firstChild.remove();
+    roomEventsEl.scrollTop = roomEventsEl.scrollHeight;
+  };
+
+  const applySystemState = (state) => {
+    const audio = state.audio ?? {};
+    if (inputToggle && document.activeElement !== inputToggle) {
+      inputToggle.checked = Boolean(audio.input_enabled);
+    }
+    if (outputToggle && document.activeElement !== outputToggle) {
+      outputToggle.checked = Boolean(audio.output_enabled);
+    }
+    if (noiseSlider && document.activeElement !== noiseSlider) {
+      noiseSlider.value = String(audio.noise_sensitivity ?? 50);
+      if (noiseValue) noiseValue.textContent = noiseSlider.value;
+    }
+    const interaction = state.interaction ?? {};
+    if (chattinessSel && document.activeElement !== chattinessSel) {
+      chattinessSel.value = interaction.chattiness ?? "medium";
+    }
+    if (replyLengthSel && document.activeElement !== replyLengthSel) {
+      replyLengthSel.value = interaction.reply_length ?? "low";
+    }
+    if (giftMediumInput && document.activeElement !== giftMediumInput) {
+      giftMediumInput.value = String(interaction.gift_battery_medium ?? "");
+    }
+    if (giftHighInput && document.activeElement !== giftHighInput) {
+      giftHighInput.value = String(interaction.gift_battery_high ?? "");
+    }
+    const groups = interaction.entry_welcome ?? {};
+    for (const box of entryGroupBoxes) {
+      if (document.activeElement !== box) {
+        box.checked = Boolean(groups[box.dataset.entryGroup]);
+      }
+    }
+    const room = state.room ?? {};
+    const previousRoom = lastRoomState;
+    lastRoomState = room;
+    // Never overwrite what someone is typing; refresh the dirty flags either way.
+    if (roomIdInput && document.activeElement !== roomIdInput && !roomPending) {
+      const active = Number(room.active_room_id ?? 0);
+      if (active > 0) roomIdInput.value = String(active);
+    }
+    if (streamerNameInput && document.activeElement !== streamerNameInput) {
+      streamerNameInput.value = String(room.streamer_name ?? "");
+    }
+    if (streamIntroInput && document.activeElement !== streamIntroInput) {
+      streamIntroInput.value = String(room.stream_intro ?? "");
+    }
+    refreshRoomInfoDirty();
+    if (roomStatusEl) {
+      if (room.connected) {
+        roomStatusEl.textContent = `已连接直播间 ${room.active_room_id}`;
+        roomStatusEl.dataset.state = "on";
+      } else if (room.error) {
+        roomStatusEl.textContent = `连接失败：${room.error}`;
+        roomStatusEl.dataset.state = "err";
+      } else {
+        roomStatusEl.textContent = "尚未连接直播间";
+        roomStatusEl.dataset.state = "off";
+      }
+    }
+    if (roomDisconnectBtn) roomDisconnectBtn.disabled = !room.connected;
+    if (roomPending && (room.connected || room.error)) setRoomPending(false, "");
+    // A new room means a new stream of events; the old rows are last room's.
+    if (
+      previousRoom &&
+      roomEventsEl &&
+      Number(previousRoom.active_room_id ?? 0) !== Number(room.active_room_id ?? 0)
+    ) {
+      roomEventsEl.textContent = "";
+      roomEventsEl.appendChild(el("p", "empty", "等待新直播间事件…"));
+    }
+  };
 
   // ------------------------------------------------------------ chat tab
 
@@ -269,7 +505,18 @@ export function createPanel({ send }) {
     } else if (kind === "reply") {
       entry.appendChild(el("span", "who", "她"));
       const status = data.status === "completed" ? "" : `〔${data.status}〕`;
-      entry.appendChild(el("span", "", `${data.text || "（无文本）"}${status}`));
+      const copy = el("span", "reply-copy");
+      const reference = data.reference;
+      if (reference && data.source && data.source !== "voice") {
+        // 「这句在接谁」——听录音的人对得上，看面板的人也对得上。
+        const label = SOURCE_ZH[data.source] ?? data.source;
+        const refText = reference.text
+          ? `${reference.name ?? "?"}：${reference.text}`
+          : reference.name ?? label;
+        copy.appendChild(el("span", "reply-reference", `引用 ${label} · ${refText}`));
+      }
+      copy.appendChild(el("span", "", `${data.text || "（无文本）"}${status}`));
+      entry.appendChild(copy);
     } else if (kind === "transcript") {
       entry.appendChild(el("span", "who", "你"));
       entry.appendChild(el("span", "", data.text ?? ""));
@@ -643,11 +890,53 @@ export function createPanel({ send }) {
     if (audioLevelEl) audioLevelEl.style.width = "0%";
   }
 
+  // A promise-shaped confirm dialog, shared by the assistant page and any
+  // future destructive action. Esc is captured before the panel's own
+  // close-on-Escape handler.
+  const confirmDialog = document.getElementById("confirm-dialog");
+  const confirmMessage = document.getElementById("confirm-message");
+  const confirmTitle = document.getElementById("confirm-title");
+  const confirmAccept = document.getElementById("confirm-accept");
+  const confirmCancel = document.getElementById("confirm-cancel");
+  const confirmAction = ({ title, message, accept = "确认" }) =>
+    new Promise((resolve) => {
+      if (!confirmDialog) {
+        resolve(true);
+        return;
+      }
+      confirmTitle.textContent = title ?? "确认操作";
+      confirmMessage.textContent = message ?? "";
+      confirmAccept.textContent = accept;
+      confirmDialog.hidden = false;
+      const done = (answer) => {
+        confirmDialog.hidden = true;
+        confirmAccept.removeEventListener("click", yes);
+        confirmCancel.removeEventListener("click", no);
+        document.removeEventListener("keydown", esc, true);
+        resolve(answer);
+      };
+      const yes = () => done(true);
+      const no = () => done(false);
+      const esc = (e) => {
+        if (e.key !== "Escape") return;
+        e.stopImmediatePropagation();
+        no();
+      };
+      confirmAccept.addEventListener("click", yes);
+      confirmCancel.addEventListener("click", no);
+      document.addEventListener("keydown", esc, true);
+    });
+
   return {
     /** How to reach whichever window holds the devices. */
     setAsk(fn) {
       ask = fn;
     },
+    /** The main page mirrors pause/audio state onto the pet controls. */
+    setOnPanelState(fn) {
+      onPanelState = fn;
+    },
+    confirmAction,
     setAudioOwner(owner, error) {
       if (!audioOwnerEl) return;
       if (error) {
@@ -718,14 +1007,35 @@ export function createPanel({ send }) {
         return;
       }
       if (event === "audio.level") {
+        if (data.source === "uplink") {
+          // The server-side meter: what the provider actually hears, 0-100,
+          // after the noise gate's metering. The device row below keeps its
+          // own ask/report meter — that one must stay alive when the INPUT
+          // switch is off, this one goes quiet with it.
+          const level = Math.max(0, Math.min(100, Number(data.level) || 0));
+          if (signalMeter) signalMeter.style.width = `${level}%`;
+          if (signalValue) signalValue.textContent = String(level);
+          return;
+        }
         if (audioLevelEl) {
           const level = Math.min(1, Number(data.level) || 0);
           audioLevelEl.style.width = `${Math.round(level * 100)}%`;
         }
         return;
       }
-      if (event === "event.feed") feedEntry(data);
-      else if (event === "log.line") logEntry(data.line ?? "");
+      if (event === "event.feed") {
+        if (LIVE_KINDS.has(data.kind)) {
+          // Room events land on the system page's flow; danmaku/SC/gift also
+          // read well in the chat timeline, where they sit next to the reply
+          // that answers them.
+          roomEvent(data);
+          if (!["danmaku", "gift", "super_chat"].includes(data.kind)) return;
+          if (data.kind === "super_chat") feedEntry({ ...data, kind: "sc" });
+          else feedEntry(data);
+          return;
+        }
+        feedEntry(data);
+      } else if (event === "log.line") logEntry(data.line ?? "");
       else if (event === "panel.state") {
         panicked = Boolean(data.panicked);
         panicBtn.dataset.panicked = String(panicked);
@@ -733,6 +1043,8 @@ export function createPanel({ send }) {
         panicBtn.textContent = panicked ? "恢复说话" : "紧急叫停";
         renderSpeak(data.speak);
         applySpeakToConfig(data.speak);
+        applySystemState(data);
+        onPanelState?.(data);
       }
     },
     /** One line about this page, in the place the streamer can read. */

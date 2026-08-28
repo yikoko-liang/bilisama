@@ -20,8 +20,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PET_WIDTH = 240;
 const PET_HEIGHT = 240;
-const PANEL_WIDTH = 420;
-const PANEL_HEIGHT = 680;
+// The five-page control centre wants a real window, not a phone-shaped one.
+const PANEL_WIDTH = 980;
+const PANEL_HEIGHT = 760;
 const POLL_MS = 2000;
 
 let petWindow = null;
@@ -134,13 +135,18 @@ function openPanelWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // The panel window gets the bridge too: the settings button on the pet
+      // needs to know when this window opens and closes.
+      preload: path.join(__dirname, "preload.cjs"),
       // Health polling and the log stream keep running while covered.
       backgroundThrottling: false,
     },
   });
   panelWindow.loadURL(`${currentUrl}#panel`);
+  petWindow?.webContents?.send?.("panel:state", true);
   panelWindow.on("closed", () => {
     panelWindow = null;
+    petWindow?.webContents?.send?.("panel:state", false);
   });
   harden(panelWindow);
 }
@@ -249,7 +255,23 @@ ipcMain.on("shell:reveal-log", (event) => {
 });
 
 ipcMain.on("pet:open-panel", (event) => {
-  if (fromPet(event)) openPanelWindow();
+  if (fromPet(event)) {
+    if (panelWindow && !panelWindow.isDestroyed()) {
+      // A second press while the window exists means "put it in front" —
+      // and the pet's settings glow should say it is open either way.
+      panelWindow.focus();
+      petWindow?.webContents?.send?.("panel:state", true);
+      return;
+    }
+    openPanelWindow();
+  }
+});
+
+// The exit handshake's shell half. Only the pet window may ask — the panel
+// closes itself like any window — and quitting the app takes both windows and
+// the tray presence with it while the backend finishes its teardown alone.
+ipcMain.on("pet:close-shell", (event) => {
+  if (fromPet(event)) app.quit();
 });
 
 // The window is a rectangle; the pet is not. Everywhere else it was an

@@ -9,6 +9,7 @@ SkipReason.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from bilisama.realtime import link
 from bilisama.ui.events import ClientEvent, ServerEvent, frame, link_frames
@@ -31,6 +32,7 @@ def test_server_vocabulary_is_pinned() -> None:
         "audio.command",
         "audio.devices",
         "audio.level",
+        "app.exiting",
     ]
 
 
@@ -44,6 +46,7 @@ def test_client_vocabulary_is_pinned() -> None:
         "playback.cancelled",
         "audio.ask",
         "audio.report",
+        "app.quit",
     ]
 
 
@@ -64,23 +67,34 @@ def test_frame_stringifies_awkward_values_instead_of_raising() -> None:
 # ------------------------------------------------------------ link translation
 
 
-def _frames(event: link.LinkEvent) -> list[tuple[ServerEvent, dict[str, object]]]:
-    return list(link_frames(event))
+def _frames(
+    event: link.LinkEvent, context: dict[str, Any] | None = None
+) -> list[tuple[ServerEvent, dict[str, Any]]]:
+    return list(link_frames(event, reply_context=context))
 
 
 def test_reply_text_delta_becomes_reply_delta() -> None:
     handle = link.ReplyHandle()
     assert _frames(link.ReplyTextDelta(handle, "你好")) == [
-        (ServerEvent.REPLY_DELTA, {"text": "你好"})
+        (
+            ServerEvent.REPLY_DELTA,
+            {"reply_id": handle.handle_id, "source": "voice", "text": "你好"},
+        )
     ]
 
 
 def test_reply_done_yields_done_plus_feed_entry() -> None:
     handle = link.ReplyHandle()
     done = link.ReplyDone(handle, link.ReplyStatus.CANCELLED, text="话说到一半")
+    base = {
+        "reply_id": handle.handle_id,
+        "source": "voice",
+        "status": "cancelled",
+        "text": "话说到一半",
+    }
     assert _frames(done) == [
-        (ServerEvent.REPLY_DONE, {"status": "cancelled", "text": "话说到一半"}),
-        (ServerEvent.EVENT_FEED, {"kind": "reply", "status": "cancelled", "text": "话说到一半"}),
+        (ServerEvent.REPLY_DONE, base),
+        (ServerEvent.EVENT_FEED, {"kind": "reply", **base}),
     ]
 
 
@@ -109,3 +123,30 @@ def test_audio_and_speech_edges_produce_nothing() -> None:
     assert _frames(link.SpeechStopped()) == []
     assert _frames(link.ReplyStarted(handle)) == []
     assert _frames(link.UserTranscriptDelta("说到一半")) == []
+
+
+def test_reply_context_rides_both_reply_frames() -> None:
+    """The scheduler resolves the trigger; these frames carry it so the chat
+    page can render 「引用 弹幕 · 张三：…」 next to the reply."""
+    from bilisama.ui.events import live_event_payload
+    from tests.fakes.bili import danmaku_event
+
+    handle = link.ReplyHandle()
+    reference = live_event_payload(danmaku_event("显存怎么算", uid=3))
+    context = {"source": "danmaku", "reference": reference}
+    frames = _frames(link.ReplyDone(handle, link.ReplyStatus.COMPLETED, text="是这样"), context)
+    for _name, payload in frames:
+        assert payload["source"] == "danmaku"
+        assert payload["reference"]["name"] == "观众3"
+        assert payload["reference"]["text"] == "显存怎么算"
+
+
+def test_live_event_payload_carries_identity_and_battery_but_no_raw() -> None:
+    from bilisama.ui.events import live_event_payload
+    from tests.fakes.bili import gift_event
+
+    payload = live_event_payload(gift_event(uid=9, coin=15_000, num=1))
+    assert payload["kind"] == "gift"
+    assert payload["gift"]["total_battery"] == 150
+    assert payload["identity"] == "uid:9"
+    assert "raw" not in payload
