@@ -46,6 +46,13 @@ class ReplySpec:
     """What L3 wants said. How it reaches the wire is the adapter's business."""
 
     instructions: str | None = None
+    # The base the per-turn instructions compose onto, FOR THIS REPLY ONLY.
+    # None keeps the session's own context (the implicit-voice-turn default);
+    # a value replaces it on the wire without touching the session or forking
+    # its history — how event turns get event rules while microphone turns
+    # keep voice rules. Adapters without a per-reply instruction channel
+    # ignore it (capabilities.per_reply_base_instructions).
+    base_instructions: str | None = None
     max_tokens: int | None = None
     write_history: bool = False
     protected: bool = False

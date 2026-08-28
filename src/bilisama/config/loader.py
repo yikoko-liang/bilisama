@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bilisama.config.migrate import migrate
+from bilisama.config.migrate import migrate, scrub_retired_interaction
 from bilisama.config.schema import Settings
 from bilisama.config.validate import ConfigError, ConfigProblem, check
 
@@ -155,6 +155,12 @@ def load(
     raw, notes = migrate(raw)
     for note in notes:
         log.info("config.migrated: %s", note)
+
+    # Unconditionally, because migrate() keys off config_version and the
+    # version lives in the BASE file: a current base layered with an older
+    # user profile still carries retired keys, and extra="forbid" would
+    # refuse the merge with a stack trace instead of starting.
+    raw = scrub_retired_interaction(raw)
 
     settings = Settings.model_validate(raw)
     if strict:

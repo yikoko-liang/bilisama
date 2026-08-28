@@ -86,8 +86,8 @@ def build_assembly_kit(
         clock=clock,
         selector=selector,
         presence=presence,
-        gift_gold_high=interaction.gift_gold_high,
-        gift_gold_medium=interaction.gift_gold_medium,
+        gift_battery_high=interaction.gift_battery_high,
+        gift_battery_medium=interaction.gift_battery_medium,
     )
     return AssemblyKit(
         assembly=assembly,

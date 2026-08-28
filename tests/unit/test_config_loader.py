@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from bilisama.config import Chattiness, ConfigError, load
+from bilisama.config.derive import derive
 from bilisama.config.migrate import CURRENT_VERSION, MIGRATIONS, Step, migrate
 
 BASE = """\
@@ -298,3 +299,62 @@ def test_the_rename_says_where_the_grown_files_went(
     said = "\n".join(record.getMessage() for record in caplog.records)
     assert "personas/mia" in said
     assert "personas/tofu" in said
+
+
+def test_v2_gift_tiers_convert_only_hand_tuned_gold_values() -> None:
+    """The old gold DEFAULTS were placeholders: carrying 10000 gold over as
+    100 batteries would silently set the high tier an order of magnitude
+    under the shipped 1000. Only a value someone actually changed converts."""
+    hand_tuned, _ = migrate(
+        {
+            "config_version": 2,
+            "interaction": {"gift_gold_high": 50_000, "gift_gold_medium": 2_000},
+        }
+    )
+    assert hand_tuned["interaction"]["gift_battery_high"] == 500
+    assert hand_tuned["interaction"]["gift_battery_medium"] == 20
+    assert "gift_gold_high" not in hand_tuned["interaction"]
+
+    untouched, notes = migrate(
+        {
+            "config_version": 2,
+            "interaction": {"gift_gold_high": 10_000, "gift_gold_medium": 1_000},
+        }
+    )
+    assert "gift_battery_high" not in untouched["interaction"], "defaults take the new defaults"
+    assert any("电池" in note for note in notes)
+
+
+def test_v2_drops_the_danmaku_section_with_the_cooldown() -> None:
+    raw, _ = migrate({"config_version": 2, "interaction": {"danmaku": {"per_uid_cooldown_s": 60}}})
+    assert "danmaku" not in raw["interaction"]
+
+
+def test_a_current_base_layered_with_an_older_profile_still_loads(tmp_path: Path) -> None:
+    """migrate() keys off config_version, which lives in the BASE file — so a
+    v3 base merged with a stale user profile still carries retired keys, and
+    extra="forbid" would refuse the whole merge. The unconditional scrub is
+    what lets that machine start."""
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "bilisama.toml").write_text(
+        'config_version = 3\nactive_profile = "old"\n', encoding="utf-8"
+    )
+    (tmp_path / "profiles" / "old.toml").write_text(
+        "[interaction]\ngift_gold_high = 50000\n\n[interaction.danmaku]\nper_uid_cooldown_s = 30\n",
+        encoding="utf-8",
+    )
+    settings = load(tmp_path / "bilisama.toml", strict=False)
+    assert settings.interaction.gift_battery_high == 500, "the tuned value keeps its meaning"
+    assert settings.interaction.gift_battery_medium == 100
+
+
+def test_effective_thresholds_lets_the_pacer_and_reply_length_override() -> None:
+    from bilisama.config.derive import effective_thresholds
+    from bilisama.config.enums import Chattiness
+
+    row = effective_thresholds(Chattiness.MEDIUM, reply_length=Chattiness.HIGH, danmaku_window_s=3)
+    assert row.danmaku_window_s == 3
+    assert row.max_output_tokens == 180
+    assert (
+        row.score_threshold == derive(Chattiness.MEDIUM).score_threshold
+    ), "the base still owns it"

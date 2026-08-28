@@ -1001,7 +1001,11 @@ def test_wrapper_tokens_in_audience_content_are_neutralized() -> None:
     assert "bilisama·live·events" in text, "the audience copy survives, defanged"
 
 
-def test_paid_intents_protect_and_requeue() -> None:
+def test_paid_intents_requeue_without_disabling_barge_in() -> None:
+    """Paid attention survives interruption by REQUEUEING. Nothing here may
+    disable barge-in: the streamer's next word is the hard ceiling. And the
+    amount never enters the prompt — a model cannot leak a number it was
+    never shown."""
     event = LiveEvent(
         kind=EventKind.SUPER_CHAT,
         room_id=1,
@@ -1015,8 +1019,10 @@ def test_paid_intents_protect_and_requeue() -> None:
     assert intent.priority is Priority.SUPERCHAT
     assert intent.requeue_on_interrupt
     assert intent.expires_at is None
-    assert intent.injection.reply.protected
-    assert "[SC ¥30]" in (intent.injection.item_text or "")
+    assert not intent.injection.reply.protected
+    item = intent.injection.item_text or ""
+    assert "[SC] 老板: 主播今天玩什么" in item
+    assert "30" not in item and "¥" not in item
 
 
 def test_feed_only_kinds_produce_no_intent() -> None:

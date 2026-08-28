@@ -152,3 +152,117 @@ def test_the_default_level_stays_quiet(caplog: pytest.LogCaptureFixture) -> None
     intent_for(LiveEvent(kind=EventKind.LIKE, room_id=777), now=0.0)
 
     assert caplog.records == [], f"info 档不该有 intents 的日志：{caplog.records}"
+
+
+# ------------------------------------------------------------ per-kind rules
+
+
+def test_danmaku_reply_repeats_the_question_before_answering() -> None:
+    """A listener hears only audio: without the question restated, the answer
+    floats free of whatever it answers."""
+    intent = intent_for(_danmaku("显存爆了是为什么？"), now=0.0)
+    assert intent is not None
+    rules = intent.injection.reply.instructions or ""
+    assert "重复一遍观众的问题" in rules
+    assert "先判断弹幕是在对主播、对你" in rules
+
+
+def test_danmaku_instruction_answers_with_its_own_judgment() -> None:
+    intent = intent_for(_danmaku(), now=0.0)
+    assert intent is not None
+    rules = intent.injection.reply.instructions or ""
+    assert "不要默认让主播回答" in rules
+    assert "这得问主播" in rules, "the banned phrasing is named, not implied"
+
+
+def test_amounts_never_enter_any_paid_prompt() -> None:
+    """The stronger guarantee: the model cannot leak a number it never saw."""
+    sc = LiveEvent(
+        kind=EventKind.SUPER_CHAT,
+        room_id=777,
+        viewer=Viewer(uid=7, name="金主"),
+        text="能出教程吗",
+        value_cny=520.0,
+        event_id="sc:9",
+    )
+    intent = intent_for(sc, now=0.0)
+    assert intent is not None
+    assert "520" not in (intent.injection.item_text or "")
+    assert "严禁说出、换算、暗示或比较 SC 金额" in (intent.injection.reply.instructions or "")
+
+
+def test_guard_buy_line_and_ceremony_scale_with_tier() -> None:
+    from bilisama.ingest.events import GuardLevel
+
+    def _guard(level: GuardLevel) -> LiveEvent:
+        return LiveEvent(
+            kind=EventKind.GUARD_BUY,
+            room_id=777,
+            viewer=Viewer(uid=8, name="新舰长", guard_level=level),
+            value_cny=198.0,
+            event_id=f"guard:{level.value}",
+        )
+
+    captain = intent_for(_guard(GuardLevel.CAPTAIN), now=0.0)
+    governor = intent_for(_guard(GuardLevel.GOVERNOR), now=0.0)
+    assert captain is not None and governor is not None
+    assert "[上舰·舰长]" in (captain.injection.item_text or "")
+    assert "[上舰·总督]" in (governor.injection.item_text or "")
+    assert "最高一档" in (governor.injection.reply.instructions or "")
+    assert "不背诵会员权益" in (captain.injection.reply.instructions or "")
+
+
+def test_vip_welcome_knows_the_verified_tier_and_varies_its_phrasing() -> None:
+    from bilisama.ingest.events import GuardLevel, Medal
+
+    captain = LiveEvent(
+        kind=EventKind.VIP_ENTER,
+        room_id=777,
+        viewer=Viewer(uid=9, name="老观众", guard_level=GuardLevel.CAPTAIN),
+        event_id="vip:1",
+    )
+    medal = LiveEvent(
+        kind=EventKind.VIP_ENTER,
+        room_id=777,
+        viewer=Viewer(uid=10, name="铁粉", medal=Medal(name="豆腐", level=7, anchor_room_id=777)),
+        event_id="vip:2",
+    )
+    a = intent_for(captain, now=0.0)
+    b = intent_for(medal, now=0.0)
+    assert a is not None and b is not None
+    assert "[进房·舰长]" in (a.injection.item_text or "")
+    assert "[进房·本房粉丝牌 7 级]" in (b.injection.item_text or "")
+    rules = a.injection.reply.instructions or ""
+    assert "最近三次进房回复" in rules, "phrasing is checked against history"
+    assert "不要提消费记录" in rules
+
+
+def test_entry_welcome_names_one_and_merges_many() -> None:
+    from bilisama.director.intents import entry_welcome_intent
+    from tests.fakes.bili import entry_event
+
+    single = entry_welcome_intent((entry_event(1),), now=10.0)
+    group = entry_welcome_intent((entry_event(1), entry_event(2), entry_event(3)), now=20.0)
+    assert "点名欢迎" in (single.injection.reply.instructions or "")
+    assert "不要播报、暗示或猜测人数" in (group.injection.reply.instructions or "")
+    assert (group.injection.item_text or "").count("[进房]") == 3
+    assert single.priority.name == "DANMAKU", "a hello queues, it never preempts"
+    assert single.dedup_key != group.dedup_key
+
+
+def test_anchor_danmaku_becomes_shared_context_not_a_reply() -> None:
+    from bilisama.director.intents import anchor_danmaku_context_item
+
+    anchor = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=777,
+        viewer=Viewer(uid=42, name="主播本人", is_anchor=True),
+        text="等下测试一下新场景",
+        event_id="dm:a1",
+    )
+    item = anchor_danmaku_context_item(anchor)
+    assert "[主播弹幕] 主播本人: 等下测试一下新场景" in item
+    assert "不需要单独回复" in item
+
+    with pytest.raises(ValueError):
+        anchor_danmaku_context_item(_danmaku())

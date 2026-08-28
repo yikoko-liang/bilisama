@@ -1371,8 +1371,8 @@ async def run_director(args: argparse.Namespace) -> int:
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
         presence=presence,
-        gift_gold_high=settings.interaction.gift_gold_high,
-        gift_gold_medium=settings.interaction.gift_gold_medium,
+        gift_battery_high=settings.interaction.gift_battery_high,
+        gift_battery_medium=settings.interaction.gift_battery_medium,
     )
 
     # Real danmaku, when a room is named (--room beats [room] room_id). The

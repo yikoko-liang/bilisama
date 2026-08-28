@@ -72,8 +72,8 @@ class Assembly:
         presence: PresenceWelcomer | None = None,
         # Defaults READ the schema rather than repeating its numbers: retuning
         # the tier ladder in one place must not leave shadow defaults behind.
-        gift_gold_high: int = _TIER_DEFAULTS.gift_gold_high,
-        gift_gold_medium: int = _TIER_DEFAULTS.gift_gold_medium,
+        gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
+        gift_battery_medium: int = _TIER_DEFAULTS.gift_battery_medium,
     ) -> None:
         self._store = store
         self._distiller = distiller
@@ -90,8 +90,8 @@ class Assembly:
         self._clock_granularity_min = clock_granularity_min
         self._selector = selector
         self._presence = presence
-        self._gift_gold_high = gift_gold_high
-        self._gift_gold_medium = gift_gold_medium
+        self._gift_battery_high = gift_battery_high
+        self._gift_battery_medium = gift_battery_medium
         # Anchors are read once: editing an anchor is a restart-level change
         # (ui_meta says so), and re-reading per push would let a mid-stream
         # edit shift the cached prefix under the provider.
@@ -178,8 +178,8 @@ class Assembly:
             now=now,
             max_tokens=self._max_tokens,
             protect_ms=self._protect_ms,
-            gift_gold_high=self._gift_gold_high,
-            gift_gold_medium=self._gift_gold_medium,
+            gift_battery_high=self._gift_battery_high,
+            gift_battery_medium=self._gift_battery_medium,
         )
         if intent is not None:
             self.intents_submitted += 1

@@ -149,8 +149,13 @@ def gift_event(
     coin_type: str = "gold",
     room_id: int = 777,
     event_id: str = "",
+    unit_battery: int | None = None,
 ) -> LiveEvent:
     viewer = Viewer(uid=uid, name=f"老板{uid}")
+    if unit_battery is None:
+        # Mirror source.py's mapping: wire price 100 == 1 battery, gold only.
+        # coin is the TOTAL, so divide by num first.
+        unit_battery = max(1, (coin // max(num, 1)) // 100) if coin_type == "gold" else 0
     return LiveEvent(
         kind=EventKind.GIFT,
         room_id=room_id,
@@ -161,6 +166,7 @@ def gift_event(
             num=num,
             coin_type=coin_type,
             total_coin=coin,
+            unit_battery=unit_battery,
             combo_id=f"{viewer.identity}:{gift_id}",
         ),
         value_cny=cny_from_gold(coin) if coin_type == "gold" else 0.0,

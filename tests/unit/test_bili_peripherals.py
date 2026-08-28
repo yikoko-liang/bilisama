@@ -83,7 +83,9 @@ async def test_five_entries_buy_one_welcome_at_default_switches(tmp_path: Path) 
         await assembly.on_event(_entry(uid))
     assert [i.source for i in intents] == ["entry"]
     assert intents[0].priority is Priority.DANMAKU, "a hello queues, it never preempts an answer"
-    assert "5 位" in (intents[0].injection.item_text or "")
+    item = intents[0].injection.item_text or ""
+    assert "新观众" in item
+    assert "5" not in item, "headcounts stay out: the number is stale the moment a sixth walks in"
 
 
 async def test_entry_off_silences_the_burst_for_observe_mode(tmp_path: Path) -> None:
@@ -132,13 +134,16 @@ def _gift_event(coins: int, *, coin_type: str = "gold") -> LiveEvent:
     return gift_event(coin=coins, coin_type=coin_type)
 
 
-def test_gift_tiers_follow_the_gold_thresholds() -> None:
-    high = intent_for(_gift_event(20000), now=0.0)
-    medium = intent_for(_gift_event(5000), now=0.0)
-    light = intent_for(_gift_event(500), now=0.0)
+def test_gift_tiers_follow_the_battery_thresholds() -> None:
+    """Tiers compare total batteries — the number the viewer sees — and no
+    tier is protected any more: streamer speech always lands, paid safety is
+    the requeue."""
+    high = intent_for(_gift_event(150_000), now=0.0)  # 1500 batteries
+    medium = intent_for(_gift_event(15_000), now=0.0)  # 150 batteries
+    light = intent_for(_gift_event(500), now=0.0)  # 5 batteries
     free = intent_for(_gift_event(990, coin_type="silver"), now=0.0)
     assert high is not None and medium is not None and light is not None and free is not None
-    assert high.priority is Priority.BIG_GIFT and high.injection.reply.protected
+    assert high.priority is Priority.BIG_GIFT and not high.injection.reply.protected
     assert high.requeue_on_interrupt
     assert medium.priority is Priority.VIP_ENTER, "medium rides the VIP rung"
     assert medium.requeue_on_interrupt and not medium.injection.reply.protected

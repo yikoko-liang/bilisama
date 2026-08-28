@@ -50,8 +50,43 @@ def _v1_rename_personas(raw: dict[str, Any]) -> dict[str, Any]:
     return {**raw, "persona": {**persona, "id": new}}
 
 
+# v2 -> v3: gift tiers moved from gold coins to the frontend battery unit
+# (100 gold == 1 battery), and the danmaku section lost its last field when
+# the 60s per-viewer cooldown was removed. The old gold DEFAULTS (10000/1000
+# gold = 100/10 batteries) are not converted — they were placeholders, and
+# carrying them over would silently set the new tiers an order of magnitude
+# below the shipped 1000/100. Only a value someone actually changed converts.
+_OLD_GOLD_DEFAULTS = {"gift_gold_high": 10000, "gift_gold_medium": 1000}
+
+
+def scrub_retired_interaction(raw: dict[str, Any]) -> dict[str, Any]:
+    """Convert or drop retired `[interaction]` keys wherever they appear.
+
+    Shared by the v2 migration step and by the loader's unconditional pass:
+    a v3 base file can still be layered with an older profile that carries
+    these keys, and `extra="forbid"` would refuse the merge outright.
+    """
+    interaction = raw.get("interaction")
+    if not isinstance(interaction, dict):
+        return raw
+    retired = ("gift_gold_high", "gift_gold_medium", "danmaku")
+    if not any(key in interaction for key in retired):
+        return raw
+    cleaned = dict(interaction)
+    for old_key, old_default in _OLD_GOLD_DEFAULTS.items():
+        gold = cleaned.pop(old_key, None)
+        if not isinstance(gold, int) or gold == old_default:
+            continue
+        new_key = old_key.replace("gold", "battery")
+        # A hand-tuned threshold keeps its meaning in the new unit; the
+        # explicit key wins over any battery value a later layer might merge.
+        cleaned.setdefault(new_key, max(1, gold // 100))
+    cleaned.pop("danmaku", None)
+    return {**raw, "interaction": cleaned}
+
+
 # from-version -> the step that produces from-version + 1.
-MIGRATIONS: dict[int, Step] = {1: _v1_rename_personas}
+MIGRATIONS: dict[int, Step] = {1: _v1_rename_personas, 2: scrub_retired_interaction}
 
 # What each step is worth saying out loud. A silent rewrite of somebody's
 # persona id is the kind of help that reads as a bug — and the half this
@@ -62,7 +97,14 @@ _NOTES: dict[int, str] = {
         "人设 mia 已改名 tofu（中文叫豆腐），配置里已经自动跟上。"
         "如果你攒过共同经历或口癖，它们还在数据目录的 personas/mia/ 下面，"
         "把那个目录改名成 personas/tofu/ 就能接着用。"
-    )
+    ),
+    2: (
+        "礼物分档从金瓜子换成了电池（100 金瓜子 = 1 电池），新键叫 "
+        "gift_battery_high / gift_battery_medium，默认 1000 / 100 电池。"
+        "你自己改过的旧金瓜子门槛已按汇率换算保留；没改过的直接用新默认。"
+        "另外同一观众的 60 秒回复冷却已经取消（追问会立刻参与挑选），"
+        "对应的 [interaction.danmaku] 一节不再需要。"
+    ),
 }
 
 

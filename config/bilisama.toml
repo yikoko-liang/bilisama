@@ -10,13 +10,14 @@
 #
 # config/s2s/bilisama-s2s.json 是从 [speech.s2s] 渲染出来的产物，不要手改。
 
-config_version = 2                       # v1→v2：随包人设 mia 改名成 tofu，旧配置会自动跟上
+config_version = 3                       # v2→v3：礼物分档改用电池、删掉单观众冷却；v1→v2：mia 改名 tofu。旧配置会自动跟上
 active_profile = "normal"
 
 [room]
 room_id = 0
 platform = "bilibili"
 credential_ref = "env:BILI_SESSDATA"       # 登录态 cookie 的引用；没设这个环境变量就匿名连（观众全打码）
+stream_intro = ""                           # 本场直播在做什么，一两句话；会进提示词，也参与弹幕相关性判断
 
 [speech]
 provider = "s2s"                        # s2s | dashscope | volcano | openai_ga
@@ -93,6 +94,9 @@ output_device = "auto"
 # 注意这两个字段目前运行期没有读者，真正决定声音去哪儿的是面板「声音」那一节。
 output_route = "direct"
 echo_guard = "duck"                     # 主播一开口先把 AI 音量压下去
+input_enabled = true                    # 语音输入开关；每次启动恢复 true，面板改动只管本场
+output_enabled = true                   # 语音播报开关；同上
+noise_sensitivity = 50                  # 0 更抗噪，100 更容易听见小声说话；本地门限，改了立即生效
 
 [safety]
 wordlist_path = "auto"
@@ -100,13 +104,14 @@ allowlist_path = "auto"
 on_hit = "drop_sentence"
 
 [interaction]
-chattiness = "medium"
-sc_protect_ms = 4000
-gift_gold_high = 10000
-gift_gold_medium = 1000
-burst_uniques = 5
+chattiness = "medium"                   # 说话频率的相对档位；实际节奏跟着房间活跃度动态走
+reply_length = "low"                    # 每句说多长，独立于说话频率；low 一句短话
+sc_protect_ms = 4000                    # 旧版兼容字段；主播现在始终可打断，付费事件靠重排队防丢
+gift_battery_high = 1000                # 高额礼物门槛，单位电池（观众礼物面板上的数，1 电池 = 0.1 元）
+gift_battery_medium = 100               # 中额礼物门槛，同上；不得高于高额门槛
+burst_uniques = 5                       # 以下三项仅兼容旧配置；动态进房合并不再读取
 burst_window_s = 45
-burst_cooldown_s = 90                   # 欢迎过一批后，多少秒内不再发第二次批量欢迎
+burst_cooldown_s = 90
 
 # 事件一律入库（记忆、字幕、事件流照常），这里只管说不说
 [interaction.speak]
@@ -115,15 +120,17 @@ gift = true
 super_chat = true
 guard_buy = true
 vip_enter = true
-entry = true                            # 管的是批量欢迎那一声；单人进房任何档位都不发声
+entry = true                            # 普通进房按房间活跃度短窗口合并欢迎；繁忙房间自动闭嘴
 follow = false
 like = false
 share = false
 proactive = true
 background_result = false               # MVP 默认关
 
-[interaction.danmaku]                   # 弹幕挑选（L3）。窗口长度和打分门槛由话痨度派生，不在这里
-per_uid_cooldown_s = 60                 # 回应过谁之后，多少秒内不再挑他的弹幕；他的话照常入库
+[interaction.entry_welcome]             # 进房欢迎按身份分组开关；speak 那边是总闸，这里是分闸
+ordinary = true                         # 普通观众（合并欢迎）
+naval = true                            # 现役舰队用户（按名欢迎）
+ranking = true                          # 本房 5 级以上粉丝牌（按名欢迎）
 
 [interaction.proactive]                 # 主动话题（L1）。开口时机由冷场阈值（话痨度派生）决定
 max_per_hour = 12

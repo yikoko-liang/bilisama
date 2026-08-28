@@ -192,7 +192,7 @@ def test_show_emits_json_a_browser_can_parse(
     assert code == 0
     payload = _strict_json(out)
     assert payload["speech"]["s2s"]["turn"]["max_speech_ms"] is None
-    assert payload["_derived"]["source"] == "interaction.chattiness"
+    assert payload["_derived"]["source"] == "interaction.chattiness、interaction.reply_length"
 
 
 def test_show_keeps_a_finite_limit_as_a_number(

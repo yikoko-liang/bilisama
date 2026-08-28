@@ -58,6 +58,8 @@ def _settings(
     volcano_model: str = "1.2.1.1",
     volcano_speaker: str = "",
     config_version: int = CURRENT_VERSION,
+    gift_battery_high: int = 1000,
+    gift_battery_medium: int = 100,
 ) -> Settings:
     """Shipped defaults with a model id, and one axis moved off it.
 
@@ -86,6 +88,10 @@ def _settings(
             "avatar": {"expression_source": expression_source},
             "audio": {"output_route": output_route, "echo_guard": echo_guard},
             "room": {"room_id": room_id, "credential_ref": credential_ref},
+            "interaction": {
+                "gift_battery_high": gift_battery_high,
+                "gift_battery_medium": gift_battery_medium,
+            },
             "persona": {"growth": {"voice": growth_voice}},
         }
     )
@@ -158,6 +164,11 @@ BROKEN_ONE_WAY_EACH = {
     "room.credential_ref": _Broken(_settings(room_id=12345, credential_ref="")),
     "speech.side.base_url": _Broken(_settings(growth_voice="collect", side_base_url="")),
     "config_version": _Broken(_settings(config_version=99)),
+    # Inverted tiers pass ge=1 alone; only the order rule catches the config
+    # in which the medium branch is unreachable.
+    "interaction.gift_battery_medium": _Broken(
+        _settings(gift_battery_high=100, gift_battery_medium=1000)
+    ),
     "safety.wordlist_path": _Broken(
         _settings(room_id=12345, credential_ref="env:BILI_SESSDATA"), _NO_CONFIG_DIR
     ),

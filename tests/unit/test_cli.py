@@ -147,7 +147,7 @@ def test_show_prints_the_config_that_actually_took_effect(
     # The field path, not the bare word: the settings page renders these five as
     # read-only rows and needs somewhere to send a click (config/ui_meta.py
     # DERIVED_META is where the answer now comes from).
-    assert payload["_derived"]["source"] == "interaction.chattiness"
+    assert payload["_derived"]["source"] == "interaction.chattiness、interaction.reply_length"
     derived = derive(Chattiness.HIGH).model_dump()
     for key, expected in derived.items():
         assert payload["_derived"][key] == expected

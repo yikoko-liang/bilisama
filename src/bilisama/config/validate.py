@@ -137,6 +137,23 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     """
     problems: list[ConfigProblem] = []
 
+    # Both bounds pass ge=1 alone; only their ORDER makes the tiers mean
+    # anything. Inverted, every gift takes the >= high branch first and the
+    # medium tier is unreachable — no error, just thank-yous one register too
+    # grand. Fatal: a panel edit that would do this must be refused, not saved.
+    if s.interaction.gift_battery_medium > s.interaction.gift_battery_high:
+        problems.append(
+            ConfigProblem(
+                field="interaction.gift_battery_medium",
+                message=(
+                    f"中额礼物门槛（{s.interaction.gift_battery_medium} 电池）高于高额门槛"
+                    f"（{s.interaction.gift_battery_high} 电池），中额档永远轮不到。"
+                ),
+                fix="把中额门槛改到不超过高额门槛，或者把高额门槛改上去。",
+                fatal=True,
+            )
+        )
+
     # A file a NEWER build wrote. Migrations only run forwards (migrate.py), so
     # there is nothing to bring this one back with, and reading it anyway means
     # honouring values whose meaning may have changed under the same name.

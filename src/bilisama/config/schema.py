@@ -18,7 +18,7 @@ from bilisama.config.enums import Chattiness, GrowthMode, ProviderName
 # The config shape this build reads. It lives here rather than in `migrate`
 # because both of that module's neighbours need it and neither may import it:
 # `validate` refuses a file from the future, `migrate` walks an old one forward.
-CURRENT_VERSION: Final[int] = 2
+CURRENT_VERSION: Final[int] = 3
 
 
 class TurnConfig(BaseModel):
@@ -234,6 +234,14 @@ class AudioConfig(BaseModel):
     # subtracts what the shell itself played.
     output_route: Literal["virtual", "direct"] = Field("direct")
     echo_guard: Literal["duck", "off"] = Field("duck")
+    # The pause-adjacent session switches: both reset to True on every
+    # director start (session state, not a durable preference).
+    input_enabled: bool = Field(True)
+    output_enabled: bool = Field(True)
+    # 0 favours noise rejection; 100 admits quieter speech. A local PCM gate
+    # on the uplink, because smart_turn takes no server-VAD threshold and
+    # the hosted endpoints' own knobs cannot see the streamer's room.
+    noise_sensitivity: int = Field(50, ge=0, le=100)
 
 
 class SafetyConfig(BaseModel):
@@ -278,30 +286,43 @@ class ProactiveConfig(BaseModel):
     wake_interval_s: int = Field(30, ge=5, le=300)
 
 
-class DanmakuConfig(BaseModel):
-    """Danmaku-lane knobs. Window length and score threshold are derived from
-    chattiness (derive.py) — single-writer rule — so only the per-viewer
-    cooldown lives here."""
+class EntryWelcomeConfig(BaseModel):
+    """Which entry groups may receive a welcome.
+
+    ordinary is the coalesced hello for plain arrivals; naval covers current
+    fleet members (guard level off the wire); ranking covers the level-5+
+    current-room medal wearers. All three sit under speak.entry / speak.
+    vip_enter — those switches silence the lane, these choose within it.
+    """
 
     model_config = {"extra": "forbid"}
 
-    # Seconds before the same viewer can win the danmaku window again. Armed
-    # by the reply, not the attempt (safety.PerUidCooldown).
-    per_uid_cooldown_s: int = Field(60, ge=0, le=600)
+    ordinary: bool = True
+    naval: bool = True
+    ranking: bool = True
 
 
 class InteractionConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     chattiness: Chattiness = Field(Chattiness.MEDIUM)
+    # Reply length rides its own slider instead of shadowing chattiness:
+    # how OFTEN she speaks and how LONG she speaks are different worries.
+    # Reuses the three-level enum; the token caps live in derive.py.
+    reply_length: Chattiness = Field(Chattiness.LOW)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
     sc_protect_ms: int = Field(4000, ge=0, le=15000)
-    gift_gold_high: int = Field(10000, ge=0)
-    gift_gold_medium: int = Field(1000, ge=0)
+    # Tiers in the frontend battery unit — the number a viewer actually sees
+    # on the gift panel (wire price 100 == 1 battery == CNY 0.1). validate.py
+    # holds medium <= high.
+    gift_battery_high: int = Field(1000, ge=1)
+    gift_battery_medium: int = Field(100, ge=1)
+    # Legacy PresenceWelcomer knobs. The dynamic entry coalescing (event
+    # pacer) has taken over; these stay so older profiles keep loading.
     burst_uniques: int = Field(5, ge=1)
     burst_window_s: int = Field(45, ge=5)
     burst_cooldown_s: int = Field(90, ge=0)
-    danmaku: DanmakuConfig = Field(default_factory=DanmakuConfig)
+    entry_welcome: EntryWelcomeConfig = Field(default_factory=EntryWelcomeConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
 
 
@@ -330,6 +351,11 @@ class RoomConfig(BaseModel):
     room_id: int = Field(0, ge=0)
     platform: Literal["bilibili"] = Field("bilibili")
     credential_ref: str = Field("")
+    # A short, streamer-authored description of the current show. It joins
+    # the pushed context (its own 直播简介 section) and feeds the danmaku
+    # relevance check, so welcomes and replies can reference what is
+    # happening without guessing from a room title or screen content.
+    stream_intro: str = Field("", max_length=500)
 
 
 class GrowthSwitches(BaseModel):
