@@ -1,4 +1,4 @@
-# UPSTREAM: xfgryujk/blivedm @ 0da0c10fc50ed0ccd3e68c65f6a503cf3ca4198b (dev branch, vendored 2026-08-13, unmodified)
+# UPSTREAM: xfgryujk/blivedm @ 0da0c10fc50ed0ccd3e68c65f6a503cf3ca4198b (dev branch, vendored 2026-08-13; local INTERACT_WORD_V2 identity fields)
 # -*- coding: utf-8 -*-
 import base64
 import dataclasses
@@ -606,14 +606,27 @@ class InteractWordV2Message:
     """时间戳"""
     msg_type: int = 0
     """`{1: '进入', 2: '关注了', 3: '分享了', 4: '特别关注了', 5: '互粉了', 6: '为主播点赞了'}`"""
+    guard_level: int = 0
+    """舰队等级，0非舰队，1总督，2提督，3舰长（本地扩展，见 VENDOR.md）"""
+    medal_level: int = 0
+    """当前佩戴粉丝牌等级（本地扩展）"""
+    medal_name: str = ''
+    """当前佩戴粉丝牌名称（本地扩展）"""
+    medal_room_id: int = 0
+    """粉丝牌所属直播间（本地扩展）"""
 
     @classmethod
     def from_command(cls, data: dict):
         proto = pb.InteractWordV2.loads(base64.b64decode(data['pb']))
+        fans_medal = proto.fans_medal
         return cls(
             uid=proto.uid,
             username=proto.uname,
             face=proto.uinfo.base.face,
             timestamp=proto.timestamp,
             msg_type=proto.msg_type,
+            guard_level=fans_medal.guard_level,
+            medal_level=fans_medal.medal_level,
+            medal_name=fans_medal.medal_name,
+            medal_room_id=fans_medal.anchor_roomid,
         )

@@ -31,7 +31,7 @@ class EventKind(StrEnum):
     GIFT = "gift"
     SUPER_CHAT = "super_chat"
     GUARD_BUY = "guard_buy"
-    VIP_ENTER = "vip_enter"  # member, top-spender or past gifter walking in
+    VIP_ENTER = "vip_enter"  # current guard or level-5+ current-room medal walking in
     ENTRY = "entry"  # ordinary arrival, high volume
     FOLLOW = "follow"
     LIKE = "like"
@@ -104,6 +104,10 @@ class Viewer:
     wealth_level: int = 0  # NO CONSUMER YET; DANMU_MSG fills it, nothing reads it
     guard_level: GuardLevel = GuardLevel.NONE
     is_admin: bool = False
+    # Set by the bilibili source when the sender is the room's own streamer
+    # (uid matches room_owner_uid from the handshake). The assembly reads it to
+    # turn the streamer's own danmaku into shared context instead of a reply.
+    is_anchor: bool = False
     medal: Medal | None = None
 
     @property
@@ -133,6 +137,9 @@ class Gift:
     num: int = 1
     coin_type: str = ""  # gold | silver | ""; only gold is real money
     total_coin: int = 0  # 1000 gold == CNY 1
+    # The per-unit value a viewer actually sees in the gift panel: wire price
+    # 100 == 1 battery == CNY 0.1. Product tiers speak battery, not gold.
+    unit_battery: int = 0
     combo_id: str = ""
     # NO WIRE WRITER, NO CONSUMER. The platform's own combo signals: only the
     # replay fixtures fill them (tests/fakes/replay.py), because a fixture
@@ -151,7 +158,13 @@ class Gift:
         """NO CONSUMER YET — mind the near-namesake. What routes an event into
         the paid lane is LiveEvent.is_paid (source.py's offer), which reads
         value_cny. This one answers the same question from the gift block."""
-        return self.coin_type == "gold" and self.total_coin > 0
+        return self.total_battery > 0 or (self.coin_type == "gold" and self.total_coin > 0)
+
+    @property
+    def total_battery(self) -> int:
+        """The whole gift's frontend value, the number tiering compares against
+        gift_battery_high/medium. Combos multiply it via num."""
+        return self.unit_battery * self.num
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,19 +250,25 @@ def cny_from_gold(total_coin: int) -> float:
     return total_coin / 1000.0
 
 
-def is_vip_entry(viewer: Viewer, *, lifetime_gift_cny: float = 0.0) -> bool:
+def is_vip_entry(viewer: Viewer, *, room_id: int = 0, lifetime_gift_cny: float = 0.0) -> bool:
     """Whether this arrival deserves a greeting by name.
 
-    Members and anyone who has spent money before go into the paid lane; ordinary
-    arrivals are high-volume and stay silent by default, surfacing only in the
-    batched welcome.
+    Current guards and viewers wearing a level-5-or-higher medal FOR THIS ROOM
+    go into the named welcome lane — both read straight off the wire, so a
+    first-time captain is greeted this stream, not next. lifetime_gift_cny is
+    the legacy store-backed lane; production stopped paying a store read per
+    arrival for it, but the condition stays so a caller that already holds the
+    number can still use it.
 
     Args:
         viewer: The person who just walked in.
-        lifetime_gift_cny: What they have spent across all past streams, looked up
-            from memory.
+        room_id: The active room, used to reject medals worn for another room.
+        lifetime_gift_cny: What they have spent across all past streams, if the
+            caller looked it up; 0 skips the lane.
 
     Returns:
         True when they are worth greeting individually.
     """
-    return viewer.guard_level.is_patron or lifetime_gift_cny > 0
+    medal = viewer.medal
+    high_local_medal = medal is not None and medal.level >= 5 and medal.is_this_room(room_id)
+    return viewer.guard_level.is_patron or high_local_medal or lifetime_gift_cny > 0

@@ -193,12 +193,16 @@ class Assembly:
             self._direct_ring.mark(event.dedup_key, now)
 
     def _promote_entry(self, event: LiveEvent) -> LiveEvent:
-        """ENTRY → VIP_ENTER when memory knows this person spent money.
+        """ENTRY → VIP_ENTER for current guards and high local-medal wearers.
 
-        The wire model carries no guard level on InteractWordV2 (VENDOR.md),
-        so the promotion is store-based: past gifts or a recorded guard tier
-        earn a greeting by name.
+        The wire identity comes first and costs nothing: the locally extended
+        InteractWordV2 model (VENDOR.md) now carries guard level and fan
+        medal, so a first-time captain is greeted THIS stream. The store
+        lookup below is the legacy past-spender lane and still pays a read
+        per unseen arrival.
         """
+        if is_vip_entry(event.viewer, room_id=event.room_id):
+            return dataclasses.replace(event, kind=EventKind.VIP_ENTER)
         identity = event.viewer.identity
         if identity == "anon":
             return event  # masked arrivals carry no lookupable history

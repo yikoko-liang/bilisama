@@ -32,6 +32,7 @@ rather than trusting the presence of a credential string.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import http.cookies
 from collections import deque
 from collections.abc import Callable
@@ -184,6 +185,14 @@ def event_from_gift(message: Any, *, room_id: int, recv_at: float, generation: i
         num=message.num,
         coin_type=message.coin_type,
         total_coin=message.total_coin,
+        # Wire price 100 == 1 battery. blind_price first: a blind-box gift's
+        # `price` is the box, but the viewer (and the thank-you tier) sees what
+        # came out of it. Free gifts are silver/empty coin_type and stay 0.
+        unit_battery=(
+            max(1, int(message.blind_price or message.price) // 100)
+            if message.coin_type == "gold"
+            else 0
+        ),
         combo_id=f"{viewer.identity}:{message.gift_id}",
     )
     value = cny_from_gold(message.total_coin) if message.coin_type == "gold" else 0.0
@@ -323,14 +332,21 @@ def event_from_interact(
 ) -> LiveEvent | None:
     """INTERACT_WORD_V2 → ENTRY / FOLLOW / SHARE / LIKE by msg_type.
 
-    The simplified upstream model carries no guard level, so promoting a
-    captain's arrival to VIP_ENTER is not decidable here — that upgrade reads
-    the store and lives at assembly level (stage-6 periphery batch).
+    The locally extended vendor model (VENDOR.md "Local protocol extension")
+    carries the arrival's current guard and fan-medal identity, so the
+    assembly can classify a VIP arrival off the wire instead of consulting
+    spend history.
     """
     kind = _INTERACT_KIND.get(message.msg_type)
     if kind is None:
         return None
-    viewer = Viewer(uid=message.uid, name=message.username, face_url=message.face)
+    viewer = Viewer(
+        uid=message.uid,
+        name=message.username,
+        face_url=message.face,
+        guard_level=GuardLevel.from_wire(message.guard_level),
+        medal=_medal(message.medal_name, message.medal_level, "", message.medal_room_id),
+    )
     return LiveEvent(
         kind=kind,
         room_id=room_id,
@@ -495,11 +511,16 @@ class BilibiliEventSource:
         self._connection_uid = 0
         self._credential_checked = False
         self._vendor_drift = ""
+        # The room owner's uid from the same handshake. 0 means unknown, and
+        # unknown means no danmaku gets the anchor mark — misattributing a
+        # viewer's question to the streamer is worse than missing the mark.
+        self._room_owner_uid = 0
         self._popularity = 0
         self._counts: dict[str, int] = {}
         self._dropped = 0
         self._errors = 0
         self._danmaku_anonymous = 0
+        self._anchor_danmaku_marked = 0
         self._on_sc_delete = on_sc_delete
         self._parse_windows: dict[str, list[float]] = {}
         self._shed: dict[str, int] = {}
@@ -521,6 +542,7 @@ class BilibiliEventSource:
         self._connection_uid = 0
         self._credential_checked = False
         self._vendor_drift = ""
+        self._room_owner_uid = 0
         # Fresh failure book per supervised run: without this, a tripped
         # breaker would re-raise instantly on every restart and burn the
         # supervisor's budget without giving the new connection a chance.
@@ -571,11 +593,13 @@ class BilibiliEventSource:
             self._connection_uid = _resolved_uid(client)
             self._credential_checked = True
             self._real_room_id = int(getattr(client, "room_id", 0) or 0)
+            self._room_owner_uid = int(getattr(client, "room_owner_uid", 0) or 0)
             self._connected = True
             log.info(
                 "bilibili.connected",
                 room_id=self._real_room_id,
                 logged_in=self._connection_uid > 0,
+                owner_uid_known=self._room_owner_uid > 0,
             )
             if self.credential_stale:
                 # The one moment the truth is knowable. Nothing downstream can
@@ -645,6 +669,19 @@ class BilibiliEventSource:
     def offer(self, event: LiveEvent | None) -> None:
         if event is None:
             return
+        if (
+            event.kind is EventKind.DANMAKU
+            and self._room_owner_uid > 0
+            and event.viewer.uid == self._room_owner_uid
+        ):
+            # The streamer typing in their own room. Marked, not dropped: the
+            # assembly turns it into shared context instead of a reply, and
+            # dropping it here would also hide it from memory and the panel.
+            self._anchor_danmaku_marked += 1
+            event = dataclasses.replace(
+                event,
+                viewer=dataclasses.replace(event.viewer, is_anchor=True),
+            )
         if event.kind is EventKind.GUARD_BUY and self._merged_guard(event):
             return
         self._counts[event.kind.value] = self._counts.get(event.kind.value, 0) + 1
@@ -789,6 +826,8 @@ class BilibiliEventSource:
             # already makes wrongly. This one is the platform's answer.
             "logged_in": self.logged_in,
             "credential_stale": self.credential_stale,
+            "owner_uid_known": self._room_owner_uid > 0,
+            "anchor_danmaku_marked": self._anchor_danmaku_marked,
             "vendor_drift": self._vendor_drift,
             "popularity": self._popularity,
             "counts": dict(self._counts),

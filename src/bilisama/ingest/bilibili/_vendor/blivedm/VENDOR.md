@@ -3,7 +3,7 @@
 - Upstream: https://github.com/xfgryujk/blivedm
 - Branch: dev (the default branch; master is the stale release branch)
 - Commit: `0da0c10fc50ed0ccd3e68c65f6a503cf3ca4198b` — 2026-08-12, "开放平台接口修复礼物解析错误"
-- Vendored: 2026-08-13, unmodified except a one-line `# UPSTREAM:` header per file
+- Vendored: 2026-08-13; local `INTERACT_WORD_V2` identity extension added 2026-08-28
 - License: MIT (see LICENSE beside this file, kept verbatim)
 
 ## Why vendored instead of a git dependency
@@ -32,6 +32,16 @@ unrelated, wrong package (upstream README warns about this).
 - WBI signing uses `urllib.parse.urlencode` (hand-rolled), not yarl query
   encoding — insensitive to yarl version drift. yarl is only used for
   `cookie_jar.filter_cookies(yarl.URL(...))`.
+
+## Local protocol extension (2026-08-28)
+
+Live captures show `INTERACT_WORD_V2` root field 9 carries the active fan
+medal: fields 2/3 are level/name, field 9 is guard level and field 12 is the
+anchor room id. `models/pb.py` and `models/web.py` expose those four values so
+the product can classify current-room VIP arrivals without consulting spend
+history. `tests/unit/test_bili_translate.py` round-trips the exact protobuf
+shape. Re-vendoring must re-apply this block (or adopt upstream's own model if
+it has grown one by then).
 
 ## How to re-vendor (quarterly discipline, plan §5.1)
 

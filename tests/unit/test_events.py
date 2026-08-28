@@ -13,6 +13,7 @@ from bilisama.ingest.events import (
     Gift,
     GuardLevel,
     LiveEvent,
+    Medal,
     Viewer,
     cny_from_gold,
     is_vip_entry,
@@ -190,8 +191,27 @@ def test_guard_makes_a_vip_entry() -> None:
 
 
 def test_past_spending_makes_a_vip_entry() -> None:
-    """Past spenders deserve a greeting too, not just current members."""
+    """The legacy store-backed lane still counts when a caller supplies it."""
     assert is_vip_entry(Viewer(uid=1), lifetime_gift_cny=30.0)
+
+
+def test_current_room_medal_level_five_makes_a_vip_entry() -> None:
+    """Wire identity, no store: a level-5+ medal FOR THIS ROOM earns a name."""
+    viewer = Viewer(uid=1, medal=Medal(name="豆腐", level=5, anchor_room_id=777))
+    assert is_vip_entry(viewer, room_id=777)
+
+
+def test_other_room_or_low_level_medal_does_not_make_a_vip_entry() -> None:
+    other_room = Viewer(uid=1, medal=Medal(name="别家", level=21, anchor_room_id=888))
+    low_level = Viewer(uid=2, medal=Medal(name="豆腐", level=4, anchor_room_id=777))
+    assert not is_vip_entry(other_room, room_id=777)
+    assert not is_vip_entry(low_level, room_id=777)
+
+
+def test_gift_total_battery_is_unit_price_times_quantity() -> None:
+    gift = Gift(name="小花花", num=120, unit_battery=1)
+    assert gift.total_battery == 120
+    assert gift.is_paid, "battery value alone marks a gift as paid"
 
 
 def test_guard_level_from_wire() -> None:

@@ -118,11 +118,14 @@ def test_masked_danmaku_keeps_the_event_and_falls_back_to_the_hash() -> None:
     assert event.viewer.medal is None
 
 
-def test_gold_gift_derives_cny_and_merges_on_tid() -> None:
+def test_gold_gift_derives_cny_battery_and_merges_on_tid() -> None:
     message = web_models.GiftMessage.from_command(_gift_data())
     event = event_from_gift(message, **_KW)
     assert event.kind is EventKind.GIFT
     assert event.value_cny == 26.0, "1000 gold == 1 CNY, from total_coin"
+    assert event.gift is not None
+    assert event.gift.unit_battery == 52, "wire price=5200 is 52 batteries"
+    assert event.gift.total_battery == 260
     assert event.event_id == "gift:tid-777", "tid is the V1/V2 merge key"
     assert event.ts_ms == 1755000123000, "gift timestamps are seconds, scaled to ms"
     assert event.gift is not None
@@ -147,6 +150,34 @@ def test_the_wire_never_fills_the_platform_combo_fields() -> None:
         assert gift is not None
         assert gift.combo_count == 0
         assert gift.combo_end is None
+
+
+def test_blind_box_uses_original_box_battery_price() -> None:
+    message = web_models.GiftMessage.from_command(
+        _gift_data(
+            price=19900,
+            total_coin=1000,
+            blind_gift={"original_gift_name": "心动盲盒", "original_gift_price": 100},
+        )
+    )
+    event = event_from_gift(message, **_KW)
+    assert event.gift is not None
+    assert event.gift.unit_battery == 1, "盲盒按购买价，不按开出的礼物标价"
+
+
+@pytest.mark.parametrize(
+    ("gift_name", "wire_price", "batteries"),
+    [("小花花", 100, 1), ("打Call", 200, 2), ("情书", 5200, 52)],
+)
+def test_wire_gift_price_matches_frontend_battery_table(
+    gift_name: str, wire_price: int, batteries: int
+) -> None:
+    message = web_models.GiftMessage.from_command(
+        _gift_data(giftName=gift_name, price=wire_price, num=1, total_coin=wire_price)
+    )
+    event = event_from_gift(message, **_KW)
+    assert event.gift is not None
+    assert event.gift.unit_battery == batteries
 
 
 def test_silver_gift_is_worth_nothing_and_not_paid() -> None:
@@ -218,6 +249,29 @@ def test_upstream_still_names_only_the_three_verified_msg_types() -> None:
     assert named == {0: "Unknown", 1: "EnterRoom", 2: "Follow", 3: "ShareRoom"}
 
 
+def test_interact_word_v2_maps_guard_and_current_room_medal() -> None:
+    """The local vendor extension (VENDOR.md): root field 9 is the fan medal."""
+    raw = pb.InteractWordV2(
+        uid=66,
+        uname="老观众",
+        msg_type=1,
+        timestamp=1755000400,
+        fans_medal=pb.InteractWordV2FansMedalInfo(
+            medal_name="豆腐",
+            medal_level=8,
+            anchor_roomid=777,
+            guard_level=3,
+        ),
+    ).dumps()
+    message = web_models.InteractWordV2Message.from_command({"pb": base64.b64encode(raw).decode()})
+    event = event_from_interact(message, **_KW)
+    assert event is not None
+    assert event.viewer.guard_level is GuardLevel.CAPTAIN
+    assert event.viewer.medal is not None
+    assert event.viewer.medal.level == 8
+    assert event.viewer.medal.is_this_room(777)
+
+
 def test_interact_word_v2_splits_by_msg_type_through_real_protobuf() -> None:
     cases = {
         1: EventKind.ENTRY,
@@ -239,6 +293,57 @@ def test_interact_word_v2_splits_by_msg_type_through_real_protobuf() -> None:
 def _source() -> tuple[BilibiliEventSource, FakeClock]:
     clock = FakeClock(wall=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
     return BilibiliEventSource(777, clock, queue_size=4), clock
+
+
+def test_anchor_danmaku_is_marked_and_kept_for_observation() -> None:
+    """The streamer typing in their own room is context, not a viewer question
+    — but dropping it would also hide it from memory and the panel, so the
+    event flows on with is_anchor set and the assembly decides."""
+    source, _clock = _source()
+    source._room_owner_uid = 42
+    danmaku = event_from_danmaku(
+        web_models.DanmakuMessage.from_command(_danmu_info(uid=42, uname="主播本人")), **_KW
+    )
+
+    source.offer(danmaku)
+
+    status = source.status()
+    adopted = source._queue.get_nowait()
+    assert adopted is not None and adopted.viewer.is_anchor
+    assert status["counts"] == {"danmaku": 1}
+    assert status["anchor_danmaku_marked"] == 1
+
+
+def test_masked_danmaku_is_never_mistaken_for_the_anchor() -> None:
+    """uid=0 is masking, not the owner; and an unknown owner marks nobody."""
+    source, _clock = _source()
+    source._room_owner_uid = 42
+    danmaku = event_from_danmaku(
+        web_models.DanmakuMessage.from_command(
+            _danmu_info(uid=0, uname="Y**", crc="deadbeef", medal=False, privilege=0, admin=0)
+        ),
+        **_KW,
+    )
+
+    source.offer(danmaku)
+
+    assert source._queue.qsize() == 1
+    queued = source._queue.get_nowait()
+    assert queued is not None and not queued.viewer.is_anchor
+    assert source.status()["anchor_danmaku_marked"] == 0
+
+
+def test_anchor_gift_is_not_filtered_with_anchor_danmaku() -> None:
+    """Only danmaku carries the mark: a streamer testing a gift in their own
+    room is still a paid event and still deserves the paid lane."""
+    source, _clock = _source()
+    source._room_owner_uid = 9
+    gift = event_from_gift(web_models.GiftMessage.from_command(_gift_data(uid=9)), **_KW)
+
+    source.offer(gift)
+
+    assert list(source._paid) == [gift]
+    assert source.status()["counts"] == {"gift": 1}
 
 
 def test_paid_events_take_the_side_pocket_and_drain_first() -> None:
