@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
@@ -67,6 +68,9 @@ _SPEECH_EDGE_GRACE_S = 0.3
 # carry no expires_at of their own (intents.py:160, deliberately: paid work
 # must not go stale in the queue), so the first failure gives them one.
 _DISPATCH_RETRY_WINDOW_S = 6.0
+# How many dispatched replies the handle->intent reverse index remembers for
+# the panel. Well past anything in flight; eviction is dispatch order.
+_REPLY_INTENTS_CAP = 128
 # And the attempts inside that window are spaced. A failed send means the
 # socket is sick, and redispatching into it as fast as the loop allows is not
 # a retry, it is a spin: probed 2026-08-25 at roughly 65000 attempts a second
@@ -110,6 +114,11 @@ class _Active:
     # A PlaybackClear already went out for this reply; the late done(cancelled)
     # must not send a second one under a made-up reason (A10).
     cleared: bool = False
+    # The first audio or non-empty text delta flips this. From then on a
+    # higher-priority live event QUEUES instead of preempting: cutting a
+    # sentence the room already hears mid-word is worse than any priority
+    # gap. The streamer's own barge-in and panic are separate hard paths.
+    output_started: bool = False
 
 
 @dataclass(slots=True)
@@ -189,8 +198,32 @@ class Scheduler:
         self._wake = asyncio.Event()
         self.controls: asyncio.Queue[PlaybackClear] = asyncio.Queue()
         self._tasks: set[asyncio.Task[None]] = set()
+        # handle_id -> the Intent whose reply it is; see _dispatch.
+        self._reply_intents: OrderedDict[int, Intent] = OrderedDict()
 
     # ------------------------------------------------------------ intake
+
+    def reply_intent(self, handle_id: int) -> Intent | None:
+        """The intent behind one reply handle, for the UI's reference blocks.
+
+        None for the provider's implicit microphone turns — those have no
+        intent, which is itself the answer (source "voice").
+        """
+        return self._reply_intents.get(handle_id)
+
+    def set_cooldown(self, seconds: float) -> None:
+        """Retune the post-reply cooldown live. 0 disables it — the event
+        pacer's budget owns ordinary-speech rate then."""
+        self._cooldown_s = max(0.0, seconds)
+        self._wake.set()
+
+    async def _write_history(self, text: str) -> None:
+        try:
+            await self._speech.add_context_item(text, role="assistant")
+        except Exception as exc:
+            # A clean spoken reply must not be re-booked as a failure because
+            # the history write missed; she just may repeat herself sooner.
+            log.warning("scheduler.history_write_failed", error_text=str(exc)[:200])
 
     def submit(self, intent: Intent) -> None:
         """Queue an intent. Duplicates (same dedup_key while queued or active)
@@ -414,6 +447,8 @@ class Scheduler:
             # in the rule-5 shared-response-id trap (A2).
             if self._active is None or event.handle is not self._active.handle:
                 self._floor.on_implicit(True)
+        elif isinstance(event, link.ReplyAudioDelta):
+            self._mark_output_started(event.handle)
         elif isinstance(event, link.ReplyTextDelta):
             self._on_delta(event)
         elif isinstance(event, link.ReplyDone):
@@ -588,6 +623,14 @@ class Scheduler:
             active.protected_until = self._clock.monotonic() + reply.protect_ms / 1000.0
             self._spawn(self._protection_cap(active), name="scheduler:protect-cap")
         self._active = active
+        # The UI's reverse index: reply.delta frames only carry the handle,
+        # and the fanout consumer reads them AFTER this slot may already be
+        # cleared — the map is what lets the panel say which danmaku a reply
+        # answered. Bounded; eviction order is insertion, which is dispatch
+        # order.
+        self._reply_intents[handle.handle_id] = intent
+        while len(self._reply_intents) > _REPLY_INTENTS_CAP:
+            self._reply_intents.popitem(last=False)
         self._floor.on_reply_active(True)
         if self._guard is not None:
             self._guard.reset()
@@ -631,10 +674,17 @@ class Scheduler:
 
     # ------------------------------------------------------------ events
 
+    def _mark_output_started(self, handle: link.ReplyHandle) -> None:
+        active = self._active
+        if active is not None and handle is active.handle:
+            active.output_started = True
+
     def _on_delta(self, event: link.ReplyTextDelta) -> None:
         active = self._active
         if active is None or event.handle is not active.handle:
             return
+        if event.text:
+            active.output_started = True
         if self._guard is None:
             return
         word = self._guard.hit(event.text)
@@ -657,6 +707,13 @@ class Scheduler:
         if event.status is link.ReplyStatus.COMPLETED:
             if self._spoken_sink is not None and event.text:
                 self._spoken_sink(event.text)
+            if active.intent.injection.reply.write_history and event.text:
+                # Out-of-band replies never enter the provider's own history,
+                # so without this she cannot remember what she just said — the
+                # root of every "same opening three welcomes in a row".
+                # Spawned like every other send here (the event loop must not
+                # stall), and a failure is one warning, not a dead loop.
+                self._spawn(self._write_history(event.text), name="scheduler:write-history")
             self._settle_active(Outcome.SPOKEN, Phase.GENERATING)
             if self._cooldown_s > 0:
                 self._floor.start_cooldown(self._cooldown_s)
@@ -815,6 +872,11 @@ class Scheduler:
     def _maybe_preempt(self, incoming: Intent) -> None:
         active = self._active
         if active is None:
+            return
+        if active.output_started:
+            # The room already hears this sentence: live events queue behind
+            # it no matter how they rank. Only the streamer's barge-in and
+            # panic — the hard paths — may still cut it.
             return
         if int(incoming.priority) <= int(active.intent.priority):
             return

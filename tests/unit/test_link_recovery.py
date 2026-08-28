@@ -727,3 +727,75 @@ async def test_stale_audio_is_dropped_where_it_is_played() -> None:
     stale_handle = link.ReplyHandle(stale=True)
     stale = link.ReplyAudioDelta(handle=stale_handle, pcm=b"\x03\x04")
     assert stale.handle.stale, "作废标记就在事件上，播放侧没有理由看不见"
+
+
+# ------------------------------------------------------------ pause (suspend/resume)
+
+
+async def test_suspend_holds_the_transport_and_resume_restores_the_session() -> None:
+    """The pause gate's link half on the hosted path: no reconnect climbs
+    while suspended, and resume replays bootstrap plus persona — a resumed
+    session behaves like a reconnected one because it is one."""
+    clock = FakeClock()
+    async with MockRealtimeServer(
+        caps=caps_mod.DASHSCOPE, codec=dia.BETA, script=Script(delta_chunks=1)
+    ) as server:
+        hosted = HostedLink(
+            server.url,
+            ProviderName.DASHSCOPE,
+            clock=clock,
+            turn=HostedTurnConfig(),
+            auto_reconnect=True,
+        )
+        await hosted.connect()
+        try:
+            await hosted.set_context("你是豆腐。")
+            # The send returns once the frame is on the socket; wait for the
+            # server to have READ both (bootstrap + persona) before counting.
+            for _ in range(50):
+                if server.recorded.count("session.update") >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            before = server.recorded.count("session.update")
+
+            await hosted.suspend()
+            await clock.advance(181.0)  # far past every backoff: nothing may climb
+            between = server.recorded.count("session.update")
+            assert between == before, "a suspended link must not talk"
+
+            await hosted.resume()
+            for _ in range(50):
+                if server.recorded.count("session.update") >= before + 2:
+                    break
+                await asyncio.sleep(0.01)
+            after = server.recorded.count("session.update")
+            assert after >= before + 2, "resume must restore bootstrap and persona"
+
+            # And it can speak again on the same event stream.
+            events = hosted.events()
+            await hosted.request_reply(link.ReplySpec(instructions="再说一句"))
+            done = await _next_event(events, link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.COMPLETED
+        finally:
+            await hosted.aclose()
+
+
+async def test_s2s_suspend_resume_replays_context_and_any_owed_rearm() -> None:
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script(delta_chunks=1)) as server:
+        s2s = S2SLink(server.url)
+        await s2s.connect()
+        try:
+            await s2s.set_context("你是豆腐。")
+            before = server.recorded.count("session.update")
+            await s2s.suspend()
+            await s2s.resume()
+            for _ in range(50):
+                if server.recorded.count("session.update") > before:
+                    break
+                await asyncio.sleep(0.01)
+            assert server.recorded.count("session.update") > before, "the persona came back"
+        finally:
+            await s2s.aclose()

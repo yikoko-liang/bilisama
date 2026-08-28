@@ -1329,3 +1329,111 @@ async def test_the_name_survives_the_channel_production_actually_uses() -> None:
             assert dialog["system_role"].startswith("我叫豆腐")
         finally:
             await volcano.aclose()
+
+
+# ------------------------------------------------------------ pause (suspend/resume)
+
+
+async def test_suspend_parks_the_link_and_resume_carries_the_dialogue_back() -> None:
+    """The pause gate on this adapter cannot use aclose (its _closing is
+    permanent), so suspend is the same teardown minus the finality — and
+    resume's StartSession carries the surviving dialog_id, the same
+    continuation the reconnect ladder performs."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server, clock=clock, reconnect_backoff_s=1.0)
+        try:
+            await volcano.suspend()
+            # Locals, not attribute asserts: mypy narrows the attribute to a
+            # literal and calls the rest of the test unreachable.
+            paused = volcano._suspended
+            assert paused
+            # A dead socket while suspended must not be reported or retried.
+            await clock.advance(30.0)
+            assert volcano._reconnect_task is None
+
+            await volcano.resume()
+            await server.wait_ready()
+            resumed = volcano._suspended
+            assert not resumed
+            assert server.resumed_with == [
+                server.dialog_id
+            ], f"恢复没带 dialog_id，暂停一次她就失忆：{server.resumed_with}"
+        finally:
+            await volcano.aclose()
+
+
+async def test_uplink_during_suspend_is_dropped_at_the_counter_not_raised() -> None:
+    """The microphone pump keeps pushing while paused; those frames must die
+    quietly at the session gate instead of raising into the pump's retry."""
+    clock = FakeClock()
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server, clock=clock)
+        try:
+            await volcano.suspend()
+            before = volcano._dropped_uplink
+            await volcano.push_audio(b"\x00\x00" * 320)
+            assert volcano._dropped_uplink == before + 1
+        finally:
+            await volcano.aclose()
+
+
+async def test_assistant_write_backs_never_overwrite_the_stashed_danmaku() -> None:
+    """add_context_item is a stash for the NEXT query's body on this protocol.
+    An assistant-role write-back landing between a danmaku's stash and its
+    request_reply would replace the viewer's words with her own."""
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server)
+        try:
+            await volcano.add_context_item("[弹幕] 阿强: 显存怎么算")
+            await volcano.add_context_item("我刚才说过了……", role="assistant")
+            assert volcano._pending_item == "[弹幕] 阿强: 显存怎么算"
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_scoped_base_instruction_is_ignored_with_one_warning() -> None:
+    """No per-reply instruction channel here: the capability bit says so, the
+    Assembly folds event rules into the session context, and a spec that
+    still carries one is a wiring bug worth exactly one log line."""
+    import logging
+
+    lines: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(record.getMessage())
+
+    logger = logging.getLogger("bilisama.realtime.providers.volcano")
+    sink = _Sink()
+    logger.addHandler(sink)
+    try:
+        async with MockVolcanoServer() as server:
+            volcano, _events = await _linked(server)
+            try:
+                first = await volcano.request_reply(link.ReplySpec(base_instructions="事件规则"))
+                await volcano.cancel(first)
+                await volcano.request_reply(link.ReplySpec(base_instructions="事件规则"))
+            finally:
+                await volcano.aclose()
+    finally:
+        logger.removeHandler(sink)
+    assert lines.count("volcano.base_instructions_ignored") == 1, lines
+
+
+async def test_set_bot_name_pushes_the_o_generation_config_without_reconnect() -> None:
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server)
+        try:
+            starts_before = server.recorded.count(wire.ClientEvent.START_SESSION)
+            await volcano.set_context("你是豆腐。")
+            await volcano.set_bot_name("奶豆")
+            await server.wait_for(wire.ClientEvent.UPDATE_CONFIG, count=2)
+            body = server.recorded.body_for(wire.ClientEvent.UPDATE_CONFIG)
+            assert body.get("dialog", {}).get("bot_name") == "奶豆"
+            assert (
+                server.recorded.count(wire.ClientEvent.START_SESSION) == starts_before
+            ), "a rename is not a new session on the O generation"
+            assert volcano._bot_name == "奶豆"
+        finally:
+            await volcano.aclose()

@@ -32,6 +32,7 @@ from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime.link import (
     LinkDown,
     LinkEvent,
+    ReplyAudioDelta,
     ReplyDone,
     ReplyHandle,
     ReplySpec,
@@ -53,11 +54,14 @@ def _intent(
     expires_at: float | None = None,
     created_at: float = 0.0,
     text: str | None = "[弹幕] 观众A: 你好",
+    write_history: bool = False,
 ) -> Intent:
     return Intent(
         source=source,
         priority=priority,
-        injection=Injection(reply=ReplySpec(instructions="回一句"), item_text=text),
+        injection=Injection(
+            reply=ReplySpec(instructions="回一句", write_history=write_history), item_text=text
+        ),
         dedup_key=dedup,
         created_at=created_at,
         expires_at=expires_at,
@@ -90,6 +94,16 @@ def _assert_one_verdict_each(scheduler: Scheduler) -> None:
     ids = [v.intent_id for v in scheduler.verdicts]
     dupes = {i for i in ids if ids.count(i) > 1}
     assert not dupes, f"这些 intent 拿到了多条终局：{sorted(dupes)}"
+
+
+async def _wait_for(check: Callable[[], bool], *, timeout: float = 8.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("等不到条件成立")
 
 
 async def _wait_verdicts(scheduler: Scheduler, count: int, *, timeout: float = 8.0) -> None:
@@ -183,24 +197,86 @@ async def test_gift_storm_never_overlaps_replies() -> None:
         assert creates == 6 and len(dones) == 6
 
 
-async def test_higher_priority_preempts_and_the_victim_gets_a_verdict() -> None:
-    """An SC lands mid-danmaku-reply: the active one dies with PREEMPTED, the
-    SC speaks, and nothing overlaps on the wire."""
-    script = Script(delta_chunks=6, delta_interval_s=0.05)
-    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
-        async with _running_scheduler(server) as (scheduler, _):
-            scheduler.submit(_intent(dedup="dan_1"))
-            for _ in range(200):
-                if scheduler._active is not None:
-                    break
-                await asyncio.sleep(0.01)
-            scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True))
-            await _wait_verdicts(scheduler, 2)
-        preempted = [v for v in scheduler.verdicts if v.reason is SkipReason.PREEMPTED]
-        assert preempted and preempted[0].source == "danmaku"
-        spoken = [v for v in scheduler.verdicts if v.outcome is Outcome.SPOKEN]
-        assert spoken and spoken[0].source == "super_chat"
-        assert server.recorded.count("error") == 0
+async def test_higher_priority_preempts_before_the_victim_starts_output() -> None:
+    """An SC lands while a danmaku reply is dispatched but has produced no
+    audio yet: the victim dies with PREEMPTED and the SC takes the slot.
+    Scripted frame by frame, because the window this tests is exactly
+    "dispatched, zero deltas so far"."""
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _wait_for(lambda: scheduler._active is not None)
+        scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True))
+        await _wait_for(lambda: len(speech.cancels) == 1)
+        # The provider answers the cancel like a real one would.
+        await speech.feed.put(ReplyDone(handle=speech.handles[0], status=ReplyStatus.CANCELLED))
+        await _wait_for(lambda: len(speech.replies) == 2)
+    preempted = [v for v in scheduler.verdicts if v.reason is SkipReason.PREEMPTED]
+    assert preempted and preempted[0].source == "danmaku"
+
+
+async def test_live_event_queues_once_output_has_started() -> None:
+    """The moment the room hears the first frame, priority stops cutting: an
+    SC queues behind a speaking danmaku reply and speaks after it, and no
+    cancel ever goes out."""
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _wait_for(lambda: scheduler._active is not None)
+        await speech.feed.put(ReplyAudioDelta(handle=speech.handles[0], pcm=b"xx"))
+        await _wait_for(lambda: scheduler._active is not None and scheduler._active.output_started)
+        scheduler.submit(_intent("super_chat", Priority.SUPERCHAT, dedup="sc_1", requeue=True))
+        await asyncio.sleep(0.05)
+        assert speech.cancels == [], "a heard sentence is never cut by a live event"
+        await speech.feed.put(
+            ReplyDone(handle=speech.handles[0], status=ReplyStatus.COMPLETED, text="回完了")
+        )
+        await _wait_for(lambda: len(speech.replies) == 2)
+    assert not any(v.reason is SkipReason.PREEMPTED for v in scheduler.verdicts)
+
+
+async def test_completed_reply_with_write_history_is_written_back_as_assistant() -> None:
+    """Out-of-band replies never enter the provider's history, so she cannot
+    remember what she just said unless the scheduler writes it back — the root
+    of every three-identical-welcomes evening."""
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1", write_history=True))
+        await _wait_for(lambda: scheduler._active is not None)
+        await speech.feed.put(
+            ReplyDone(handle=speech.handles[0], status=ReplyStatus.COMPLETED, text="欢迎阿强！")
+        )
+        await _wait_for(lambda: ("欢迎阿强！", "assistant") in speech.history)
+    assert speech.history[-1] == ("欢迎阿强！", "assistant")
+
+
+async def test_write_history_off_writes_nothing_back() -> None:
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        scheduler.submit(_intent(dedup="dan_1"))
+        await _wait_for(lambda: scheduler._active is not None)
+        await speech.feed.put(
+            ReplyDone(handle=speech.handles[0], status=ReplyStatus.COMPLETED, text="好的")
+        )
+        await _wait_for(lambda: any(v.outcome is Outcome.SPOKEN for v in scheduler.verdicts))
+    assert all(role != "assistant" for _text, role in speech.history)
+
+
+async def test_reply_intent_maps_a_handle_back_to_its_trigger() -> None:
+    """The panel's reverse index: reply frames carry only the handle, and the
+    fanout reads them after the active slot may already be clear."""
+    speech = _ScriptedLink()
+    async with _scheduler_on(speech) as scheduler:
+        submitted = _intent(dedup="dan_1")
+        scheduler.submit(submitted)
+        await _wait_for(lambda: scheduler._active is not None)
+        handle_id = speech.handles[0].handle_id
+        await speech.feed.put(
+            ReplyDone(handle=speech.handles[0], status=ReplyStatus.COMPLETED, text="好")
+        )
+        await _wait_for(lambda: any(v.outcome is Outcome.SPOKEN for v in scheduler.verdicts))
+        assert scheduler.reply_intent(handle_id) is submitted, "survives the slot being cleared"
+        assert scheduler.reply_intent(999_999) is None, "implicit voice turns have no intent"
 
 
 async def test_barge_in_clears_playback_first_and_requeues_paid_work() -> None:
@@ -438,8 +514,12 @@ class _ScriptedLink:
         self.quiet_window_s = 0.6
         self.feed: asyncio.Queue[LinkEvent] = asyncio.Queue()
         self.items: list[str] = []
+        # Every item with the role it carried, so write-history asserts can
+        # tell an assistant write-back from a user injection.
+        self.history: list[tuple[str, str]] = []
         self.item_attempts = 0
         self.replies: list[ReplySpec] = []
+        self.handles: list[ReplyHandle] = []
         self.cancels: list[ReplyHandle] = []
         self._cancel_error = cancel_error
         self._item_failures = item_failures
@@ -448,6 +528,12 @@ class _ScriptedLink:
         return None
 
     async def aclose(self) -> None:
+        return None
+
+    async def suspend(self) -> None:
+        return None
+
+    async def resume(self) -> None:
         return None
 
     async def set_context(self, instructions: str) -> None:
@@ -466,10 +552,13 @@ class _ScriptedLink:
             self._item_failures -= 1
             raise ConnectionError("还没连接")
         self.items.append(text)
+        self.history.append((text, role))
 
     async def request_reply(self, spec: ReplySpec) -> ReplyHandle:
         self.replies.append(spec)
-        return ReplyHandle()
+        handle = ReplyHandle()
+        self.handles.append(handle)
+        return handle
 
     async def cancel(self, handle: ReplyHandle) -> None:
         self.cancels.append(handle)

@@ -500,3 +500,40 @@ async def test_a_chunk_too_short_to_convert_is_not_sent_as_an_empty_frame() -> N
 
 async def _record(sink: list[bytes], pcm: bytes) -> None:
     sink.append(pcm)
+
+
+async def test_a_reply_scoped_base_replaces_the_session_persona_for_that_turn() -> None:
+    """Event turns carry event rules without touching the session: the base
+    rides the response.create, composed under the per-turn ask, and the next
+    reply without one falls back to the session's own context."""
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    for make in (
+        lambda url: HostedLink(url, ProviderName.DASHSCOPE, session_cap_min=0),
+        lambda url: S2SLink(url, text_replies=False),
+    ):
+        async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
+            adapter = make(server.url)
+            await adapter.connect()
+            try:
+                await adapter.set_context("公共上下文＋主播语音规则")
+                await adapter.request_reply(
+                    link.ReplySpec(base_instructions="公共上下文＋事件规则", instructions="谢谢SC")
+                )
+                await adapter.request_reply(link.ReplySpec(instructions="随口一句"))
+                for _ in range(50):
+                    if server.recorded.count("response.create") >= 2:
+                        break
+                    await asyncio.sleep(0.01)
+                creates = [
+                    e["response"]
+                    for e in server.recorded.events
+                    if e.get("type") == "response.create"
+                ]
+                assert len(creates) == 2
+                assert creates[0]["instructions"].startswith("公共上下文＋事件规则")
+                assert "谢谢SC" in creates[0]["instructions"]
+                assert "主播语音规则" not in creates[0]["instructions"]
+                assert creates[1]["instructions"].startswith("公共上下文＋主播语音规则")
+            finally:
+                await adapter.aclose()

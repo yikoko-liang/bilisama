@@ -773,6 +773,14 @@ class _Fanout:
             await asyncio.gather(self._task, return_exceptions=True)
         await self._inner.aclose()
 
+    async def suspend(self) -> None:
+        # The pump stays up: the adapter's events() queue never terminates
+        # across a suspend, so every view upstairs just goes quiet with it.
+        await self._inner.suspend()
+
+    async def resume(self) -> None:
+        await self._inner.resume()
+
     async def set_context(self, instructions: str) -> None:
         await self._inner.set_context(instructions)
 

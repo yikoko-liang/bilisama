@@ -207,6 +207,42 @@ class HostedLink:
             self._rotation.cancel()
         await self._client.aclose()
 
+    async def suspend(self) -> None:
+        """The pause gate's link half: socket closed, rotation parked.
+
+        aclose() is reversible on this client by design — connect() clears
+        _closing and the events() queue never terminates — so the fanout
+        pumps upstairs sit quietly across the gap instead of dying.
+        """
+        if self._rotation is not None:
+            self._rotation.cancel()
+            self._rotation = None
+        await self._client.aclose()
+        log.info("hosted.suspended", provider=self._provider.value)
+
+    async def resume(self) -> None:
+        """Reopen and replay. connect() already re-runs the bootstrap and the
+        stored context, and re-arms rotation — a resumed session behaves like
+        a reconnected one because it IS one."""
+        await self.connect()
+        log.info("hosted.resumed", provider=self._provider.value)
+
+    async def reconfigure_session(
+        self, *, voice: str | None = None, turn: HostedTurnConfig | None = None
+    ) -> None:
+        """Apply a new voice or turn config by rotating the socket.
+
+        Both ride the per-connection bootstrap frame, so the honest way to
+        change them is a fresh connection: rotate() hands over mid-stream the
+        same way the session cap does, and _resume_session rebuilds the
+        bootstrap from the fields set here.
+        """
+        if voice is not None:
+            self._voice = voice
+        if turn is not None:
+            self._turn = turn
+        await self._client.rotate("settings_changed")
+
     async def set_context(self, instructions: str) -> None:
         # Kept locally too: per-response instructions REPLACE the session's on
         # the wire (same protocol semantics as s2s), so request_reply
@@ -263,10 +299,14 @@ class HostedLink:
         # Out-of-band only where it does not cost the slot: on GA it runs in
         # parallel; on the beta dialect the bit is a guess pending the real
         # endpoint test, so stay in-band there rather than assume.
+        # A reply-scoped base replaces the session's persona ON THE WIRE for
+        # this response only — the session itself is untouched, so the next
+        # implicit microphone turn still speaks under voice rules.
+        base = spec.base_instructions if spec.base_instructions is not None else self._context
         frame = self._codec.response_create(
             out_of_band=self._caps.out_of_band_exempt_from_slot,
             text_only=False,
-            instructions=compose_instructions(self._context, spec.instructions),
+            instructions=compose_instructions(base, spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
         return await self._client.request_reply(frame)

@@ -34,6 +34,12 @@ class Capabilities:
     # Declared turn-detection types. Configuring an undeclared one is an error,
     # never a silent downgrade.
     turn_detection_types: frozenset[str] = field(default_factory=lambda: frozenset({"server_vad"}))
+    # Whether one reply can carry its own base instructions (ReplySpec.
+    # base_instructions replaces the session's for that response only). The
+    # OpenAI-style dialects do this natively; volcano has no per-response
+    # instruction channel at all, so the Assembly folds event rules into the
+    # session context there instead of scoping per turn.
+    per_reply_base_instructions: bool = True
 
     @property
     def expr_tags_safe(self) -> bool:
@@ -126,6 +132,11 @@ VOLCANO = Capabilities(
     # The vendor's docs are explicit that only server VAD exists here. Naming
     # the others would be the exact lie this field exists to prevent.
     turn_detection_types=frozenset({"server_vad"}),
+    # No per-response instruction channel: the query body carries content
+    # only, the persona rides StartSession, and SC2.0 cannot even update it
+    # mid-session (see providers/volcano.py). The Assembly folds event rules
+    # into the session context on this provider instead.
+    per_reply_base_instructions=False,
 )
 
 

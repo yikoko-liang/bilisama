@@ -209,6 +209,23 @@ class SpeechLink(Protocol):
 
     async def aclose(self) -> None: ...
 
+    async def suspend(self) -> None:
+        """Close the socket and hold every automatic reconnect.
+
+        The pause gate's link half: nothing is torn down for good — context,
+        dialog continuity and pending re-arms stay with the adapter — but no
+        frame moves and no reconnect ladder climbs until resume().
+        """
+        ...
+
+    async def resume(self) -> None:
+        """Reopen after suspend() and replay what a fresh socket needs.
+
+        Raising is allowed and means "still down": the caller keeps the
+        session paused and says so, rather than un-pausing into silence.
+        """
+        ...
+
     async def set_context(self, instructions: str) -> None: ...
 
     async def push_audio(self, pcm: bytes) -> None: ...

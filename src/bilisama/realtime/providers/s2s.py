@@ -135,6 +135,17 @@ class S2SLink:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def suspend(self) -> None:
+        """The pause gate's link half — see HostedLink.suspend; same client,
+        same reversible aclose()."""
+        await self._client.aclose()
+        log.info("s2s.suspended")
+
+    async def resume(self) -> None:
+        """connect() replays context and any owed barge-in re-arm."""
+        await self.connect()
+        log.info("s2s.resumed")
+
     async def set_context(self, instructions: str) -> None:
         # text_only pins the SESSION, which is what the implicit VAD turn obeys.
         # Kept locally too: per-response instructions REPLACE the session's on
@@ -188,10 +199,13 @@ class S2SLink:
             await self._client.send_command(self._interrupt_patch(False))
             self._barge_in_disarmed = True
             log.info("s2s.protection_armed", protect_ms=spec.protect_ms)
+        # A reply-scoped base replaces the session's persona for this response
+        # only; the session (and the implicit VAD turn it drives) is untouched.
+        base = spec.base_instructions if spec.base_instructions is not None else self._context
         frame = self._codec.response_create(
             out_of_band=True,
             text_only=self._text_replies,
-            instructions=compose_instructions(self._context, spec.instructions),
+            instructions=compose_instructions(base, spec.instructions),
             max_output_tokens=spec.max_tokens,
         )
         try:

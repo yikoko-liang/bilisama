@@ -195,6 +195,12 @@ class VolcanoLink:
         self._watchdog: asyncio.Task[None] | None = None
         self._events: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
         self._closing = False
+        # The pause gate. Unlike _closing it is reversible: suspend() sets it
+        # so the receive loop's death does not read as a lost link, resume()
+        # clears it and reconnects.
+        self._suspended = False
+        # Said once per link, not per event turn: see request_reply.
+        self._warned_base_instructions = False
 
         self._context = ""
         self._started = False
@@ -483,6 +489,81 @@ class VolcanoLink:
             finally:
                 self._ws = None
 
+    async def suspend(self) -> None:
+        """The pause gate's link half: park everything, keep the dialogue.
+
+        aclose() is off limits here — its `_closing` is permanent on this
+        adapter — so this is the same teardown with the finality left out:
+        tasks parked, slot settled, a polite goodbye, socket dropped. The
+        dialog_id survives, and resume()'s StartSession carries it, so the
+        server hands the conversation back (it keeps 20 QA rounds).
+        """
+        self._suspended = True
+        pending = [
+            task
+            for task in (self._watchdog, self._reconnect_task, self._swap_task)
+            if task is not None
+        ]
+        for task in pending:
+            task.cancel()
+        self._reconnect_task = None
+        self._swap_task = None
+        self._watchdog = None
+        self._swap_pending = False
+        # A reply still in flight was already panic-killed by the pause
+        # sequence upstairs; CANCELLED frees the slot without reading as a
+        # provider failure.
+        self._settle(link.ReplyStatus.CANCELLED)
+        # The uplink gate: frames arriving mid-pause drop at the counter
+        # instead of raising into the microphone pump.
+        self._session_ready.clear()
+        if self._ws is not None and self._started:
+            try:
+                await self._send(
+                    wire.client_request(
+                        wire.ClientEvent.FINISH_SESSION, session_id=self._session_id
+                    )
+                )
+                await self._send(wire.client_request(wire.ClientEvent.FINISH_CONNECTION))
+            except (ConnectionError, websockets.ConnectionClosed, OSError) as exc:
+                log.debug("volcano.goodbye_skipped", detail=str(exc)[:120])
+        self._started = False
+        if self._recv is not None:
+            self._recv.cancel()
+            pending.append(self._recv)
+        await self._drop_socket()
+        await asyncio.gather(*pending, return_exceptions=True)
+        log.info("volcano.suspended", dialog_id=self._dialog_id)
+
+    async def resume(self) -> None:
+        """Reopen after suspend(). connect() rebuilds both session levels and
+        _session_body carries the surviving dialog_id, so this is the same
+        continuation the reconnect ladder performs — deliberately, not by
+        luck."""
+        self._suspended = False
+        await self.connect()
+        log.info("volcano.resumed", dialog_id=self._dialog_id)
+
+    async def set_bot_name(self, name: str) -> None:
+        """Rename her without a reconnect.
+
+        O generation: dialog.bot_name rides the full UpdateConfig body that
+        set_context already sends — whether the SERVER applies a bot_name
+        mid-session is unverified on the real endpoint (the docs only promise
+        it at StartSession), so until that probe lands the next session start
+        is the guaranteed carrier and this push is best effort. SC generation
+        carries the name inside the character manifest itself, and the persona
+        refresh that renamed her pushes that manifest through set_context — so
+        there is nothing separate to send here.
+        """
+        if name == self._bot_name:
+            return
+        self._bot_name = name
+        if not self._started:
+            return  # the next StartSession carries it
+        if _PERSONA_KEY[self._model] == "system_role":
+            await self.set_context(self._context)
+
     async def aclose(self) -> None:
         """Say goodbye, then stop reading — in that order.
 
@@ -701,7 +782,7 @@ class VolcanoLink:
         second did nothing at all — which is how a failed swap became a link
         that looked fine forever.
         """
-        if self._closing or not self._started:
+        if self._closing or self._suspended or not self._started:
             return
         self._started = False
         # A deferred context change dies with the session. Leaving the flag set
@@ -745,8 +826,16 @@ class VolcanoLink:
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
         """Stash it. See the module note: there is no wire event for one user
-        message, so it travels as the body of the next request_reply."""
-        del role  # only "user" is meaningful here, and it is the only caller
+        message, so it travels as the body of the next request_reply.
+
+        Assistant write-backs are dropped, deliberately: the stash is the
+        NEXT query's body, so an assistant line here would overwrite a waiting
+        danmaku — and the server already keeps her replies in the dialog's
+        own 20-round history, which is what write_history exists to fake on
+        the providers that forget.
+        """
+        if role != "user":
+            return
         self._pending_item = text
 
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
@@ -756,6 +845,16 @@ class VolcanoLink:
         so waiting here is not merely bookkeeping. The watchdog is what
         guarantees the wait ends.
         """
+        if spec.base_instructions is not None and not self._warned_base_instructions:
+            # No per-response instruction channel on this protocol: the query
+            # body carries content only. The Assembly reads the capability bit
+            # and folds event rules into the session context here instead, so
+            # a spec still carrying one means a wiring bug worth one line.
+            self._warned_base_instructions = True
+            log.warning(
+                "volcano.base_instructions_ignored",
+                error_text="这个语音后端没有逐轮指令通道，事件规则应并入会话上下文。",
+            )
         handle = link.ReplyHandle()
         item = self._pending_item
         # The wait and the take have to be one step: Event.set() wakes every
