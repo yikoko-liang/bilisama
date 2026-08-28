@@ -347,10 +347,16 @@ async def test_config_tab_offers_editors_for_live_and_badges_for_frozen(
         "document.querySelector(\"[data-path='interaction.speak.danmaku'] input[type=checkbox]\")"
         " !== null",
     )
-    # ...a frozen field renders greyed with its reload badge, and no control.
+    # ...chattiness went live with the control-centre rework and renders a
+    # select now...
     await _wait(
         page,
-        "(() => { const row = document.querySelector(\"[data-path='interaction.chattiness']\");"
+        "document.querySelector(\"[data-path='interaction.chattiness'] select\") !== null",
+    )
+    # ...and a frozen field renders greyed with its reload badge, no control.
+    await _wait(
+        page,
+        "(() => { const row = document.querySelector(\"[data-path='avatar.renderer']\");"
         " return row && !row.querySelector('input,select')"
         " && row.querySelector('.cfg-badge').textContent === '重启生效'; })()",
     )

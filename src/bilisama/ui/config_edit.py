@@ -35,6 +35,7 @@ __all__ = [
     "ConfigEditError",
     "apply_config_edit",
     "apply_panel_edits",
+    "apply_runtime_config_edit",
     "field_control",
     "speak_paths",
 ]
@@ -102,7 +103,13 @@ def field_control(info: FieldInfo) -> dict[str, Any]:
     return {"kind": "text", "choices": None, "min": None, "max": None}
 
 
-def apply_config_edit(settings: Settings, path: Any, value: Any) -> tuple[FieldMeta, Any]:
+def _apply_config_edit(
+    settings: Settings,
+    path: Any,
+    value: Any,
+    *,
+    allowed_reload: frozenset[Reload],
+) -> tuple[FieldMeta, Any]:
     """Validate and apply one panel edit in place.
 
     Args:
@@ -123,7 +130,7 @@ def apply_config_edit(settings: Settings, path: Any, value: Any) -> tuple[FieldM
         raise ConfigEditError(f"没有「{path}」这个配置项")
     if meta.secret:
         raise ConfigEditError(f"「{meta.label}」是密钥，不走面板——改 path.sh 或环境变量")
-    if meta.reload is not Reload.LIVE:
+    if meta.reload not in allowed_reload:
         why = _RELOAD_ZH.get(meta.reload, "本场改不了")
         raise ConfigEditError(f"「{meta.label}」直播中改不了：{why}")
     resolved = _resolve(settings, path)
@@ -139,6 +146,27 @@ def apply_config_edit(settings: Settings, path: Any, value: Any) -> tuple[FieldM
     applied = getattr(patched, field)
     setattr(parent, field, applied)
     return meta, applied
+
+
+def apply_config_edit(settings: Settings, path: Any, value: Any) -> tuple[FieldMeta, Any]:
+    """Apply an edit whose consumers already read the value live."""
+    return _apply_config_edit(settings, path, value, allowed_reload=frozenset({Reload.LIVE}))
+
+
+def apply_runtime_config_edit(settings: Settings, path: Any, value: Any) -> tuple[FieldMeta, Any]:
+    """Apply a panel edit that has an explicit runtime reload hook.
+
+    The caller must run the matching hook before acknowledging the edit —
+    apply-without-hook is the "面板说改好了但没生效" bug in one line. ENGINE
+    stays excluded: dev-talk cannot replace the separate local speech engine
+    safely inside one process.
+    """
+    return _apply_config_edit(
+        settings,
+        path,
+        value,
+        allowed_reload=frozenset({Reload.LIVE, Reload.RECONNECT, Reload.RESTART}),
+    )
 
 
 def speak_paths(settings: Settings) -> dict[str, str]:

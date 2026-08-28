@@ -180,14 +180,31 @@ def test_config_snapshot_covers_all_meta_and_serializes() -> None:
 def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
     rows = {row["path"]: row for row in config_snapshot(_settings())}
     editable = {path for path, row in rows.items() if row["editable"]}
-    # The 2026-08-14 consumer audit: speak.* is read at call time, runtime.log_*
-    # goes live through the dev-talk relog hook. Everything else snapshots at
-    # construction and must NOT offer an editor. Growing this set means wiring
-    # a consumer first, then flipping its ui_meta reload back to LIVE.
+    # Grown with the control-centre rework, each entry the same way the
+    # 2026-08-14 audit demanded: a consumer wired first (dev-talk's
+    # run_reload_hook / refresh_* chain), then the ui_meta flip to LIVE.
     speak = {
         f"interaction.speak.{name}" for name in _settings().interaction.speak.__class__.model_fields
     }
-    assert editable == speak | {"runtime.log_level", "runtime.log_viewer_content"}
+    hooked = {
+        "interaction.chattiness",
+        "interaction.reply_length",
+        "interaction.gift_battery_high",
+        "interaction.gift_battery_medium",
+        "interaction.entry_welcome.ordinary",
+        "interaction.entry_welcome.naval",
+        "interaction.entry_welcome.ranking",
+        "interaction.sc_protect_ms",
+        "interaction.proactive.max_per_hour",
+        "interaction.proactive.wake_interval_s",
+        "room.stream_intro",
+        "persona.id",
+        "persona.streamer_name",
+        "persona.display_name",
+        "persona.growth.relationship",
+        "persona.growth.voice",
+    }
+    assert editable == speak | hooked | {"runtime.log_level", "runtime.log_viewer_content"}
     # Section headers stay read-only even when marked LIVE for grouping.
     assert rows["interaction.speak"]["editable"] is False
     # Editor facts ride along: the page renders controls without guessing.

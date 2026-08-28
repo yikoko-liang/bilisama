@@ -135,7 +135,7 @@ def test_a_refused_config_edit_says_why_and_changes_nothing() -> None:
 
     changed = apply_panel_edits(
         settings,
-        {"config": {"path": "interaction.chattiness", "value": "high"}},
+        {"config": {"path": "avatar.renderer", "value": "sprite"}},
         announce=announce,
     )
 
@@ -212,8 +212,8 @@ def test_both_the_change_and_the_refusal_reach_the_log(
             settings,
             {
                 "speak": {"danmaku": False},
-                # Reload.RECONNECT, so the panel may not touch it mid-run.
-                "config": {"path": "interaction.chattiness", "value": "high"},
+                # Reload.RESTART, so the LIVE-only channel may not touch it.
+                "config": {"path": "avatar.renderer", "value": "sprite"},
             },
             announce=announce,
         )
@@ -224,7 +224,7 @@ def test_both_the_change_and_the_refusal_reach_the_log(
     assert _fields(applied[0])["path"] == "interaction.speak.danmaku"
     assert _fields(applied[0])["applied"] == "False"
     assert len(refused) == 1
-    assert _fields(refused[0])["path"] == "interaction.chattiness"
+    assert _fields(refused[0])["path"] == "avatar.renderer"
     # error_text, not text: the scrubber folds audience content by field name
     # and leaves the diagnostic names whole (obs/logging.py _DIAGNOSTIC). A
     # refusal reason folded to 「<12 chars>」 is the field that answers WHY,

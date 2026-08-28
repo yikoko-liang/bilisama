@@ -27,7 +27,20 @@ def test_secret_refused_before_anything_else() -> None:
 
 def test_non_live_field_refused_with_reload_reason() -> None:
     with pytest.raises(ConfigEditError, match="直播中改不了"):
-        apply_config_edit(Settings(), "interaction.chattiness", "high")
+        apply_config_edit(Settings(), "avatar.renderer", "sprite")
+
+
+def test_runtime_gate_admits_hooked_reload_classes_but_never_engine() -> None:
+    """The widened gate: RECONNECT and RESTART pass (the caller owes the
+    hook), ENGINE stays out — dev-talk cannot swap the local speech engine
+    inside one process."""
+    from bilisama.ui.config_edit import apply_runtime_config_edit
+
+    settings = Settings()
+    _meta, applied = apply_runtime_config_edit(settings, "speech.dashscope.voice", "longanqian")
+    assert applied == "longanqian" and settings.speech.dashscope.voice == "longanqian"
+    with pytest.raises(ConfigEditError, match="直播中改不了"):
+        apply_runtime_config_edit(settings, "speech.s2s.turn.thresh", 0.5)
 
 
 def test_section_header_refused() -> None:

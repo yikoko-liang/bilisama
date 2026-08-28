@@ -102,6 +102,30 @@ _LINE_SOFT_CAP = 32
 # gets reintroduced.
 _RELOG_ON_EDIT = frozenset({"runtime.log_level", "runtime.log_viewer_content"})
 
+# Panel edits that are SESSION state, not durable preferences: applied live,
+# never written to disk, and forced back to their session defaults on every
+# director start (_director_session_overrides — the two lists move together).
+_SESSION_ONLY_PANEL_PATHS = frozenset(
+    {
+        "audio.input_enabled",
+        "audio.output_enabled",
+        "room.room_id",
+        "persona.streamer_name",
+    }
+)
+
+
+def _director_session_overrides() -> dict[str, Any]:
+    """The session-state fields every director run starts from.
+
+    A previous stream's paused microphone or connected room must not leak
+    into tonight through a stale file — these ride the override layer, above
+    whatever the TOML says.
+    """
+    return {
+        "audio": {"input_enabled": True, "output_enabled": True},
+    }
+
 
 def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
     """Make a background task's death audible.
@@ -1007,6 +1031,8 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.cli import DEFAULT_CONFIG, report_problems, report_validation
     from bilisama.clock import SystemClock
     from bilisama.config import ConfigError, check, derive, load
+    from bilisama.config._ui import Reload
+    from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
     from bilisama.director.intent import Intent
@@ -1025,9 +1051,14 @@ async def run_director(args: argparse.Namespace) -> int:
         template_variables,
     )
     from bilisama.proactive import ProactiveTopicLoop
+    from bilisama.realtime.providers.volcano import VolcanoLink
     from bilisama.side import OpenAICompatSideModel, SideModel
     from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
-    from bilisama.ui.config_edit import apply_panel_edits
+    from bilisama.ui.config_edit import (
+        ConfigEditError,
+        apply_runtime_config_edit,
+        speak_paths,
+    )
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
     from bilisama.ui.hub import UiHub, VoiceSignals
     from bilisama.ui.poke import PokeResponder
@@ -1044,7 +1075,7 @@ async def run_director(args: argparse.Namespace) -> int:
         # load() treats a missing path as "all defaults", which silently ignores
         # a typo'd --config — the one case where defaults are a lie (D6).
         raise SystemExit(f"找不到配置文件：{config_path}")
-    overrides: dict[str, Any] = {}
+    overrides: dict[str, Any] = _director_session_overrides()
     if args.persona:
         overrides["persona"] = {"id": args.persona}
     if args.skin:
@@ -1055,7 +1086,7 @@ async def run_director(args: argparse.Namespace) -> int:
         else:
             overrides["avatar"] = {"renderer": "sprite", "model_id": args.skin}
     try:
-        settings = load(config_path, overrides=overrides or None, strict=False)
+        settings = load(config_path, overrides=overrides, strict=False)
     except ConfigError as exc:
         # A broken TOML, or a file a newer build wrote. strict=False does not
         # cover either — the file cannot be read at all — and letting it out of
@@ -1268,7 +1299,10 @@ async def run_director(args: argparse.Namespace) -> int:
             text_replies=False,
         )
     )
+    from bilisama.realtime.providers.hosted import HostedLink
+
     inner: link.SpeechLink = built.link
+    hosted_link = inner if isinstance(inner, HostedLink) else None
     connect_url: str = built.url
     # After the build, not before it: only here is connect_url the address that
     # will actually be dialed, model and all. Printed earlier the line could
@@ -1460,6 +1494,124 @@ async def run_director(args: argparse.Namespace) -> int:
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
     )
+
+    # ------------------------------------------------------------ panel edits
+    # The write channel the control centre uses: validate -> apply in memory
+    # -> run the reload hook -> persist (unless session-only) -> roll back on
+    # any failure. apply_runtime_config_edit widened the gate, so every path
+    # it admits MUST have a hook here — a missing branch is the "面板说改好了
+    # 但没生效" bug.
+    config_writer = TomlConfigWriter(config_path, settings)
+
+    def refresh_interaction_settings() -> None:
+        """Re-poke every consumer that snapshotted [interaction] at build."""
+        live = live_thresholds()
+        assembly.configure_interaction(
+            max_tokens=live.max_output_tokens,
+            protect_ms=settings.interaction.sc_protect_ms,
+            gift_battery_high=settings.interaction.gift_battery_high,
+            gift_battery_medium=settings.interaction.gift_battery_medium,
+        )
+        proactive.configure(
+            max_per_hour=settings.interaction.proactive.max_per_hour,
+            wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
+            max_tokens=live.max_output_tokens,
+        )
+        # The pacer's bucket owns ordinary rate; the scheduler cooldown stays 0.
+        scheduler.set_cooldown(0.0)
+
+    async def refresh_persona_settings() -> None:
+        """Rebuild the persona stack after a persona.* edit, live."""
+        nonlocal persona, variables, voice_rules, event_rules
+        persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
+        variables = template_variables(
+            settings.persona, reply_length=settings.interaction.reply_length
+        )
+        voice_rules = live_voice_rules(config_path.parent, variables)
+        event_rules = live_event_rules(config_path.parent, variables)
+        assembly.replace_persona(
+            persona,
+            settings.persona.growth,
+            variables,
+            voice_rules=voice_rules,
+            event_rules=event_rules,
+        )
+        distiller.replace_persona(persona, settings.persona.growth)
+        proactive.configure(
+            prompt=persona.proactive_prompt(
+                config_path.parent / "prompts" / "proactive.md", variables
+            ),
+            assistant_label=settings.persona.display_name or settings.persona.id,
+        )
+        if isinstance(inner, VolcanoLink):
+            await inner.set_bot_name(settings.persona.display_name or settings.persona.id)
+        await assembly.refresh_context()
+
+    async def run_reload_hook(path: str) -> bool:
+        """The hook table apply_runtime_config_edit's contract points at.
+
+        Returns whether a hook ran. A non-LIVE path nobody handles here must
+        be REFUSED by the caller — applying it in memory with no consumer
+        re-poked is the lie the widened gate makes possible.
+        """
+        if path in _RELOG_ON_EDIT:
+            relog()
+            return True
+        if path == "room.stream_intro":
+            await assembly.refresh_context()
+            return True
+        if path.startswith("persona.") or path == "interaction.reply_length":
+            await refresh_persona_settings()
+            if path == "interaction.reply_length":
+                refresh_interaction_settings()
+            return True
+        if path.startswith("interaction."):
+            refresh_interaction_settings()
+            return True
+        if path.startswith("speech.dashscope.") and hosted_link is not None:
+            await hosted_link.reconfigure_session(
+                voice=settings.speech.dashscope.voice,
+                turn=settings.speech.dashscope.turn,
+            )
+            return True
+        return False
+
+    async def apply_runtime_edit(path: str, value: Any) -> str:
+        """One panel edit, end to end. Returns the receipt line to announce.
+
+        Raises ConfigEditError with a human sentence on any refusal; a hook
+        or persist failure rolls the in-memory value back and re-runs the
+        hook so consumers see the old value again.
+        """
+        resolved_parent = settings
+        for part in path.split(".")[:-1]:
+            resolved_parent = getattr(resolved_parent, part)
+        leaf = path.split(".")[-1]
+        old = getattr(resolved_parent, leaf)
+        meta, applied = apply_runtime_config_edit(settings, path, value)
+        problems = [p for p in check(settings, config_dir=config_path.parent) if p.fatal]
+        if problems:
+            setattr(resolved_parent, leaf, old)
+            raise ConfigEditError(problems[0].message + (problems[0].fix or ""))
+        try:
+            handled = await run_reload_hook(path)
+            if not handled and meta.reload is not Reload.LIVE:
+                setattr(resolved_parent, leaf, old)
+                raise ConfigEditError(
+                    f"「{meta.label}」这一项还没有对应的热生效通道，先在配置文件里改"
+                )
+            if path not in _SESSION_ONLY_PANEL_PATHS:
+                config_writer.write(path, applied)
+        except (ConfigWriteError, OSError, FileNotFoundError) as exc:
+            setattr(resolved_parent, leaf, old)
+            with contextlib.suppress(Exception):
+                await run_reload_hook(path)
+            raise ConfigEditError(f"「{meta.label}」没改成：{exc}") from exc
+        shown_old = old.value if hasattr(old, "value") else old
+        shown_new = applied.value if hasattr(applied, "value") else applied
+        if path in _SESSION_ONLY_PANEL_PATHS:
+            return f"{meta.label}：{shown_old} → {shown_new}（本场已生效，重启恢复默认）"
+        return f"{meta.label}：{shown_old} → {shown_new}（已保存并生效）"
 
     # Real danmaku, when a room is named (--room beats [room] room_id). The
     # credential chain: config ref first, then path.sh's BILI_SESSDATA. No
@@ -1720,12 +1872,24 @@ async def run_director(args: argparse.Namespace) -> int:
                     if hub is not None:
                         hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": line})
 
-                # Both write shapes (config tab, speak matrix) go through the
-                # one validated channel; this closure only adds the receipt and
-                # the reload hooks below.
-                for path in apply_panel_edits(settings, data, announce=announce):
-                    if path in _RELOG_ON_EDIT:
-                        relog()
+                # Both write shapes (config rows, speak matrix) become (path,
+                # value) pairs through the one validated runtime channel:
+                # apply -> hook -> persist -> roll back on failure.
+                edits: list[tuple[str, Any]] = []
+                config = data.get("config")
+                if isinstance(config, dict) and isinstance(config.get("path"), str):
+                    edits.append((config["path"], config.get("value")))
+                speak = data.get("speak")
+                if isinstance(speak, dict):
+                    paths = speak_paths(settings)
+                    for name, value in speak.items():
+                        if isinstance(name, str) and name in paths:
+                            edits.append((paths[name], value))
+                for path, value in edits:
+                    try:
+                        announce(await apply_runtime_edit(path, value))
+                    except ConfigEditError as exc:
+                        announce(str(exc))
                 if hub is not None:
                     hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
 
