@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld("bilisamaShell", {
   revealLog: () => ipcRenderer.send("shell:reveal-log"),
   // The exit handshake: the page confirmed with the streamer already.
   close: () => ipcRenderer.send("pet:close-shell"),
+  // The live-mock console needs a real Chrome (tab-audio capture); the shell
+  // opens it externally instead of in an Electron window.
+  openLiveMock: () => ipcRenderer.send("shell:open-live-mock"),
   // The pet's settings button glows while the panel window is open. Returns
   // an unsubscribe, though the pet page never bothers — it lives as long as
   // the window does.

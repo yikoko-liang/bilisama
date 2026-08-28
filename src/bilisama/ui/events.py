@@ -56,6 +56,9 @@ class ServerEvent(StrEnum):
     # The exit handshake's outbound half: broadcast, tiny sleep, then the
     # backend starts its slow teardown while every window closes itself.
     APP_EXITING = "app.exiting"
+    # The live-mock console's state machine and its adopted-event preview.
+    LIVE_MOCK_STATE = "live_mock.state"
+    LIVE_MOCK_EVENT = "live_mock.event"
 
 
 class ClientEvent(StrEnum):
@@ -84,6 +87,12 @@ class ClientEvent(StrEnum):
     # The acceptance console: run one test card / stop the current one.
     TEST_RUN = "test.run"
     TEST_STOP = "test.stop"
+    # The live-mock console's lifecycle; PCM itself rides the audio socket
+    # (?role=mock), never these text frames.
+    LIVE_MOCK_CHECK = "live_mock.check"
+    LIVE_MOCK_START = "live_mock.start"
+    LIVE_MOCK_STOP = "live_mock.stop"
+    LIVE_MOCK_CAPTURE_STOP = "live_mock.capture_stop"
 
 
 def frame(event: ServerEvent, data: Mapping[str, Any]) -> str:

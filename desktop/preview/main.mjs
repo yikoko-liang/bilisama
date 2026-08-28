@@ -9,6 +9,7 @@
 // 'floating' + skipTaskbar + backgroundThrottling:false.
 
 import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -272,6 +273,20 @@ ipcMain.on("pet:open-panel", (event) => {
 // the tray presence with it while the backend finishes its teardown alone.
 ipcMain.on("pet:close-shell", (event) => {
   if (fromPet(event)) app.quit();
+});
+
+// getDisplayMedia's tab-audio capture wants a real Chrome; Electron's picker
+// cannot offer tab audio. Either window may ask.
+ipcMain.on("shell:open-live-mock", (event) => {
+  if (!fromShell(event) || !currentUrl) return;
+  const url = `${currentUrl.replace(/\/$/, "")}/live-mock`;
+  if (process.platform === "darwin") {
+    execFile("/usr/bin/open", ["-a", "Google Chrome", url], (error) => {
+      if (error) shell.openExternal(url);
+    });
+  } else {
+    shell.openExternal(url);
+  }
 });
 
 // The window is a rectangle; the pet is not. Everywhere else it was an

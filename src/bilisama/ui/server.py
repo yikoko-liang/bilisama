@@ -213,6 +213,7 @@ def create_ui_app(
     user_skins_root: Path | None = None,
     broker: AudioBroker | None = None,
     on_audio: Callable[[bytes], Awaitable[None]] | None = None,
+    on_mock_audio: Callable[[bytes], Awaitable[None]] | None = None,
 ) -> FastAPI:
     """Assemble the app: page, WebSocket, config, static assets, health.
 
@@ -248,7 +249,10 @@ def create_ui_app(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         response = await call_next(request)
-        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:"
+        response.headers["Content-Security-Policy"] = (
+            # media-src blob: is the live-mock page's <video srcObject> preview.
+            "default-src 'self'; img-src 'self' data:; media-src 'self' blob:"
+        )
         # The token lives in the path; never leak it through a Referer header.
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -257,6 +261,10 @@ def create_ui_app(
     @app.get(prefix + "/")
     async def index() -> FileResponse:
         return FileResponse(root / "index.html")
+
+    @app.get(prefix + "/live-mock")
+    async def live_mock() -> FileResponse:
+        return FileResponse(root / "live-mock.html")
 
     @app.get(prefix + "/config")
     async def config() -> JSONResponse:
@@ -356,6 +364,27 @@ def create_ui_app(
                 await ws.close(code=4403)
                 return
             await ws.accept()
+            if ws.query_params.get("role") == "mock":
+                # The live-mock page's uplink: an ALTERNATIVE microphone, not
+                # a device owner. It never claims the broker (her replies keep
+                # playing from whoever holds the speaker), gets no downlink
+                # and no silence filler — the AudioInputSwitch elects it and
+                # the switch's own gates meter it.
+                try:
+                    while True:
+                        message = await ws.receive()
+                        if message.get("type") == "websocket.disconnect":
+                            break
+                        payload = message.get("bytes")
+                        if payload is not None and on_mock_audio is not None:
+                            await on_mock_audio(payload)
+                            continue
+                        text = message.get("text")
+                        if text is not None:
+                            await _dispatch(text, handlers)
+                except WebSocketDisconnect:
+                    pass
+                return
             # The shell's preload declares itself; a plain tab cannot, which is
             # exactly the distinction we want to rank on.
             who: AudioOwner = "shell" if ws.query_params.get("role") == "shell" else "browser"

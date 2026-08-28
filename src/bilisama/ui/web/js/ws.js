@@ -3,7 +3,10 @@
 // page clears its panel on reconnect so the replay lands on a clean slate.
 
 export function connect({ onFrame, onStatus }) {
-  const url = `ws://${location.host}${location.pathname.replace(/\/$/, "")}/ws`;
+  // Both /<token>/ and /<token>/live-mock share one socket. Deriving from the
+  // first path segment keeps the random token without assuming the page name.
+  const tokenRoot = `/${location.pathname.split("/").filter(Boolean)[0]}`;
+  const url = `ws://${location.host}${tokenRoot}/ws`;
   let sock = null;
   let closed = false;
   let attempt = 0;

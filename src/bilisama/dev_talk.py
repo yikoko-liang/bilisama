@@ -1762,6 +1762,24 @@ async def run_director(args: argparse.Namespace) -> int:
     test_runner = MockTestRunner(
         test_catalog, tests_source, clock, notify=test_notify, revoke=scheduler.revoke
     )
+
+    from bilisama.ui.live_mock import LiveMockController
+
+    def mock_state_sink(state: dict[str, Any]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.LIVE_MOCK_STATE, state)
+
+    def mock_event_sink(preview: dict[str, object]) -> None:
+        if hub is not None:
+            hub.broadcast(ServerEvent.LIVE_MOCK_EVENT, dict(preview))
+
+    live_mock = LiveMockController(
+        source_factory=live_room_source,
+        event_sink=assembly.on_event,
+        audio=audio_input,
+        publish_state=mock_state_sink,
+        publish_event=mock_event_sink,
+    )
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
@@ -2182,6 +2200,22 @@ async def run_director(args: argparse.Namespace) -> int:
                 print("[面板] 收到退出请求，开始收尾")
                 stop.set()
 
+            async def on_live_mock_check(data: dict[str, Any]) -> None:
+                capture = data.get("capture")
+                await live_mock.check(
+                    room_id=int(data.get("room_id") or 0),
+                    capture=capture if isinstance(capture, dict) else {},
+                )
+
+            async def on_live_mock_start(_data: dict[str, Any]) -> None:
+                await live_mock.start()
+
+            async def on_live_mock_stop(_data: dict[str, Any]) -> None:
+                await live_mock.stop()
+
+            async def on_live_mock_capture_stop(_data: dict[str, Any]) -> None:
+                await live_mock.capture_stopped()
+
             async def on_test_run(data: dict[str, Any]) -> None:
                 case_id = str(data.get("case_id") or "")
                 try:
@@ -2216,6 +2250,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     "panel": panel_state(),
                     "tests": test_catalog.public(),
                     "test_state": test_runner.state(),
+                    "live_mock": live_mock.state(),
                 }
 
             try:
@@ -2256,9 +2291,14 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.APP_QUIT: on_app_quit,
                         ClientEvent.TEST_RUN: on_test_run,
                         ClientEvent.TEST_STOP: on_test_stop,
+                        ClientEvent.LIVE_MOCK_CHECK: on_live_mock_check,
+                        ClientEvent.LIVE_MOCK_START: on_live_mock_start,
+                        ClientEvent.LIVE_MOCK_STOP: on_live_mock_stop,
+                        ClientEvent.LIVE_MOCK_CAPTURE_STOP: on_live_mock_capture_stop,
                     },
                     broker=broker,
                     on_audio=uplink,
+                    on_mock_audio=live_mock.push_audio,
                     hello=hello,
                     # <data home>/bilisama/skins — user-imported packs, shadowing
                     # the packaged ones. Endpoint file and skins share the roof.
@@ -2664,6 +2704,8 @@ async def run_director(args: argparse.Namespace) -> int:
             try:
                 if hub is not None:
                     await hub.aclose()
+                with contextlib.suppress(Exception):
+                    await live_mock.aclose()
                 await ui_server.stop()
             except Exception as exc:
                 print(f"[收尾] 界面服务器没关上：{exc}", file=sys.stderr)

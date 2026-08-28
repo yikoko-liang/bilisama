@@ -33,6 +33,8 @@ def test_server_vocabulary_is_pinned() -> None:
         "audio.devices",
         "audio.level",
         "app.exiting",
+        "live_mock.state",
+        "live_mock.event",
     ]
 
 
@@ -49,6 +51,10 @@ def test_client_vocabulary_is_pinned() -> None:
         "app.quit",
         "test.run",
         "test.stop",
+        "live_mock.check",
+        "live_mock.start",
+        "live_mock.stop",
+        "live_mock.capture_stop",
     ]
 
 

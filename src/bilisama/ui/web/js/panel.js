@@ -1215,6 +1215,12 @@ export function createPanel({ send }) {
     renderTestCases();
   });
   testStop?.addEventListener("click", () => send("test.stop", {}));
+  document.getElementById("live-mock-open")?.addEventListener("click", () => {
+    // getDisplayMedia with tab audio needs a real Chrome; the shell opens the
+    // page in the external browser, a plain tab just navigates its own way.
+    if (window.bilisamaShell?.openLiveMock) window.bilisamaShell.openLiveMock();
+    else window.open("live-mock", "_blank", "noopener");
+  });
 
   // A promise-shaped confirm dialog, shared by the assistant page and any
   // future destructive action. Esc is captured before the panel's own
