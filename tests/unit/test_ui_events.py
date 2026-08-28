@@ -47,6 +47,8 @@ def test_client_vocabulary_is_pinned() -> None:
         "audio.ask",
         "audio.report",
         "app.quit",
+        "test.run",
+        "test.stop",
     ]
 
 

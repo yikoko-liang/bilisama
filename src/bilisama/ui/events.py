@@ -81,6 +81,9 @@ class ClientEvent(StrEnum):
     AUDIO_REPORT = "audio.report"
     # The exit handshake's inbound half: the pet page's right-click dialog.
     APP_QUIT = "app.quit"
+    # The acceptance console: run one test card / stop the current one.
+    TEST_RUN = "test.run"
+    TEST_STOP = "test.stop"
 
 
 def frame(event: ServerEvent, data: Mapping[str, Any]) -> str:

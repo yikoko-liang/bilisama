@@ -191,6 +191,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "ui.uplink_page_resumed",
         "ui.uplink_resumed",
         "ui.uplink_silence_filled",
+        "ui_test.failed",
         "ui.ws_origin_refused",
         "volcano.interrupt_unsent",
         "volcano.interrupted",

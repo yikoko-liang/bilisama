@@ -805,3 +805,34 @@ input.cfg-edit:focus {
 .test-description { padding: 0 var(--space-3); font-size: 12.5px; color: var(--ink-dim); }
 .test-tools { display: flex; align-items: center; gap: 10px; padding: 0 var(--space-3); font-size: 12.5px; }
 .test-cases { padding: var(--space-3); font-size: 12.5px; }
+
+.test-set { padding: 6px 12px; border: 1px solid var(--panel-edge); border-radius: 99px; background: var(--panel); color: var(--ink-dim); cursor: pointer; font-size: 12.5px; }
+.test-set.active { color: var(--ink); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.test-card { border: 1px solid var(--panel-edge); border-radius: var(--radius-m, 10px); padding: 12px; margin-bottom: 10px; background: var(--panel); }
+.test-card.running { border-color: var(--accent); }
+.test-card.failed { border-color: var(--c-err); }
+.test-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.test-title { margin: 0; font-size: 13.5px; }
+.test-meta { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.test-tag { font-size: 11px; padding: 1px 6px; border-radius: 99px; background: color-mix(in srgb, var(--ink-faint) 22%, transparent); color: var(--ink-dim); }
+.test-tag.candidate { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--ink); }
+.test-duration { font-size: 11px; color: var(--ink-faint); }
+.test-run { padding: 5px 14px; border: 1px solid var(--accent); border-radius: var(--radius-s); background: transparent; color: var(--accent); cursor: pointer; white-space: nowrap; }
+.test-run:disabled { opacity: 0.5; cursor: default; }
+.test-label { margin: 10px 0 4px; font-size: 11.5px; color: var(--ink-faint); text-transform: none; }
+.test-copy { margin: 0; white-space: pre-wrap; }
+.test-expected { margin: 0; padding-left: 18px; }
+.test-expected li { margin: 2px 0; }
+.test-events { display: flex; flex-wrap: wrap; gap: 5px; }
+.test-event, .test-no-event { font-size: 11px; padding: 2px 6px; border-radius: 5px; background: color-mix(in srgb, var(--ink-faint) 14%, transparent); color: var(--ink-dim); }
+.test-reference { margin: 0; color: var(--ink-dim); font-size: 12px; }
+.test-status { margin: 8px 0 0; font-size: 12px; color: var(--accent); min-height: 1em; }
+.test-card.failed .test-status { color: var(--c-err); }
+.test-judge { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.test-judge-label { font-size: 11.5px; color: var(--ink-faint); }
+.test-pass, .test-fail { padding: 3px 12px; border-radius: var(--radius-s); border: 1px solid var(--panel-edge); background: var(--panel); cursor: pointer; }
+.test-pass { color: var(--c-ok, #2a9d5c); }
+.test-fail { color: var(--c-err); }
+.test-result { font-size: 12px; color: var(--ink-dim); }
+.test-stop { padding: 4px 12px; border: 1px solid var(--panel-edge); border-radius: var(--radius-s); background: var(--panel); color: var(--ink); cursor: pointer; }
+.test-stop:disabled { opacity: 0.45; cursor: default; }

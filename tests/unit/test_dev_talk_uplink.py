@@ -787,6 +787,7 @@ def _director_config(root: Path) -> Path:
     (root / "prompts" / "proactive.md").write_text("随便聊点什么。\n", encoding="utf-8")
     shutil.copytree(repo / "config" / "personas" / "tofu", root / "personas" / "tofu")
     shutil.copytree(repo / "config" / "personas" / "live", root / "personas" / "live")
+    shutil.copytree(repo / "config" / "testsets", root / "testsets")
     path = root / "bilisama.toml"
     path.write_text(
         "config_version = 1\n"

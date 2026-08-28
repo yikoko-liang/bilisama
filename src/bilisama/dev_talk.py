@@ -1741,6 +1741,27 @@ async def run_director(args: argparse.Namespace) -> int:
         registry.register("bilibili", bili_source.status)
 
     console = QueueSource("console")
+    # The acceptance console: JSON test cards injected through their own
+    # QueueSource into the SAME assembly the live room feeds. A broken
+    # catalog refuses to start — a card that cannot load is a card that would
+    # silently not run on the night someone relies on it.
+    from bilisama.ui.test_runner import MockTestRunner, load_test_catalog
+
+    try:
+        test_catalog = load_test_catalog(config_path.parent / "testsets")
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"测试集读不了：{exc}") from exc
+
+    def test_notify(state: dict[str, object]) -> None:
+        if hub is not None:
+            # Rides event.feed with kind="test" rather than a new event type:
+            # the chat page ignores it, the test page filters for it.
+            hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "test", **state})
+
+    tests_source = QueueSource("ui-tests")
+    test_runner = MockTestRunner(
+        test_catalog, tests_source, clock, notify=test_notify, revoke=scheduler.revoke
+    )
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
 
@@ -2161,6 +2182,16 @@ async def run_director(args: argparse.Namespace) -> int:
                 print("[面板] 收到退出请求，开始收尾")
                 stop.set()
 
+            async def on_test_run(data: dict[str, Any]) -> None:
+                case_id = str(data.get("case_id") or "")
+                try:
+                    await test_runner.start(case_id)
+                except ValueError as exc:
+                    test_notify({"status": "error", "case_id": case_id, "text": str(exc)})
+
+            async def on_test_stop(_data: dict[str, Any]) -> None:
+                await test_runner.stop()
+
             async def on_console_line(data: dict[str, Any]) -> None:
                 text = data.get("text")
                 if isinstance(text, str):
@@ -2183,6 +2214,8 @@ async def run_director(args: argparse.Namespace) -> int:
                         "model_id": settings.avatar.model_id,
                     },
                     "panel": panel_state(),
+                    "tests": test_catalog.public(),
+                    "test_state": test_runner.state(),
                 }
 
             try:
@@ -2221,6 +2254,8 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.PLAYBACK_ENDED: on_playback_ended,
                         ClientEvent.PLAYBACK_CANCELLED: on_playback_cancelled,
                         ClientEvent.APP_QUIT: on_app_quit,
+                        ClientEvent.TEST_RUN: on_test_run,
+                        ClientEvent.TEST_STOP: on_test_stop,
                     },
                     broker=broker,
                     on_audio=uplink,
@@ -2487,7 +2522,9 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
             asyncio.create_task(proactive.run(), name="director:proactive"),
             asyncio.create_task(
-                assembly.run([console] + ([bili_source] if bili_source is not None else [])),
+                assembly.run(
+                    [console, tests_source] + ([bili_source] if bili_source is not None else [])
+                ),
                 name="director:assembly",
             ),
             local_pair.start_mic(),
