@@ -1263,3 +1263,38 @@ async def test_assistant_page_switches_after_a_confirm(page: Page, harness: Harn
     await _wait(page, "document.getElementById('assistant-editor').hidden === false")
     await page.fill("#assistant-identity", "# 花子\n今晚换个说法")
     await _wait(page, "document.getElementById('assistant-save').disabled === false")
+
+
+async def test_ordinary_event_replies_stay_out_of_the_bubble_when_voice_is_on(
+    page: Page, harness: Harness
+) -> None:
+    """With voice fully on, a danmaku-lane reply is heard, not ballooned — a
+    bubble per danmaku is noise. Voice-turn replies (no source) still bubble;
+    the previous test suite pins that half."""
+    await _wait(page, "document.title.includes('豆腐')")
+    harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "speaking"})
+    harness.hub.broadcast(
+        ServerEvent.REPLY_DELTA, {"text": "谢谢弹幕", "source": "danmaku", "reply_id": "r-dm"}
+    )
+    await page.wait_for_timeout(200)
+    assert await page.evaluate("document.getElementById('bubble').hidden") is True
+    harness.hub.broadcast(
+        ServerEvent.REPLY_DELTA, {"text": "谢谢老板的舰", "source": "guard_buy", "reply_id": "r-gb"}
+    )
+    await _wait(page, "!document.getElementById('bubble').hidden")
+
+
+async def test_the_judgment_row_actually_hides_when_marked_hidden(page: Page) -> None:
+    """CSS regression: `.test-judge { display:flex }` outranked the UA's
+    [hidden] rule, so panel.js's judge.hidden toggle painted the row on every
+    card all the time."""
+    hidden_display = await page.evaluate("""() => {
+          const probe = document.createElement('div');
+          probe.className = 'test-judge';
+          probe.hidden = true;
+          document.body.appendChild(probe);
+          const display = getComputedStyle(probe).display;
+          probe.remove();
+          return display;
+        }""")
+    assert hidden_display == "none"

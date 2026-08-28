@@ -810,7 +810,9 @@ input.cfg-edit:focus {
 .test-set.active { color: var(--ink); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .test-card { border: 1px solid var(--panel-edge); border-radius: var(--radius-m, 10px); padding: 12px; margin-bottom: 10px; background: var(--panel); }
 .test-card.running { border-color: var(--accent); }
-.test-card.failed { border-color: var(--c-err); }
+.test-card.failed,
+.test-card[data-judgment="fail"] { border-color: color-mix(in srgb, var(--c-err) 60%, var(--panel-edge)); }
+.test-card[data-judgment="pass"] { border-color: color-mix(in srgb, var(--c-ok) 60%, var(--panel-edge)); }
 .test-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
 .test-title { margin: 0; font-size: 13.5px; }
 .test-meta { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
@@ -829,6 +831,10 @@ input.cfg-edit:focus {
 .test-status { margin: 8px 0 0; font-size: 12px; color: var(--accent); min-height: 1em; }
 .test-card.failed .test-status { color: var(--c-err); }
 .test-judge { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+/* The author display:flex above outranks the UA's [hidden] rule; without this
+   line panel.js's judge.hidden toggle does nothing and the judgment row is
+   painted on every card all the time. */
+.test-judge[hidden] { display: none; }
 .test-judge-label { font-size: 11.5px; color: var(--ink-faint); }
 .test-pass, .test-fail { padding: 3px 12px; border-radius: var(--radius-s); border: 1px solid var(--panel-edge); background: var(--panel); cursor: pointer; }
 .test-pass { color: var(--c-ok, #2a9d5c); }

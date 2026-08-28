@@ -28,6 +28,10 @@ const SPEAK_LABEL = {
   background_result: "后台结果",
 };
 
+// Kinds with a switch but no speaking intent behind it (ledger #50): the
+// matrix pins them off and grey instead of promising speech that never comes.
+const NO_VOICE_SOURCES = new Set(["follow", "like", "share"]);
+
 const FEED_WHO = { sc: "SC", gift: "礼物", danmaku: "弹幕" };
 
 // Room-feed rows the system page renders; everything else in event.feed
@@ -127,6 +131,7 @@ export function createPanel({ send }) {
   let isOpen = panelOnly;
   let panicked = false;
   let onPanelState = null;
+  let onOpenChange = null;
   let healthTimer = null;
   let configLoaded = false;
   let logPaused = false;
@@ -178,6 +183,7 @@ export function createPanel({ send }) {
 
   const open = () => {
     isOpen = true;
+    onOpenChange?.(true);
     panel.classList.add("open");
     scrim.hidden = false;
     requestAnimationFrame(() => scrim.classList.add("open"));
@@ -193,6 +199,7 @@ export function createPanel({ send }) {
   const close = () => {
     if (panelOnly) return;
     isOpen = false;
+    onOpenChange?.(false);
     panel.classList.remove("open");
     scrim.classList.remove("open");
     setTimeout(() => {
@@ -268,16 +275,24 @@ export function createPanel({ send }) {
     for (const [key, value] of Object.entries(speak ?? {})) {
       const existing = speakBoxes.get(key);
       if (existing) {
-        existing.checked = Boolean(value);
+        if (!existing.disabled) existing.checked = Boolean(value);
         continue;
       }
       const label = el("label");
       const box = el("input");
       box.type = "checkbox";
-      box.checked = Boolean(value);
-      box.addEventListener("change", () => {
-        send("panel.set", { speak: { [key]: box.checked } });
-      });
+      if (NO_VOICE_SOURCES.has(key)) {
+        // Ledger #50: these kinds have no speaking intent in the backend, so
+        // a checkable box is a placebo. Grey and pinned off until they do.
+        box.checked = false;
+        box.disabled = true;
+        label.title = "后端暂时没有这类语音，开关未生效";
+      } else {
+        box.checked = Boolean(value);
+        box.addEventListener("change", () => {
+          send("panel.set", { speak: { [key]: box.checked } });
+        });
+      }
       label.appendChild(box);
       label.appendChild(el("span", "", SPEAK_LABEL[key] ?? key));
       matrixEl.appendChild(label);
@@ -356,7 +371,10 @@ export function createPanel({ send }) {
   roomConnectBtn?.addEventListener("click", () => {
     const id = Number((roomIdInput?.value ?? "").trim());
     if (!Number.isInteger(id) || id <= 0) {
-      if (roomStatusEl) roomStatusEl.textContent = "直播间号要是正整数";
+      if (roomStatusEl) {
+        roomStatusEl.textContent = "直播间号要是正整数";
+        roomStatusEl.dataset.state = "err";
+      }
       return;
     }
     setRoomPending(true, "正在连接…");
@@ -364,26 +382,43 @@ export function createPanel({ send }) {
     send("panel.set", { room: { action: "connect", room_id: id } });
   });
   roomDisconnectBtn?.addEventListener("click", () => {
+    roomDisconnectBtn.disabled = true; // one click, one disconnect
     setRoomPending(true, "正在断开…");
+    if (roomStatusEl) roomStatusEl.textContent = "正在断开直播间事件流…";
     send("panel.set", { room: { action: "disconnect" } });
   });
 
+  let roomInfoSaving = false;
+  const roomInfoDefaultHint = roomInfoHint?.textContent ?? "";
+
   const refreshRoomInfoDirty = () => {
     const server = lastRoomState ?? {};
-    if (streamerNameSave && streamerNameInput) {
-      streamerNameSave.disabled =
-        streamerNameInput.value.trim() === String(server.streamer_name ?? "");
+    const nameDirty =
+      Boolean(streamerNameInput) &&
+      streamerNameInput.value.trim() !== String(server.streamer_name ?? "");
+    const introDirty =
+      Boolean(streamIntroInput) && streamIntroInput.value !== String(server.stream_intro ?? "");
+    if (streamerNameSave) streamerNameSave.disabled = !nameDirty;
+    if (roomInfoSave) roomInfoSave.disabled = !introDirty;
+    if (roomInfoHint && !roomPending) {
+      roomInfoHint.textContent = roomInfoSaving
+        ? "正在保存…"
+        : nameDirty || introDirty
+          ? "有未保存修改"
+          : roomInfoDefaultHint;
     }
-    if (roomInfoSave && streamIntroInput) {
-      roomInfoSave.disabled = streamIntroInput.value === String(server.stream_intro ?? "");
-    }
+    return nameDirty || introDirty;
   };
   streamerNameInput?.addEventListener("input", refreshRoomInfoDirty);
   streamIntroInput?.addEventListener("input", refreshRoomInfoDirty);
   streamerNameSave?.addEventListener("click", () => {
+    roomInfoSaving = true;
+    refreshRoomInfoDirty();
     sendConfig("persona.streamer_name", streamerNameInput?.value.trim() ?? "");
   });
   roomInfoSave?.addEventListener("click", () => {
+    roomInfoSaving = true;
+    refreshRoomInfoDirty();
     sendConfig("room.stream_intro", streamIntroInput?.value ?? "");
   });
 
@@ -398,6 +433,8 @@ export function createPanel({ send }) {
       bits.push(`${medal.this_room ? "本房" : "外房"}粉丝牌${medal.name}·Lv${medal.level}`);
     }
     if (data.user_level) bits.push(`用户Lv${data.user_level}`);
+    if (data.wealth_level) bits.push(`荣耀Lv${data.wealth_level}`);
+    if (data.identity && data.identity !== "anon") bits.push(String(data.identity));
     return bits.join(" · ");
   };
 
@@ -405,11 +442,16 @@ export function createPanel({ send }) {
     if (!roomEventsEl) return;
     roomEventsEl.querySelector(".empty")?.remove();
     const row = el("div", `room-event ${data.kind}`);
-    row.appendChild(el("span", "when", new Date().toTimeString().slice(0, 8)));
+    // The event's own clock when it has one: a replayed or delayed frame must
+    // not claim it happened "now".
+    const stamp = data.ts_ms ? new Date(data.ts_ms) : new Date();
+    row.appendChild(el("span", "when", stamp.toTimeString().slice(0, 8)));
     row.appendChild(el("span", "pill", LIVE_LABEL[data.kind] ?? data.kind));
     let body = data.name ?? "?";
-    if (data.gift) body += `：${data.gift.name} ×${data.gift.num}`;
-    else if (data.text) body += `：${data.text}`;
+    if (data.gift) {
+      body += `：${data.gift.name} ×${data.gift.num}`;
+      if (data.gift.total_battery) body += `（${data.gift.total_battery} 电池）`;
+    } else if (data.text) body += `：${data.text}`;
     const identity = identityBits(data);
     if (identity) body += `（${identity}）`;
     if (data.mock) body += "〔Mock〕";
@@ -427,8 +469,12 @@ export function createPanel({ send }) {
     if (outputToggle && document.activeElement !== outputToggle) {
       outputToggle.checked = Boolean(audio.output_enabled);
     }
-    if (noiseSlider && document.activeElement !== noiseSlider) {
-      noiseSlider.value = String(audio.noise_sensitivity ?? 50);
+    if (
+      noiseSlider &&
+      document.activeElement !== noiseSlider &&
+      Number.isFinite(audio.noise_sensitivity)
+    ) {
+      noiseSlider.value = String(audio.noise_sensitivity);
       if (noiseValue) noiseValue.textContent = noiseSlider.value;
     }
     const interaction = state.interaction ?? {};
@@ -458,12 +504,22 @@ export function createPanel({ send }) {
       const active = Number(room.active_room_id ?? 0);
       if (active > 0) roomIdInput.value = String(active);
     }
+    // Backfill protection: focus is not the whole story — a field the user
+    // edited and clicked away from is still theirs until saved. Compare with
+    // the PREVIOUS server value: matching it means untouched, overwrite away.
+    const prevRoom = previousRoom ?? {};
     if (streamerNameInput && document.activeElement !== streamerNameInput) {
-      streamerNameInput.value = String(room.streamer_name ?? "");
+      const untouched =
+        roomInfoSaving ||
+        streamerNameInput.value.trim() === String(prevRoom.streamer_name ?? "");
+      if (untouched) streamerNameInput.value = String(room.streamer_name ?? "");
     }
     if (streamIntroInput && document.activeElement !== streamIntroInput) {
-      streamIntroInput.value = String(room.stream_intro ?? "");
+      const untouched =
+        roomInfoSaving || streamIntroInput.value === String(prevRoom.stream_intro ?? "");
+      if (untouched) streamIntroInput.value = String(room.stream_intro ?? "");
     }
+    roomInfoSaving = false;
     refreshRoomInfoDirty();
     if (roomStatusEl) {
       if (room.connected) {
@@ -516,9 +572,18 @@ export function createPanel({ send }) {
       if (reference && data.source && data.source !== "voice") {
         // 「这句在接谁」——听录音的人对得上，看面板的人也对得上。
         const label = SOURCE_ZH[data.source] ?? data.source;
-        const refText = reference.text
+        let refText = reference.text
           ? `${reference.name ?? "?"}：${reference.text}`
-          : reference.name ?? label;
+          : (reference.name ?? label);
+        // The amount explains the queue-jump; the model never hears it, the
+        // operator should. Gifts speak batteries (the panel unit), money ¥.
+        if (reference.gift) {
+          refText += `〔${reference.gift.name} ×${reference.gift.num}`;
+          if (reference.gift.total_battery) refText += `，${reference.gift.total_battery} 电池`;
+          refText += "〕";
+        } else if (reference.value_cny) {
+          refText += `〔¥${Math.round(reference.value_cny)}〕`;
+        }
         copy.appendChild(el("span", "reply-reference", `引用 ${label} · ${refText}`));
       }
       copy.appendChild(el("span", "", `${data.text || "（无文本）"}${status}`));
@@ -1230,33 +1295,45 @@ export function createPanel({ send }) {
   const confirmTitle = document.getElementById("confirm-title");
   const confirmAccept = document.getElementById("confirm-accept");
   const confirmCancel = document.getElementById("confirm-cancel");
+  let settlePendingConfirm = null;
   const confirmAction = ({ title, message, accept = "确认" }) =>
     new Promise((resolve) => {
       if (!confirmDialog) {
         resolve(true);
         return;
       }
+      // A second ask while one is open: the first resolves false and its
+      // listeners come off — otherwise both promises settle on one click.
+      settlePendingConfirm?.(false);
       confirmTitle.textContent = title ?? "确认操作";
       confirmMessage.textContent = message ?? "";
       confirmAccept.textContent = accept;
       confirmDialog.hidden = false;
       const done = (answer) => {
+        settlePendingConfirm = null;
         confirmDialog.hidden = true;
         confirmAccept.removeEventListener("click", yes);
         confirmCancel.removeEventListener("click", no);
+        confirmDialog.removeEventListener("click", backdrop);
         document.removeEventListener("keydown", esc, true);
         resolve(answer);
       };
       const yes = () => done(true);
       const no = () => done(false);
+      const backdrop = (e) => {
+        if (e.target === confirmDialog) no();
+      };
       const esc = (e) => {
         if (e.key !== "Escape") return;
         e.stopImmediatePropagation();
         no();
       };
+      settlePendingConfirm = done;
       confirmAccept.addEventListener("click", yes);
       confirmCancel.addEventListener("click", no);
+      confirmDialog.addEventListener("click", backdrop);
       document.addEventListener("keydown", esc, true);
+      confirmCancel.focus?.();
     });
 
   return {
@@ -1267,6 +1344,10 @@ export function createPanel({ send }) {
     /** The main page mirrors pause/audio state onto the pet controls. */
     setOnPanelState(fn) {
       onPanelState = fn;
+    },
+    /** Browser-tab mode: the corner icon mirrors the in-page sheet. */
+    setOnOpenChange(fn) {
+      onOpenChange = fn;
     },
     confirmAction,
     setAudioOwner(owner, error) {
@@ -1416,6 +1497,14 @@ export function createPanel({ send }) {
       timelineEl.textContent = "";
       timelineEl.appendChild(el("p", "empty", "还没有对话"));
       loglinesEl.textContent = "";
+      // The room-event stream and the test card state replay with the rings
+      // too; stale rows would double and a finished run would stay painted.
+      if (roomEventsEl) {
+        roomEventsEl.textContent = "";
+        roomEventsEl.appendChild(el("p", "empty", "等待直播间事件…"));
+      }
+      testState = { status: "idle", case_id: "" };
+      applyTestState();
       // The local lines went with them, so they are news again — otherwise a
       // reconnect silently retires the one notice explaining a dead skin.
       noticed.clear();

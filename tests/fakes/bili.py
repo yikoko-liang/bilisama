@@ -208,10 +208,16 @@ def danmaku_event(
     )
 
 
-def entry_event(uid: int, *, room_id: int = 777) -> LiveEvent:
+def entry_event(
+    uid: int,
+    *,
+    room_id: int = 777,
+    guard_level: GuardLevel = GuardLevel.NONE,
+    medal: Medal | None = None,
+) -> LiveEvent:
     return LiveEvent(
         kind=EventKind.ENTRY,
         room_id=room_id,
-        viewer=Viewer(uid=uid, name=f"观众{uid}"),
+        viewer=Viewer(uid=uid, name=f"观众{uid}", guard_level=guard_level, medal=medal),
         event_id=f"iw:{uid}",
     )

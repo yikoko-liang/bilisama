@@ -45,7 +45,10 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 
 `--director` 还自带一个桌宠网页界面（形象、说话气泡、面板），启动横幅里有地址，
 加 `--open` 自动开浏览器；桌面悬浮窗形态在 `desktop/preview/`。用法见 runbook
-「桌宠预览」一节。
+「桌宠预览」一节。面板的「测试」页内置两套测试集（功能验收加六位候选主播的业务
+小直播），逐卡运行人工判定；同一页还能打开「直播 Mock」，共享一个带音频的 Chrome
+标签页、填真实房间号，用直播画面的声音代替麦克风做全链路验证——两样的用法和
+通过标准见 [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md)。
 
 要改代码的话，提交前跑一遍门禁 `scripts/gate.sh`（格式、类型、单测、CLI 冒烟，
 装了就连集成层和浏览器界面层一起跑，九步），规矩写在 [CONTRIBUTING.md](CONTRIBUTING.md)。

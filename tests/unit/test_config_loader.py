@@ -358,3 +358,37 @@ def test_effective_thresholds_lets_the_pacer_and_reply_length_override() -> None
     assert (
         row.score_threshold == derive(Chattiness.MEDIUM).score_threshold
     ), "the base still owns it"
+
+
+# ------------------------------------------------- yiko-merge audit closures
+
+
+def test_fresh_install_defaults_pin_the_shipped_contract() -> None:
+    """Bare Settings(): the values a machine with no config file starts from.
+    Nobody guarded these; a schema-default drift would ship silently."""
+    from bilisama.config.enums import Chattiness
+    from bilisama.config.schema import Settings
+
+    s = Settings()
+    assert s.interaction.chattiness is Chattiness.MEDIUM
+    assert s.interaction.reply_length is Chattiness.LOW
+    assert (s.interaction.gift_battery_high, s.interaction.gift_battery_medium) == (1000, 100)
+    assert s.room.room_id == 0 and s.room.stream_intro == ""
+    assert s.persona.streamer_name == "主播"
+    assert s.audio.input_enabled and s.audio.output_enabled
+    assert s.audio.noise_sensitivity == 50
+
+
+def test_shipped_config_loads_and_keeps_the_requested_defaults() -> None:
+    """The repo's own bilisama.toml through the real loader (profiles layered):
+    the file the streamer actually starts from, not a synthetic tmp copy."""
+    from bilisama.config.enums import Chattiness
+    from bilisama.config.loader import load
+
+    shipped = Path(__file__).resolve().parent.parent.parent / "config" / "bilisama.toml"
+    s = load(shipped)
+    assert s.interaction.chattiness is Chattiness.MEDIUM
+    assert s.interaction.reply_length is Chattiness.LOW
+    assert s.audio.input_enabled and s.audio.output_enabled
+    assert s.persona.display_name == "豆腐"
+    assert s.room.room_id == 0, "the shipped file must not point at a real room"

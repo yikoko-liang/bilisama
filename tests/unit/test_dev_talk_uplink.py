@@ -753,6 +753,18 @@ class _SilentSpeaker:
     def resume(self) -> None:
         return None
 
+    def finish_reply(self) -> None:
+        return None
+
+    def set_enabled(self, enabled: bool) -> None:
+        return None
+
+    def refresh_default_device(self) -> str | None:
+        return None
+
+    def status(self) -> dict[str, object]:
+        return {"enabled": True, "backlog_s": 0.0}
+
     def close(self) -> None:
         self.closed = True
 
@@ -882,10 +894,11 @@ async def test_the_director_stands_the_whole_stack_up_and_takes_it_down(
     speech = await _run_until_ready(_director_args(director_box))
     printed = capsys.readouterr().out
 
-    # Config actually drove the run: chattiness low comes from the file, and
-    # 180s is what derive() makes of it (config/derive.py).
+    # Config actually drove the run: chattiness low comes from the file. The
+    # banner stopped naming a fixed idle threshold nobody reads (yiko-merge
+    # audit); it names the dynamic pacer's current value instead.
     assert "话痨度 low" in printed
-    assert "冷场 180s" in printed
+    assert "冷场阈值随房间活跃度浮动" in printed
     # The wordlist gate ran on the real path, not just in `validate`.
     assert "[安全] 词表已装载，命中策略 drop_sentence" in printed
     # The persona reached the link before any task started.

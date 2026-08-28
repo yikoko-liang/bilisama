@@ -358,11 +358,17 @@ body.shell .pet-controls {
   background: color-mix(in srgb, var(--c-err) 12%, var(--panel));
 }
 
-.pet-control:hover,
-.pet-control:focus-visible {
+.pet-control:hover {
   color: var(--ink);
   transform: translateY(-1px);
-  outline: none;
+}
+
+.pet-control:focus-visible {
+  /* Keyboard users need to see which of the four quick keys holds focus. */
+  color: var(--ink);
+  transform: translateY(-1px);
+  outline: 2px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 2px;
 }
 
 .pet-control:active { transform: translateY(0) scale(0.95); }

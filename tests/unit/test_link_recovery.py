@@ -24,6 +24,7 @@ import pytest
 import websockets
 from websockets.frames import Close
 
+from bilisama import dev_talk
 from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import HostedTurnConfig
@@ -510,6 +511,35 @@ async def test_a_drop_names_its_close_code_without_the_deprecated_property() -> 
 # ------------------------------------------------------------ playback backlog
 
 
+def _bare_speaker(stream: object | None) -> dev_talk._Speaker:
+    """A _Speaker with every runtime field set and no PortAudio device.
+
+    __new__-built on purpose: the constructor claims a real output device,
+    and these tests exercise buffer arithmetic, not audio hardware.
+    """
+    import threading
+
+    from bilisama.dev_talk import _Speaker
+
+    speaker = _Speaker.__new__(_Speaker)
+    speaker._buffer = bytearray()
+    speaker._dropped_s = 0.0
+    speaker._lock = threading.Lock()
+    speaker._stream = stream
+    speaker._sounddevice = None
+    speaker._primed = False
+    speaker._reply_finished = False
+    speaker._rebuffer_count = 0
+    speaker._underrun_blocks = 0
+    speaker._callback_status_count = 0
+    speaker._enabled = True
+    speaker._suspended = False
+    speaker._device = None
+    speaker._opened_device = None
+    speaker._last_output_error = ""
+    return speaker
+
+
 def test_the_speaker_never_falls_more_than_the_cap_behind() -> None:
     """Measured failure: replies are dispatched when the SERVER finishes
     generating, which is seconds before the audience finishes hearing the
@@ -519,13 +549,9 @@ def test_the_speaker_never_falls_more_than_the_cap_behind() -> None:
     The floor gate is the real fix; this ceiling is the backstop for whenever
     the gate is bypassed. Falling behind by minutes must not be reachable.
     """
-    from bilisama.dev_talk import _MAX_BACKLOG_BYTES, _OUTPUT_RATE, _Speaker
+    from bilisama.dev_talk import _MAX_BACKLOG_BYTES, _OUTPUT_RATE
 
-    speaker = _Speaker.__new__(_Speaker)  # no PortAudio device in a unit test
-    speaker._buffer = bytearray()
-    speaker._dropped_s = 0.0
-    speaker._lock = __import__("threading").Lock()
-    speaker._stream = object()  # pretend a device is attached
+    speaker = _bare_speaker(object())  # pretend a device is attached
 
     one_second = b"\x00\x00" * _OUTPUT_RATE
     for _ in range(60):
@@ -540,13 +566,9 @@ def test_a_muted_run_does_not_latch_the_playback_gate() -> None:
     """With no output device nothing drains the buffer, so buffering at all
     would leave `busy` True forever — and the new gate would then hold the
     floor shut for the rest of the stream. Worse than having no speaker."""
-    from bilisama.dev_talk import _OUTPUT_RATE, _Speaker
+    from bilisama.dev_talk import _OUTPUT_RATE
 
-    speaker = _Speaker.__new__(_Speaker)
-    speaker._buffer = bytearray()
-    speaker._dropped_s = 0.0
-    speaker._lock = __import__("threading").Lock()
-    speaker._stream = None
+    speaker = _bare_speaker(None)
 
     speaker.play(b"\x00\x00" * _OUTPUT_RATE)
     assert not speaker.busy
@@ -563,13 +585,9 @@ def test_dropping_backlog_keeps_sample_alignment() -> None:
     """
     import struct
 
-    from bilisama.dev_talk import _MAX_BACKLOG_BYTES, _Speaker
+    from bilisama.dev_talk import _MAX_BACKLOG_BYTES
 
-    speaker = _Speaker.__new__(_Speaker)
-    speaker._buffer = bytearray()
-    speaker._dropped_s = 0.0
-    speaker._lock = __import__("threading").Lock()
-    speaker._stream = object()
+    speaker = _bare_speaker(object())
 
     # A ramp, so a one-byte phase shift is unmistakable in the decoded values.
     total = _MAX_BACKLOG_BYTES // 2 + 1000
@@ -586,6 +604,118 @@ def test_dropping_backlog_keeps_sample_alignment() -> None:
     assert got[0] in ramp, f"first surviving sample {got[0]} is not a real sample"
     head = ramp.index(got[0])
     assert list(got[:50]) == ramp[head : head + 50], "samples are out of phase"
+
+
+def test_speaker_prebuffers_network_jitter_instead_of_splitting_audio_with_silence() -> None:
+    """DashScope deltas arrive in bursts; playing the first short packet and
+    padding the rest of the word with zeroes was the audible stop-start bug."""
+    from bilisama.dev_talk import _PLAYBACK_PREROLL_BYTES
+
+    speaker = _bare_speaker(object())
+    first = b"\x11\x22" * 100
+    speaker.play(first)
+    output = bytearray(512)
+    speaker._feed(output, 256, None, None)
+
+    assert output == b"\x00" * 512
+    assert bytes(speaker._buffer) == first, "a short first packet must wait, not play then cut"
+
+    remaining = _PLAYBACK_PREROLL_BYTES - len(first)
+    speaker.play(b"\x11\x22" * ((remaining + 1) // 2))
+    speaker._feed(output, 256, None, None)
+    assert output == b"\x11\x22" * 256
+
+
+def test_speaker_drains_a_short_tail_after_reply_done() -> None:
+    """Generation over: a sub-preroll remainder plays out instead of waiting
+    for a cushion that will never fill."""
+    speaker = _bare_speaker(object())
+    tail = b"\x33\x44" * 100
+    speaker.play(tail)
+    speaker.finish_reply()
+    output = bytearray(512)
+    speaker._feed(output, 256, None, None)
+
+    assert output[: len(tail)] == tail
+    assert output[len(tail) :] == b"\x00" * (len(output) - len(tail))
+    assert not speaker.busy
+
+
+def test_disabling_speaker_flushes_current_audio_and_blocks_later_chunks() -> None:
+    speaker = _bare_speaker(object())
+    speaker.play(b"first reply")
+    assert speaker.busy
+    speaker.set_enabled(False)
+    assert (speaker.enabled, bytes(speaker._buffer)) == (False, b"")
+    speaker.play(b"must stay muted")
+    assert bytes(speaker._buffer) == b""
+    speaker.set_enabled(True)
+    speaker.play(b"audible again")
+    assert speaker.enabled is True
+    assert bytes(speaker._buffer) == b"audible again"
+
+
+def test_speaker_reopens_when_the_macos_default_output_changes() -> None:
+    """A Bluetooth headset selected after startup must not leave PCM on the
+    old PortAudio stream until the whole companion is restarted."""
+
+    class FakeStream:
+        def __init__(self, device: int) -> None:
+            self.device = device
+            self.active = True
+            self.started = False
+            self.closed = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.active = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeDefault:
+        device = (0, 2)
+
+    class FakeSoundDevice:
+        default = FakeDefault()
+
+        def __init__(self) -> None:
+            self.created: list[FakeStream] = []
+
+        def RawOutputStream(self, **kwargs: object) -> FakeStream:
+            device = kwargs["device"]
+            assert isinstance(device, int)
+            stream = FakeStream(device)
+            self.created.append(stream)
+            return stream
+
+    old = FakeStream(1)
+    speaker = _bare_speaker(old)
+    speaker._sounddevice = FakeSoundDevice()
+    speaker._opened_device = 1
+
+    message = speaker.refresh_default_device()
+
+    assert message == "默认扬声器已切换到设备 2"
+    assert old.closed is True
+    assert speaker._stream is speaker._sounddevice.created[0]
+    assert speaker._stream.started is True
+
+
+def test_speaker_refresh_stays_put_while_pinned_or_suspended() -> None:
+    """--output-device pins the device; a page holding the devices must not
+    have them stolen back by the poller."""
+    pinned = _bare_speaker(object())
+    pinned._sounddevice = object()
+    pinned._device = 3
+    assert pinned.refresh_default_device() is None
+
+    suspended = _bare_speaker(None)
+    suspended._sounddevice = object()
+    suspended._suspended = True
+    assert suspended.refresh_default_device() is None
 
 
 @contextmanager

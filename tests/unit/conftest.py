@@ -40,6 +40,7 @@ class AssemblyKit:
     speak: SpeakSwitches
     intents: list[Intent] = field(default_factory=list)
     pushed: list[str] = field(default_factory=list)
+    proactive: ProactiveTopicLoop | None = None
 
 
 def build_assembly_kit(
@@ -54,6 +55,8 @@ def build_assembly_kit(
     entry_group_enabled: Callable[[str], bool] | None = None,
     event_observer: Callable[[LiveEvent], None] | None = None,
     observe_context_item: Callable[[str], Awaitable[None]] | None = None,
+    voice_rules: str = "",
+    event_rules: str = "",
 ) -> AssemblyKit:
     """One Assembly, wired the way dev-talk wires it, on a FakeClock.
 
@@ -101,6 +104,8 @@ def build_assembly_kit(
         observe_context_item=observe_context_item,
         gift_battery_high=interaction.gift_battery_high,
         gift_battery_medium=interaction.gift_battery_medium,
+        voice_rules=voice_rules,
+        event_rules=event_rules,
     )
     return AssemblyKit(
         assembly=assembly,
@@ -110,4 +115,5 @@ def build_assembly_kit(
         speak=speak,
         intents=intents,
         pushed=pushed,
+        proactive=proactive,
     )

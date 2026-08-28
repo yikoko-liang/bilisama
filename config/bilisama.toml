@@ -1,8 +1,9 @@
 # BiliSama 配置。这是唯一的真相源，密钥除外（密钥走环境变量）。
 #
 # 有几类值刻意不在这里：
-#   - 冷场阈值、弹幕窗口、打分门槛、冷却、回复长度 —— 由 chattiness 派生，
-#     跑 `bilisama config chattiness` 看三档分别是多少
+#   - 打分门槛和回复 token 上限 —— 由 chattiness 与 reply_length 派生，
+#     跑 `bilisama config chattiness` 看三档分别是多少；弹幕窗口和冷场阈值
+#     由房间活跃度动态调节（event_pacing.py），不在任何配置键里
 #   - 任何密钥 —— 这里只留一个引用名。今天唯一的后端是环境变量
 #     （secrets.py:22-40）：写成 "env:名字" 就读那个环境变量，写成裸名 "abc"
 #     先试 BILISAMA_KEY_ABC 再试 abc。系统钥匙串是跟 Electron 壳一起做的规划

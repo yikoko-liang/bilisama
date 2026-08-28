@@ -198,6 +198,9 @@ def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
         "interaction.proactive.max_per_hour",
         "interaction.proactive.wake_interval_s",
         "room.stream_intro",
+        # LIVE since the yiko-merge audit: run_reload_hook connects/disconnects
+        # in process, and the panel edit is session-only (never persisted).
+        "room.room_id",
         "audio.input_enabled",
         "audio.output_enabled",
         "audio.noise_sensitivity",

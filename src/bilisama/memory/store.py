@@ -243,7 +243,10 @@ class MemoryStore:
         # room owner's line as a viewer's request invents an audience member.
         recorded_name = viewer.name
         if viewer.is_anchor and not recorded_name.startswith("主播本人·"):
-            recorded_name = f"主播本人·{recorded_name}" if recorded_name else "主播本人"
+            # identity as the fallback base: a masked/blank-named owner line
+            # still records WHICH identity spoke, not just a bare label.
+            base = recorded_name or viewer.identity
+            recorded_name = f"主播本人·{base}" if base else "主播本人"
         event_row = (
             self._stream_id,
             event.kind.value,

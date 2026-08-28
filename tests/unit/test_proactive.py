@@ -408,3 +408,64 @@ async def test_pending_funnel_work_waves_the_topic_off() -> None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         store.close()
+
+
+# ------------------------------------------------- yiko-merge audit closures
+
+
+async def test_side_model_failure_falls_back_instead_of_silencing_topics() -> None:
+    """A configured-but-broken side model must degrade exactly like a missing
+    one: the Realtime link still breaks the ice."""
+    from bilisama.side import SideModelError
+
+    class BrokenSide(FakeSide):
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            raise SideModelError("侧路模型超时")
+
+    async with _running_paced(side=BrokenSide()) as (loop, _floor, intents, clock, _pacer):
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        assert "后台候选暂不可用" in (intents[0].injection.reply.instructions or "")
+        assert loop.status()["fallback_topics"] == 1
+
+
+async def test_dialogue_lines_enter_the_candidate_material() -> None:
+    """The side model sees what was just said on air — both roles — not only
+    the event log."""
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+
+    class Recorder(FakeSide):
+        def __init__(self) -> None:
+            super().__init__()
+            self.users: list[str] = []
+
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            self.users.append(user)
+            return await super().complete(system=system, user=user, max_tokens=max_tokens)
+
+    side = Recorder()
+    loop = ProactiveTopicLoop(
+        side,
+        store,
+        SpeakingFloor(clock),
+        clock,
+        submit=lambda _i: None,
+        prompt="想一个话题",
+        idle_threshold_s=99.0,
+        assistant_label="豆腐",
+    )
+    loop.note_dialogue("streamer", "这段显存爆了")
+    loop.note_dialogue("assistant", "换低显存模式试试")
+    task = asyncio.create_task(loop.run())
+    try:
+        await clock.advance(2.0)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert side.users, "the candidate refresh ran"
+    material = side.users[-1]
+    assert "主播：这段显存爆了" in material
+    assert "豆腐：换低显存模式试试" in material
+    assert "连续无人回应次数" in material

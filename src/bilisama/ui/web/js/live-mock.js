@@ -91,7 +91,9 @@ function captureSnapshot() {
     video_live: videoTrack?.readyState === "live",
     audio_live: audioTrack?.readyState === "live" && audioFramesCaptured > 0,
     source_label: videoTrack?.label || sourceName.textContent || "浏览器共享源",
-    sample_rate: 16000,
+    // The SOURCE's real rate, for the preflight card; the worklet resamples
+    // to 16000 either way.
+    sample_rate: audioTrack?.getSettings?.().sampleRate ?? 16000,
   };
 }
 
@@ -215,15 +217,7 @@ function runCheck() {
   }
   checkButton.disabled = true;
   checkButton.textContent = "检测中…";
-  const speak = {};
-  for (const input of eventSwitches) {
-    if (input.dataset.speak === "entry") {
-      speak.entry = input.checked;
-      speak.vip_enter = input.checked;
-    } else {
-      speak[input.dataset.speak] = input.checked;
-    }
-  }
+  // The event switches send their own panel.set on change; nothing to batch.
   if (streamIntroEdited) {
     socket.send("panel.set", {
       config: { path: "room.stream_intro", value: streamIntro.value.trim() },
@@ -318,6 +312,9 @@ roomInput.addEventListener("input", () => {
   const candidate = Number(roomInput.value.trim());
   if (candidate > 0 && candidate !== configuredRoomId && !streamIntroEdited) {
     streamIntro.value = "";
+    // Programmatic clears fire no input event; mark it edited by hand or the
+    // page's 「更换房间时留空会清除旧主题」 promise never reaches the config.
+    streamIntroEdited = configuredStreamIntro !== "";
   }
 });
 streamIntro.addEventListener("input", () => {

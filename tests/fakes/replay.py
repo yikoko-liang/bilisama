@@ -64,16 +64,22 @@ def parse_line(raw: dict[str, Any], *, room_id: int = 0) -> LiveEvent:
     value_cny = float(raw.get("value_cny", 0.0))
     if g := raw.get("gift"):
         total_coin = int(g.get("total_coin", 0))
+        num = int(g.get("num", 1))
+        coin_type = str(g.get("coin_type", ""))
+        # Older fixtures predate the battery field. Backfill it from the gold
+        # price the way the wire path does (100 gold = 1 battery), or replayed
+        # paid gifts read total_battery == 0 and never reach the paid lanes.
+        fallback_battery = total_coin // max(num, 1) // 100 if coin_type == "gold" else 0
         gift = Gift(
             gift_id=int(g.get("gift_id", 0)),
             name=str(g.get("name", "")),
-            num=int(g.get("num", 1)),
-            coin_type=str(g.get("coin_type", "")),
+            num=num,
+            coin_type=coin_type,
             total_coin=total_coin,
             combo_id=str(g.get("combo_id", "")),
             combo_count=int(g.get("combo_count", 0)),
             combo_end=g.get("combo_end"),
-            unit_battery=int(g.get("unit_battery", 0)),
+            unit_battery=int(g.get("unit_battery", fallback_battery)),
         )
         if not value_cny and gift.is_paid:
             value_cny = cny_from_gold(total_coin)

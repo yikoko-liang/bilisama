@@ -35,6 +35,24 @@ const inputToggleBtn = document.getElementById("voice-input-toggle");
 const outputToggleBtn = document.getElementById("voice-output-toggle");
 const pauseToggleBtn = document.getElementById("pause-toggle");
 const controlState = { paused: false, input: true, output: true };
+let bubbleReplyId = null;
+
+// Which replies show as a pet bubble. Paused: none (nothing new speaks
+// anyway, and a bubble over a paused pet reads as a ghost). Voice fully on:
+// her voice-turn replies and the high-value lanes bubble, the ordinary event
+// lanes do not — a bubble per danmaku is noise when the voice already carries
+// it. With 播报 off, the bubble is the only channel, so everything shows.
+// (Softened from yiko, which hid even voice replies behind full voice: on
+// this branch the pet IS the primary surface, her speech balloon stays.)
+const QUIET_BUBBLE_SOURCES = new Set(["danmaku", "entry", "proactive", "background_result"]);
+function replyUsesBubble(data) {
+  if (panelOnly) return false;
+  if (controlState.paused) return false;
+  if (controlState.input && controlState.output) {
+    return !QUIET_BUBBLE_SOURCES.has(data?.source ?? "voice");
+  }
+  return true;
+}
 
 function paintControls() {
   const set = (btn, on, onTip, offTip) => {
@@ -43,6 +61,7 @@ function paintControls() {
     btn.setAttribute("aria-pressed", String(on));
     btn.dataset.tooltip = on ? onTip : offTip;
     btn.title = on ? onTip : offTip;
+    btn.disabled = false; // panel.state answered; the ack gate lifts
   };
   set(inputToggleBtn, controlState.input, "点击关闭语音输入", "点击打开语音输入");
   set(outputToggleBtn, controlState.output, "点击关闭语音播报", "点击打开语音播报");
@@ -59,10 +78,18 @@ function paintControls() {
 }
 
 inputToggleBtn?.addEventListener("click", () => {
-  send("panel.set", { audio: { input_enabled: !controlState.input } });
+  if (send("panel.set", { audio: { input_enabled: !controlState.input } })) {
+    inputToggleBtn.disabled = true; // until panel.state repaints with the truth
+  } else {
+    bubble.showTransient?.("语音连接已断开，输入开关没有生效。", 3200);
+  }
 });
 outputToggleBtn?.addEventListener("click", () => {
-  send("panel.set", { audio: { output_enabled: !controlState.output } });
+  if (send("panel.set", { audio: { output_enabled: !controlState.output } })) {
+    outputToggleBtn.disabled = true;
+  } else {
+    bubble.showTransient?.("语音连接已断开，播报开关没有生效。", 3200);
+  }
 });
 pauseToggleBtn?.addEventListener("click", () => {
   if (!send("panel.set", { paused: !controlState.paused })) {
@@ -87,18 +114,36 @@ const exitDialog = document.getElementById("exit-dialog");
 if (!panelOnly && exitDialog) {
   const exitConfirm = document.getElementById("exit-confirm");
   const exitCancel = document.getElementById("exit-cancel");
+  const closeExitDialog = () => {
+    exitDialog.hidden = true;
+    lastFit = ""; // the quitting size no longer applies; shrink back
+    fitToSkin();
+  };
   document.getElementById("pet-mount")?.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     exitDialog.hidden = false;
+    // The shell window normally hugs the pet; the dialog needs real estate.
+    lastFit = "";
+    fitToSkin();
   });
-  exitCancel?.addEventListener("click", () => {
-    exitDialog.hidden = true;
+  exitCancel?.addEventListener("click", closeExitDialog);
+  exitDialog.addEventListener("click", (e) => {
+    if (e.target === exitDialog) closeExitDialog();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !exitDialog.hidden) closeExitDialog();
   });
   exitConfirm?.addEventListener("click", () => {
-    exitDialog.hidden = true;
-    if (!send("app.quit")) {
+    if (send("app.quit")) {
+      // Keep the dialog up as the receipt: app.exiting closes the window.
+      exitConfirm.disabled = true;
+      exitConfirm.textContent = "正在退出…";
+    } else if (window.bilisamaShell?.close) {
       // The backend is already gone; nothing will answer. Close what we can.
-      window.bilisamaShell?.close?.();
+      window.bilisamaShell.close();
+    } else {
+      closeExitDialog();
+      bubble.showTransient?.("后端进程没有运行，无需退出。", 3200);
     }
   });
 }
@@ -162,8 +207,14 @@ function fitToSkin() {
   const bubbleH = bubbleEl && !bubbleEl.hidden ? bubbleEl.getBoundingClientRect().height : 0;
   // 208 keeps a 13px line readable; the bubble needs its own height plus the
   // gap it floats above the pet by.
-  const width = Math.round(Math.max(rect.width + 56, 208));
-  const height = Math.round(rect.height + Math.max(BASE_HEADROOM, bubbleH + 40));
+  let width = Math.round(Math.max(rect.width + 56, 208));
+  let height = Math.round(rect.height + Math.max(BASE_HEADROOM, bubbleH + 40));
+  const exitOpen = exitDialog && !exitDialog.hidden;
+  if (exitOpen) {
+    // The exit card is min(320px, 100%): a 208px pet window would clip it.
+    width = Math.max(width, 360);
+    height = Math.max(height, 260);
+  }
   const key = `${width}x${height}`;
   if (key === lastFit) return; // streaming text resizes by a pixel at a time
   lastFit = key;
@@ -180,6 +231,14 @@ const cornerBtn = document.getElementById("corner");
 window.bilisamaShell?.onPanelState?.((open) => {
   cornerBtn?.classList.toggle("active", Boolean(open));
 });
+// In a plain browser tab the panel slides in-page; the shell IPC above never
+// fires, so the corner icon listens to the panel itself.
+if (!window.bilisamaShell) {
+  panel.setOnOpenChange?.((open) => {
+    cornerBtn?.classList.toggle("active", Boolean(open));
+    cornerBtn?.setAttribute("aria-pressed", String(Boolean(open)));
+  });
+}
 
 if (!panelOnly && window.bilisamaShell?.setInteractive) {
   const shell = window.bilisamaShell;
@@ -256,12 +315,26 @@ const handlers = {
     applyVisual();
   },
   "reply.delta": (data) => {
-    if (!panelOnly) bubble.delta(data.text ?? "");
+    if (!replyUsesBubble(data)) return;
+    if (data.reply_id && data.reply_id !== bubbleReplyId) {
+      // A different reply started streaming: close the old bubble stream so
+      // this one replaces the text instead of appending to it.
+      bubbleReplyId = data.reply_id;
+      bubble.endReply();
+    }
+    bubble.delta(data.text ?? "");
   },
-  "reply.done": () => {
+  "reply.done": (data) => {
     // The bubble outlives the text stream on purpose; dismissal is keyed to
     // voice.state falling back to idle (see bubble.js). Marking the end is
     // what lets the next reply replace this text instead of appending to it.
+    if (replyUsesBubble(data) && data.reply_id && data.reply_id !== bubbleReplyId && data.text) {
+      // No delta of this reply ever bubbled (gating flipped mid-reply, or the
+      // stream raced the page): show the finished line once instead of never.
+      bubbleReplyId = data.reply_id;
+      bubble.showTransient?.(data.text, 4000);
+      return;
+    }
     bubble.endReply();
   },
   "playback.clear": () => {

@@ -35,6 +35,7 @@ import threading
 import traceback
 import wave
 import zlib
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -42,7 +43,9 @@ from urllib.parse import parse_qsl
 
 import websockets
 
-from bilisama.config.enums import ProviderName
+from bilisama.config.derive import DerivedThresholds, effective_thresholds
+from bilisama.config.enums import Chattiness, ProviderName
+from bilisama.event_pacing import EventPacingSnapshot
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.obs.health import LinkHealth
 from bilisama.obs.logging import bind, get_logger
@@ -85,6 +88,13 @@ _FRAME_MS = 32
 # seconds is roughly two replies: enough that a burst plays out intact, far
 # short of the minutes of drift measured before the floor gate was fed.
 _MAX_BACKLOG_BYTES = 10 * 2 * _OUTPUT_RATE
+# DashScope audio deltas arrive over the network in bursts. Starting PortAudio
+# on the first short packet makes the callback consume it before the next
+# packet arrives, then fill the gap with silence — the audible stop-start bug.
+# Hold a small jitter cushion first; 120 ms stays below a conversational beat
+# while covering several ordinary websocket scheduling gaps.
+_PLAYBACK_PREROLL_MS = 120
+_PLAYBACK_PREROLL_BYTES = _OUTPUT_RATE * 2 * _PLAYBACK_PREROLL_MS // 1000
 
 # How long the uplink keeps forwarding into a dead socket before giving up.
 # Has to outlast the client's whole reconnect budget — six tries with backoff
@@ -105,7 +115,9 @@ _RELOG_ON_EDIT = frozenset({"runtime.log_level", "runtime.log_viewer_content"})
 
 # Panel edits that are SESSION state, not durable preferences: applied live,
 # never written to disk, and forced back to their session defaults on every
-# director start (_director_session_overrides — the two lists move together).
+# director start for the AUDIO pair only (_director_session_overrides): the
+# room and the streamer name are legitimate TOML configuration, so those two
+# are session-only in the panel yet still start from the file.
 _SESSION_ONLY_PANEL_PATHS = frozenset(
     {
         "audio.input_enabled",
@@ -119,9 +131,10 @@ _SESSION_ONLY_PANEL_PATHS = frozenset(
 def _director_session_overrides() -> dict[str, Any]:
     """The session-state fields every director run starts from.
 
-    A previous stream's paused microphone or connected room must not leak
-    into tonight through a stale file — these ride the override layer, above
-    whatever the TOML says.
+    Only the audio pair: a stream must always begin able to hear and speak,
+    whatever a hand-edited TOML claims. room_id and streamer_name are real
+    configuration and stay file-driven (panel edits to them are session-only
+    instead — see _SESSION_ONLY_PANEL_PATHS).
     """
     return {
         "audio": {"input_enabled": True, "output_enabled": True},
@@ -441,7 +454,79 @@ class _Speaker:
         self._device = device
         self._lock = threading.Lock()
         self._stream: Any = None
+        self._sounddevice: Any = None
+        # Jitter-cushion state (see _PLAYBACK_PREROLL_MS): primed means the
+        # callback may drain; a sub-preroll remainder waits for finish_reply.
+        self._primed = False
+        self._reply_finished = False
+        self._rebuffer_count = 0
+        self._underrun_blocks = 0
+        self._callback_status_count = 0
+        self._enabled = True
+        self._suspended = False
+        self._opened_device: int | None = None
+        self._last_output_error = ""
         self._open()
+
+    def _feed(self, outdata: Any, frames: int, time_info: Any, status: Any) -> None:
+        """PortAudio callback: drain jitter-buffered PCM without touching asyncio."""
+        need = len(outdata)
+        with self._lock:
+            if status:
+                self._callback_status_count += 1
+            was_primed = self._primed
+            if not self._primed and (
+                len(self._buffer) >= _PLAYBACK_PREROLL_BYTES
+                or (self._reply_finished and bool(self._buffer))
+            ):
+                self._primed = True
+            if not self._primed:
+                chunk = b""
+            elif len(self._buffer) >= need:
+                chunk = bytes(self._buffer[:need])
+                del self._buffer[:need]
+            elif self._reply_finished:
+                chunk = bytes(self._buffer)
+                self._buffer.clear()
+                self._primed = False
+                self._reply_finished = False
+            else:
+                # Preserve the short packet and wait for a fresh cushion. The
+                # old path played this fragment and padded the rest of the same
+                # word with zeroes, producing the reported chopped speech.
+                chunk = b""
+                self._primed = False
+                if was_primed:
+                    self._rebuffer_count += 1
+                    self._underrun_blocks += 1
+        outdata[: len(chunk)] = chunk
+        if len(chunk) < need:
+            outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
+
+    def _start_stream(self, device: int | None) -> Any:
+        stream = self._sounddevice.RawOutputStream(
+            samplerate=_OUTPUT_RATE,
+            channels=1,
+            dtype="int16",
+            device=device,
+            callback=self._feed,
+        )
+        try:
+            stream.start()
+        except Exception:
+            _close_audio_stream(stream)
+            raise
+        return stream
+
+    def _default_output_device(self) -> int | None:
+        if self._sounddevice is None:
+            return None
+        pair = self._sounddevice.default.device
+        try:
+            value = int(pair[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
 
     def _open(self) -> None:
         """Take the output device. Leaves _stream None if it cannot be had."""
@@ -451,32 +536,15 @@ class _Speaker:
         except ImportError:
             self._stream = None
             return
-
-        def feed(outdata: Any, frames: int, time_info: Any, status: Any) -> None:
-            need = len(outdata)
-            with self._lock:
-                chunk = bytes(self._buffer[:need])
-                del self._buffer[: len(chunk)]
-            outdata[: len(chunk)] = chunk
-            if len(chunk) < need:
-                outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
-
-        stream = sounddevice.RawOutputStream(
-            samplerate=_OUTPUT_RATE,
-            channels=1,
-            dtype="int16",
-            device=device,
-            callback=feed,
-        )
+        self._sounddevice = sounddevice
         try:
-            stream.start()
+            stream = self._start_stream(device)
         except Exception as exc:
             # An opened-but-unstartable device (Bluetooth pulled mid-setup)
             # would otherwise leave the stream unreachable — the constructor
             # raises, no caller ever holds the object, and close() can never
-            # run. Release it here and carry on mute: the voice loop is worth
-            # more than the speaker.
-            _close_audio_stream(stream)
+            # run. _start_stream released it; carry on mute: the voice loop
+            # is worth more than the speaker.
             self._stream = None
             print(f"[音频] 扬声器起不来（{exc}），这场没有声音输出。", file=sys.stderr)
             # Once per open, never per block — this is the device handshake,
@@ -490,6 +558,7 @@ class _Speaker:
             )
             return
         self._stream = stream
+        self._opened_device = device if device is not None else self._default_output_device()
 
     def suspend(self) -> None:
         """Give the output device up while a page holds it. BLOCKING.
@@ -501,14 +570,58 @@ class _Speaker:
         over again.
         """
         self.flush()
+        self._suspended = True
         stream, self._stream = self._stream, None
         if stream is not None:
             _close_audio_stream(stream)
 
     def resume(self) -> None:
         """Take the device back after a page let go. BLOCKING."""
+        self._suspended = False
         if self._stream is None:
             self._open()
+
+    def refresh_default_device(self) -> str | None:
+        """Follow a macOS default-output change without restarting BiliSama.
+
+        Explicit ``--output-device`` selections stay pinned, and a suspended
+        speaker stays suspended — while a page holds the devices, reopening
+        here would steal them back mid-session.
+        """
+        if self._device is not None or self._suspended or self._sounddevice is None:
+            return None
+        target = self._default_output_device()
+        if target is None:
+            return None
+        old = self._stream
+        try:
+            active = bool(old is not None and old.active)
+        except Exception:
+            active = False
+        if target == self._opened_device and active:
+            return None
+        # Stop the old callback before starting the new one. Both callbacks
+        # share the same PCM ring; overlapping them, even briefly, lets two
+        # devices race to consume different halves of one sentence.
+        if old is not None:
+            _close_audio_stream(old)
+        self._stream = None
+        try:
+            replacement = self._start_stream(target)
+        except Exception as exc:
+            self.flush()
+            message = f"默认扬声器重连失败（{exc}），会继续重试"
+            if message == self._last_output_error:
+                return None
+            self._last_output_error = message
+            return message
+        self._stream = replacement
+        previous = self._opened_device
+        self._opened_device = target
+        self._last_output_error = ""
+        if previous == target:
+            return f"默认扬声器设备 {target} 已重新连接"
+        return f"默认扬声器已切换到设备 {target}"
 
     def play(self, pcm: bytes) -> None:
         if self._stream is None:
@@ -518,6 +631,8 @@ class _Speaker:
             # floor shut for the rest of the stream.
             return
         with self._lock:
+            if not self._enabled:
+                return
             self._buffer.extend(pcm)
             over = len(self._buffer) - _MAX_BACKLOG_BYTES
             if over > 0:
@@ -548,6 +663,43 @@ class _Speaker:
     def flush(self) -> None:
         with self._lock:
             self._buffer.clear()
+            self._primed = False
+            self._reply_finished = False
+
+    def finish_reply(self) -> None:
+        """Release a sub-preroll final packet once generation has completed."""
+        with self._lock:
+            self._reply_finished = bool(self._buffer)
+            if not self._buffer:
+                self._primed = False
+
+    @property
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable playback; disabling also stops already-buffered speech."""
+        with self._lock:
+            self._enabled = enabled
+            if not enabled:
+                self._buffer.clear()
+                self._primed = False
+                self._reply_finished = False
+
+    def status(self) -> dict[str, object]:
+        """Expose playback continuity counters for the health panel."""
+        with self._lock:
+            return {
+                "enabled": self._enabled,
+                "opened_device": self._opened_device,
+                "backlog_s": round(len(self._buffer) / 2.0 / _OUTPUT_RATE, 3),
+                "dropped_s": round(self._dropped_s, 3),
+                "rebuffer_count": self._rebuffer_count,
+                "underrun_blocks": self._underrun_blocks,
+                "callback_status_count": self._callback_status_count,
+                "last_error": self._last_output_error,
+            }
 
     def close(self) -> None:
         """Release the output stream. BLOCKING — call via asyncio.to_thread.
@@ -564,6 +716,21 @@ class _Speaker:
     def busy(self) -> bool:
         with self._lock:
             return len(self._buffer) > 0
+
+
+async def _watch_default_output(speaker: _Speaker) -> None:
+    """Keep desktop playback on the current macOS default output.
+
+    A Bluetooth headset that connects after startup becomes the system default
+    without any notification PortAudio can hear, so poll once a second; the
+    speaker itself refuses to move while pinned (--output-device) or while a
+    page holds the devices.
+    """
+    while True:
+        await asyncio.sleep(1.0)
+        message = await asyncio.to_thread(speaker.refresh_default_device)
+        if message:
+            print(f"[音频] {message}")
 
 
 async def _consume(
@@ -711,6 +878,10 @@ async def _consume_events(
                 if speaker is not None:
                     speaker.flush()  # the local half of playback.clear
             elif isinstance(event, link.ReplyDone):
+                if speaker is not None:
+                    # Generation is over: release a sub-preroll tail instead of
+                    # holding it hostage to a cushion that will never fill.
+                    speaker.finish_reply()
                 marker = f"—— 回复结束（{event.status}）——"
                 if stream_text:
                     say(f"\n{marker}")
@@ -844,6 +1015,23 @@ class _Fanout:
         await self._inner.end_protection()
 
 
+def _paced_thresholds(
+    chattiness: Chattiness, reply_length: Chattiness, pacing: EventPacingSnapshot
+) -> DerivedThresholds:
+    """The selector's rules for the NEXT window: chattiness × room load.
+
+    Both halves of the pacer's verdict ride along — the window length AND the
+    score bar (quiet rooms lower it, busy rooms raise it). Forwarding only the
+    window was this function's founding bug: the dynamic bar had a producer
+    and a status line but no consumer.
+    """
+    return effective_thresholds(
+        chattiness,
+        reply_length=reply_length,
+        danmaku_window_s=max(1, round(pacing.danmaku_window_s)),
+    ).model_copy(update={"score_threshold": pacing.score_threshold})
+
+
 def _console_viewer(name: str) -> Viewer:
     # A stable uid per name, so memory sees 测试观众 as the same person every time.
     return Viewer(uid=10000 + zlib.crc32(name.encode()) % 90000, name=name)
@@ -869,7 +1057,9 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
     """One typed line, one simulated live event.
 
     "你好" — danmaku from 测试观众; "阿强:你好" — danmaku from 阿强;
-    "/sc 阿强 30 主播玩什么" — Super Chat; "/gift 阿强 52" — paid gift.
+    "/sc 阿强 30 主播玩什么" — Super Chat (yuan, like the platform);
+    "/gift 阿强 52" — a 52-battery gift (the unit the gift panel shows,
+    and the unit the tier thresholds read).
     """
     text = text.strip()
     if not text:
@@ -895,13 +1085,16 @@ def _parse_console_event(text: str, seq: int) -> LiveEvent | None:
         if len(parts) < 2:
             return None
         value = _parse_amount(parts[1])
-        if value is None:
+        if value is None or not value.is_integer():
             return None
+        # Batteries, not yuan: tiering reads Gift.total_battery, so a console
+        # gift priced only in gold coins never reached the paid lanes.
+        batteries = int(value)
         return LiveEvent(
             kind=EventKind.GIFT,
             viewer=_console_viewer(parts[0]),
-            gift=Gift(name="礼物", num=1, coin_type="gold", total_coin=int(value * 1000)),
-            value_cny=value,
+            gift=Gift(name="礼物", num=1, coin_type="gold", unit_battery=batteries),
+            value_cny=batteries / 10.0,
             event_id=event_id,
         )
     if text.startswith("/"):
@@ -1284,7 +1477,10 @@ async def run_director(args: argparse.Namespace) -> int:
         )
         side_desc = "path.sh 的内网端点（要 EasyConnect + no_proxy，连不上会刷 refresh_failed）"
     if side is None:
-        print("提示：没配侧路模型（[speech.side] 或 source path.sh），主动话题和蒸馏这场不干活。")
+        print(
+            "提示：没配侧路模型（[speech.side] 或 source path.sh），"
+            "主动话题改由 Realtime 直接生成；这场不做记忆蒸馏。"
+        )
     else:
         print(f"[侧路] {side_desc}")
 
@@ -1401,9 +1597,21 @@ async def run_director(args: argparse.Namespace) -> int:
                 },
             )
 
+    # The last few lines actually said on air — streamer transcript and her
+    # own completed replies — so the selector's zero-model relevance check can
+    # hard-accept an audience line that picks up the current conversation.
+    # 300s freshness at read time, one normalised line each, capped at 8.
+    recent_dialogue: deque[tuple[float, str]] = deque(maxlen=8)
+
+    def note_recent_line(text: str) -> None:
+        line = " ".join(text.split())[:240]
+        if line:
+            recent_dialogue.append((clock.monotonic(), line))
+
     def spoken_line(text: str) -> None:
         distiller.note_assistant_line(text)
         proactive.note_dialogue("assistant", text)
+        note_recent_line(text)
 
     scheduler = Scheduler(
         speech,
@@ -1422,27 +1630,25 @@ async def run_director(args: argparse.Namespace) -> int:
         spoken_sink=spoken_line,
     )
 
-    from bilisama.config.derive import DerivedThresholds, effective_thresholds
     from bilisama.event_pacing import EventPacer
     from bilisama.ingest.bilibili.selector import DanmakuSelector, EntryCoalescer
 
     event_pacer = EventPacer(clock, chattiness=lambda: settings.interaction.chattiness)
 
     def live_thresholds() -> DerivedThresholds:
-        """The selector's rules for the NEXT window: chattiness × room load,
-        reply length riding its own slider. Read per window-open."""
-        pacing = event_pacer.snapshot()
-        return effective_thresholds(
+        # Read per window-open; the merge itself is module-level and tested.
+        return _paced_thresholds(
             settings.interaction.chattiness,
-            reply_length=settings.interaction.reply_length,
-            danmaku_window_s=max(1, round(pacing.danmaku_window_s)),
+            settings.interaction.reply_length,
+            event_pacer.snapshot(),
         )
 
     def selector_context_lines() -> tuple[str, ...]:
-        # What the stream is about, for the relevance hard-accept. Recent
-        # dialogue joins this tuple with the proactive rework (stage 5).
-        intro = settings.room.stream_intro.strip()
-        return (intro,) if intro else ()
+        # What the stream is about plus what was just said on air, for the
+        # relevance hard-accept.
+        now = clock.monotonic()
+        recent = tuple(line for stamp, line in recent_dialogue if now - stamp <= 300.0)
+        return tuple(line for line in (settings.room.stream_intro, *recent) if line.strip())
 
     def selector_mention_terms() -> tuple[str, ...]:
         cfg = settings.persona
@@ -1504,6 +1710,12 @@ async def run_director(args: argparse.Namespace) -> int:
         # loop only calls this once it is running.
         reply_base_instructions=lambda: assembly.build_public_context(),
     )
+
+    def on_streamer_transcript(text: str) -> None:
+        # Two readers of one transcript line: topic material for the proactive
+        # loop, relevance material for the danmaku selector.
+        proactive.note_dialogue("streamer", text)
+        note_recent_line(text)
 
     async def push_context(text: str) -> None:
         await speech.set_context(text)
@@ -1629,12 +1841,14 @@ async def run_director(args: argparse.Namespace) -> int:
                 audio_input.set_enabled(settings.audio.input_enabled)
             return True
         if path == "audio.output_enabled":
+            # Mirror the switch into the local sink so a play() call that
+            # slips past the closure gate still stays silent; disabling also
+            # stops the sentence in the air, not just the next one. Both
+            # sinks may not exist yet this early in startup; a missing one
+            # simply has nothing to flush.
+            with contextlib.suppress(NameError):
+                speaker.set_enabled(settings.audio.output_enabled)
             if not settings.audio.output_enabled:
-                # Stop the sentence in the air, not just the next one. Both
-                # sinks may not exist yet this early in startup; a missing one
-                # simply has nothing to flush.
-                with contextlib.suppress(NameError):
-                    speaker.flush()
                 with contextlib.suppress(NameError):
                     if broker is not None:
                         broker.flush()
@@ -1782,6 +1996,7 @@ async def run_director(args: argparse.Namespace) -> int:
     )
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
+    registry.register("audio_output", speaker.status)
 
     class _LocalPair:
         """The sounddevice ends, parked while a page holds the devices.
@@ -1837,7 +2052,7 @@ async def run_director(args: argparse.Namespace) -> int:
     broker: AudioBroker | None = None
 
     _USAGE = (
-        "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 金额；"
+        "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 电池数；"
         "/mute 紧急叫停（让她住嘴，不碰麦克风），/unmute 恢复"
     )
     _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
@@ -1988,6 +2203,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         "output_enabled": settings.audio.output_enabled,
                         "noise_sensitivity": settings.audio.noise_sensitivity,
                         "signal_level": audio_input.signal_level,
+                        "output": speaker.status(),
                     },
                     "interaction": {
                         "chattiness": interaction.chattiness.value,
@@ -2103,6 +2319,23 @@ async def run_director(args: argparse.Namespace) -> int:
                     for name, value in speak.items():
                         if isinstance(name, str) and name in paths:
                             edits.append((paths[name], value))
+                        else:
+                            announce(f"未知直播事件开关 {name}，忽略")
+                audio = data.get("audio")
+                if isinstance(audio, dict):
+                    # The system page's three audio controls arrive on this
+                    # shape; dropping them silently is how the mic switch
+                    # became a placebo once already.
+                    audio_paths = {
+                        "input_enabled": "audio.input_enabled",
+                        "output_enabled": "audio.output_enabled",
+                        "noise_sensitivity": "audio.noise_sensitivity",
+                    }
+                    for name, value in audio.items():
+                        if isinstance(name, str) and name in audio_paths:
+                            edits.append((audio_paths[name], value))
+                        else:
+                            announce(f"未知音频配置 {name}，忽略")
                 room = data.get("room")
                 if isinstance(room, dict):
                     action = room.get("action")
@@ -2200,6 +2433,32 @@ async def run_director(args: argparse.Namespace) -> int:
                 print("[面板] 收到退出请求，开始收尾")
                 stop.set()
 
+            # A mock run must be the ONLY room feeding the assembly. The mock
+            # controller connects its own source, so a previously connected
+            # real room would double every event stream; park it for the run
+            # and bring it back when the run ends. If the mock's room dies
+            # mid-run the restore waits for the operator's stop/re-check —
+            # silently reattaching a room under an error banner would be worse.
+            live_mock_parked_room = 0
+
+            async def _park_room_for_mock() -> None:
+                nonlocal live_mock_parked_room
+                status = room_source.status()
+                if bool(status.get("connected")) and not live_mock_parked_room:
+                    live_mock_parked_room = int(status.get("room_id") or 0)
+                    await room_source.disconnect()
+                    print("[直播Mock] 已暂挂真实直播间连接，Mock 结束后自动恢复")
+
+            async def _restore_room_after_mock() -> None:
+                nonlocal live_mock_parked_room
+                room_id, live_mock_parked_room = live_mock_parked_room, 0
+                if room_id > 0:
+                    try:
+                        await room_source.connect(room_id)
+                        print(f"[直播Mock] 已恢复真实直播间 {room_id}")
+                    except ConnectionError as exc:
+                        print(f"[直播Mock] 直播间 {room_id} 没能恢复：{str(exc)[:120]}")
+
             async def on_live_mock_check(data: dict[str, Any]) -> None:
                 capture = data.get("capture")
                 await live_mock.check(
@@ -2208,13 +2467,16 @@ async def run_director(args: argparse.Namespace) -> int:
                 )
 
             async def on_live_mock_start(_data: dict[str, Any]) -> None:
+                await _park_room_for_mock()
                 await live_mock.start()
 
             async def on_live_mock_stop(_data: dict[str, Any]) -> None:
                 await live_mock.stop()
+                await _restore_room_after_mock()
 
             async def on_live_mock_capture_stop(_data: dict[str, Any]) -> None:
                 await live_mock.capture_stopped()
+                await _restore_room_after_mock()
 
             async def on_test_run(data: dict[str, Any]) -> None:
                 case_id = str(data.get("case_id") or "")
@@ -2508,7 +2770,7 @@ async def run_director(args: argparse.Namespace) -> int:
             f"已连接 {provider.value}（{connect_url.split('?')[0]}），director 模式：\n"
             f"  人设 {settings.persona.id}（persona list 可看全部）  "
             f"话痨度 {settings.interaction.chattiness.value}"
-            f"（冷场 {thresholds.idle_threshold_s}s 起话题）\n"
+            f"（冷场阈值随房间活跃度浮动，当前 {event_pacer.snapshot().proactive_idle_s:.0f}s）\n"
             f"  生长层 relationship={settings.persona.growth.relationship.value} "
             f"voice={settings.persona.growth.voice.value}\n"
             "  说话即聊；终端打字＝模拟弹幕；Ctrl-C 下播（触发蒸馏后退出）。"
@@ -2578,12 +2840,13 @@ async def run_director(args: argparse.Namespace) -> int:
                     link_health=link_health,
                     # Completed streamer turns are topic material — never a
                     # reset of the live-event dead-air clock (proactive.py).
-                    on_transcript=lambda text: proactive.note_dialogue("streamer", text),
+                    on_transcript=on_streamer_transcript,
                     output_enabled=output_enabled,
                 ),
                 name="director:play",
             ),
             asyncio.create_task(drain_controls(), name="director:controls"),
+            asyncio.create_task(_watch_default_output(speaker), name="director:default-output"),
             asyncio.create_task(stdin_pump(), name="director:stdin"),
             asyncio.create_task(lag_monitor.run(), name="director:loop-lag"),
             asyncio.create_task(report_playback(), name="director:playback"),
@@ -2837,7 +3100,15 @@ async def run(args: argparse.Namespace) -> int:
                 _pump_mic(client, args.input_device, speaker, args.mute_while_speaking)
             )
         consume = asyncio.create_task(_consume(client, speaker, reply_wav))
+        watcher = (
+            asyncio.create_task(_watch_default_output(speaker), name="wire:default-output")
+            if speaker is not None
+            else None
+        )
         done, pending = await asyncio.wait({pump, consume}, return_when=asyncio.FIRST_COMPLETED)
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)

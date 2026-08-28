@@ -625,3 +625,124 @@ async def test_stream_intro_has_its_own_dynamic_context_section(tmp_path: Path) 
     text = kit.assembly.build_context()
     assert "# 直播简介" in text
     assert "ComfyUI 工作流" in text
+
+
+# ------------------------------------------------- yiko-merge audit closures
+
+
+async def test_ambience_does_not_reset_the_dead_air_clock(tmp_path: Path) -> None:
+    """Follows, likes and roomless console lines are ambience, not company:
+    resetting the proactive idle timer on them starves the icebreaker in
+    exactly the rooms that need it."""
+    kit = build_assembly_kit(tmp_path)
+    proactive = kit.proactive
+    assert proactive is not None
+    await kit.clock.advance(50.0)
+    baseline = proactive._last_activity
+
+    follow = LiveEvent(
+        kind=EventKind.FOLLOW, room_id=777, viewer=Viewer(uid=9, name="路人"), event_id="f1"
+    )
+    await kit.assembly.on_event(follow)
+    roomless = LiveEvent(
+        kind=EventKind.DANMAKU, room_id=0, viewer=Viewer(uid=8, name="键盘"), text="你好"
+    )
+    await kit.assembly.on_event(roomless)
+    assert proactive._last_activity == baseline, "ambience must not look like company"
+
+    from tests.fakes.bili import danmaku_event
+
+    await kit.assembly.on_event(danmaku_event("有人说话了", uid=7))
+    assert proactive._last_activity == kit.clock.monotonic()
+
+
+async def test_audience_danmaku_and_sc_reset_the_unanswered_topic_count(tmp_path: Path) -> None:
+    """A viewer answering the icebreaker is a response — the counter must not
+    keep climbing until the streamer personally speaks."""
+    kit = build_assembly_kit(tmp_path)
+    proactive = kit.proactive
+    assert proactive is not None
+    proactive._unanswered_count = 2
+    proactive._awaiting_response = True
+
+    from tests.fakes.bili import gift_event
+
+    await kit.assembly.on_event(gift_event(uid=5, coin=10000))
+    assert proactive.status()["unanswered_count"] == 2, "a gift is activity, not an answer"
+
+    from tests.fakes.bili import danmaku_event
+
+    await kit.assembly.on_event(danmaku_event("我来接话", uid=6))
+    assert proactive.status()["unanswered_count"] == 0
+
+
+async def test_paused_release_from_the_deferred_pool_stays_silent(tmp_path: Path) -> None:
+    """deliver_selected re-checks the pause gate: a winner deferred before the
+    pause must neither speak nor spend budget after it."""
+    from typing import Literal
+
+    from bilisama.clock import FakeClock
+    from bilisama.config.enums import Chattiness
+    from bilisama.event_pacing import EventPacer
+
+    consumed: list[str] = []
+
+    class ProbePacer(EventPacer):
+        def try_consume(
+            self,
+            lane: Literal[
+                "danmaku", "entry", "proactive", "gift", "super_chat", "guard_buy", "vip_enter"
+            ],
+        ) -> bool:
+            consumed.append(lane)
+            return super().try_consume(lane)
+
+    pacer = ProbePacer(FakeClock(), chattiness=lambda: Chattiness.MEDIUM)
+    kit = build_assembly_kit(tmp_path, speak=SpeakSwitches(danmaku=True), event_pacer=pacer)
+    kit.assembly.set_event_input_enabled(False)
+
+    from tests.fakes.bili import danmaku_event
+
+    await kit.assembly.deliver_selected(danmaku_event("暂停前的赢家", uid=11))
+    assert kit.intents == []
+    assert consumed == [], "the ordinary budget must not be charged while paused"
+
+
+async def test_legacy_presence_lane_respects_the_ordinary_entry_switch(tmp_path: Path) -> None:
+    """The batch-of-5 lane is superseded wiring, but while it exists it obeys
+    the same ordinary-entry switch as the coalescer lane."""
+    from bilisama.ingest.bilibili.selector import PresenceWelcomer
+    from tests.fakes.bili import entry_event
+
+    kit = build_assembly_kit(
+        tmp_path,
+        speak=SpeakSwitches(entry=True),
+        presence=PresenceWelcomer(),
+        entry_group_enabled=lambda group: group != "ordinary",
+    )
+    for uid in range(1, 6):
+        await kit.assembly.on_event(entry_event(uid))
+    assert kit.intents == [], "ordinary off must silence the legacy burst too"
+
+
+async def test_real_live_rule_files_reach_their_turn_scopes(tmp_path: Path) -> None:
+    """The shipped config/personas/live pair, rendered and wired — not stub
+    strings: the voice contract shows only in the voice scope, the event
+    contract only in the event scope."""
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_event_rules, live_voice_rules, template_variables
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    variables = template_variables(PersonaConfig())
+    voice = live_voice_rules(config_dir, variables)
+    event = live_event_rules(config_dir, variables)
+    kit = build_assembly_kit(tmp_path, voice_rules=voice, event_rules=event)
+
+    voice_scope = kit.assembly.build_context()
+    event_scope = kit.assembly.build_event_context()
+    assert "{{" not in voice_scope and "{{" not in event_scope
+    assert "当前输入：主播语音" in voice_scope
+    assert "当前输入：主播语音" not in event_scope
+    assert "回复长度档位" in voice_scope, "the reply-length line reaches voice turns"
+    assert "当前输入：直播间事件" in event_scope
+    assert "当前输入：直播间事件" not in voice_scope

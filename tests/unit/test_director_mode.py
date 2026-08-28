@@ -112,7 +112,10 @@ def test_console_super_chat_and_gift_carry_value() -> None:
     gift = _parse_console_event("/gift 老板 52", 2)
     assert gift is not None
     assert gift.kind is EventKind.GIFT
-    assert gift.value_cny == 52.0
+    # /gift speaks batteries since the yiko-merge audit (1 battery = 0.1 CNY):
+    # the tier thresholds read total_battery, so yuan-only console gifts never
+    # reached the paid lanes.
+    assert gift.value_cny == 5.2
     assert gift.gift is not None and gift.gift.is_paid
 
 
@@ -284,3 +287,63 @@ def test_persona_list_shows_all_and_marks_the_active_one(tmp_path: Path) -> None
     for pid in ("tofu", "ming", "butter"):
         assert pid in text
     assert "专属话题提示词" in text and "话题提示词用全局默认" in text
+
+
+# ------------------------------------------------- yiko-merge audit closures
+
+
+def test_paced_thresholds_carry_both_window_and_score_bar() -> None:
+    """The pacer's verdict has two halves; forwarding only the window left the
+    dynamic score bar produced-but-unread."""
+    from bilisama.clock import FakeClock
+    from bilisama.config.enums import Chattiness
+    from bilisama.event_pacing import EventPacer
+
+    pacer = EventPacer(FakeClock(), chattiness=lambda: Chattiness.MEDIUM)
+    snapshot = pacer.snapshot()  # an empty room reads QUIET: bar drops
+    merged = dev_talk._paced_thresholds(Chattiness.MEDIUM, Chattiness.MEDIUM, snapshot)
+    assert merged.score_threshold == snapshot.score_threshold
+    assert merged.score_threshold != 0.3, "QUIET must move the bar off the static value"
+    assert merged.danmaku_window_s == max(1, round(snapshot.danmaku_window_s))
+
+
+def test_console_gift_carries_batteries_into_the_paid_tiers() -> None:
+    """/gift speaks the unit the gift panel shows; a console gift priced only
+    in gold coins never reached gift_battery_medium/high."""
+    event = _parse_console_event("/gift 老板 1000", 1)
+    assert event is not None and event.gift is not None
+    assert event.gift.unit_battery == 1000
+    assert event.gift.total_battery == 1000
+    assert event.value_cny == 100.0
+    assert event.is_paid
+    assert _parse_console_event("/gift 老板 3.5", 2) is None, "batteries are integers"
+
+
+def test_session_only_paths_and_session_overrides_stay_aligned() -> None:
+    """The panel's session-only fields and the forced session start values:
+    audio pair forced on, room and streamer name file-driven."""
+    assert (
+        frozenset(
+            {
+                "audio.input_enabled",
+                "audio.output_enabled",
+                "room.room_id",
+                "persona.streamer_name",
+            }
+        )
+        == dev_talk._SESSION_ONLY_PANEL_PATHS
+    )
+    assert dev_talk._director_session_overrides() == {
+        "audio": {"input_enabled": True, "output_enabled": True}
+    }
+
+
+def test_panel_injection_is_marked_as_a_live_room_event() -> None:
+    from bilisama.ingest.events import EventKind, LiveEvent, Viewer
+
+    plain = LiveEvent(kind=EventKind.DANMAKU, viewer=Viewer(uid=1, name="a"), text="hi")
+    marked = dev_talk._as_live_mock_event(plain, 0)
+    assert marked.room_id == dev_talk._MANUAL_MOCK_ROOM_ID
+    assert marked.raw is not None and marked.raw.get("manual_mock") is True
+    kept = dev_talk._as_live_mock_event(plain, 42)
+    assert kept.room_id == 42

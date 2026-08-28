@@ -32,6 +32,19 @@ export function createBubble(el) {
   };
 
   return {
+    showTransient(text, lingerMs = 2600) {
+      // One whole line at once — control feedback and full-reply fallbacks,
+      // not a stream. Self-dismisses; voice state is not consulted because
+      // nothing is being spoken.
+      hide();
+      open = true;
+      replyEnded = true;
+      el.textContent = text;
+      el.hidden = false;
+      el.classList.add("show");
+      hideTimer = setTimeout(hide, lingerMs);
+    },
+
     delta(text) {
       if (shatterTimer !== null) {
         // Mid-shatter: the old line is dead, this is a new one.

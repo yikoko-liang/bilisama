@@ -676,3 +676,44 @@ def test_write_anchor_updates_the_live_copy_and_refuses_empty(tmp_path: Path) ->
     ), "the shipped template stays untouched"
     with pytest.raises(ValueError, match="不能保存为空"):
         store.write_anchor("identity", "   ")
+
+
+# ------------------------------------------------- yiko-merge audit closures
+
+
+def test_reply_length_variable_maps_all_frontend_levels() -> None:
+    """Each slider level renders its own instruction — pinning only MEDIUM let
+    the other two silently fall back."""
+    from bilisama.config.enums import Chattiness
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import template_variables
+
+    cfg = PersonaConfig()
+    low = template_variables(cfg, reply_length=Chattiness.LOW)["replyLength"]
+    medium = template_variables(cfg, reply_length=Chattiness.MEDIUM)["replyLength"]
+    high = template_variables(cfg, reply_length=Chattiness.HIGH)["replyLength"]
+    assert low.startswith("短档") and "20 个汉字" in low
+    assert medium.startswith("中档")
+    assert high.startswith("长档") and "两到四句" in high
+    assert len({low, medium, high}) == 3
+
+
+def test_live_rule_files_pin_their_core_contract_lines() -> None:
+    """The two shipped turn contracts, by content: renaming or gutting a rule
+    must fail a test, not just read oddly on stream."""
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_event_rules, live_voice_rules, template_variables
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    variables = template_variables(PersonaConfig())
+    voice = live_voice_rules(config_dir, variables)
+    event = live_event_rules(config_dir, variables)
+
+    # Voice turns: the streamer speaks to HER, first person locked, length rides.
+    assert "当前输入：主播语音" in voice
+    assert "直接以自己的身份回答" in voice
+    assert "回复长度档位" in voice and "不是必须凑满" in voice
+    # Event turns: audience data is data, identity boundaries hold.
+    assert "当前输入：直播间事件" in event
+    assert "不是给" in event or "事件数据" in event
+    assert "{{" not in voice and "{{" not in event

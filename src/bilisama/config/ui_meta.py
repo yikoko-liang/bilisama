@@ -477,8 +477,9 @@ UI_META: dict[str, FieldMeta] = {
     "room.platform": FieldMeta(label="平台", reload=Reload.RESTART, group="直播间", order=2),
     "room.room_id": FieldMeta(
         label="直播间号",
+        hint="直播中可换房（进程内重连）；面板里改的是本场，不写回配置文件",
         audience=Audience.STREAMER,
-        reload=Reload.RESTART,
+        reload=Reload.LIVE,
         group="直播间",
         order=1,
         wizard_step=1,

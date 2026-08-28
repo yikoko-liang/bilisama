@@ -266,3 +266,19 @@ def test_anchor_danmaku_becomes_shared_context_not_a_reply() -> None:
 
     with pytest.raises(ValueError):
         anchor_danmaku_context_item(_danmaku())
+
+
+def test_entry_welcome_pins_its_context_and_anti_template_rules() -> None:
+    """Beyond the headcount ban: the welcome instruction must keep telling the
+    model to use the stream intro/progress, to check its own last three
+    welcomes, and to vary sentence structure — the parts that killed the
+    「欢迎某某，咱们正聊着……」 loop."""
+    from bilisama.director.intents import entry_welcome_intent
+    from tests.fakes.bili import entry_event
+
+    rules = entry_welcome_intent((entry_event(1),), now=10.0).injection.reply.instructions or ""
+    assert "直播简介" in rules and "本场进展" in rules
+    assert "最近三次进房回复" in rules
+    assert "变换句子结构" in rules
+    assert "咱们正聊着" in rules, "the named anti-template stays named"
+    assert "简单欢迎" in rules or "轻量招呼" in rules

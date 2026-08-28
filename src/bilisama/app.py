@@ -57,6 +57,21 @@ log = get_logger(__name__)
 
 _TIER_DEFAULTS = InteractionConfig()
 
+# Event kinds that mean "an audience member did something" for the dead-air
+# clock. Follows/likes/shares and room-state churn are ambience, not company;
+# resetting the proactive idle timer on them starves the icebreaker exactly
+# when the room feels dead.
+_AUDIENCE_ACTIVITY_KINDS = frozenset(
+    {
+        EventKind.DANMAKU,
+        EventKind.GIFT,
+        EventKind.SUPER_CHAT,
+        EventKind.GUARD_BUY,
+        EventKind.VIP_ENTER,
+        EventKind.ENTRY,
+    }
+)
+
 
 class Assembly:
     """Owns the emit path and the context push. Wire once, at startup."""
@@ -165,7 +180,13 @@ class Assembly:
         """The one sink every source feeds. Memory always; speech maybe."""
         self._store.on_event(event)
         self._distiller.note_event()
-        self._proactive.note_activity()
+        if event.room_id > 0 and event.kind in _AUDIENCE_ACTIVITY_KINDS:
+            # A danmaku or SC also counts as answering a standing proactive
+            # topic, so the unanswered counter resets on audience response,
+            # not only on streamer speech.
+            self._proactive.note_activity(
+                responds_to_topic=event.kind in (EventKind.DANMAKU, EventKind.SUPER_CHAT)
+            )
         self.events_seen += 1
         if self._event_pacer is not None:
             self._event_pacer.note_event(event)
@@ -197,9 +218,10 @@ class Assembly:
             if self._entries is not None:
                 if self._entry_group_enabled("ordinary"):
                     self._entries.offer(event)
-            elif self._presence is not None:
+            elif self._presence is not None and self._entry_group_enabled("ordinary"):
                 # The legacy batch-of-5 lane, kept only for wiring that has
-                # not adopted the coalescer.
+                # not adopted the coalescer; the ordinary-entry switch gates
+                # it the same as the coalescer lane.
                 burst = self._presence.note(event.viewer.identity, self._clock.monotonic())
                 if burst is not None:
                     self.intents_submitted += 1
@@ -237,7 +259,13 @@ class Assembly:
         deferred winner held through a monologue pays on release, and the
         selector's delivery_blocked already guaranteed a token is waiting.
         Gift and paid lanes pass the bucket untouched.
+
+        The pause gate is re-checked at release: a winner that entered the
+        deferred pool before the pause must not speak (or spend budget) after
+        it — on_event's gate only covers events that arrive DURING the pause.
         """
+        if not self._event_input_enabled:
+            return
         if self._event_pacer is not None and not self._event_pacer.try_consume(
             "danmaku" if event.kind is EventKind.DANMAKU else "gift"
         ):
@@ -266,7 +294,7 @@ class Assembly:
         if self._observe_context_item is None:
             return
         try:
-            await self._observe_context_item(anchor_danmaku_context_item(event))
+            await self._observe_context_item(anchor_danmaku_context_item(event.redacted()))
             self.anchor_context_written += 1
         except Exception as exc:
             # Losing one context line must not take the emit path down; the
