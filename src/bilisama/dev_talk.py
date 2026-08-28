@@ -1590,6 +1590,13 @@ async def run_director(args: argparse.Namespace) -> int:
         if path.startswith("interaction."):
             refresh_interaction_settings()
             return True
+        if path == "room.room_id":
+            wanted = settings.room.room_id
+            if wanted > 0:
+                await room_source.connect(wanted)
+            else:
+                await room_source.disconnect()
+            return True
         if path == "audio.noise_sensitivity":
             audio_input.set_noise_sensitivity(settings.audio.noise_sensitivity)
             return True
@@ -1657,20 +1664,25 @@ async def run_director(args: argparse.Namespace) -> int:
     # credential chain: config ref first, then path.sh's BILI_SESSDATA. No
     # credential still connects — Bilibili then masks every uid to 0, which
     # kills regular-viewer memory, so say it out loud.
-    bili_source = None
+    from bilisama.ingest.bilibili import BilibiliEventSource
+    from bilisama.ui.room_control import SwitchableRoomSource
+
     room_id = args.room if args.room is not None else settings.room.room_id
+    # One truth: the config reference (shipped default env:BILI_SESSDATA).
+    sessdata = secrets.resolve(settings.room.credential_ref) or ""
     # Whether a credential STRING was found, which is all anyone knows this
     # early — _watch_credential corrects it once the platform has answered.
-    room_credentialed = False
-    if room_id:
-        from bilisama.ingest.bilibili import BilibiliEventSource
+    room_credentialed = bool(sessdata)
 
-        # One truth: the config reference (shipped default env:BILI_SESSDATA).
-        sessdata = secrets.resolve(settings.room.credential_ref) or ""
-        room_credentialed = bool(sessdata)
-        bili_source = BilibiliEventSource(
-            room_id, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke
-        )
+    def live_room_source(wanted: int) -> BilibiliEventSource:
+        return BilibiliEventSource(wanted, clock, sessdata=sessdata, on_sc_delete=scheduler.revoke)
+
+    # Always built, even with no room named: the panel connects and switches
+    # rooms IN PROCESS through it. room_id > 0 (from --room or the config)
+    # keeps the old auto-connect behaviour as the starting target.
+    room_source = SwitchableRoomSource(live_room_source, room_id)
+    bili_source: SwitchableRoomSource | None = room_source
+    if room_id:
         if sessdata:
             print(f"[弹幕] 连接房间 {room_id}（登录态）")
         else:
@@ -1923,6 +1935,11 @@ async def run_director(args: argparse.Namespace) -> int:
                     "room": {
                         "stream_intro": settings.room.stream_intro,
                         "streamer_name": settings.persona.streamer_name,
+                        "room_id": settings.room.room_id,
+                        "connected": bool(room_source.status().get("connected")),
+                        "requested_room_id": room_source.status().get("requested_room_id", 0),
+                        "active_room_id": room_source.status().get("active_room_id", 0),
+                        "error": room_source.status().get("error", ""),
                     },
                     "persona": {
                         "id": settings.persona.id,
@@ -2031,7 +2048,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         "name": settings.persona.display_name or settings.persona.id,
                     },
                     "provider": provider.value,
-                    "room_connected": bool(room_id),
+                    "room_connected": bool(room_source.status().get("connected")),
                     "avatar": {
                         "renderer": settings.avatar.renderer,
                         "model_id": settings.avatar.model_id,
