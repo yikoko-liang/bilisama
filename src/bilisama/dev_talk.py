@@ -1975,7 +1975,17 @@ async def run_director(args: argparse.Namespace) -> int:
                         "id": settings.persona.id,
                         "name": settings.persona.display_name or settings.persona.id,
                     },
+                    "assistants": assistant_cards(),
                 }
+
+            def assistant_cards() -> list[dict[str, Any]]:
+                from bilisama.ui import assistants as assistants_mod
+
+                try:
+                    return assistants_mod.assistant_snapshot(settings, config_path.parent)
+                except OSError as exc:
+                    log.warning("dev_talk.assistants_unreadable", error_text=str(exc)[:200])
+                    return []
 
             def push_panel_state() -> None:
                 """Re-send the sticky state after something OTHER than the page
@@ -2054,6 +2064,39 @@ async def run_director(args: argparse.Namespace) -> int:
                     for name, value in speak.items():
                         if isinstance(name, str) and name in paths:
                             edits.append((paths[name], value))
+                room = data.get("room")
+                if isinstance(room, dict):
+                    action = room.get("action")
+                    try:
+                        if action == "disconnect":
+                            await room_source.disconnect()
+                            announce("已断开直播间")
+                        elif action == "connect":
+                            wanted = int(room.get("room_id") or 0)
+                            if wanted <= 0:
+                                announce("直播间号要是正整数")
+                            elif wanted == settings.room.room_id and not room_source.status().get(
+                                "connected"
+                            ):
+                                # Same id, not connected: a plain retry, no edit.
+                                await room_source.connect(wanted)
+                                announce(f"已连接直播间 {wanted}")
+                            else:
+                                edits.append(("room.room_id", wanted))
+                        elif action == "save_info":
+                            if "streamer_name" in room:
+                                edits.append(
+                                    ("persona.streamer_name", str(room.get("streamer_name") or ""))
+                                )
+                            if "stream_intro" in room:
+                                edits.append(
+                                    ("room.stream_intro", str(room.get("stream_intro") or ""))
+                                )
+                    except ConnectionError as exc:  # RoomConnectionError included
+                        announce(f"直播间操作没成：{str(exc)[:120]}")
+                assistant = data.get("assistant")
+                if isinstance(assistant, dict):
+                    await handle_assistant(assistant, announce)
                 for path, value in edits:
                     try:
                         announce(await apply_runtime_edit(path, value))
@@ -2061,6 +2104,48 @@ async def run_director(args: argparse.Namespace) -> int:
                         announce(str(exc))
                 if hub is not None:
                     hub.broadcast(ServerEvent.PANEL_STATE, panel_state())
+
+            async def handle_assistant(
+                assistant: dict[str, Any], announce: Callable[[str], None]
+            ) -> None:
+                from bilisama.ui import assistants as assistants_mod
+
+                action = assistant.get("action")
+                if action == "select":
+                    wanted = str(assistant.get("id") or "")
+                    if wanted == settings.persona.id:
+                        return
+                    try:
+                        # One batch: the id, and the display name reset so the
+                        # new persona does not keep introducing itself by the
+                        # old one's name (ui_meta warned about exactly this).
+                        announce(await apply_runtime_edit("persona.id", wanted))
+                        announce(await apply_runtime_edit("persona.display_name", ""))
+                    except ConfigEditError as exc:
+                        announce(str(exc))
+                    return
+                if action == "save":
+                    persona_id = str(assistant.get("id") or "")
+                    anchor = str(assistant.get("anchor") or "")
+                    text = str(assistant.get("text") or "")
+                    try:
+                        if anchor not in ("identity", "personality"):
+                            raise ValueError(f"没有「{anchor}」这个人设文件")
+                        assistants_mod.save_anchor(
+                            settings,
+                            config_path.parent,
+                            persona_id,
+                            anchor,  # type: ignore[arg-type]
+                            text,
+                        )
+                    except ValueError as exc:
+                        announce(str(exc))
+                        return
+                    if persona_id == settings.persona.id:
+                        # The active persona changed under the session: rebuild
+                        # the prompt stack so the edit is heard this stream.
+                        await refresh_persona_settings()
+                    announce(f"人设「{persona_id}」的 {anchor} 已保存并生效")
 
             async def on_app_quit(_data: dict[str, Any]) -> None:
                 """The right-click exit: acknowledge first, tear down after.

@@ -890,6 +890,121 @@ export function createPanel({ send }) {
     if (audioLevelEl) audioLevelEl.style.width = "0%";
   }
 
+  // ------------------------------------------------------------ assistants
+
+  const assistantCards = document.getElementById("assistant-cards");
+  const assistantEditor = document.getElementById("assistant-editor");
+  const assistantTitle = document.getElementById("assistant-editor-title");
+  const assistantIdentity = document.getElementById("assistant-identity");
+  const assistantPersonality = document.getElementById("assistant-personality");
+  const assistantSave = document.getElementById("assistant-save");
+  let assistants = [];
+  let shownAssistant = null; // which card the editor is showing
+  let editorDirty = false;
+
+  const refreshAssistantDirty = () => {
+    const card = assistants.find((one) => one.id === shownAssistant);
+    editorDirty =
+      Boolean(card) &&
+      (assistantIdentity.value !== card.identity ||
+        assistantPersonality.value !== card.personality);
+    if (assistantSave) assistantSave.disabled = !editorDirty;
+  };
+  assistantIdentity?.addEventListener("input", refreshAssistantDirty);
+  assistantPersonality?.addEventListener("input", refreshAssistantDirty);
+
+  const showAssistant = (card) => {
+    shownAssistant = card.id;
+    if (assistantEditor) assistantEditor.hidden = false;
+    if (assistantTitle) assistantTitle.textContent = `${card.name} · 人设配置`;
+    assistantIdentity.value = card.identity;
+    assistantPersonality.value = card.personality;
+    refreshAssistantDirty();
+  };
+
+  const renderAssistants = () => {
+    if (!assistantCards) return;
+    assistantCards.textContent = "";
+    if (!assistants.length) {
+      assistantCards.appendChild(el("p", "empty", "没有读到人设包"));
+      return;
+    }
+    for (const card of assistants) {
+      const node = el("button", "assistant-card" + (card.current ? " current" : ""));
+      node.type = "button";
+      const face = el("span", "assistant-face", card.name.slice(0, 1));
+      // A deterministic hue per persona keeps the cards tellable apart
+      // without shipping four portraits.
+      let hash = 0;
+      for (const ch of card.id) hash = (hash * 31 + ch.charCodeAt(0)) % 360;
+      face.style.background = `hsl(${hash} 55% 55%)`;
+      node.appendChild(face);
+      node.appendChild(el("span", "assistant-name", card.name));
+      if (card.description) node.appendChild(el("span", "assistant-desc", card.description));
+      node.appendChild(el("span", "assistant-state", card.current ? "当前人设" : "点击查看"));
+      node.addEventListener("click", async () => {
+        showAssistant(card);
+        if (card.current) return;
+        const ok = await confirmAction({
+          title: `切换到「${card.name}」？`,
+          message: "整套人设立即热更新：锚点、生长文件和提示词都换过去，不重连语音服务。",
+          accept: "切换",
+        });
+        if (!ok) return;
+        send("panel.set", { assistant: { action: "select", id: card.id } });
+      });
+      assistantCards.appendChild(node);
+    }
+  };
+
+  assistantSave?.addEventListener("click", async () => {
+    const card = assistants.find((one) => one.id === shownAssistant);
+    if (!card || !editorDirty) return;
+    const ok = await confirmAction({
+      title: `保存「${card.name}」的人设？`,
+      message: card.current
+        ? "保存后立即热更新当前会话；随包原稿不受影响。"
+        : "保存进该人设的活副本；切换到它时生效。",
+      accept: "保存",
+    });
+    if (!ok) return;
+    if (assistantIdentity.value !== card.identity) {
+      send("panel.set", {
+        assistant: { action: "save", id: card.id, anchor: "identity", text: assistantIdentity.value },
+      });
+    }
+    if (assistantPersonality.value !== card.personality) {
+      send("panel.set", {
+        assistant: {
+          action: "save",
+          id: card.id,
+          anchor: "personality",
+          text: assistantPersonality.value,
+        },
+      });
+    }
+  });
+
+  const applyAssistants = (cards) => {
+    if (!Array.isArray(cards)) return;
+    assistants = cards;
+    renderAssistants();
+    const shown = assistants.find((one) => one.id === shownAssistant);
+    if (!shown) {
+      // The card the editor was showing is gone; fall back to the current one.
+      const current = assistants.find((one) => one.current);
+      if (current && assistantEditor && !assistantEditor.hidden) showAssistant(current);
+      return;
+    }
+    if (assistantTitle) assistantTitle.textContent = `${shown.name} · 人设配置`;
+    // A dirty editor is the user's text; only clean editors follow the server.
+    if (!editorDirty) {
+      assistantIdentity.value = shown.identity;
+      assistantPersonality.value = shown.personality;
+    }
+    refreshAssistantDirty();
+  };
+
   // A promise-shaped confirm dialog, shared by the assistant page and any
   // future destructive action. Esc is captured before the panel's own
   // close-on-Escape handler.
@@ -1044,6 +1159,7 @@ export function createPanel({ send }) {
         renderSpeak(data.speak);
         applySpeakToConfig(data.speak);
         applySystemState(data);
+        applyAssistants(data.assistants);
         onPanelState?.(data);
       }
     },

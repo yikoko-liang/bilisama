@@ -48,6 +48,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "bootstrap.s2s_keys_unknown",
         "bootstrap.s2s_reconcile_unavailable",
         "config.migrated: %s",
+        "dev_talk.assistants_unreadable",
         "dev_talk.console_injected",
         "dev_talk.distill_done",
         "dev_talk.distill_failed",

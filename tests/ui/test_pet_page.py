@@ -1217,3 +1217,49 @@ async def test_reply_reference_names_the_danmaku_it_answers(page: Page, harness:
         page,
         "document.querySelector('#timeline .reply-reference')" ".textContent.includes('阿强')",
     )
+
+
+@pytest.mark.ui_browser
+async def test_assistant_page_switches_after_a_confirm(page: Page, harness: Harness) -> None:
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='assistants']")
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {
+            "panicked": False,
+            "speak": {},
+            "assistants": [
+                {
+                    "id": "tofu",
+                    "name": "豆腐",
+                    "description": "暖白方块",
+                    "identity": "# 豆腐",
+                    "personality": "软",
+                    "current": True,
+                },
+                {
+                    "id": "hanako",
+                    "name": "花子",
+                    "description": "别的性子",
+                    "identity": "# 花子",
+                    "personality": "利落",
+                    "current": False,
+                },
+            ],
+        },
+    )
+    await _wait(page, "document.querySelectorAll('#assistant-cards .assistant-card').length === 2")
+    await page.click("#assistant-cards .assistant-card:not(.current)")
+    await _wait(page, "document.getElementById('confirm-dialog').hidden === false")
+    await page.click("#confirm-accept")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("assistant") or {}).get("action") == "select"
+        and (d.get("assistant") or {}).get("id") == "hanako",
+    )
+    # The editor shows the clicked card; typing arms the save button.
+    await _wait(page, "document.getElementById('assistant-editor').hidden === false")
+    await page.fill("#assistant-identity", "# 花子\n今晚换个说法")
+    await _wait(page, "document.getElementById('assistant-save').disabled === false")
