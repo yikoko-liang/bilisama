@@ -156,6 +156,12 @@ speaker = "saturn_zh_female_keainvsheng_tob"
 
 SC 版本（`2.2.0.0`）不看 `bot_name`——名字从 `character_manifest` 正文里取，我们已经这么发了。
 
+**直播中途改名，两代都走换会话**（2026-08-29 真端点验的）：O2.0 的 `UpdateConfig` 带上
+`dialog.bot_name` 也是收下就忽略——改完再问名字，她答的还是旧的。所以 adapter 的
+`set_bot_name` 在 O 代也降级成换会话（同一条 socket、带 `dialog_id`，对话接得上），
+和 SC 代换人设是同一招。同场实测：挂起再恢复（暂停总闸走的路）之后她还记得这一场
+问过什么，名字也保持换过之后的。
+
 跑契约测试（没凭据会逐条跳过并说清楚怎么补）：
 
 ```bash

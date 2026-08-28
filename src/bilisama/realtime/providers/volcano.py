@@ -262,8 +262,11 @@ class VolcanoLink:
         # client.py:254-257 holds _command_lock for the same reason.
         self._slot_lock = asyncio.Lock()
         # One swap at a time, and only when there is something new to carry.
+        # None marks the on-wire session as stale regardless of context text
+        # (a rename does this): None never equals a str, so the dedupe below
+        # cannot swallow the swap.
         self._swap_lock = asyncio.Lock()
-        self._swapped_context = ""
+        self._swapped_context: str | None = ""
 
     @property
     def dialog_id(self) -> str:
@@ -547,14 +550,16 @@ class VolcanoLink:
     async def set_bot_name(self, name: str) -> None:
         """Rename her without a reconnect.
 
-        O generation: dialog.bot_name rides the full UpdateConfig body that
-        set_context already sends — whether the SERVER applies a bot_name
-        mid-session is unverified on the real endpoint (the docs only promise
-        it at StartSession), so until that probe lands the next session start
-        is the guaranteed carrier and this push is best effort. SC generation
-        carries the name inside the character manifest itself, and the persona
-        refresh that renamed her pushes that manifest through set_context — so
-        there is nothing separate to send here.
+        O generation: probed live 2026-08-28 — an UpdateConfig carrying
+        dialog.bot_name is ACCEPTED AND IGNORED (asked her name right after,
+        she answered the old one), so the only carrier that works mid-stream
+        is the next StartSession. Swap sessions instead: same socket, same
+        dialog_id, the conversation carries over. The stale marker forces the
+        swap even when the persona text itself is unchanged — a rename with
+        identical context would otherwise hit the swap dedupe and never leave.
+        SC generation carries the name inside the character manifest itself,
+        and the persona refresh that renamed her pushes that manifest through
+        set_context — which swaps on that generation anyway.
         """
         if name == self._bot_name:
             return
@@ -562,7 +567,8 @@ class VolcanoLink:
         if not self._started:
             return  # the next StartSession carries it
         if _PERSONA_KEY[self._model] == "system_role":
-            await self.set_context(self._context)
+            self._swapped_context = None
+            await self._swap_session()
 
     async def aclose(self) -> None:
         """Say goodbye, then stop reading — in that order.

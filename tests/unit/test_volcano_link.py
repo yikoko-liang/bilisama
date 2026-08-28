@@ -1421,19 +1421,26 @@ async def test_a_scoped_base_instruction_is_ignored_with_one_warning() -> None:
     assert lines.count("volcano.base_instructions_ignored") == 1, lines
 
 
-async def test_set_bot_name_pushes_the_o_generation_config_without_reconnect() -> None:
+async def test_set_bot_name_swaps_the_session_on_the_o_generation() -> None:
+    """Probed live 2026-08-28: an UpdateConfig carrying dialog.bot_name is
+    accepted and IGNORED — asked her name right after, she answered the old
+    one. The previous version of this test pinned exactly that mercy of the
+    fake server («a rename is not a new session»); the real carrier is the
+    next StartSession, so a rename swaps sessions on the same dialog."""
     async with MockVolcanoServer() as server:
         volcano, _events = await _linked(server)
         try:
             starts_before = server.recorded.count(wire.ClientEvent.START_SESSION)
             await volcano.set_context("你是豆腐。")
             await volcano.set_bot_name("奶豆")
-            await server.wait_for(wire.ClientEvent.UPDATE_CONFIG, count=2)
-            body = server.recorded.body_for(wire.ClientEvent.UPDATE_CONFIG)
+            await server.wait_for(wire.ClientEvent.FINISH_SESSION)
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=starts_before + 1)
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
             assert body.get("dialog", {}).get("bot_name") == "奶豆"
-            assert (
-                server.recorded.count(wire.ClientEvent.START_SESSION) == starts_before
-            ), "a rename is not a new session on the O generation"
             assert volcano._bot_name == "奶豆"
+            # A rename with UNCHANGED persona text must still swap: the swap
+            # dedupe compares context, and the stale marker defeats it.
+            await volcano.set_bot_name("雪豆")
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=starts_before + 2)
         finally:
             await volcano.aclose()
