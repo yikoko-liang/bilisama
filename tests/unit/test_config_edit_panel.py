@@ -274,3 +274,27 @@ def test_a_non_dict_under_speak_or_config_is_ignored() -> None:
     assert apply_panel_edits(settings, {"config": "danmaku"}, announce=announce) == []
     assert apply_panel_edits(settings, {"speak": ["danmaku"]}, announce=announce) == []
     assert said == []
+
+
+def test_audio_patch_lands_through_the_shared_table() -> None:
+    """The pet quick keys and the system page send {audio:{...}}; a shape only
+    dev-talk's private copy understood was untestable end-to-end — the same
+    drift that once made the mic switch a placebo."""
+    settings = Settings()
+    lines: list[str] = []
+    changed = apply_panel_edits(
+        settings,
+        {"audio": {"input_enabled": False, "noise_sensitivity": 80}},
+        announce=lines.append,
+    )
+    assert settings.audio.input_enabled is False
+    assert settings.audio.noise_sensitivity == 80
+    assert set(changed) == {"audio.input_enabled", "audio.noise_sensitivity"}
+
+
+def test_unknown_audio_key_is_announced_not_swallowed() -> None:
+    settings = Settings()
+    lines: list[str] = []
+    changed = apply_panel_edits(settings, {"audio": {"volume": 3}}, announce=lines.append)
+    assert changed == []
+    assert any("未知音频配置 volume" in line for line in lines)

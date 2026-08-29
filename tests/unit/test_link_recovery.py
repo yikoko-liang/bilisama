@@ -525,6 +525,9 @@ def _bare_speaker(stream: object | None) -> dev_talk._Speaker:
     speaker._buffer = bytearray()
     speaker._dropped_s = 0.0
     speaker._lock = threading.Lock()
+    speaker._device_lock = threading.Lock()
+    speaker._closed = False
+    speaker._swapping = False
     speaker._stream = stream
     speaker._sounddevice = None
     speaker._primed = False
@@ -929,3 +932,60 @@ async def test_s2s_suspend_resume_replays_context_and_any_owed_rearm() -> None:
             assert server.recorded.count("session.update") > before, "the persona came back"
         finally:
             await s2s.aclose()
+
+
+def test_play_keeps_buffering_while_a_device_swap_is_in_flight() -> None:
+    """refresh_default_device holds _stream at None for the whole new-device
+    open; dropping PCM there cut a hole mid-sentence and let `busy` release
+    the floor early."""
+    speaker = _bare_speaker(None)
+    speaker._swapping = True
+    speaker.play(b"\x11\x22" * 200)
+    assert speaker.busy, "mid-swap audio must wait for the replacement stream"
+
+    speaker._swapping = False
+    speaker._stream = None
+    speaker.play(b"\x33\x44" * 10)
+    assert speaker.backlog_s == pytest.approx(400 / 2 / 24000), "a muted run still drops"
+
+
+def test_new_reply_audio_resets_the_finish_latch() -> None:
+    """finish_reply's release latch belongs to ONE reply: inherited by the
+    next one, its first network gap drained everything instead of
+    rebuffering — the chopped-word artefact came back for every reply in a
+    burst."""
+    speaker = _bare_speaker(object())
+    speaker.play(b"\x11\x22" * 50)  # reply A's sub-preroll tail
+    speaker.finish_reply()
+    assert speaker._reply_finished is True
+
+    speaker.play(b"\x33\x44" * 50)  # reply B starts before A's tail drained
+    # A plain-bool local: mypy narrowed the attribute to Literal[True] above
+    # and would call the next assert unreachable.
+    finished: bool = speaker._reply_finished
+    assert finished is False, "B must rebuffer, not drain-everything"
+
+    output = bytearray(64)
+    speaker._feed(output, 32, None, None)
+    assert output == b"\x00" * 64, "sub-preroll data waits for a cushion again"
+
+
+def test_finish_reply_latches_even_on_an_empty_buffer() -> None:
+    """Unconditional latch: the client's tombstones guarantee no same-reply
+    audio after ReplyDone, and play() resets it for the next reply — so a
+    stray True can only release early, never hold audio hostage."""
+    speaker = _bare_speaker(object())
+    speaker.finish_reply()
+    assert speaker._reply_finished is True and speaker._primed is False
+
+
+def test_a_closed_speaker_stays_closed() -> None:
+    """close() is final: a resume (or a racing refresh) arriving afterwards
+    must not resurrect a PortAudio stream nothing will ever release."""
+    speaker = _bare_speaker(object())
+    speaker.close()
+    assert speaker._closed is True and speaker._stream is None
+    speaker.resume()
+    assert speaker._stream is None, "resume after close must not reopen"
+    speaker._sounddevice = object()
+    assert speaker.refresh_default_device() is None

@@ -299,7 +299,9 @@ def cmd_persona_list(args: argparse.Namespace) -> int:
     if not personas_dir.is_dir():
         print(f"没有人设目录：{personas_dir}", file=sys.stderr)
         return 2
-    for d in sorted(p for p in personas_dir.iterdir() if p.is_dir()):
+    # personas/live holds the shared turn-rule files, not a persona package —
+    # the assistants page excludes it the same way (ui/assistants.py).
+    for d in sorted(p for p in personas_dir.iterdir() if p.is_dir() and p.name != "live"):
         pid = d.name
         marker = "＊" if pid == settings.persona.id else "　"
         live_dir = (

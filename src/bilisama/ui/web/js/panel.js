@@ -46,6 +46,19 @@ const LIVE_LABEL = {
   share: "分享", room_state: "房间状态",
 };
 const GUARD_ZH = { captain: "舰长", admiral: "提督", governor: "总督" };
+
+// One vocabulary for money across the room feed, the chat feed and the reply
+// reference — live_event_payload is one shape, so its rendering is one too.
+function giftBits(gift) {
+  if (!gift) return "";
+  let text = `${gift.name} ×${gift.num}`;
+  if (gift.total_battery) text += `（${gift.total_battery} 电池）`;
+  return text;
+}
+function amountBits(data) {
+  if (data.gift) return giftBits(data.gift);
+  return data.value_cny ? `¥${Math.round(data.value_cny)}` : "";
+}
 const SOURCE_ZH = {
   danmaku: "弹幕", super_chat: "SC", gift: "礼物", guard_buy: "上舰",
   vip_enter: "VIP进房", entry: "进房", proactive: "主动话题", voice: "语音",
@@ -360,10 +373,12 @@ export function createPanel({ send }) {
   // ---- room card ----
 
   let roomPending = false;
+  let roomPendingKind = ""; // "connect" | "disconnect" — decides which state settles it
   let lastRoomState = null;
 
-  const setRoomPending = (pending, hint) => {
+  const setRoomPending = (pending, kind, hint) => {
     roomPending = pending;
+    roomPendingKind = pending ? kind : "";
     if (roomConnectBtn) roomConnectBtn.disabled = pending;
     if (roomInfoHint && hint) roomInfoHint.textContent = hint;
   };
@@ -377,18 +392,17 @@ export function createPanel({ send }) {
       }
       return;
     }
-    setRoomPending(true, "正在连接…");
+    setRoomPending(true, "connect", "正在连接…");
     if (roomStatusEl) roomStatusEl.textContent = `正在连接直播间 ${id}…`;
     send("panel.set", { room: { action: "connect", room_id: id } });
   });
   roomDisconnectBtn?.addEventListener("click", () => {
     roomDisconnectBtn.disabled = true; // one click, one disconnect
-    setRoomPending(true, "正在断开…");
+    setRoomPending(true, "disconnect", "正在断开…");
     if (roomStatusEl) roomStatusEl.textContent = "正在断开直播间事件流…";
     send("panel.set", { room: { action: "disconnect" } });
   });
 
-  let roomInfoSaving = false;
   const roomInfoDefaultHint = roomInfoHint?.textContent ?? "";
 
   const refreshRoomInfoDirty = () => {
@@ -401,24 +415,15 @@ export function createPanel({ send }) {
     if (streamerNameSave) streamerNameSave.disabled = !nameDirty;
     if (roomInfoSave) roomInfoSave.disabled = !introDirty;
     if (roomInfoHint && !roomPending) {
-      roomInfoHint.textContent = roomInfoSaving
-        ? "正在保存…"
-        : nameDirty || introDirty
-          ? "有未保存修改"
-          : roomInfoDefaultHint;
+      roomInfoHint.textContent = nameDirty || introDirty ? "有未保存修改" : roomInfoDefaultHint;
     }
-    return nameDirty || introDirty;
   };
   streamerNameInput?.addEventListener("input", refreshRoomInfoDirty);
   streamIntroInput?.addEventListener("input", refreshRoomInfoDirty);
   streamerNameSave?.addEventListener("click", () => {
-    roomInfoSaving = true;
-    refreshRoomInfoDirty();
     sendConfig("persona.streamer_name", streamerNameInput?.value.trim() ?? "");
   });
   roomInfoSave?.addEventListener("click", () => {
-    roomInfoSaving = true;
-    refreshRoomInfoDirty();
     sendConfig("room.stream_intro", streamIntroInput?.value ?? "");
   });
 
@@ -434,7 +439,6 @@ export function createPanel({ send }) {
     }
     if (data.user_level) bits.push(`用户Lv${data.user_level}`);
     if (data.wealth_level) bits.push(`荣耀Lv${data.wealth_level}`);
-    if (data.identity && data.identity !== "anon") bits.push(String(data.identity));
     return bits.join(" · ");
   };
 
@@ -448,10 +452,8 @@ export function createPanel({ send }) {
     row.appendChild(el("span", "when", stamp.toTimeString().slice(0, 8)));
     row.appendChild(el("span", "pill", LIVE_LABEL[data.kind] ?? data.kind));
     let body = data.name ?? "?";
-    if (data.gift) {
-      body += `：${data.gift.name} ×${data.gift.num}`;
-      if (data.gift.total_battery) body += `（${data.gift.total_battery} 电池）`;
-    } else if (data.text) body += `：${data.text}`;
+    if (data.gift) body += `：${giftBits(data.gift)}`;
+    else if (data.text) body += `：${data.text}`;
     const identity = identityBits(data);
     if (identity) body += `（${identity}）`;
     if (data.mock) body += "〔Mock〕";
@@ -507,19 +509,18 @@ export function createPanel({ send }) {
     // Backfill protection: focus is not the whole story — a field the user
     // edited and clicked away from is still theirs until saved. Compare with
     // the PREVIOUS server value: matching it means untouched, overwrite away.
+    // No force-overwrite flag: after a save lands, the server echoes the
+    // typed value, the compare converges on its own, and a shared flag was
+    // exactly how saving ONE field clobbered the other's unsaved edit.
     const prevRoom = previousRoom ?? {};
     if (streamerNameInput && document.activeElement !== streamerNameInput) {
-      const untouched =
-        roomInfoSaving ||
-        streamerNameInput.value.trim() === String(prevRoom.streamer_name ?? "");
+      const untouched = streamerNameInput.value.trim() === String(prevRoom.streamer_name ?? "");
       if (untouched) streamerNameInput.value = String(room.streamer_name ?? "");
     }
     if (streamIntroInput && document.activeElement !== streamIntroInput) {
-      const untouched =
-        roomInfoSaving || streamIntroInput.value === String(prevRoom.stream_intro ?? "");
+      const untouched = streamIntroInput.value === String(prevRoom.stream_intro ?? "");
       if (untouched) streamIntroInput.value = String(room.stream_intro ?? "");
     }
-    roomInfoSaving = false;
     refreshRoomInfoDirty();
     if (roomStatusEl) {
       if (room.connected) {
@@ -534,7 +535,13 @@ export function createPanel({ send }) {
       }
     }
     if (roomDisconnectBtn) roomDisconnectBtn.disabled = !room.connected;
-    if (roomPending && (room.connected || room.error)) setRoomPending(false, "");
+    // A connect settles on connected-or-error; a clean disconnect settles on
+    // NEITHER (connected=false, error="") — keying both on the same pair left
+    // the pending latch stuck after every successful disconnect, with the
+    // connect button dead until a reload.
+    const settled =
+      roomPendingKind === "disconnect" ? !room.connected || room.error : room.connected || room.error;
+    if (roomPending && settled) setRoomPending(false, "", "");
     // A new room means a new stream of events; the old rows are last room's.
     if (
       previousRoom &&
@@ -577,13 +584,8 @@ export function createPanel({ send }) {
           : (reference.name ?? label);
         // The amount explains the queue-jump; the model never hears it, the
         // operator should. Gifts speak batteries (the panel unit), money ¥.
-        if (reference.gift) {
-          refText += `〔${reference.gift.name} ×${reference.gift.num}`;
-          if (reference.gift.total_battery) refText += `，${reference.gift.total_battery} 电池`;
-          refText += "〕";
-        } else if (reference.value_cny) {
-          refText += `〔¥${Math.round(reference.value_cny)}〕`;
-        }
+        const amount = amountBits(reference);
+        if (amount) refText += `〔${amount}〕`;
         copy.appendChild(el("span", "reply-reference", `引用 ${label} · ${refText}`));
       }
       copy.appendChild(el("span", "", `${data.text || "（无文本）"}${status}`));

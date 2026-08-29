@@ -607,3 +607,29 @@ def test_the_probe_is_shaped_for_the_health_registry(tmp_path: Path) -> None:
 
     assert snapshot["status"] == "ok"
     assert snapshot["components"]["distill"]["side_configured"] is False
+
+
+def test_masked_anchor_danmaku_records_identity_not_a_bare_label(tmp_path: Path) -> None:
+    """A blank-named room owner line must still say WHICH identity spoke:
+    「主播本人」 alone makes every masked owner line indistinguishable."""
+    from datetime import UTC, datetime
+
+    from bilisama.clock import FakeClock
+    from bilisama.ingest.events import EventKind, LiveEvent, Viewer
+    from bilisama.memory.store import MemoryStore
+
+    clock = FakeClock(wall=datetime(2026, 8, 29, 20, 0, tzinfo=UTC))
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    store.on_event(
+        LiveEvent(
+            kind=EventKind.DANMAKU,
+            room_id=777,
+            viewer=Viewer(uid=0, uid_hash="abc123", name="", is_anchor=True),
+            text="等下换个场景",
+            event_id="anchor-1",
+        )
+    )
+    events = store.recent_events(limit=1)
+    assert events and "主播本人·hash:abc123" in events[0]
+    store.close()

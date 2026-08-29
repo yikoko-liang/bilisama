@@ -550,7 +550,7 @@ class VolcanoLink:
     async def set_bot_name(self, name: str) -> None:
         """Rename her without a reconnect.
 
-        O generation: probed live 2026-08-28 — an UpdateConfig carrying
+        O generation: probed live 2026-08-29 — an UpdateConfig carrying
         dialog.bot_name is ACCEPTED AND IGNORED (asked her name right after,
         she answered the old one), so the only carrier that works mid-stream
         is the next StartSession. Swap sessions instead: same socket, same
@@ -567,7 +567,12 @@ class VolcanoLink:
         if not self._started:
             return  # the next StartSession carries it
         if _PERSONA_KEY[self._model] == "system_role":
-            self._swapped_context = None
+            # Under the swap lock: an in-flight swap writes _swapped_context
+            # on completion, and a marker set outside the lock is overwritten
+            # by exactly that write — the queued rename then loses to the
+            # dedupe it was meant to defeat.
+            async with self._swap_lock:
+                self._swapped_context = None
             await self._swap_session()
 
     async def aclose(self) -> None:

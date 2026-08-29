@@ -453,6 +453,14 @@ class _Speaker:
         self._dropped_s = 0.0
         self._device = device
         self._lock = threading.Lock()
+        # Serialises every stream-ownership transition (open/suspend/resume/
+        # refresh/close). These all run on to_thread workers, and the 1 Hz
+        # refresh poller racing suspend() is how the desktop end re-took a
+        # device the page owned. Separate from _lock: the PCM ring lock must
+        # never be held across a PortAudio open, which can block for seconds.
+        self._device_lock = threading.Lock()
+        self._closed = False
+        self._swapping = False  # a refresh holds _stream at None mid-open
         self._stream: Any = None
         self._sounddevice: Any = None
         # Jitter-cushion state (see _PLAYBACK_PREROLL_MS): primed means the
@@ -569,17 +577,19 @@ class _Speaker:
         just ended, and playing them on the way back would be the backlog all
         over again.
         """
-        self.flush()
-        self._suspended = True
-        stream, self._stream = self._stream, None
-        if stream is not None:
-            _close_audio_stream(stream)
+        with self._device_lock:
+            self.flush()
+            self._suspended = True
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                _close_audio_stream(stream)
 
     def resume(self) -> None:
         """Take the device back after a page let go. BLOCKING."""
-        self._suspended = False
-        if self._stream is None:
-            self._open()
+        with self._device_lock:
+            self._suspended = False
+            if self._stream is None and not self._closed:
+                self._open()
 
     def refresh_default_device(self) -> str | None:
         """Follow a macOS default-output change without restarting BiliSama.
@@ -588,51 +598,79 @@ class _Speaker:
         speaker stays suspended — while a page holds the devices, reopening
         here would steal them back mid-session.
         """
-        if self._device is not None or self._suspended or self._sounddevice is None:
+        if self._device is not None or self._sounddevice is None:
             return None
-        target = self._default_output_device()
-        if target is None:
-            return None
-        old = self._stream
-        try:
-            active = bool(old is not None and old.active)
-        except Exception:
-            active = False
-        if target == self._opened_device and active:
-            return None
-        # Stop the old callback before starting the new one. Both callbacks
-        # share the same PCM ring; overlapping them, even briefly, lets two
-        # devices race to consume different halves of one sentence.
-        if old is not None:
-            _close_audio_stream(old)
-        self._stream = None
-        try:
-            replacement = self._start_stream(target)
-        except Exception as exc:
-            self.flush()
-            message = f"默认扬声器重连失败（{exc}），会继续重试"
-            if message == self._last_output_error:
+        with self._device_lock:
+            # Re-checked under the lock: the unlocked pre-check above is just
+            # a cheap skip, and a suspend()/close() that won the lock first
+            # must not have its decision overwritten by this worker.
+            if self._suspended or self._closed:
                 return None
-            self._last_output_error = message
-            return message
-        self._stream = replacement
-        previous = self._opened_device
-        self._opened_device = target
-        self._last_output_error = ""
-        if previous == target:
-            return f"默认扬声器设备 {target} 已重新连接"
-        return f"默认扬声器已切换到设备 {target}"
+            try:
+                target = self._default_output_device()
+            except Exception as exc:
+                # A PortAudio hiccup here must not kill the poller for the
+                # rest of the stream; log once per distinct message instead.
+                message = f"默认扬声器探测失败（{exc}）"
+                if message == self._last_output_error:
+                    return None
+                self._last_output_error = message
+                return message
+            if target is None:
+                return None
+            old = self._stream
+            try:
+                active = bool(old is not None and old.active)
+            except Exception as exc:
+                log.debug("dev_talk.speaker_probe_failed", error_text=str(exc)[:120])
+                active = False
+            if target == self._opened_device and active:
+                return None
+            # Stop the old callback before starting the new one. Both
+            # callbacks share the same PCM ring; overlapping them, even
+            # briefly, lets two devices race to consume different halves of
+            # one sentence. While the new open is in flight play() keeps
+            # buffering (_swapping) so the reply survives the gap.
+            if old is not None:
+                _close_audio_stream(old)
+            self._stream = None
+            self._swapping = True
+            try:
+                replacement = self._start_stream(target)
+            except Exception as exc:
+                self.flush()
+                message = f"默认扬声器重连失败（{exc}），会继续重试"
+                if message == self._last_output_error:
+                    return None
+                self._last_output_error = message
+                return message
+            finally:
+                self._swapping = False
+            self._stream = replacement
+            previous = self._opened_device
+            self._opened_device = target
+            self._last_output_error = ""
+            if previous == target:
+                return f"默认扬声器设备 {target} 已重新连接"
+            return f"默认扬声器已切换到设备 {target}"
 
     def play(self, pcm: bytes) -> None:
-        if self._stream is None:
+        if self._stream is None and not self._swapping:
             # Muted run (no sounddevice, or the device refused to start).
             # Buffering here would be worse than useless: nothing drains it,
             # so `busy` would latch True and the playback gate would hold the
-            # floor shut for the rest of the stream.
+            # floor shut for the rest of the stream. A device swap in flight
+            # is the one exception: the replacement stream drains the buffer
+            # moments later, and dropping instead cut a hole mid-sentence
+            # while `busy` released the floor early.
             return
         with self._lock:
             if not self._enabled:
                 return
+            # New PCM after finish_reply() belongs to the NEXT reply: without
+            # this reset the previous reply's release latch let this one's
+            # first network gap drain everything instead of rebuffering.
+            self._reply_finished = False
             self._buffer.extend(pcm)
             over = len(self._buffer) - _MAX_BACKLOG_BYTES
             if over > 0:
@@ -667,9 +705,15 @@ class _Speaker:
             self._reply_finished = False
 
     def finish_reply(self) -> None:
-        """Release a sub-preroll final packet once generation has completed."""
+        """Release a sub-preroll final packet once generation has completed.
+
+        Unconditionally latched: the client's tombstones guarantee no same-
+        reply audio follows ReplyDone, and play() resets the latch the moment
+        the NEXT reply's PCM arrives — so a stray True can only ever release
+        audio early, never hold it hostage.
+        """
         with self._lock:
-            self._reply_finished = bool(self._buffer)
+            self._reply_finished = True
             if not self._buffer:
                 self._primed = False
 
@@ -708,7 +752,9 @@ class _Speaker:
         PortAudio's atexit release ran AFTER the farewell print — the exit
         that "hangs after 再见". Idempotent so both exit paths may call it.
         """
-        stream, self._stream = self._stream, None
+        with self._device_lock:
+            self._closed = True
+            stream, self._stream = self._stream, None
         if stream is not None:
             _close_audio_stream(stream)
 
@@ -719,15 +765,18 @@ class _Speaker:
 
 
 async def _watch_default_output(speaker: _Speaker) -> None:
-    """Keep desktop playback on the current macOS default output.
+    """Recover the desktop output stream when it dies under the default device.
 
-    A Bluetooth headset that connects after startup becomes the system default
-    without any notification PortAudio can hear, so poll once a second; the
-    speaker itself refuses to move while pinned (--output-device) or while a
-    page holds the devices.
+    Honest scope (probed 2026-08-29 against the bundled PortAudio dylib):
+    Pa_Initialize freezes BOTH the device list and the default-device index —
+    Pa_GetDefaultOutputDevice reads a static struct with zero syscalls — so a
+    device that appears after startup, and even a default switched between
+    existing devices, is invisible here. What this loop CAN do is notice the
+    open stream going inactive (device yanked) and reopen it, which is why it
+    stays. Real hotplug needs a re-init strategy; ledger entry #90.
     """
     while True:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(3.0)
         message = await asyncio.to_thread(speaker.refresh_default_device)
         if message:
             print(f"[音频] {message}")
@@ -1265,6 +1314,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.side import OpenAICompatSideModel, SideModel
     from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
     from bilisama.ui.config_edit import (
+        AUDIO_PANEL_PATHS,
         ConfigEditError,
         apply_runtime_config_edit,
         speak_paths,
@@ -1663,11 +1713,25 @@ async def run_director(args: argparse.Namespace) -> int:
         thresholds=live_thresholds,
         context_lines=selector_context_lines,
         mention_terms=selector_mention_terms,
-        # Window winners wait out the streamer AND an empty bucket: no intent
-        # exists while blocked, so no TTL burns during a monologue.
-        delivery_blocked=lambda: floor.streamer_speaking or not event_pacer.can_consume("danmaku"),
+        # Window winners wait out the streamer, an empty bucket AND the pause
+        # switch: no intent exists while blocked, so no TTL burns during a
+        # monologue, and a pause defers the winner instead of discarding it
+        # in a delivery no-op that would still book selector counters.
+        delivery_blocked=lambda: (
+            runtime_paused or floor.streamer_speaking or not event_pacer.can_consume("danmaku")
+        ),
     )
-    entries = EntryCoalescer(clock, policy=event_pacer.snapshot)
+
+    def entry_policy() -> EventPacingSnapshot:
+        # The pause switch rides the coalescer's own hold flag, so a paused
+        # welcome is accounted as suppressed rather than silently dropped in
+        # the delivery callback.
+        snapshot = event_pacer.snapshot()
+        if runtime_paused and snapshot.entry_enabled:
+            return dataclasses.replace(snapshot, entry_enabled=False)
+        return snapshot
+
+    entries = EntryCoalescer(clock, policy=entry_policy)
 
     async def observe_context_item(text: str) -> None:
         await speech.add_context_item(text)
@@ -1801,9 +1865,13 @@ async def run_director(args: argparse.Namespace) -> int:
             ),
             assistant_label=settings.persona.display_name or settings.persona.id,
         )
+        # Context BEFORE the rename: on the O generation set_bot_name swaps
+        # the session, and a swap started first would carry the OLD persona
+        # body — the new one then trails as a second push and the swap dedupe
+        # marker never converges.
+        await assembly.refresh_context()
         if isinstance(inner, VolcanoLink):
             await inner.set_bot_name(settings.persona.display_name or settings.persona.id)
-        await assembly.refresh_context()
 
     async def run_reload_hook(path: str) -> bool:
         """The hook table apply_runtime_config_edit's contract points at.
@@ -1994,6 +2062,7 @@ async def run_director(args: argparse.Namespace) -> int:
         publish_state=mock_state_sink,
         publish_event=mock_event_sink,
     )
+    registry.register("live_mock", live_mock.state)
     seq = itertools.count(1)
     speaker = _Speaker(args.output_device)
     registry.register("audio_output", speaker.status)
@@ -2325,15 +2394,11 @@ async def run_director(args: argparse.Namespace) -> int:
                 if isinstance(audio, dict):
                     # The system page's three audio controls arrive on this
                     # shape; dropping them silently is how the mic switch
-                    # became a placebo once already.
-                    audio_paths = {
-                        "input_enabled": "audio.input_enabled",
-                        "output_enabled": "audio.output_enabled",
-                        "noise_sensitivity": "audio.noise_sensitivity",
-                    }
+                    # became a placebo once already. The table is shared with
+                    # apply_panel_edits so the browser harness speaks it too.
                     for name, value in audio.items():
-                        if isinstance(name, str) and name in audio_paths:
-                            edits.append((audio_paths[name], value))
+                        if isinstance(name, str) and name in AUDIO_PANEL_PATHS:
+                            edits.append((AUDIO_PANEL_PATHS[name], value))
                         else:
                             announce(f"未知音频配置 {name}，忽略")
                 room = data.get("room")
@@ -2445,21 +2510,35 @@ async def run_director(args: argparse.Namespace) -> int:
                 nonlocal live_mock_parked_room
                 status = room_source.status()
                 if bool(status.get("connected")) and not live_mock_parked_room:
-                    live_mock_parked_room = int(status.get("room_id") or 0)
+                    # The REQUESTED id, not status["room_id"]: that one is the
+                    # late-resolving real id and reads 0 until the handshake
+                    # lands — a park recorded as 0 can never be restored.
+                    live_mock_parked_room = int(status.get("active_room_id") or 0)
                     await room_source.disconnect()
                     print("[直播Mock] 已暂挂真实直播间连接，Mock 结束后自动恢复")
 
             async def _restore_room_after_mock() -> None:
                 nonlocal live_mock_parked_room
                 room_id, live_mock_parked_room = live_mock_parked_room, 0
-                if room_id > 0:
-                    try:
-                        await room_source.connect(room_id)
-                        print(f"[直播Mock] 已恢复真实直播间 {room_id}")
-                    except ConnectionError as exc:
-                        print(f"[直播Mock] 直播间 {room_id} 没能恢复：{str(exc)[:120]}")
+                if room_id <= 0:
+                    return
+                if bool(room_source.status().get("connected")):
+                    # The operator connected some room mid-mock; their newer
+                    # choice wins over the parked one.
+                    print(f"[直播Mock] 直播间已另行连接，不再恢复原房间 {room_id}")
+                    return
+                try:
+                    await room_source.connect(room_id)
+                    print(f"[直播Mock] 已恢复真实直播间 {room_id}")
+                except ConnectionError as exc:
+                    print(f"[直播Mock] 直播间 {room_id} 没能恢复：{str(exc)[:120]}")
 
             async def on_live_mock_check(data: dict[str, Any]) -> None:
+                # A re-check after an errored run is an exit from that run:
+                # bring the parked room back first (preflight holds its own
+                # source, so the real room may stay live until start parks it
+                # again).
+                await _restore_room_after_mock()
                 capture = data.get("capture")
                 await live_mock.check(
                     room_id=int(data.get("room_id") or 0),
@@ -2926,7 +3005,16 @@ async def run_director(args: argparse.Namespace) -> int:
                                 if intent.event is not None
                                 else {"kind": intent.source}
                             )
-                            reply_context = {"source": intent.source, "reference": reference}
+                            # priority rides along so the page can decide
+                            # bubble-worthiness from the scheduler's own tier
+                            # instead of re-deriving it from source names —
+                            # a small gift already tiers down to DANMAKU
+                            # server-side, which no source list can see.
+                            reply_context = {
+                                "source": intent.source,
+                                "priority": int(intent.priority),
+                                "reference": reference,
+                            }
                     for name, data in link_frames(ev, reply_context=reply_context):
                         live_hub.broadcast(name, data)
 
@@ -3101,8 +3189,8 @@ async def run(args: argparse.Namespace) -> int:
             )
         consume = asyncio.create_task(_consume(client, speaker, reply_wav))
         watcher = (
-            asyncio.create_task(_watch_default_output(speaker), name="wire:default-output")
-            if speaker is not None
+            _watch(asyncio.create_task(_watch_default_output(speaker), name="wire:default-output"))
+            if speaker is not None and args.output_device is None
             else None
         )
         done, pending = await asyncio.wait({pump, consume}, return_when=asyncio.FIRST_COMPLETED)

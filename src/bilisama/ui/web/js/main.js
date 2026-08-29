@@ -38,20 +38,25 @@ const controlState = { paused: false, input: true, output: true };
 let bubbleReplyId = null;
 
 // Which replies show as a pet bubble. Paused: none (nothing new speaks
-// anyway, and a bubble over a paused pet reads as a ghost). Voice fully on:
+// anyway, and a bubble over a paused pet reads as a ghost). Voice output on:
 // her voice-turn replies and the high-value lanes bubble, the ordinary event
 // lanes do not — a bubble per danmaku is noise when the voice already carries
-// it. With 播报 off, the bubble is the only channel, so everything shows.
+// it. With voice output off, the bubble is the only channel, so everything
+// shows. The tier comes from the scheduler's own priority on the frame (a
+// small gift tiers down to the danmaku rung server-side; a source list here
+// could not see that); the source set is only the fallback for old frames.
 // (Softened from yiko, which hid even voice replies behind full voice: on
 // this branch the pet IS the primary surface, her speech balloon stays.)
 const QUIET_BUBBLE_SOURCES = new Set(["danmaku", "entry", "proactive", "background_result"]);
+const QUIET_BUBBLE_BELOW = 40; // Priority.BACKGROUND — everything under it queues quietly
 function replyUsesBubble(data) {
   if (panelOnly) return false;
   if (controlState.paused) return false;
-  if (controlState.input && controlState.output) {
-    return !QUIET_BUBBLE_SOURCES.has(data?.source ?? "voice");
-  }
-  return true;
+  if (!controlState.output) return true;
+  const source = data?.source ?? "voice";
+  if (source === "voice") return true;
+  if (typeof data?.priority === "number") return data.priority >= QUIET_BUBBLE_BELOW;
+  return !QUIET_BUBBLE_SOURCES.has(source);
 }
 
 function paintControls() {
@@ -66,6 +71,7 @@ function paintControls() {
   set(inputToggleBtn, controlState.input, "点击关闭语音输入", "点击打开语音输入");
   set(outputToggleBtn, controlState.output, "点击关闭语音播报", "点击打开语音播报");
   if (pauseToggleBtn) {
+    pauseToggleBtn.disabled = false; // the ack gate lifts with every repaint
     pauseToggleBtn.classList.toggle("active", controlState.paused);
     pauseToggleBtn.setAttribute("aria-pressed", String(controlState.paused));
     const tip = controlState.paused ? "恢复伴播助手" : "暂停伴播助手";
@@ -77,25 +83,30 @@ function paintControls() {
   }
 }
 
-inputToggleBtn?.addEventListener("click", () => {
-  if (send("panel.set", { audio: { input_enabled: !controlState.input } })) {
-    inputToggleBtn.disabled = true; // until panel.state repaints with the truth
-  } else {
-    bubble.showTransient?.("语音连接已断开，输入开关没有生效。", 3200);
-  }
-});
-outputToggleBtn?.addEventListener("click", () => {
-  if (send("panel.set", { audio: { output_enabled: !controlState.output } })) {
-    outputToggleBtn.disabled = true;
-  } else {
-    bubble.showTransient?.("语音连接已断开，播报开关没有生效。", 3200);
-  }
-});
-pauseToggleBtn?.addEventListener("click", () => {
-  if (!send("panel.set", { paused: !controlState.paused })) {
-    bubble.showTransient?.("语音连接已断开，暂停开关没有生效。");
-  }
-});
+// One shape for all three quick keys: ask, disable until panel.state answers
+// (paintControls lifts the gate), toast when the link is down. The pause key
+// used to skip the ack gate, so a double-click queued two suspend cycles.
+function askToggle(btn, patch, failText) {
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    if (send("panel.set", patch())) {
+      btn.disabled = true; // until panel.state repaints with the truth
+    } else {
+      bubble.showTransient(failText, 3200);
+    }
+  });
+}
+askToggle(
+  inputToggleBtn,
+  () => ({ audio: { input_enabled: !controlState.input } }),
+  "语音连接已断开，输入开关没有生效。",
+);
+askToggle(
+  outputToggleBtn,
+  () => ({ audio: { output_enabled: !controlState.output } }),
+  "语音连接已断开，播报开关没有生效。",
+);
+askToggle(pauseToggleBtn, () => ({ paused: !controlState.paused }), "语音连接已断开，暂停开关没有生效。");
 
 // panel.state is the one truth for all three; the buttons only ASK.
 panel.setOnPanelState((state) => {
@@ -114,8 +125,15 @@ const exitDialog = document.getElementById("exit-dialog");
 if (!panelOnly && exitDialog) {
   const exitConfirm = document.getElementById("exit-confirm");
   const exitCancel = document.getElementById("exit-cancel");
+  const exitConfirmLabel = exitConfirm?.textContent ?? "";
   const closeExitDialog = () => {
     exitDialog.hidden = true;
+    // A dismissed quit is a cancelled quit: the confirm button must come
+    // back, or the next right-click opens a dialog stuck on 「正在退出…」.
+    if (exitConfirm) {
+      exitConfirm.disabled = false;
+      exitConfirm.textContent = exitConfirmLabel;
+    }
     lastFit = ""; // the quitting size no longer applies; shrink back
     fitToSkin();
   };
@@ -143,7 +161,7 @@ if (!panelOnly && exitDialog) {
       window.bilisamaShell.close();
     } else {
       closeExitDialog();
-      bubble.showTransient?.("后端进程没有运行，无需退出。", 3200);
+      bubble.showTransient("后端进程没有运行，无需退出。", 3200);
     }
   });
 }
@@ -332,7 +350,7 @@ const handlers = {
       // No delta of this reply ever bubbled (gating flipped mid-reply, or the
       // stream raced the page): show the finished line once instead of never.
       bubbleReplyId = data.reply_id;
-      bubble.showTransient?.(data.text, 4000);
+      bubble.showTransient(data.text, 4000);
       return;
     }
     bubble.endReply();

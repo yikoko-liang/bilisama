@@ -18,6 +18,7 @@ export function createBubble(el) {
   let hideTimer = null;
   let shatterTimer = null;
   let replyEnded = false;
+  let transient = false; // a one-shot line on its own timer; voice state is noise to it
 
   const hide = () => {
     clearTimeout(hideTimer);
@@ -26,6 +27,7 @@ export function createBubble(el) {
     shatterTimer = null;
     open = false;
     replyEnded = false;
+    transient = false;
     el.hidden = true;
     el.classList.remove("show", "shatter");
     el.textContent = "";
@@ -34,11 +36,14 @@ export function createBubble(el) {
   return {
     showTransient(text, lingerMs = 2600) {
       // One whole line at once — control feedback and full-reply fallbacks,
-      // not a stream. Self-dismisses; voice state is not consulted because
-      // nothing is being spoken.
+      // not a stream. Self-dismisses on its own timer; the transient flag is
+      // what keeps onVoiceState's hands off it — without it, the first
+      // listening/speaking frame cleared hideTimer and the line stuck
+      // on screen indefinitely.
       hide();
       open = true;
       replyEnded = true;
+      transient = true;
       el.textContent = text;
       el.hidden = false;
       el.classList.add("show");
@@ -52,6 +57,7 @@ export function createBubble(el) {
       }
       clearTimeout(hideTimer);
       hideTimer = null;
+      transient = false;
       if (!open || replyEnded) {
         // A finished reply is still on screen (the bubble outlives the text
         // stream by design) — replace it rather than appending, or replies
@@ -74,7 +80,7 @@ export function createBubble(el) {
     },
 
     onVoiceState(state) {
-      if (!open || shatterTimer !== null) return;
+      if (!open || shatterTimer !== null || transient) return;
       if (state === "idle" || state === "offline") {
         clearTimeout(hideTimer);
         hideTimer = setTimeout(hide, LINGER_MS);

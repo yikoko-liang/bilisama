@@ -286,6 +286,9 @@ def test_persona_list_shows_all_and_marks_the_active_one(tmp_path: Path) -> None
     assert "＊ hanako" in text
     for pid in ("tofu", "ming", "butter"):
         assert pid in text
+    # personas/live is the shared turn-rule directory, not a persona; listing
+    # it invited `--persona live`, which has no identity.md to load.
+    assert "live" not in text.split()
     assert "专属话题提示词" in text and "话题提示词用全局默认" in text
 
 

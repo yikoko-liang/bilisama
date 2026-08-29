@@ -51,7 +51,7 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 通过标准见 [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md)。
 
 要改代码的话，提交前跑一遍门禁 `scripts/gate.sh`（格式、类型、单测、CLI 冒烟，
-装了就连集成层和浏览器界面层一起跑，九步），规矩写在 [CONTRIBUTING.md](CONTRIBUTING.md)。
+装了就连集成层、浏览器界面层和 eslint 一起跑，十步），规矩写在 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 文档索引
 

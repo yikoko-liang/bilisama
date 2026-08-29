@@ -176,6 +176,17 @@ def speak_paths(settings: Settings) -> dict[str, str]:
     return {name: f"interaction.speak.{name}" for name in type(speak).model_fields}
 
 
+# The system page's audio controls, panel key → config path. One table shared
+# by dev-talk's on_panel_set and apply_panel_edits below, so the browser-test
+# harness exercises the same shape the pet's quick keys send — an audio patch
+# only one of the two understood is how the mic switch became a placebo once.
+AUDIO_PANEL_PATHS: dict[str, str] = {
+    "input_enabled": "audio.input_enabled",
+    "output_enabled": "audio.output_enabled",
+    "noise_sensitivity": "audio.noise_sensitivity",
+}
+
+
 def apply_panel_edits(
     settings: Settings,
     data: Mapping[str, Any],
@@ -212,6 +223,14 @@ def apply_panel_edits(
                 # both are 「面板要改的东西没改成」, and splitting them would
                 # mean grepping twice for one question.
                 log.info("ui.config_edit_refused", path=f"speak.{name}", error_text="未知开关")
+    audio_patch = data.get("audio")
+    if isinstance(audio_patch, dict):
+        for name, value in audio_patch.items():
+            if name in AUDIO_PANEL_PATHS:
+                edits.append((AUDIO_PANEL_PATHS[name], value))
+            else:
+                announce(f"未知音频配置 {name}，忽略")
+                log.info("ui.config_edit_refused", path=f"audio.{name}", error_text="未知音频配置")
     edit = data.get("config")
     if isinstance(edit, dict):
         edits.append((edit.get("path"), edit.get("value")))

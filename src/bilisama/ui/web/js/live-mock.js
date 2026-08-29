@@ -308,14 +308,29 @@ function appendEntry(kind, who, text) {
 shareButton.addEventListener("click", chooseShare);
 shareStop.addEventListener("click", () => stopCapture());
 checkButton.addEventListener("click", runCheck);
+let introClearedForRoomChange = false;
 roomInput.addEventListener("input", () => {
   const candidate = Number(roomInput.value.trim());
+  if (candidate === configuredRoomId && introClearedForRoomChange) {
+    // The operator typed their way back to the configured room (every
+    // intermediate keystroke of an edit passes through "some other id") —
+    // the pending clear no longer applies; put the topic back.
+    introClearedForRoomChange = false;
+    streamIntro.value = configuredStreamIntro;
+    streamIntroEdited = false;
+    return;
+  }
   if (candidate > 0 && candidate !== configuredRoomId && !streamIntroEdited) {
     streamIntro.value = "";
     // Programmatic clears fire no input event; mark it edited by hand or the
     // page's 「更换房间时留空会清除旧主题」 promise never reaches the config.
+    introClearedForRoomChange = true;
     streamIntroEdited = configuredStreamIntro !== "";
   }
+});
+streamIntro.addEventListener("input", () => {
+  // A hand edit takes over; the automatic clear stops second-guessing it.
+  introClearedForRoomChange = false;
 });
 streamIntro.addEventListener("input", () => {
   streamIntroEdited = streamIntro.value !== configuredStreamIntro;

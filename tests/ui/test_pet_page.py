@@ -130,6 +130,14 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
                 {
                     "panicked": False,
                     "speak": {n: bool(getattr(speak, n)) for n in type(speak).model_fields},
+                    # The audio trio rides the same echo so the pet's quick
+                    # keys are observable end-to-end (their ack gate lifts on
+                    # this frame).
+                    "audio": {
+                        "input_enabled": settings.audio.input_enabled,
+                        "output_enabled": settings.audio.output_enabled,
+                        "noise_sensitivity": settings.audio.noise_sensitivity,
+                    },
                 },
             )
 
@@ -1298,3 +1306,89 @@ async def test_the_judgment_row_actually_hides_when_marked_hidden(page: Page) ->
           return display;
         }""")
     assert hidden_display == "none"
+
+
+async def test_quick_key_toggles_the_mic_through_the_shared_channel(
+    page: Page, harness: Harness
+) -> None:
+    """The pet's voice-input key: ack-gated ask, applied via apply_panel_edits,
+    repainted from the panel.state echo — the end-to-end path that was
+    structurally untestable while the audio shape lived only in dev-talk."""
+    await _wait(page, "document.title.includes('豆腐')")
+    assert harness.settings.audio.input_enabled is True
+    await page.click("#voice-input-toggle")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("audio") or {}).get("input_enabled") is False,
+    )
+    # A plain-bool local: mypy narrowed the attribute to Literal[True] above.
+    applied: bool = harness.settings.audio.input_enabled
+    assert applied is False
+    # The echo repaints the key into its off state and lifts the ack gate.
+    await _wait(
+        page,
+        "document.getElementById('voice-input-toggle').getAttribute('aria-pressed') === 'false'"
+        " && !document.getElementById('voice-input-toggle').disabled",
+    )
+
+
+async def test_dismissing_a_pending_quit_revives_the_confirm_button(
+    page: Page, harness: Harness
+) -> None:
+    """Esc during the 「正在退出…」 wait must hand the button back: a stuck
+    disabled confirm made the pet unquittable for the rest of the session."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.dispatch_event("#pet-mount", "contextmenu")
+    await _wait(page, "document.getElementById('exit-dialog').hidden === false")
+    await page.click("#exit-confirm")
+    await _wait(page, "document.getElementById('exit-confirm').disabled === true")
+    await page.keyboard.press("Escape")
+    await _wait(page, "document.getElementById('exit-dialog').hidden === true")
+    await page.dispatch_event("#pet-mount", "contextmenu")
+    await _wait(
+        page,
+        "document.getElementById('exit-confirm').disabled === false"
+        " && document.getElementById('exit-confirm').textContent !== '正在退出…'",
+    )
+
+
+async def test_a_transient_bubble_outlives_the_next_voice_state(
+    page: Page, harness: Harness
+) -> None:
+    """The one-shot line runs on its own timer: a listening frame arriving
+    right after used to clear that timer and pin the text forever."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.evaluate("window.__bilisamaBubbleProbe = true")
+    # The reply.done fallback path shows the whole line at once.
+    harness.hub.broadcast(
+        ServerEvent.REPLY_DONE,
+        {"status": "completed", "text": "整段补显的一句", "reply_id": "r-t", "source": "guard_buy"},
+    )
+    await _wait(page, "!document.getElementById('bubble').hidden")
+    harness.hub.broadcast(ServerEvent.VOICE_STATE, {"state": "listening"})
+    # Its own linger (4s) still dismisses it despite the voice-state noise.
+    await _wait(page, "document.getElementById('bubble').hidden", timeout_ms=6000)
+
+
+async def test_no_voice_switches_render_pinned_off(page: Page, harness: Harness) -> None:
+    """follow/like/share have no speaking intent behind them (#50): the matrix
+    shows them grey and off instead of promising speech that never comes."""
+    await _wait(page, "document.title.includes('豆腐')")
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {"panicked": False, "speak": {"danmaku": True, "follow": True, "like": False}},
+    )
+    await _wait(page, "document.querySelectorAll('#speak-matrix input').length >= 3")
+    pinned = await page.evaluate("""() => {
+          const boxes = [...document.querySelectorAll('#speak-matrix label')];
+          const byName = Object.fromEntries(
+            boxes.map((l) => [l.textContent.trim(), l.querySelector('input')])
+          );
+          return {
+            follow: { disabled: byName['关注']?.disabled, checked: byName['关注']?.checked },
+            danmaku: { disabled: byName['普通弹幕']?.disabled },
+          };
+        }""")
+    assert pinned["follow"] == {"disabled": True, "checked": False}
+    assert pinned["danmaku"] == {"disabled": False}

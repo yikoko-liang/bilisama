@@ -1444,3 +1444,22 @@ async def test_set_bot_name_swaps_the_session_on_the_o_generation() -> None:
             await server.wait_for(wire.ClientEvent.START_SESSION, count=starts_before + 2)
         finally:
             await volcano.aclose()
+
+
+async def test_a_rename_queued_behind_a_running_swap_still_swaps() -> None:
+    """The stale marker is written under _swap_lock: set outside it, an
+    in-flight swap's completion (`_swapped_context = sent`) erased the marker
+    and the queued rename lost to the very dedupe it exists to defeat."""
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server)
+        try:
+            await volcano.set_context("你是豆腐。")
+            starts_before = server.recorded.count(wire.ClientEvent.START_SESSION)
+            # Two renames in quick succession: the second queues behind the
+            # first swap's lock and must still produce its own StartSession.
+            await asyncio.gather(volcano.set_bot_name("奶豆"), volcano.set_bot_name("雪豆"))
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=starts_before + 2)
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body.get("dialog", {}).get("bot_name") == "雪豆"
+        finally:
+            await volcano.aclose()

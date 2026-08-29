@@ -300,3 +300,12 @@ def test_developer_sees_everything() -> None:
     """Every tier is in use. They nest rather than partition."""
     audiences = {m.audience for m in UI_META.values()}
     assert audiences == set(Audience), f"unused audience tier: {set(Audience) - audiences}"
+
+
+def test_room_id_is_live_because_the_system_page_hot_switches_it() -> None:
+    """The advanced page renders reload badges from this class; RESTART here
+    while the system page hot-switches rooms had the two pages telling the
+    operator opposite stories about the same field."""
+    meta = UI_META["room.room_id"]
+    assert meta.reload is Reload.LIVE
+    assert "不写回配置文件" in (meta.hint or "")
