@@ -392,3 +392,30 @@ def test_shipped_config_loads_and_keeps_the_requested_defaults() -> None:
     assert s.audio.input_enabled and s.audio.output_enabled
     assert s.persona.display_name == "豆腐"
     assert s.room.room_id == 0, "the shipped file must not point at a real room"
+
+
+def test_v3_tofu_renderer_migrates_to_the_sprite_axis(tmp_path: Path) -> None:
+    """v3 -> v4 (ledger #40): renderer stops naming a skin. A "tofu" renderer
+    becomes sprite + EMPTY model_id — cleared too, because the old semantics
+    never read model_id under a tofu renderer, and keeping a leftover value
+    would silently activate a backed-out skin experiment."""
+    from bilisama.config.migrate import migrate
+
+    dirty = {
+        "config_version": 3,
+        "avatar": {"renderer": "tofu", "model_id": "kirby"},
+    }
+    migrated, notes = migrate(dirty)
+    assert migrated["avatar"] == {"renderer": "sprite", "model_id": ""}
+    assert any("形象" in note and "sprite" in note for note in notes)
+
+    untouched = {
+        "config_version": 3,
+        "avatar": {"renderer": "sprite", "model_id": "kirby"},
+    }
+    migrated, _ = migrate(untouched)
+    assert migrated["avatar"] == {"renderer": "sprite", "model_id": "kirby"}
+
+    no_section = {"config_version": 3}
+    migrated, _ = migrate(no_section)
+    assert "avatar" not in migrated

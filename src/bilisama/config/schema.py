@@ -18,7 +18,7 @@ from bilisama.config.enums import Chattiness, GrowthMode, ProviderName
 # The config shape this build reads. It lives here rather than in `migrate`
 # because both of that module's neighbours need it and neither may import it:
 # `validate` refuses a file from the future, `migrate` walks an old one forward.
-CURRENT_VERSION: Final[int] = 3
+CURRENT_VERSION: Final[int] = 4
 
 
 class TurnConfig(BaseModel):
@@ -398,16 +398,18 @@ class PersonaConfig(BaseModel):
 class AvatarConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    # tofu = the built-in pixel robot (named for the missing-glyph box — the
-    # tofu Noto set out to eliminate, here alive with a face), sprite =
-    # pet.json spritesheet skin pack, live2d = stage 5. The default must be
-    # renderable today, which is why it is tofu and not live2d. model_id is
-    # whatever asset the chosen renderer loads: tofu ignores it, sprite reads
-    # it as a skin-pack directory name, live2d will read it as a model
-    # directory. One field on purpose — a separate skin field would allow
-    # renderer=sprite to dangle next to a live2d model id with nothing to
-    # catch it.
-    renderer: Literal["tofu", "sprite", "live2d"] = Field("tofu")
+    # Two axes, one job each (ledger #40, split in v4). `renderer` is the
+    # MECHANISM: sprite = pet.json spritesheet pipeline (the shipping one),
+    # live2d = stage 5, configured-but-unimplemented. `model_id` is the
+    # ASSET the mechanism loads: empty means the built-in tofu robot (named
+    # for the missing-glyph box — the tofu Noto set out to eliminate, here
+    # alive with a face); a name means a skin-pack directory, user packs
+    # under ~/.local/share/bilisama/skins shadowing packaged ones; the
+    # explicit name "tofu" pins the PACKAGED copy so no user pack can wear
+    # her face (renderer.js packagedOnly). For live2d it will name a model
+    # directory. The old renderer value "tofu" mixed both axes and migrates
+    # to sprite + empty model_id.
+    renderer: Literal["sprite", "live2d"] = Field("sprite")
     model_id: str = Field("")
     expression_source: Literal["tag", "lexicon", "tool_call"] = Field("tag")
 

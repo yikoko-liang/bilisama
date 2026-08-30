@@ -516,7 +516,7 @@ VAD 阈值。
   `--provider dashscope --model qwen-audio-3.0-realtime-flash`。界面层只认归一化
   事件，不认 provider。两条路都真机验过（2026-08-14）：s2s 全套十项清单；
   DashScope 上 SC 注入后回复以 31 段流式文字进气泡、状态 idle→thinking→speaking。
-- 形象由 `[avatar]` 配置决定，**出厂是 `renderer = "tofu"`**——内置像素机器人「豆腐」
+- 形象由 `[avatar]` 配置决定，**出厂是 `model_id = ""`（内置豆腐）**——内置像素机器人「豆腐」
   （名字来自字体行话：缺字方块「□」就叫 tofu，Noto 的使命是消灭它，我们把它养活了），
   零素材、无版权包袱；`"sprite"` 读皮肤包（`model_id` 填包名，内部分支带了 kirby）。
   自己导入的皮肤包放 `~/.local/share/bilisama/skins/<包名>/`，与仓库内置的同名时你的
@@ -738,7 +738,7 @@ echo 卡的读数不作数。
 
 ```
 [persona] id = "tofu"      →  config/personas/tofu/            人设文本
-[avatar] renderer = "tofu" →  src/bilisama/ui/web/skins/tofu/  精灵图
+[avatar] model_id = ""（内置豆腐）→ src/bilisama/ui/web/skins/tofu/  精灵图
 ```
 
 `--persona tofu` 和 `--skin tofu` 是两个不同的查找，改一个不影响另一个。
@@ -751,8 +751,9 @@ echo 卡的读数不作数。
   的名字全都用不出来。**这条原来写的是「不是这次改名引入的」，2026-08-28 评审查证推翻了**：
   取值是 `display_name or id`，`display_name` 出厂从 `""` 翻成 `"豆腐"` 正是这次改名做的，
   在那之前空值会回落到各自的 `id`。老账 #86，改的时候默认值和两处文档要一起动。
-- `renderer` 那个三值枚举混了两个轴：`tofu` 是「哪个皮肤包」，`sprite` / `live2d`
-  是「哪种机制」。老账 #40，跟名字无关。
+- ~~`renderer` 三值枚举混轴~~ 已拆（老账 #40，2026-08-30）：`renderer` 只说机制
+  （sprite / live2d），`model_id` 说形象——留空是内置豆腐。旧配置里的
+  `renderer = "tofu"` 会被 v3→v4 迁移自动改写，显示效果不变。
 
 人设文件的活副本在 `~/.local/share/bilisama/personas/<id>/`（`persona.data_dir` 可改），
 全是明文 markdown，随时可以打开手改：

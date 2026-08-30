@@ -203,7 +203,7 @@ async def harness() -> AsyncIterator[Harness]:
         origin="",
         port=0,
         calls=[],
-        avatar={"renderer": "tofu", "model_id": ""},
+        avatar={"renderer": "sprite", "model_id": ""},
         server=None,  # type: ignore[arg-type]  # filled by _build_server
     )
     _build_server(hub, [ha])
@@ -559,7 +559,7 @@ async def test_a_missing_pack_leaves_a_line_where_the_streamer_can_read_it(
 async def test_a_renderer_this_build_cannot_mount_says_so_instead_of_degrading_quietly(
     browser: Browser, harness: Harness
 ) -> None:
-    """live2d is a legal config value (config/schema.py:324) with no
+    """live2d is a legal config value (config/schema.py's AvatarConfig) with no
     implementation on this side — stage 5's work, still behind §6.4's licensing
     gate. Until then the page mounts the built-in instead, which is right; doing
     it without a word is not. The streamer edits the config, the pet looks
@@ -598,21 +598,21 @@ async def test_the_panel_window_hears_about_it_too(browser: Browser, harness: Ha
         await context.close()
 
 
-async def test_a_skin_pack_configured_without_a_name_says_so_too(
+async def test_an_empty_model_id_mounts_the_builtin_quietly(
     browser: Browser, harness: Harness
 ) -> None:
-    """The same silence, one field over: renderer=sprite with an empty
-    model_id. config validate does not catch the pair, and the mount reads it
-    as 「no pack asked for」 — which is the built-in, arrived at without a
-    word."""
+    """Reversed with the v4 axis split (ledger #40): sprite + empty model_id
+    IS the built-in tofu now — a legal default, not a half-configured pack.
+    The old version of this test demanded a warning here; the warning would
+    now fire on every fresh install."""
     harness.avatar = {"renderer": "sprite", "model_id": ""}
     context = await browser.new_context(bypass_csp=True)
     page = await context.new_page()
     try:
         await page.goto(harness.url)
-        await _wait(page, "document.querySelectorAll('#loglines .logline').length > 0")
+        await _wait(page, "document.querySelector('#pet-mount canvas') !== null")
         text = await page.locator("#loglines").inner_text()
-        assert "model_id" in text, f"日志区没说是哪个字段空着：{text}"
+        assert "model_id" not in text, f"合法默认不该出警告：{text}"
     finally:
         await context.close()
 

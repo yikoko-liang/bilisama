@@ -11,7 +11,7 @@
 #
 # config/s2s/bilisama-s2s.json 是从 [speech.s2s] 渲染出来的产物，不要手改。
 
-config_version = 3                       # v2→v3：礼物分档改用电池、删掉单观众冷却；v1→v2：mia 改名 tofu。旧配置会自动跟上
+config_version = 4                       # v3→v4：形象 renderer 拆成机制轴；v2→v3：礼物改电池、删单观众冷却；v1→v2：mia 改名 tofu。旧配置会自动跟上
 active_profile = "normal"
 
 [room]
@@ -163,8 +163,8 @@ voice = "off"
 # sprite、model_id 填目录名（内部分支带了 kirby，约束见 src/bilisama/ui/web/skins/kirby/README.md）；
 # 只试一次不用改这里，跑 dev-talk 时加 --skin <名字>。皮肤缺失或损坏会自动退回豆腐。
 [avatar]
-renderer = "tofu"
-model_id = ""
+renderer = "sprite"                     # 渲染机制：sprite 精灵图（含内置豆腐）；live2d 待接入
+model_id = ""                           # 留空 = 内置豆腐；填皮肤包目录名换肤（助手页也能点选）
 expression_source = "tag"               # 只在我们自己做 TTS 时安全
 
 [runtime]

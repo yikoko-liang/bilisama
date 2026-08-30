@@ -100,7 +100,7 @@ def _hello() -> dict[str, Any]:
         "persona": {"id": "tofu", "name": "豆腐"},
         "provider": "s2s",
         "room_connected": False,
-        "avatar": {"renderer": "tofu", "model_id": ""},
+        "avatar": {"renderer": "sprite", "model_id": ""},
         "panel": {"panicked": False, "speak": {"danmaku": True, "gift": False}},
     }
 

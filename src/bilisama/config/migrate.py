@@ -85,8 +85,29 @@ def scrub_retired_interaction(raw: dict[str, Any]) -> dict[str, Any]:
     return {**raw, "interaction": cleaned}
 
 
+def _v3_split_avatar_axes(raw: dict[str, Any]) -> dict[str, Any]:
+    """v3 -> v4: [avatar] renderer stops naming a skin (ledger #40).
+
+    The old renderer value "tofu" answered BOTH 「which mechanism」 and
+    「which asset」; the new axis keeps mechanisms only (sprite / live2d) and
+    moves the asset choice to model_id, where empty means the built-in tofu.
+    model_id is cleared TOO, not kept: under the old semantics a tofu
+    renderer never read it, so a leftover value (a kirby experiment somebody
+    backed out of by flipping renderer) would silently become the active
+    skin. Behaviour is preserved bit for bit instead.
+    """
+    avatar = raw.get("avatar")
+    if not isinstance(avatar, dict) or avatar.get("renderer") != "tofu":
+        return raw
+    return {**raw, "avatar": {**avatar, "renderer": "sprite", "model_id": ""}}
+
+
 # from-version -> the step that produces from-version + 1.
-MIGRATIONS: dict[int, Step] = {1: _v1_rename_personas, 2: scrub_retired_interaction}
+MIGRATIONS: dict[int, Step] = {
+    1: _v1_rename_personas,
+    2: scrub_retired_interaction,
+    3: _v3_split_avatar_axes,
+}
 
 # What each step is worth saying out loud. A silent rewrite of somebody's
 # persona id is the kind of help that reads as a bug — and the half this
@@ -104,6 +125,12 @@ _NOTES: dict[int, str] = {
         "你自己改过的旧金瓜子门槛已按汇率换算保留；没改过的直接用新默认。"
         "另外同一观众的 60 秒回复冷却已经取消（追问会立刻参与挑选），"
         "对应的 [interaction.danmaku] 一节不再需要。"
+    ),
+    3: (
+        "形象配置拆成了两个轴：renderer 只说渲染机制（sprite / live2d），"
+        "具体形象由 model_id 承担——留空就是内置的豆腐机器人。"
+        '原来的 renderer = "tofu" 已自动改成 sprite、model_id 留空，显示效果不变；'
+        "想换皮肤把 model_id 填成皮肤包目录名，或在面板「助手」页点选。"
     ),
 }
 

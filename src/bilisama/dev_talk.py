@@ -1614,11 +1614,14 @@ async def run_director(args: argparse.Namespace) -> int:
         overrides["persona"] = {"id": args.persona}
     if args.skin:
         # A run-scoped override, same layer as --persona: nothing touches the
-        # tracked toml. "tofu" selects the built-in robot explicitly.
-        if args.skin == "tofu":
-            overrides["avatar"] = {"renderer": "tofu", "model_id": ""}
-        else:
-            overrides["avatar"] = {"renderer": "sprite", "model_id": args.skin}
+        # tracked toml. Both branches pin renderer=sprite on purpose: on a v3
+        # file the migration step rewrites a "tofu" renderer AND clears
+        # model_id (this override merges before migration runs), and a config
+        # carrying live2d must still show the requested skin. The explicit
+        # "tofu" id keeps the packaged robot un-shadowable (renderer.js
+        # packagedOnly).
+        model_id = "tofu" if args.skin == "tofu" else args.skin
+        overrides["avatar"] = {"renderer": "sprite", "model_id": model_id}
     try:
         settings = load(config_path, overrides=overrides, strict=False)
     except ConfigError as exc:

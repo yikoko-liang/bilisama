@@ -173,7 +173,7 @@ def test_config_snapshot_covers_all_meta_and_serializes() -> None:
     assert "speech.dashscope.voice" not in paths, "别的 provider 的字段还在铺"
     sample = {row["path"]: row for row in rows}["avatar.renderer"]
     assert sample["label"] == "形象类型"
-    assert sample["value"] == "tofu"
+    assert sample["value"] == "sprite"
     assert sample["audience"] == "streamer"
 
 
