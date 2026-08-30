@@ -133,6 +133,7 @@ export function createPanel({ send }) {
   const giftMediumInput = document.getElementById("gift-medium");
   const giftHighInput = document.getElementById("gift-high");
   const entryGroupBoxes = [...document.querySelectorAll("[data-entry-group]")];
+  const skinCardsEl = document.getElementById("skin-cards");
   const testSetSwitch = document.getElementById("test-set-switch");
   const testDescription = document.getElementById("test-description");
   const testCandidate = document.getElementById("test-candidate");
@@ -1035,6 +1036,47 @@ export function createPanel({ send }) {
     }
   };
 
+  // ---- the appearance half of the 「形象与声音」 card ----
+
+  let appearanceState = null;
+
+  const renderSkins = () => {
+    if (!skinCardsEl || !appearanceState) return;
+    const skins = appearanceState.skins ?? [];
+    const currentId = appearanceState.avatar?.model_id || "tofu";
+    skinCardsEl.textContent = "";
+    if (!skins.length) {
+      skinCardsEl.appendChild(el("p", "empty", "没有读到皮肤包"));
+      return;
+    }
+    for (const skin of skins) {
+      const node = el("button", "skin-card" + (skin.id === currentId ? " current" : ""));
+      node.type = "button";
+      const face = el("span", "assistant-face", skin.id.slice(0, 1).toUpperCase());
+      let hash = 120;
+      for (const ch of skin.id) hash = (hash * 31 + ch.charCodeAt(0)) % 360;
+      face.style.background = `hsl(${hash} 45% 50%)`;
+      node.appendChild(face);
+      node.appendChild(el("span", "assistant-name", skin.id === "tofu" ? "豆腐（内置）" : skin.id));
+      node.appendChild(
+        el("span", "assistant-state", skin.id === currentId ? "当前形象" : skin.source === "user" ? "导入包" : "内置"),
+      );
+      node.addEventListener("click", () => {
+        if (skin.id === currentId) return;
+        // Cheap and reversible — no confirm. Empty means the built-in, which
+        // is how the config spells "tofu" since the v4 axis split.
+        sendConfig("avatar.model_id", skin.id === "tofu" ? "" : skin.id);
+      });
+      skinCardsEl.appendChild(node);
+    }
+  };
+
+  const applySkins = (appearance) => {
+    if (!appearance || typeof appearance !== "object") return;
+    appearanceState = appearance;
+    renderSkins();
+  };
+
   assistantSave?.addEventListener("click", async () => {
     const card = assistants.find((one) => one.id === shownAssistant);
     if (!card || !editorDirty) return;
@@ -1470,6 +1512,7 @@ export function createPanel({ send }) {
         applySpeakToConfig(data.speak);
         applySystemState(data);
         applyAssistants(data.assistants);
+        applySkins(data.appearance);
         onPanelState?.(data);
       }
     },

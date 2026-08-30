@@ -231,7 +231,10 @@ UI_META: dict[str, FieldMeta] = {
         hint="留空 = 内置豆腐；填皮肤包目录名换肤"
         "（用户包放 ~/.local/share/bilisama/skins/）；live2d 时是模型目录名",
         audience=Audience.STREAMER,
-        reload=Reload.RESTART,
+        # LIVE: the consumer is the pet page, re-poked by the PANEL_STATE
+        # broadcast after every panel edit — no reload hook needed or wanted
+        # (an avatar.* hook arm would unlock renderer/expression_source too).
+        reload=Reload.LIVE,
         group="形象",
         order=2,
         wizard_step=3,

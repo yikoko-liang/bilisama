@@ -108,8 +108,19 @@ askToggle(
 );
 askToggle(pauseToggleBtn, () => ({ paused: !controlState.paused }), "语音连接已断开，暂停开关没有生效。");
 
+// Remount only when the avatar actually changed (reconnects and repeated
+// state frames keep it). Shared by hello and panel.state: a skin picked on
+// the panel rides the state broadcast, no reconnect needed.
+function applyAvatar(avatar) {
+  if (JSON.stringify(avatar) !== JSON.stringify(rendererWanted)) {
+    mountRenderer(avatar);
+  }
+}
+
 // panel.state is the one truth for all three; the buttons only ASK.
 panel.setOnPanelState((state) => {
+  const avatar = state.appearance?.avatar;
+  if (avatar) applyAvatar(avatar);
   controlState.paused = Boolean(state.paused);
   controlState.input = Boolean(state.audio?.input_enabled ?? true);
   controlState.output = Boolean(state.audio?.output_enabled ?? true);
@@ -322,11 +333,7 @@ const handlers = {
     }
     panel.setHello(data);
     document.title = `${data.persona?.name ?? "BiliSama"} · BiliSama`;
-    // Remount only when the avatar actually changed (reconnects keep it).
-    const avatar = data.avatar ?? {};
-    if (JSON.stringify(avatar) !== JSON.stringify(rendererWanted)) {
-      mountRenderer(avatar);
-    }
+    applyAvatar(data.avatar ?? {});
   },
   "voice.state": (data) => {
     state.voice = data.state ?? "idle";

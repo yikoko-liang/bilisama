@@ -2539,6 +2539,11 @@ async def run_director(args: argparse.Namespace) -> int:
             async def on_playback_cancelled(_data: dict[str, Any]) -> None:
                 tally.cancelled()
 
+            # <data home>/bilisama/skins — user-imported packs, shadowing the
+            # packaged ones. The static mount and the picker's listing must
+            # agree on this directory, so it is computed once.
+            user_skins_root = default_endpoint_path().parent.parent / "skins"
+
             def panel_state() -> dict[str, Any]:
                 speak = settings.interaction.speak
                 interaction = settings.interaction
@@ -2581,7 +2586,29 @@ async def run_director(args: argparse.Namespace) -> int:
                         "name": settings.persona.display_name or settings.persona.id,
                     },
                     "assistants": assistant_cards(),
+                    # The appearance block re-pokes the pet page: avatar edits
+                    # are Reload.LIVE with the PAGE as their consumer, and the
+                    # PANEL_STATE broadcast at the end of on_panel_set is the
+                    # poke — no run_reload_hook arm exists or should.
+                    "appearance": {
+                        "skins": skin_cards(),
+                        "avatar": {
+                            "renderer": settings.avatar.renderer,
+                            "model_id": settings.avatar.model_id,
+                        },
+                    },
                 }
+
+            def skin_cards() -> list[dict[str, Any]]:
+                from bilisama.ui import skins as skins_mod
+
+                try:
+                    return skins_mod.list_skin_packs(
+                        skins_mod.packaged_skins_root(), user_skins_root
+                    )
+                except OSError as exc:
+                    log.warning("dev_talk.skins_unreadable", error_text=str(exc)[:200])
+                    return []
 
             def assistant_cards() -> list[dict[str, Any]]:
                 from bilisama.ui import assistants as assistants_mod
@@ -2911,9 +2938,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     on_audio=uplink,
                     on_mock_audio=live_mock.push_audio,
                     hello=hello,
-                    # <data home>/bilisama/skins — user-imported packs, shadowing
-                    # the packaged ones. Endpoint file and skins share the roof.
-                    user_skins_root=default_endpoint_path().parent.parent / "skins",
+                    user_skins_root=user_skins_root,
                 )
                 ui_server = UiServer(app, ui_sock)
                 ui_server.start()

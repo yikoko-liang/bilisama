@@ -31,6 +31,7 @@ from bilisama.ui.config_edit import apply_panel_edits
 from bilisama.ui.events import ClientEvent, ServerEvent
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import UiServer, bind_ui_socket, create_ui_app
+from bilisama.ui.skins import list_skin_packs, packaged_skins_root
 
 try:
     from playwright.async_api import Browser, Page, async_playwright
@@ -55,6 +56,7 @@ class Harness:
     room: dict[str, Any] = field(
         default_factory=lambda: {"connected": False, "active_room_id": 0, "error": ""}
     )
+    user_skins_root: Any = None  # a tmp dir with user packs, when a test needs one
     broker: AudioBroker | None = None
     uplink: list[bytes] = field(default_factory=list)
     _sock_port: int = 0
@@ -160,6 +162,18 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
                         "streamer_name": settings.persona.streamer_name,
                         "stream_intro": settings.room.stream_intro,
                     },
+                    # The appearance echo is what lets a picked skin remount
+                    # the pet without a reconnect — same key production sends.
+                    "appearance": {
+                        "skins": list_skin_packs(
+                            packaged_skins_root(),
+                            harness_ref[0].user_skins_root if harness_ref else None,
+                        ),
+                        "avatar": {
+                            "renderer": settings.avatar.renderer,
+                            "model_id": settings.avatar.model_id,
+                        },
+                    },
                 },
             )
 
@@ -180,6 +194,7 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
         hello=harness_ref[0].hello if harness_ref else dict,
         broker=broker,
         on_audio=on_audio,
+        user_skins_root=harness_ref[0].user_skins_root if harness_ref else None,
     )
     server = UiServer(app, sock)
     if harness_ref:
@@ -1599,3 +1614,90 @@ async def test_live_mock_restores_the_topic_when_the_room_id_returns(
     await _wait(page, "document.getElementById('stream-intro').value === ''")
     await page.keyboard.type("5")  # back to the configured room
     await _wait(page, "document.getElementById('stream-intro').value === '今天聊AI'")
+
+
+async def test_the_skin_selector_lists_packs_and_marks_the_current_one(
+    page: Page, harness: Harness
+) -> None:
+    """The 「形象与声音」 card on the assistants page: built-in tofu leads and
+    reads as current on a fresh config; kirby (internal preview, #31) is not
+    advertised."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='assistants']")
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {
+            "panicked": False,
+            "speak": {},
+            "appearance": {
+                "skins": list_skin_packs(packaged_skins_root(), None),
+                "avatar": {"renderer": "sprite", "model_id": ""},
+            },
+        },
+    )
+    await _wait(page, "document.querySelectorAll('#skin-cards .skin-card').length >= 1")
+    cards = await page.evaluate(
+        """() => [...document.querySelectorAll('#skin-cards .skin-card')].map((c) => ({
+             name: c.querySelector('.assistant-name').textContent,
+             current: c.classList.contains('current'),
+           }))"""
+    )
+    assert cards[0]["name"] == "豆腐（内置）" and cards[0]["current"] is True
+    assert all("kirby" not in card["name"] for card in cards)
+
+
+async def test_picking_a_skin_remounts_the_pet_live(
+    page: Page, harness: Harness, tmp_path: Any
+) -> None:
+    """The whole chain: a user pack under the mounted skins root, a click on
+    its card, the config edit through the shared channel, and the pet
+    remounting from the panel.state echo — no reconnect anywhere. The copied
+    kirby assets are 128px frames against tofu's 156, so the canvas width is
+    the proof of the swap."""
+    import shutil
+
+    user_root = tmp_path / "skins"
+    user_root.mkdir()
+    shutil.copytree(packaged_skins_root() / "kirby", user_root / "candy")
+    # The static /skins mount is fixed at server build; rebuild on the same
+    # port with the root in place (the reconnect test's pattern) so the page
+    # can actually fetch skins/candy/pet.json.
+    harness.user_skins_root = user_root
+    await harness.server.stop()
+    _build_server(harness.hub, [harness], port=harness.port)
+    for _ in range(200):
+        if harness.server.started:
+            break
+        await asyncio.sleep(0.01)
+
+    await _wait(page, "document.title.includes('豆腐')", timeout_ms=10000)
+    await _wait(page, "document.querySelector('#pet-mount canvas')?.width === 156")
+    await page.click("#corner")
+    await page.click("[data-tab='assistants']")
+    # Seed the card list the way production does; the CLICK then exercises the
+    # real sendConfig -> apply_panel_edits -> panel.state echo round trip.
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {
+            "panicked": False,
+            "speak": {},
+            "appearance": {
+                "skins": list_skin_packs(packaged_skins_root(), user_root),
+                "avatar": {"renderer": "sprite", "model_id": ""},
+            },
+        },
+    )
+    await _wait(page, "document.querySelectorAll('#skin-cards .skin-card').length >= 2")
+    await page.evaluate("""() => [...document.querySelectorAll('#skin-cards .skin-card')]
+              .find((c) => c.querySelector('.assistant-name').textContent === 'candy')
+              .click()""")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("config") or {}).get("path") == "avatar.model_id"
+        and (d.get("config") or {}).get("value") == "candy",
+    )
+    assert harness.settings.avatar.model_id == "candy"
+    # The echo's appearance.avatar reaches main.js and remounts: kirby frames.
+    await _wait(page, "document.querySelector('#pet-mount canvas')?.width === 128", timeout_ms=8000)

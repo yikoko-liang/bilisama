@@ -201,6 +201,9 @@ def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
         # LIVE since the yiko-merge audit: run_reload_hook connects/disconnects
         # in process, and the panel edit is session-only (never persisted).
         "room.room_id",
+        # LIVE since the skin picker: the consumer is the pet page, re-poked
+        # by the PANEL_STATE broadcast after every panel edit.
+        "avatar.model_id",
         "audio.input_enabled",
         "audio.output_enabled",
         "audio.noise_sensitivity",
