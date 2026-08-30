@@ -238,31 +238,37 @@ BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json scripts/smoke_provider_b
 ```
 
 它先检查 .venv、`path.sh` 凭据和桌面壳装没装，缺什么用中文明说；然后按名字探测
-MacBook 内置麦克风（蓝牙耳机的麦不会被误选成输入），最后以 DashScope 全装配档启动。
-**幂等**：后端已经活着时只补拉桌面壳，不会起第二个语音会话——判断依据是
-endpoint.json 里的 pid 真活着、而且确实是一个 bilisama dev-talk 进程。
+MacBook 内置麦克风（蓝牙耳机的麦不会被误选成输入），最后以全装配档（`--director`）
+启动。**幂等**：后端已经活着时只补拉桌面壳，不会起第二个语音会话——判断依据是
+endpoint.json 里的 pid 真活着、而且确实是一个 bilisama dev-talk 进程；这时候再传
+参数它会明说「这次不生效，想换配置先退出正在跑的」。
 
-环境变量按需覆盖：
+脚本自己只认四个选项（同名 `BILISAMA_*` 环境变量也行，选项优先）：
+`--provider`（默认 dashscope）、`--model`（默认 qwen-audio-3.0-realtime-flash，只在
+dashscope 路生效——豆包路模型和音色从 `[speech.volcano]` 读）、`--room`（不给是
+沙箱模式）、`--input-device`（不给自动找内置麦）。**其余参数原样透传给 dev-talk**，
+所以临时旗子直接挂在后面就行：
 
 ```bash
-BILISAMA_ROOM_ID=<房间号> ./start_bilisama.sh
+./start_bilisama.sh --room 21452505 --skin kirby
 ```
 
 ```bash
-BILISAMA_INPUT_DEVICE=<设备编号> ./start_bilisama.sh
+BILISAMA_PROVIDER=volcano ./start_bilisama.sh --persona hanako
 ```
 
 ```bash
-BILISAMA_PROVIDER=volcano ./start_bilisama.sh
+./start_bilisama.sh --open --voice longanlufeng
 ```
 
-豆包路径不传 `--model`，模型和音色从 `[speech.volcano]` 读。只想检查环境不连模型：
+只想检查环境不连模型（会把解析出的后端/模型/设备/房间和透传参数都打出来）：
 
 ```bash
 ./start_bilisama.sh --check
 ```
 
-.command 版失败时窗口停住，看完报错按回车再关。
+`--help` 有中文说明；喂 `--wav` 的场次找不到麦克风不会拦启动。
+.command 版失败时窗口停住，看完报错按回车再关；终端里给它传参数也会原样转发。
 
 ## dev-talk：真人语音测试（两档）
 

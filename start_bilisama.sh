@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Launch the verified DashScope director path from Finder or a terminal.
+# The streamer's entrance: checks the environment in Chinese, fills sensible
+# defaults, then hands over to `bilisama dev-talk --director`.
+#
+# The script OWNS four knobs (--provider/--model/--room/--input-device, each
+# flag > BILISAMA_* env > default) because it has something to add to them:
+# credential checks, mic auto-detection, room validation. Every other flag
+# passes through to dev-talk untouched, so this file never becomes another
+# place that has to learn a new dev-talk option by name.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -9,15 +16,46 @@ PET_DIR="$REPO_ROOT/desktop/preview"
 ELECTRON="$PET_DIR/node_modules/.bin/electron"
 ELECTRON_RUNTIME="$PET_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 ENDPOINT_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bilisama/ui/endpoint.json"
-MODEL="${BILISAMA_REALTIME_MODEL:-qwen-audio-3.0-realtime-flash}"
-# dashscope 是走通验收的默认路；接豆包的机器用 BILISAMA_PROVIDER=volcano 覆盖
-# （模型与音色那时从 bilisama.toml 的 [speech.volcano] 读，--model 不用传）。
+
+# dashscope 是走通验收的默认路；接豆包的机器用 --provider volcano 或
+# BILISAMA_PROVIDER=volcano（模型与音色那时从 bilisama.toml 的 [speech.volcano]
+# 读，--model 不用传）。
 PROVIDER="${BILISAMA_PROVIDER:-dashscope}"
+MODEL="${BILISAMA_REALTIME_MODEL:-qwen-audio-3.0-realtime-flash}"
 ROOM_ID="${BILISAMA_ROOM_ID:-}"
+INPUT_DEVICE="${BILISAMA_INPUT_DEVICE:-}"
 
 die() {
   printf '\033[31m启动失败：%s\033[0m\n' "$*" >&2
   exit 1
+}
+
+usage() {
+  cat <<'EOF'
+用法：./start_bilisama.sh [选项] [其余 dev-talk 参数]
+
+自己认的选项（也可用同名 BILISAMA_* 环境变量，选项优先）：
+  --provider <名字>       语音后端（默认 dashscope；BILISAMA_PROVIDER）
+  --model <模型名>        托管服务的模型（默认 qwen-audio-3.0-realtime-flash，
+                          只在 dashscope 路生效；BILISAMA_REALTIME_MODEL）
+  --room <房间号>         连真实直播间，正整数（默认沙箱模式；BILISAMA_ROOM_ID）
+  --input-device <编号>   麦克风设备（默认自动找内置麦；BILISAMA_INPUT_DEVICE）
+  --check                 只做环境检查，不启动
+  -h, --help              看这份说明
+
+其余参数原样交给 dev-talk，常用的比如：
+  --skin kirby            本次换皮肤包（不改配置文件）
+  --persona hanako        临时换人设
+  --voice longanlufeng    临时换音色试听
+  --open                  界面起来后自动开浏览器
+  --no-pet                只要浏览器界面，不要悬浮窗
+完整清单见 .venv/bin/bilisama dev-talk --help。
+
+例子：
+  ./start_bilisama.sh
+  ./start_bilisama.sh --room 21452505 --skin kirby
+  BILISAMA_PROVIDER=volcano ./start_bilisama.sh --persona hanako
+EOF
 }
 
 running_backend_pid() {
@@ -74,6 +112,40 @@ raise SystemExit(1)
 PY
 }
 
+# --- 参数解析：四个自有选项收走，其余原样透传 --------------------------------
+
+need_value() {
+  # $1 = flag name, $2 = remaining arg count after the flag
+  [ "$2" -ge 1 ] || die "$1 后面要跟一个值。"
+}
+
+CHECK_ONLY=0
+EXTRA_ARGS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --check) CHECK_ONLY=1 ;;
+    --provider)   shift; need_value --provider "$#";     PROVIDER="$1" ;;
+    --provider=*) PROVIDER="${1#*=}" ;;
+    --model)      shift; need_value --model "$#";        MODEL="$1" ;;
+    --model=*)    MODEL="${1#*=}" ;;
+    --room)       shift; need_value --room "$#";         ROOM_ID="$1" ;;
+    --room=*)     ROOM_ID="${1#*=}" ;;
+    --input-device)   shift; need_value --input-device "$#"; INPUT_DEVICE="$1" ;;
+    --input-device=*) INPUT_DEVICE="${1#*=}" ;;
+    *) EXTRA_ARGS+=("$1") ;;
+  esac
+  shift
+done
+
+has_extra() {
+  local wanted="$1" arg
+  for arg in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
+    [ "$arg" = "$wanted" ] && return 0
+  done
+  return 1
+}
+
 cd "$REPO_ROOT"
 
 [ -x "$PYTHON" ] && [ -x "$BILISAMA" ] || die "Python 环境没装好。先在仓库运行 uv sync。"
@@ -86,30 +158,50 @@ if [ "$PROVIDER" = "dashscope" ]; then
   [ -n "${ali_api_key:-}" ] || die "path.sh 里缺少 ali_api_key。"
   [ -n "${dashscope_url:-}" ] || die "path.sh 里缺少 dashscope_url。"
 fi
+# 其它后端（volcano/s2s）的凭据与可达性由 dev-talk 启动时自检，缺什么它会用
+# 中文说清楚——这里不重复造一套检查，免得把钥匙串里配好引用的人误拦在门外。
 
-INPUT_DEVICE="${BILISAMA_INPUT_DEVICE:-}"
 if [ -z "$INPUT_DEVICE" ]; then
-  INPUT_DEVICE="$(find_builtin_input)" || die \
-    "找不到 MacBook 内置麦克风。运行 .venv/bin/python -m sounddevice 查看编号，再设置 BILISAMA_INPUT_DEVICE。"
+  if ! INPUT_DEVICE="$(find_builtin_input)"; then
+    if has_extra --wav || printf '%s\n' ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} | grep -q '^--wav='; then
+      INPUT_DEVICE=""  # 喂 WAV 的场次用不上麦克风，别为此拦下启动
+    else
+      die "找不到 MacBook 内置麦克风。运行 .venv/bin/python -m sounddevice 查看编号，再用 --input-device 或 BILISAMA_INPUT_DEVICE 指定。"
+    fi
+  fi
 fi
 
 if [ -n "$ROOM_ID" ] && [[ ! "$ROOM_ID" =~ ^[1-9][0-9]*$ ]]; then
-  die "BILISAMA_ROOM_ID 必须是正整数房间号，当前是：$ROOM_ID"
+  die "房间号必须是正整数，当前是：$ROOM_ID"
 fi
 
-if [ "${1:-}" = "--check" ]; then
-  if [ -n "$ROOM_ID" ]; then
-    printf '启动检查通过：模型 %s，输入设备 %s，真实房间 %s。\n' \
-      "$MODEL" "$INPUT_DEVICE" "$ROOM_ID"
-  else
-    printf '启动检查通过：模型 %s，输入设备 %s，沙箱模式。\n' "$MODEL" "$INPUT_DEVICE"
+describe_plan() {
+  local room_text="沙箱模式"
+  [ -n "$ROOM_ID" ] && room_text="真实房间 $ROOM_ID"
+  local model_text="$MODEL"
+  [ "$PROVIDER" != "dashscope" ] && model_text="（从 [speech.$PROVIDER] 读）"
+  local device_text="$INPUT_DEVICE"
+  [ -z "$device_text" ] && device_text="无（WAV 模式）"
+  printf '后端 %s，模型 %s，输入设备 %s，%s' \
+    "$PROVIDER" "$model_text" "$device_text" "$room_text"
+  if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
+    printf '，透传参数：%s' "${EXTRA_ARGS[*]}"
   fi
+  printf '\n'
+}
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  printf '启动检查通过：'
+  describe_plan
   exit 0
 fi
-[ "$#" -eq 0 ] || die "未知参数：$*"
 
 if backend_pid="$(running_backend_pid)"; then
   printf '检测到正在运行的 BiliSama（PID %s）。\n' "$backend_pid"
+  if [ "${#EXTRA_ARGS[@]}" -gt 0 ] || [ -n "$ROOM_ID" ]; then
+    printf '注意：这次给的参数对已经在跑的后端不生效。想换配置先退出它\n'
+    printf '（右键桌宠形象选退出，或 kill %s），再重新启动。\n' "$backend_pid"
+  fi
   start_pet_for_running_backend
   exit 0
 fi
@@ -118,16 +210,12 @@ launch_args=(
   dev-talk
   --director
   --provider "$PROVIDER"
-  --input-device "$INPUT_DEVICE"
 )
-if [ "$PROVIDER" = "dashscope" ]; then
-  launch_args+=(--model "$MODEL")
-fi
-if [ -n "$ROOM_ID" ]; then
-  launch_args+=(--room "$ROOM_ID")
-  printf '正在启动 BiliSama：模型 %s，输入设备 %s，真实房间 %s。\n' \
-    "$MODEL" "$INPUT_DEVICE" "$ROOM_ID"
-else
-  printf '正在启动 BiliSama：模型 %s，输入设备 %s，沙箱模式。\n' "$MODEL" "$INPUT_DEVICE"
-fi
+[ -n "$INPUT_DEVICE" ] && launch_args+=(--input-device "$INPUT_DEVICE")
+[ "$PROVIDER" = "dashscope" ] && launch_args+=(--model "$MODEL")
+[ -n "$ROOM_ID" ] && launch_args+=(--room "$ROOM_ID")
+launch_args+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
+
+printf '正在启动 BiliSama：'
+describe_plan
 exec "$BILISAMA" "${launch_args[@]}"
