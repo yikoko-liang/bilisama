@@ -1603,6 +1603,7 @@ async def run_director(args: argparse.Namespace) -> int:
         default_endpoint_path,
         write_endpoint_file,
     )
+    from bilisama.ui.voices import voice_options
 
     config_path: Path = args.config or DEFAULT_CONFIG
     if not config_path.is_file():
@@ -2586,6 +2587,10 @@ async def run_director(args: argparse.Namespace) -> int:
                         "name": settings.persona.display_name or settings.persona.id,
                     },
                     "assistants": assistant_cards(),
+                    # Like the skins: RECONNECT fields with a real hook
+                    # (reconfigure_session), page re-poked by the PANEL_STATE
+                    # broadcast after every edit.
+                    "voices": voice_options(settings),
                     # The appearance block re-pokes the pet page: avatar edits
                     # are Reload.LIVE with the PAGE as their consumer, and the
                     # PANEL_STATE broadcast at the end of on_panel_set is the

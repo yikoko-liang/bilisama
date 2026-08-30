@@ -99,6 +99,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "hosted.session_replayed",
         "hosted.suspended",
         "hosted.resumed",
+        "hosted.reconfigure_deferred",
         "intents.built",
         "intents.no_speaking_path",
         "link.fatal",

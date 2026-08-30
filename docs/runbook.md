@@ -100,7 +100,7 @@ export volcano_api_key=...
 
 | 组合 | 实际发生什么 |
 |---|---|
-| `1.2.1.1` ＋ 官方音色 | 正常。官方音色是 `zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts` |
+| `1.2.1.1` ＋ 官方音色 | 正常。官方音色是 `zh_female_vv_jupiter_bigtts`、`zh_female_xiaohe_jupiter_bigtts`、`zh_male_yunzhou_jupiter_bigtts`、`zh_male_xiaotian_jupiter_bigtts`（清单以 `config/voices.py` 为源，有单测对账） |
 | `1.2.1.1` ＋ **留空** | **她变成豆包**。服务端默认音色自带它自己的角色，压过 `dialog.bot_name`，也压过 557 字的人设——问她是谁答「豆包」。2026-08-28 真端点复现，换成官方音色当场恢复。这一格原来写的是「正常」，是错的：验过的是官方音色那一格，留空从没人测过 |
 | `1.2.1.1` ＋ 克隆音色 | **她变成别人**。克隆音色自带服务端角色，会盖过人设——实测她自称「夏栀」，还写了人设里明令禁止的动作描写 |
 | `2.2.0.0` ＋ 克隆音色（`saturn_` / `ICL_` / 自己的 `S_`） | 正常 |
@@ -297,7 +297,7 @@ source path.sh && export OPENAI_API_KEY="$api_key"
 **换音色（DashScope）**：不指定的话服务端给 `longanqian`，实测基频 343Hz——比常见成年
 女声（180~260Hz）高一截，听着发尖。配置里 `[speech.dashscope] voice` 定死，命令行
 `--voice` 临时覆盖。名字写错服务端会把可用清单直接报回来，不用查文档。同一句话在
-15 个音色下的实测基频（数字越小越低沉）：
+15 个音色下的实测基频（数字越小越低沉；这份清单以 `config/voices.py` 为源，有单测对账，面板助手页的音色下拉也读它）：
 
 | 音色 | 基频 | 音色 | 基频 |
 |---|---|---|---|

@@ -537,3 +537,69 @@ async def test_a_reply_scoped_base_replaces_the_session_persona_for_that_turn() 
                 assert creates[1]["instructions"].startswith("公共上下文＋主播语音规则")
             finally:
                 await adapter.aclose()
+
+
+async def test_reconfigure_session_rides_the_new_voice_on_the_next_bootstrap() -> None:
+    """The panel's voice change, end to end at this layer: reconfigure rotates
+    the socket, and the replayed bootstrap carries the new name — this method
+    shipped with zero tests, which is how a silent no-op would have looked
+    exactly like success."""
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, script=Script()) as server:
+        hosted = HostedLink(
+            server.url,
+            ProviderName.DASHSCOPE,
+            turn=HostedTurnConfig(),
+            voice="longanlingxin",
+            session_cap_min=0,
+        )
+        await hosted.connect()
+        try:
+            for _ in range(50):
+                if server.recorded.count("session.update"):
+                    break
+                await asyncio.sleep(0.01)
+            await hosted.reconfigure_session(voice="longanlufeng")
+            for _ in range(100):
+                if server.recorded.count("session.update") >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            frames = [e for e in server.recorded.events if e.get("type") == "session.update"]
+            assert len(frames) >= 2, "the rotate never produced a second bootstrap"
+            assert frames[-1]["session"]["voice"] == "longanlufeng"
+        finally:
+            await hosted.aclose()
+
+
+async def test_reconfigure_while_suspended_stores_the_voice_without_reconnecting() -> None:
+    """The pause gate closed the socket on purpose; a settings change must not
+    wake it through rotate()'s reconnect ladder. The value waits, and resume's
+    own bootstrap carries it."""
+    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, script=Script()) as server:
+        hosted = HostedLink(
+            server.url,
+            ProviderName.DASHSCOPE,
+            turn=HostedTurnConfig(),
+            voice="longanlingxin",
+            session_cap_min=0,
+        )
+        await hosted.connect()
+        try:
+            for _ in range(50):
+                if server.recorded.count("session.update"):
+                    break
+                await asyncio.sleep(0.01)
+            await hosted.suspend()
+            before = server.recorded.count("session.update")
+            await hosted.reconfigure_session(voice="longanlufeng")
+            await asyncio.sleep(0.1)
+            assert server.recorded.count("session.update") == before, "suspended 中不该重连"
+            assert hosted._voice == "longanlufeng", "值要先落下，resume 时生效"
+            await hosted.resume()
+            for _ in range(100):
+                if server.recorded.count("session.update") > before:
+                    break
+                await asyncio.sleep(0.01)
+            frames = [e for e in server.recorded.events if e.get("type") == "session.update"]
+            assert frames[-1]["session"]["voice"] == "longanlufeng"
+        finally:
+            await hosted.aclose()

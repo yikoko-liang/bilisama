@@ -17,6 +17,7 @@ from bilisama.config.schema import CURRENT_VERSION
 
 if TYPE_CHECKING:
     from bilisama.config.schema import Settings
+from bilisama.config.voices import VOLCANO_OFFICIAL_SPEAKERS
 
 
 def _customised(section: BaseModel) -> tuple[str, ...]:
@@ -92,7 +93,7 @@ def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
                     "问她是谁她答「豆包」，而且不会报任何错。"
                 ),
                 fix=(
-                    "O2.0（1.2.1.1）填官方音色，比如 zh_female_vv_jupiter_bigtts；"
+                    f"O2.0（1.2.1.1）填官方音色，比如 {VOLCANO_OFFICIAL_SPEAKERS[0]}；"
                     "SC2.0（2.2.0.0）填 saturn_ 开头的克隆音色。"
                 ),
             )
@@ -118,7 +119,10 @@ def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
                     f"O2.0（1.2.1.1）配了克隆音色「{speaker}」。克隆音色自带服务端角色，"
                     "会盖过人设——她会用别人的名字和口吻说话，而且不报错。"
                 ),
-                fix="换成官方音色（zh_female_vv_jupiter_bigtts 这类），或把模型版本改成 2.2.0.0。",
+                fix=(
+                    f"换成官方音色（{VOLCANO_OFFICIAL_SPEAKERS[0]} 这类），"
+                    "或把模型版本改成 2.2.0.0。"
+                ),
             )
         )
     return problems

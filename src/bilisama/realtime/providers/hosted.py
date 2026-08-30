@@ -108,6 +108,9 @@ class HostedLink:
         self._rotation: asyncio.Task[None] | None = None
         # Said once per link, not once per protected reply: see request_reply.
         self._warned_unprotected = False
+        # See reconfigure_session: while the pause gate holds the socket shut,
+        # a settings change must not reopen it through rotate().
+        self._suspended = False
 
     async def connect(self) -> None:
         """Open the socket, bootstrap the session, restore what we knew.
@@ -217,6 +220,7 @@ class HostedLink:
         if self._rotation is not None:
             self._rotation.cancel()
             self._rotation = None
+        self._suspended = True
         await self._client.aclose()
         log.info("hosted.suspended", provider=self._provider.value)
 
@@ -224,6 +228,7 @@ class HostedLink:
         """Reopen and replay. connect() already re-runs the bootstrap and the
         stored context, and re-arms rotation — a resumed session behaves like
         a reconnected one because it IS one."""
+        self._suspended = False
         await self.connect()
         log.info("hosted.resumed", provider=self._provider.value)
 
@@ -241,6 +246,12 @@ class HostedLink:
             self._voice = voice
         if turn is not None:
             self._turn = turn
+        if self._suspended:
+            # The pause gate closed this socket on purpose; rotate() would
+            # walk the reconnect ladder and wake it. The fields are stored,
+            # and resume()'s connect() rebuilds the bootstrap from them.
+            log.info("hosted.reconfigure_deferred", provider=self._provider.value)
+            return
         await self._client.rotate("settings_changed")
 
     async def set_context(self, instructions: str) -> None:

@@ -1701,3 +1701,38 @@ async def test_picking_a_skin_remounts_the_pet_live(
     assert harness.settings.avatar.model_id == "candy"
     # The echo's appearance.avatar reaches main.js and remounts: kirby frames.
     await _wait(page, "document.querySelector('#pet-mount canvas')?.width === 128", timeout_ms=8000)
+
+
+async def test_picking_a_voice_sends_the_config_edit(page: Page, harness: Harness) -> None:
+    """The voice half of the card: a hand-fed dashscope snapshot renders a
+    select, and choosing sends the edit through the shared config channel.
+    Frame only — the harness gate is LIVE-only, and the RECONNECT hook is
+    covered at the link layer (test_hosted_link's reconfigure tests)."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='assistants']")
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {
+            "panicked": False,
+            "speak": {},
+            "voices": {
+                "mode": "select",
+                "path": "speech.dashscope.voice",
+                "current": "longanlingxin",
+                "options": [
+                    {"id": "longanlingxin", "hint": "242Hz"},
+                    {"id": "longanlufeng", "hint": "150Hz"},
+                ],
+                "hint": "数字是实测基频",
+            },
+        },
+    )
+    await _wait(page, "document.querySelector('#voice-card select') !== null")
+    await page.select_option("#voice-card select", "longanlufeng")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("config") or {}).get("path") == "speech.dashscope.voice"
+        and (d.get("config") or {}).get("value") == "longanlufeng",
+    )

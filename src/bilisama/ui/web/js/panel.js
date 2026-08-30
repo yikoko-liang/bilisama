@@ -134,6 +134,7 @@ export function createPanel({ send }) {
   const giftHighInput = document.getElementById("gift-high");
   const entryGroupBoxes = [...document.querySelectorAll("[data-entry-group]")];
   const skinCardsEl = document.getElementById("skin-cards");
+  const voiceCardEl = document.getElementById("voice-card");
   const testSetSwitch = document.getElementById("test-set-switch");
   const testDescription = document.getElementById("test-description");
   const testCandidate = document.getElementById("test-candidate");
@@ -1077,6 +1078,50 @@ export function createPanel({ send }) {
     renderSkins();
   };
 
+  let voicesState = null;
+
+  const renderVoices = () => {
+    if (!voiceCardEl || !voicesState) return;
+    // A rebroadcast lands after every edit; redrawing under the streamer's
+    // cursor would close the dropdown she is choosing from.
+    if (voiceCardEl.contains(document.activeElement)) return;
+    const v = voicesState;
+    voiceCardEl.textContent = "";
+    voiceCardEl.appendChild(el("h3", "voice-title", "音色"));
+    if (v.mode === "select") {
+      const sel = el("select", "voice-select");
+      for (const opt of v.options ?? []) {
+        const node = el("option", "", opt.hint ? `${opt.id}（${opt.hint}）` : opt.id);
+        node.value = opt.id;
+        sel.appendChild(node);
+      }
+      if ((v.options ?? []).every((opt) => opt.id !== v.current)) {
+        // The configured value may be off-list (hand-edited, or empty for
+        // the server default); show it rather than silently pretend.
+        const node = el("option", "", v.current ? `${v.current}（配置里的值）` : "（服务端默认）");
+        node.value = v.current ?? "";
+        sel.appendChild(node);
+      }
+      sel.value = v.current ?? "";
+      sel.addEventListener("change", () => sendConfig(v.path, sel.value));
+      voiceCardEl.appendChild(sel);
+    } else if (v.mode === "text") {
+      const input = el("input", "voice-input");
+      input.type = "text";
+      input.value = v.current ?? "";
+      input.placeholder = "saturn_…";
+      input.addEventListener("change", () => sendConfig(v.path, input.value.trim()));
+      voiceCardEl.appendChild(input);
+    }
+    if (v.hint) voiceCardEl.appendChild(el("p", "hint", v.hint));
+  };
+
+  const applyVoices = (voices) => {
+    if (!voices || typeof voices !== "object") return;
+    voicesState = voices;
+    renderVoices();
+  };
+
   assistantSave?.addEventListener("click", async () => {
     const card = assistants.find((one) => one.id === shownAssistant);
     if (!card || !editorDirty) return;
@@ -1513,6 +1558,7 @@ export function createPanel({ send }) {
         applySystemState(data);
         applyAssistants(data.assistants);
         applySkins(data.appearance);
+        applyVoices(data.voices);
         onPanelState?.(data);
       }
     },
