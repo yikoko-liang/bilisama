@@ -1463,3 +1463,57 @@ async def test_a_rename_queued_behind_a_running_swap_still_swaps() -> None:
             assert body.get("dialog", {}).get("bot_name") == "雪豆"
         finally:
             await volcano.aclose()
+
+
+async def test_set_speaker_swaps_the_session_with_the_new_voice() -> None:
+    """The panel's voice change on this provider: tts.speaker rides the
+    StartSession body on BOTH generations, so the carrier is a session swap —
+    same socket, same dialog_id, next sentence in the new voice."""
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server)
+        try:
+            await volcano.set_context("你是豆腐。")
+            starts_before = server.recorded.count(wire.ClientEvent.START_SESSION)
+            await volcano.set_speaker("zh_female_vv_jupiter_bigtts")
+            await server.wait_for(wire.ClientEvent.FINISH_SESSION)
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=starts_before + 1)
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body.get("tts", {}).get("speaker") == "zh_female_vv_jupiter_bigtts"
+            # Unchanged persona text must not dedupe the swap away — the
+            # stale marker exists for exactly this (the rename learned it).
+            await volcano.set_speaker("zh_male_yunzhou_jupiter_bigtts")
+            await server.wait_for(wire.ClientEvent.START_SESSION, count=starts_before + 2)
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body.get("tts", {}).get("speaker") == "zh_male_yunzhou_jupiter_bigtts"
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_wrong_generation_speaker_is_refused_without_a_swap() -> None:
+    """The pairing is silent on the wire (she becomes someone else, or goes
+    mute), so the setter refuses it loudly instead — and must not have half
+    torn the session down first."""
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server)
+        try:
+            finishes_before = server.recorded.count(wire.ClientEvent.FINISH_SESSION)
+            with pytest.raises(ValueError, match="克隆音色"):
+                await volcano.set_speaker("saturn_someone_else")
+            assert volcano._speaker == "zh_female_test", "拒绝后旧值必须还在"
+            await asyncio.sleep(0.05)
+            assert server.recorded.count(wire.ClientEvent.FINISH_SESSION) == finishes_before
+        finally:
+            await volcano.aclose()
+
+
+async def test_a_speaker_set_before_connect_rides_the_first_start_session() -> None:
+    async with MockVolcanoServer() as server:
+        volcano = VolcanoLink(server.url, app_id="app", access_key="key", config=_cfg())
+        await volcano.set_speaker("zh_female_vv_jupiter_bigtts")
+        await volcano.connect()
+        try:
+            await server.wait_ready()
+            body = server.recorded.body_for(wire.ClientEvent.START_SESSION)
+            assert body.get("tts", {}).get("speaker") == "zh_female_vv_jupiter_bigtts"
+        finally:
+            await volcano.aclose()

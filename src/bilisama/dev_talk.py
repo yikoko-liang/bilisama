@@ -2199,6 +2199,13 @@ async def run_director(args: argparse.Namespace) -> int:
                     if broker is not None:
                         broker.flush()
             return True
+        if path == "speech.volcano.speaker" and isinstance(inner, VolcanoLink):
+            # EXACT match on purpose — a speech.volcano. prefix would unlock
+            # endpoint/model to raw frames the way the dashscope arm below
+            # unlocks its siblings; the speaker is the only volcano field
+            # with a live consumer. Generation changes stay refused.
+            await inner.set_speaker(settings.speech.volcano.speaker)
+            return True
         if path.startswith("speech.dashscope.") and hosted_link is not None:
             await hosted_link.reconfigure_session(
                 voice=settings.speech.dashscope.voice,

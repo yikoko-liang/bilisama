@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 import websockets
 
 from bilisama.clock import Clock, SystemClock
+from bilisama.config.validate import volcano_voice_problems
 from bilisama.obs.logging import get_logger
 from bilisama.realtime import link
 from bilisama.realtime.client import SessionRefused
@@ -574,6 +575,34 @@ class VolcanoLink:
             async with self._swap_lock:
                 self._swapped_context = None
             await self._swap_session()
+
+    async def set_speaker(self, speaker: str) -> None:
+        """Change her voice without a reconnect.
+
+        tts.speaker rides the StartSession body on BOTH generations
+        (_session_body), so unlike the rename this swaps regardless of
+        model: same socket, same dialog_id, the sentence in the air
+        finishes in the old voice and the next one starts in the new.
+
+        The pairing self-check mirrors the factory's: a wrong pairing is
+        silent on the wire (she becomes someone else, or goes mute), so a
+        direct caller gets a refusal here. The panel path never reaches it
+        — apply_runtime_edit runs check() before any hook and rolls a
+        fatal pairing back first.
+        """
+        if speaker == self._speaker:
+            return
+        problems = volcano_voice_problems(self._model, speaker)
+        if problems:
+            raise ValueError(problems[0].message)
+        self._speaker = speaker
+        if not self._started:
+            return  # the next StartSession carries it
+        # Same lock discipline as the rename above: the marker must not be
+        # overwritten by an in-flight swap's completion write.
+        async with self._swap_lock:
+            self._swapped_context = None
+        await self._swap_session()
 
     async def aclose(self) -> None:
         """Say goodbye, then stop reading — in that order.
