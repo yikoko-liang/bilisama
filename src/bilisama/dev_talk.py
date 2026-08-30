@@ -156,6 +156,56 @@ def _as_live_mock_event(event: LiveEvent, room_id: int) -> LiveEvent:
     )
 
 
+class _ParkableRoom(Protocol):
+    """The slice of SwitchableRoomSource the mock's room-parking touches."""
+
+    def status(self) -> dict[str, Any]: ...
+
+    async def connect(self, room_id: int) -> dict[str, Any]: ...
+
+    async def disconnect(self) -> None: ...
+
+
+async def _park_live_room(
+    room_source: _ParkableRoom, parked: int, say: Callable[[str], None]
+) -> int:
+    """Park a connected real room for a mock run; returns the parked id.
+
+    Records the REQUESTED id (active_room_id), not status["room_id"]: that one
+    is the late-resolving real id and reads 0 until the handshake lands — a
+    park recorded as 0 can never be restored. Already-parked or not-connected
+    states pass through unchanged.
+    """
+    status = room_source.status()
+    if not bool(status.get("connected")) or parked:
+        return parked
+    parked = int(status.get("active_room_id") or 0)
+    await room_source.disconnect()
+    say("[直播Mock] 已暂挂真实直播间连接，Mock 结束后自动恢复")
+    return parked
+
+
+async def _restore_live_room(
+    room_source: _ParkableRoom, parked: int, say: Callable[[str], None]
+) -> int:
+    """Bring a parked room back; returns 0 (the park is consumed either way).
+
+    A room the operator connected mid-mock wins over the parked one, and a
+    failed reconnect reports itself instead of raising into the caller.
+    """
+    if parked <= 0:
+        return 0
+    if bool(room_source.status().get("connected")):
+        say(f"[直播Mock] 直播间已另行连接，不再恢复原房间 {parked}")
+        return 0
+    try:
+        await room_source.connect(parked)
+        say(f"[直播Mock] 已恢复真实直播间 {parked}")
+    except ConnectionError as exc:
+        say(f"[直播Mock] 直播间 {parked} 没能恢复：{str(exc)[:120]}")
+    return 0
+
+
 def _watch(task: asyncio.Task[None]) -> asyncio.Task[None]:
     """Make a background task's death audible.
 
@@ -2512,30 +2562,15 @@ async def run_director(args: argparse.Namespace) -> int:
 
             async def _park_room_for_mock() -> None:
                 nonlocal live_mock_parked_room
-                status = room_source.status()
-                if bool(status.get("connected")) and not live_mock_parked_room:
-                    # The REQUESTED id, not status["room_id"]: that one is the
-                    # late-resolving real id and reads 0 until the handshake
-                    # lands — a park recorded as 0 can never be restored.
-                    live_mock_parked_room = int(status.get("active_room_id") or 0)
-                    await room_source.disconnect()
-                    print("[直播Mock] 已暂挂真实直播间连接，Mock 结束后自动恢复")
+                live_mock_parked_room = await _park_live_room(
+                    room_source, live_mock_parked_room, print
+                )
 
             async def _restore_room_after_mock() -> None:
                 nonlocal live_mock_parked_room
-                room_id, live_mock_parked_room = live_mock_parked_room, 0
-                if room_id <= 0:
-                    return
-                if bool(room_source.status().get("connected")):
-                    # The operator connected some room mid-mock; their newer
-                    # choice wins over the parked one.
-                    print(f"[直播Mock] 直播间已另行连接，不再恢复原房间 {room_id}")
-                    return
-                try:
-                    await room_source.connect(room_id)
-                    print(f"[直播Mock] 已恢复真实直播间 {room_id}")
-                except ConnectionError as exc:
-                    print(f"[直播Mock] 直播间 {room_id} 没能恢复：{str(exc)[:120]}")
+                live_mock_parked_room = await _restore_live_room(
+                    room_source, live_mock_parked_room, print
+                )
 
             async def on_live_mock_check(data: dict[str, Any]) -> None:
                 # A re-check after an errored run is an exit from that run:

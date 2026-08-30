@@ -52,6 +52,9 @@ class Harness:
     avatar: dict[str, str]
     server: UiServer
     settings: Settings = field(default_factory=Settings)
+    room: dict[str, Any] = field(
+        default_factory=lambda: {"connected": False, "active_room_id": 0, "error": ""}
+    )
     broker: AudioBroker | None = None
     uplink: list[bytes] = field(default_factory=list)
     _sock_port: int = 0
@@ -117,6 +120,20 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
 
         async def panel_set(data: dict[str, Any]) -> None:
             await record_panel_set(data)
+            room_patch = data.get("room")
+            if harness_ref and isinstance(room_patch, dict):
+                action = room_patch.get("action")
+                room = harness_ref[0].room
+                if action == "connect":
+                    room.update(
+                        connected=True,
+                        active_room_id=int(room_patch.get("room_id") or 0),
+                        error="",
+                    )
+                elif action == "disconnect":
+                    # A CLEAN disconnect: connected false, error empty — the
+                    # exact pair that used to strand roomPending forever.
+                    room.update(connected=False, active_room_id=0, error="")
             apply_panel_edits(
                 settings,
                 data,
@@ -137,6 +154,11 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
                         "input_enabled": settings.audio.input_enabled,
                         "output_enabled": settings.audio.output_enabled,
                         "noise_sensitivity": settings.audio.noise_sensitivity,
+                    },
+                    "room": {
+                        **(harness_ref[0].room if harness_ref else {}),
+                        "streamer_name": settings.persona.streamer_name,
+                        "stream_intro": settings.room.stream_intro,
                     },
                 },
             )
@@ -1392,3 +1414,188 @@ async def test_no_voice_switches_render_pinned_off(page: Page, harness: Harness)
         }""")
     assert pinned["follow"] == {"disabled": True, "checked": False}
     assert pinned["danmaku"] == {"disabled": False}
+
+
+async def test_a_clean_disconnect_releases_the_room_pending_latch(
+    page: Page, harness: Harness
+) -> None:
+    """connected=false with an EMPTY error is what a successful disconnect
+    looks like; keyed on connected||error, the pending latch never released
+    and the connect button stayed dead until a reload."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='system']")
+    await page.fill("#room-id", "21452505")
+    await page.click("#room-connect")
+    await _wait(page, "document.getElementById('room-status').textContent.includes('已连接')")
+    await page.click("#room-disconnect")
+    await _wait(page, "document.getElementById('room-status').textContent.includes('尚未连接')")
+    assert await page.evaluate("document.getElementById('room-connect').disabled") is False
+    # And the hint machinery is alive again, not frozen at 「正在断开…」.
+    hint = await page.text_content("#room-info-hint")
+    assert hint is not None and "正在断开" not in hint
+
+
+async def test_an_unfocused_dirty_field_survives_a_state_frame(
+    page: Page, harness: Harness
+) -> None:
+    """Focus is not the whole story: text typed and clicked away from is still
+    the operator's until saved. A re-broadcast identical state frame used to
+    clobber it (and the retired shared saving flag used to clobber the OTHER
+    field on any save)."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='system']")
+    state: dict[str, Any] = {
+        "panicked": False,
+        "speak": {},
+        "room": {
+            "connected": False,
+            "active_room_id": 0,
+            "error": "",
+            "streamer_name": "阿强",
+            "stream_intro": "老主题",
+        },
+    }
+    harness.hub.broadcast(ServerEvent.PANEL_STATE, state)
+    await _wait(page, "document.getElementById('stream-intro').value === '老主题'")
+    await page.fill("#stream-intro", "新草稿")
+    await page.click("#p-name")  # blur: the field is dirty AND unfocused
+    harness.hub.broadcast(ServerEvent.PANEL_STATE, state)
+    await page.wait_for_timeout(200)
+    assert await page.evaluate("document.getElementById('stream-intro').value") == "新草稿"
+    # The save landing (server echoes the typed value) converges the compare…
+    state["room"]["stream_intro"] = "新草稿"
+    harness.hub.broadcast(ServerEvent.PANEL_STATE, dict(state))
+    await page.wait_for_timeout(200)
+    # …after which a genuine server-side change may overwrite again.
+    state["room"]["stream_intro"] = "服务器新值"
+    harness.hub.broadcast(ServerEvent.PANEL_STATE, dict(state))
+    await _wait(page, "document.getElementById('stream-intro').value === '服务器新值'")
+
+
+async def test_a_second_confirm_ask_supersedes_the_first(page: Page, harness: Harness) -> None:
+    """Two pending confirmAction promises used to settle on one click; the
+    newer ask must retire the older one and own the dialog alone."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='assistants']")
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {
+            "panicked": False,
+            "speak": {},
+            "assistants": [
+                {
+                    "id": "tofu",
+                    "name": "豆腐",
+                    "description": "",
+                    "identity": "# 豆腐",
+                    "personality": "软",
+                    "current": True,
+                },
+                {
+                    "id": "hanako",
+                    "name": "花子",
+                    "description": "",
+                    "identity": "# 花子",
+                    "personality": "利",
+                    "current": False,
+                },
+                {
+                    "id": "ming",
+                    "name": "小明",
+                    "description": "",
+                    "identity": "# 小明",
+                    "personality": "直",
+                    "current": False,
+                },
+            ],
+        },
+    )
+    await _wait(page, "document.querySelectorAll('#assistant-cards .assistant-card').length === 3")
+    await page.click("#assistant-cards .assistant-card:nth-child(2)")
+    await _wait(page, "document.getElementById('confirm-dialog').hidden === false")
+    first_title = await page.text_content("#confirm-title")
+    # element.click() bypasses the overlay's hit-testing — the programmatic
+    # double-ask the settle guard exists for.
+    await page.evaluate("document.querySelectorAll('#assistant-cards .assistant-card')[2].click()")
+    await _wait(page, "document.getElementById('confirm-dialog').hidden === false")
+    second_title = await page.text_content("#confirm-title")
+    assert first_title != second_title, "the dialog must now speak for the SECOND ask"
+    assert second_title is not None and "小明" in second_title
+    await page.click("#confirm-accept")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("assistant") or {}).get("id") == "ming",
+    )
+    selected = [
+        (d.get("assistant") or {}).get("id")
+        for evt, d in harness.calls
+        if evt is ClientEvent.PANEL_SET and (d.get("assistant") or {}).get("action") == "select"
+    ]
+    assert selected == ["ming"], f"the superseded ask must not fire: {selected}"
+
+
+async def test_reconnecting_to_a_fresh_backend_resets_room_rows_and_test_state(
+    page: Page, harness: Harness
+) -> None:
+    """panel.reset() on reconnect: a restarted dev-talk replays nothing, so
+    stale room-event rows and a test card stuck on 运行中 would be last
+    session's ghosts."""
+    from bilisama.clock import SystemClock as _SystemClock
+    from bilisama.ui.hub import UiHub as _UiHub
+
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='system']")
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED,
+        {"kind": "entry", "name": "路人甲", "room_id": 777, "ts_ms": 1000},
+    )
+    await _wait(page, "document.querySelectorAll('#room-events .room-event').length === 1")
+
+    old_hub, old_server = harness.hub, harness.server
+    await old_server.stop()
+    fresh = _UiHub(_SystemClock())
+    harness.hub = fresh
+    _build_server(fresh, [harness], port=harness.port)
+    for _ in range(200):
+        if harness.server.started:
+            break
+        await asyncio.sleep(0.01)
+    try:
+        # ws.js reconnects on its own; the fresh hub replays nothing, so the
+        # reset must leave the room stream empty rather than doubled or stale.
+        await _wait(
+            page,
+            "document.querySelectorAll('#room-events .room-event').length === 0",
+            timeout_ms=10000,
+        )
+        assert await page.evaluate("document.querySelectorAll('.test-card.running').length") == 0
+    finally:
+        await old_hub.aclose()
+
+
+async def test_live_mock_restores_the_topic_when_the_room_id_returns(
+    page: Page, harness: Harness
+) -> None:
+    """Backspacing one digit and retyping it used to leave the topic cleared
+    and flagged edited — 检测 then persisted an empty stream_intro for a room
+    that never changed."""
+    harness.hello_override = {
+        "panel": {
+            "speak": {"danmaku": True},
+            "room": {"room_id": 12345, "stream_intro": "今天聊AI"},
+        }
+    }
+    await page.goto(harness.url + "live-mock")
+    await _wait(page, "document.getElementById('connection-pill').dataset.state === 'online'")
+    await _wait(page, "document.getElementById('stream-intro').value === '今天聊AI'")
+    await page.click("#room-id")
+    await page.keyboard.press("End")
+    await page.keyboard.press("Backspace")  # 12345 -> 1234: an intermediate id
+    await _wait(page, "document.getElementById('stream-intro').value === ''")
+    await page.keyboard.type("5")  # back to the configured room
+    await _wait(page, "document.getElementById('stream-intro').value === '今天聊AI'")

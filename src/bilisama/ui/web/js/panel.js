@@ -541,7 +541,12 @@ export function createPanel({ send }) {
     // connect button dead until a reload.
     const settled =
       roomPendingKind === "disconnect" ? !room.connected || room.error : room.connected || room.error;
-    if (roomPending && settled) setRoomPending(false, "", "");
+    if (roomPending && settled) {
+      setRoomPending(false, "", "");
+      // The dirty refresh above ran while pending still held the hint; run it
+      // again or 「正在断开…」 stays painted until the next state frame.
+      refreshRoomInfoDirty();
+    }
     // A new room means a new stream of events; the old rows are last room's.
     if (
       previousRoom &&

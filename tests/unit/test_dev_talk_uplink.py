@@ -1175,3 +1175,96 @@ def test_bare_link_mode_refuses_a_backend_it_cannot_drive(
     assert "--director" in message, "得告诉主播往哪走"
     for jargon in ("Traceback", "ValueError", "codec_for"):
         assert jargon not in message
+
+
+# ------------------------------------------------------ live-mock room parking
+
+
+class _FakeParkableRoom:
+    """The _ParkableRoom slice, scripted: status is whatever the test says."""
+
+    def __init__(self, *, connected: bool, active_room_id: int = 0) -> None:
+        self._connected = connected
+        self._active = active_room_id
+        self.connects: list[int] = []
+        self.disconnects = 0
+        self.fail_connect = False
+
+    def status(self) -> dict[str, Any]:
+        return {"connected": self._connected, "active_room_id": self._active, "room_id": 0}
+
+    async def connect(self, room_id: int) -> dict[str, Any]:
+        if self.fail_connect:
+            raise ConnectionError("房间在 12 秒内没有连接成功")
+        self.connects.append(room_id)
+        self._connected = True
+        self._active = room_id
+        return self.status()
+
+    async def disconnect(self) -> None:
+        self.disconnects += 1
+        self._connected = False
+        self._active = 0
+
+
+async def test_parking_records_the_requested_id_and_disconnects_once() -> None:
+    """The REQUESTED id (active_room_id), not the late-resolving real one:
+    a park recorded as 0 could never be restored."""
+    room = _FakeParkableRoom(connected=True, active_room_id=21452505)
+    said: list[str] = []
+    parked = await dev_talk._park_live_room(room, 0, said.append)
+    assert parked == 21452505
+    assert room.disconnects == 1
+    assert any("已暂挂" in line for line in said)
+    # Idempotent while parked: a second park must not double-disconnect.
+    room2 = _FakeParkableRoom(connected=True, active_room_id=99)
+    assert await dev_talk._park_live_room(room2, parked, said.append) == parked
+    assert room2.disconnects == 0
+
+
+async def test_parking_a_disconnected_room_is_a_no_op() -> None:
+    room = _FakeParkableRoom(connected=False)
+    said: list[str] = []
+    assert await dev_talk._park_live_room(room, 0, said.append) == 0
+    assert room.disconnects == 0 and said == []
+
+
+async def test_restore_reconnects_the_parked_room_and_consumes_the_park() -> None:
+    room = _FakeParkableRoom(connected=False)
+    said: list[str] = []
+    assert await dev_talk._restore_live_room(room, 21452505, said.append) == 0
+    assert room.connects == [21452505]
+    assert any("已恢复" in line for line in said)
+    # Nothing parked, nothing to do.
+    assert await dev_talk._restore_live_room(room, 0, said.append) == 0
+    assert room.connects == [21452505]
+
+
+async def test_restore_yields_to_a_room_connected_mid_mock() -> None:
+    """The operator's newer choice wins: restoring the parked room over it
+    would silently disconnect what they just connected."""
+    room = _FakeParkableRoom(connected=True, active_room_id=777)
+    said: list[str] = []
+    assert await dev_talk._restore_live_room(room, 21452505, said.append) == 0
+    assert room.connects == []
+    assert any("不再恢复" in line for line in said)
+
+
+async def test_restore_reports_a_failed_reconnect_instead_of_raising() -> None:
+    room = _FakeParkableRoom(connected=False)
+    room.fail_connect = True
+    said: list[str] = []
+    assert await dev_talk._restore_live_room(room, 404404, said.append) == 0
+    assert any("没能恢复" in line for line in said)
+
+
+def test_the_wire_path_watchdog_death_is_audible() -> None:
+    """run() (wire mode) must wrap its default-output poller in _watch: the
+    gather(return_exceptions=True) below it swallows a silent task's death,
+    and the director path already wraps its copy."""
+    source = _DEV_TALK_PY.read_text(encoding="utf-8")
+    wire = source.split("async def run(", 1)[1]
+    statement = wire.split("_watch_default_output(speaker)", 1)[0]
+    assert statement.rstrip().endswith(
+        "_watch(asyncio.create_task("
+    ), "wire 模式的默认输出巡检没有包 _watch——它死了没人听得见"
