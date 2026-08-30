@@ -788,7 +788,8 @@ input.cfg-edit:focus {
 }
 
 .assistant-card.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.assistant-card .assistant-face {
+.assistant-card .assistant-face,
+.skin-card .assistant-face {
   width: 56px;
   height: 56px;
   margin: 0 auto 6px;

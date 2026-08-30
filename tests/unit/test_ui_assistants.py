@@ -78,3 +78,33 @@ def test_an_explicit_data_dir_never_mixes_two_personas_live_copies(
     )
     save_anchor(settings, root, "hanako", "identity", "# 花子\n改动")
     assert not (tmp_path / "tofu-live" / "identity.md").exists()
+
+
+def test_the_card_face_renders_templates_and_the_editor_keeps_them_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The streamer reads the card, the editor edits the template: the
+    description substitutes {{userName}}/{{agentName}} the way the live
+    prompt does, while identity/personality stay verbatim."""
+    root = _config_dir(tmp_path)
+    settings = _settings(tmp_path, monkeypatch)
+    cards = {card["id"]: card for card in assistant_snapshot(settings, root)}
+    for card in cards.values():
+        assert "{{" not in card["description"], card["description"]
+        assert "{{" not in card["name"]
+    assert "主播" in cards["hanako"]["description"]
+    assert "{{agentName}}" in cards["hanako"]["identity"], "编辑器要拿到原始模板"
+
+
+def test_the_card_name_is_the_persona_id_not_the_heading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shipped packages all head with {{agentName}}, and the display name
+    is one handle across personas — rendered headings would make three
+    identical cards. The id is the differentiator."""
+    root = _config_dir(tmp_path)
+    cards = {
+        card["id"]: card for card in assistant_snapshot(_settings(tmp_path, monkeypatch), root)
+    }
+    assert cards["tofu"]["name"] == "tofu"
+    assert cards["hanako"]["name"] == "hanako"

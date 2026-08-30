@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from bilisama.config.schema import Settings
-from bilisama.persona.loader import AnchorName, PersonaStore
+from bilisama.persona.loader import AnchorName, PersonaStore, template_variables
 
 __all__ = ["assistant_snapshot", "list_personas", "save_anchor"]
 
@@ -50,15 +50,6 @@ def _store_for(settings: Settings, config_dir: Path, persona_id: str) -> Persona
     return PersonaStore.from_config(cfg, config_dir=config_dir)
 
 
-def _card_name(identity_text: str, persona_id: str) -> str:
-    """The display name: the identity file's first heading, else the id."""
-    for line in identity_text.splitlines():
-        stripped = line.strip().lstrip("#").strip()
-        if stripped:
-            return stripped
-    return persona_id
-
-
 def _card_description(identity_text: str) -> str:
     """The first prose line after the heading, clipped for the card."""
     seen_heading = False
@@ -76,9 +67,21 @@ def _card_description(identity_text: str) -> str:
 
 def assistant_snapshot(settings: Settings, config_dir: Path) -> list[dict[str, Any]]:
     """Every persona as the page renders it: current one first-class, anchors
-    included so the editor never needs a second fetch. Raw {{name}} templates
-    are shown as-is — the editor edits the TEMPLATE, substitution happens at
-    prompt time."""
+    included so the editor never needs a second fetch.
+
+    Two faces on purpose. The CARD (name/description) is for reading, so its
+    description renders through the same {{...}} variables the live prompt
+    uses — a raw {{agentName}} on the card face is a bug the streamer sees.
+    The EDITOR fields (identity/personality) stay the raw template:
+    substitution happens at prompt time, and what you edit is the template.
+
+    The card name is the persona id, not the identity file's first heading:
+    the shipped packages all head with {{agentName}}, and the agent's name is
+    ONE handle across every persona (人设与名字是两层) — rendered, three
+    cards would read identically. The id is what tells the flavors apart, and
+    what the runbook calls them.
+    """
+    variables = template_variables(settings.persona, reply_length=settings.interaction.reply_length)
     cards: list[dict[str, Any]] = []
     for persona_id in list_personas(config_dir):
         store = _store_for(settings, config_dir, persona_id)
@@ -90,8 +93,8 @@ def assistant_snapshot(settings: Settings, config_dir: Path) -> list[dict[str, A
         cards.append(
             {
                 "id": persona_id,
-                "name": _card_name(identity, persona_id),
-                "description": _card_description(identity),
+                "name": persona_id,
+                "description": _card_description(store.anchor("identity", variables)),
                 "identity": identity,
                 "personality": personality,
                 "current": persona_id == settings.persona.id,
