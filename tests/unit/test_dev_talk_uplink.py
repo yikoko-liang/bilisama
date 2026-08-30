@@ -1001,6 +1001,11 @@ async def test_the_director_registers_every_health_probe(
     assert set(snapshot) >= {
         "assembly",
         "proactive",
+        # Registered since the review round: the probe existed with a
+        # docstring promising this key, passed its own unit test through a
+        # registry the TEST built, and was dead in production — the panel's
+        # health card never showed memory-distillation state.
+        "distill",
         "scheduler",
         "loop",
         "selector",

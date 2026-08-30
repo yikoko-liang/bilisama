@@ -2002,6 +2002,10 @@ async def run_director(args: argparse.Namespace) -> int:
     registry = HealthRegistry()
     registry.register("assembly", assembly.status)
     registry.register("proactive", proactive.status)
+    # The key the probe's own docstring promises (plan section 4.12). It sat
+    # unregistered while its unit test built a registry of its own — the
+    # 「派了活但没接线」 shape again, so the stack test now pins this line.
+    registry.register("distill", distiller.status)
     registry.register("scheduler", scheduler.status)
     # The two §4.12 asks for that nothing answered: is the provider connected,
     # and what happened to the last N attempts to speak. Connected already —
