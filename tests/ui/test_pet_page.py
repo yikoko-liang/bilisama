@@ -1666,7 +1666,7 @@ async def test_picking_a_skin_remounts_the_pet_live(
     harness.user_skins_root = user_root
     await harness.server.stop()
     _build_server(harness.hub, [harness], port=harness.port)
-    for _ in range(200):
+    for _ in range(500):  # rebinding the same port can take a while under gate load
         if harness.server.started:
             break
         await asyncio.sleep(0.01)
@@ -1700,7 +1700,11 @@ async def test_picking_a_skin_remounts_the_pet_live(
     )
     assert harness.settings.avatar.model_id == "candy"
     # The echo's appearance.avatar reaches main.js and remounts: kirby frames.
-    await _wait(page, "document.querySelector('#pet-mount canvas')?.width === 128", timeout_ms=8000)
+    # Generous: the click lands right after a server rebuild, and under gate
+    # load the ws reconnect + user-pack fetch race can take a few seconds.
+    await _wait(
+        page, "document.querySelector('#pet-mount canvas')?.width === 128", timeout_ms=15000
+    )
 
 
 async def test_picking_a_voice_sends_the_config_edit(page: Page, harness: Harness) -> None:

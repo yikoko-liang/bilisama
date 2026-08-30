@@ -71,7 +71,7 @@ else
 fi
 
 step "profile 覆盖层"
-BILISAMA_GATE_WORK="$WORK" $PY - <<'EOF'
+BILISAMA_GATE_WORK="$WORK" XDG_DATA_HOME="$WORK/xdg-data" $PY - <<'EOF'
 import os
 import shutil
 import sys

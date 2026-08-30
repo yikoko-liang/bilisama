@@ -16,6 +16,7 @@ import pytest
 
 from bilisama.config import Chattiness, ConfigError, load
 from bilisama.config.derive import derive
+from bilisama.config.loader import layers, origins
 from bilisama.config.migrate import CURRENT_VERSION, MIGRATIONS, Step, migrate
 
 BASE = """\
@@ -419,3 +420,46 @@ def test_v3_tofu_renderer_migrates_to_the_sprite_axis(tmp_path: Path) -> None:
     no_section = {"config_version": 3}
     migrated, _ = migrate(no_section)
     assert "avatar" not in migrated
+
+
+def test_the_user_profile_layer_sits_between_the_shipped_profile_and_overrides(
+    tmp_path: Path,
+) -> None:
+    """Panel edits persist to the data home, never to the checkout: the user
+    layer must beat the shipped profile (or a restart undoes every saved
+    edit) and lose to live overrides (or the panel cannot change anything
+    this session)."""
+    base = tmp_path / "bilisama.toml"
+    base.write_text('active_profile = "normal"\n', encoding="utf-8")
+    shipped = tmp_path / "profiles"
+    shipped.mkdir()
+    (shipped / "normal.toml").write_text(
+        '[interaction]\nchattiness = "low"\nreply_length = "low"\n', encoding="utf-8"
+    )
+    user_root = tmp_path / "user-profiles"
+    user_root.mkdir()
+    (user_root / "normal.toml").write_text('[interaction]\nchattiness = "high"\n', encoding="utf-8")
+
+    settings = load(base, strict=False, user_profiles_root=user_root)
+    assert settings.interaction.chattiness.value == "high", "用户层要压过随包 profile"
+    assert settings.interaction.reply_length.value == "low", "没覆盖的键仍从随包层来"
+
+    overridden = load(
+        base,
+        strict=False,
+        user_profiles_root=user_root,
+        overrides={"interaction": {"chattiness": "medium"}},
+    )
+    assert overridden.interaction.chattiness.value == "medium", "面板覆盖层仍是最后赢家"
+
+
+def test_origins_names_the_user_layer(tmp_path: Path) -> None:
+    base = tmp_path / "bilisama.toml"
+    base.write_text('active_profile = "normal"\n', encoding="utf-8")
+    user_root = tmp_path / "user-profiles"
+    user_root.mkdir()
+    (user_root / "normal.toml").write_text('[avatar]\nmodel_id = "candy"\n', encoding="utf-8")
+
+    found = layers(base, user_profiles_root=user_root)
+    where = origins(found)
+    assert where["avatar.model_id"] == "profiles/normal.toml（用户层）"

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from bilisama.app import Assembly
 from bilisama.clock import FakeClock
 from bilisama.config.schema import GrowthSwitches, InteractionConfig, SpeakSwitches
@@ -27,6 +29,20 @@ from bilisama.persona.loader import PersonaStore
 from bilisama.proactive import ProactiveTopicLoop
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent.parent / "config" / "personas" / "tofu"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every unit test gets a private data home.
+
+    The config loader now reads a user profile layer from
+    `$XDG_DATA_HOME/bilisama/profiles/` — on a developer machine that file
+    exists the moment the panel persists an edit, and a suite that read it
+    would go green or red depending on what the developer clicked last
+    night. Tests that care about the data home still monkeypatch their own
+    value on top of this one.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
 
 
 @dataclass

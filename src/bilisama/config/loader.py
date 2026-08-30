@@ -19,6 +19,7 @@ from typing import Any
 from bilisama.config.migrate import migrate, scrub_retired_interaction
 from bilisama.config.schema import Settings
 from bilisama.config.validate import ConfigError, ConfigProblem, check
+from bilisama.paths import data_home
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,12 @@ class Layer:
     values: dict[str, Any]
 
 
-def layers(path: Path | None = None, *, overrides: dict[str, Any] | None = None) -> list[Layer]:
+def layers(
+    path: Path | None = None,
+    *,
+    overrides: dict[str, Any] | None = None,
+    user_profiles_root: Path | None = None,
+) -> list[Layer]:
     """The overlays `load` merges, lowest first and still separate.
 
     Split out so that "which layer did this value come from" has an answer at all
@@ -62,6 +68,10 @@ def layers(path: Path | None = None, *, overrides: dict[str, Any] | None = None)
     Args:
         path: The base TOML file. Profiles are read from its `profiles/` sibling.
         overrides: Runtime panel values, the last layer to win.
+        user_profiles_root: Where the streamer's own profile overrides live.
+            None means the data home (`~/.local/share/bilisama/profiles/`) —
+            the same file TomlConfigWriter targets, so panel edits survive a
+            restart without ever dirtying the checked-out tree.
 
     Returns:
         Only the layers that exist. The packaged defaults are not one of them:
@@ -85,6 +95,16 @@ def layers(path: Path | None = None, *, overrides: dict[str, Any] | None = None)
         profile_path = path.parent / "profiles" / f"{profile_name}.toml"
         if profile_path.exists():
             found.append(Layer(f"profiles/{profile_name}.toml", _read_toml(profile_path)))
+
+    # The streamer's own overrides, above the shipped profile: this is where
+    # panel edits land (persist.py), so runtime state lives in the data home
+    # and the git checkout stays clean.
+    profiles_root = (
+        user_profiles_root if user_profiles_root is not None else (data_home() / "profiles")
+    )
+    user_profile = profiles_root / f"{profile_name}.toml"
+    if profile_name and user_profile.exists():
+        found.append(Layer(f"profiles/{profile_name}.toml（用户层）", _read_toml(user_profile)))
 
     if overrides:
         found.append(Layer("面板改动", overrides))
@@ -126,11 +146,13 @@ def load(
     *,
     overrides: dict[str, Any] | None = None,
     strict: bool = True,
+    user_profiles_root: Path | None = None,
 ) -> Settings:
     """Load from TOML, layering the active profile on top.
 
-    Layers, lowest first (plan §7.4): packaged defaults, the base file, the active
-    profile, then the overrides.
+    Layers, lowest first (plan §7.4): packaged defaults, the base file, the
+    shipped profile, the streamer's own profile overrides (data home), then
+    the overrides.
 
     Args:
         path: The base TOML file. Profiles are read from its `profiles/` sibling.
@@ -147,7 +169,7 @@ def load(
         pydantic.ValidationError: A field has the wrong type or is out of range.
     """
     raw: dict[str, Any] = {}
-    for layer in layers(path, overrides=overrides):
+    for layer in layers(path, overrides=overrides, user_profiles_root=user_profiles_root):
         raw = _deep_merge(raw, layer.values)
 
     # After the merge, not per file: a profile overlay names only the fields it

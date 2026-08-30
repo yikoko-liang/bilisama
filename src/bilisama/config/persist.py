@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from bilisama.config.schema import Settings
+from bilisama.paths import data_home
 
 __all__ = ["ConfigWriteError", "TomlConfigWriter"]
 
@@ -102,11 +103,25 @@ def _replace_scalar(text: str, *, section: str, key: str, rendered: str) -> str:
 
 
 class TomlConfigWriter:
-    """Persist effective panel values to the active profile atomically."""
+    """Persist effective panel values to the active profile atomically.
 
-    def __init__(self, base_path: Path, settings: Settings) -> None:
+    Profile writes go to the USER layer in the data home, not to the
+    checkout's `config/profiles/` — the repo tree is code, and a skin picked
+    mid-stream is runtime state; before this split every panel edit dirtied
+    `git status`. The loader reads the user layer right above the shipped
+    profile, so persisted edits still win after a restart.
+
+    `active_profile` itself still writes to the base file: it SELECTS the
+    profile, so it cannot live inside one. It is the one panel-reachable
+    field left that touches the checkout (RESTART-gated, rarely edited).
+    """
+
+    def __init__(
+        self, base_path: Path, settings: Settings, *, user_profiles_root: Path | None = None
+    ) -> None:
         self._base_path = base_path
         self._settings = settings
+        self._user_profiles_root = user_profiles_root
 
     def target_for(self, field_path: str) -> Path:
         if field_path == "active_profile":
@@ -114,7 +129,12 @@ class TomlConfigWriter:
         profile = self._settings.active_profile.strip()
         if not profile:
             return self._base_path
-        return self._base_path.parent / "profiles" / f"{profile}.toml"
+        root = (
+            self._user_profiles_root
+            if self._user_profiles_root is not None
+            else data_home() / "profiles"
+        )
+        return root / f"{profile}.toml"
 
     def write(self, field_path: str, value: Any) -> Path:
         """Write one validated scalar and return the file that changed."""
