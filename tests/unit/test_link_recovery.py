@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 import websockets
@@ -540,6 +542,7 @@ def _bare_speaker(stream: object | None) -> dev_talk._Speaker:
     speaker._device = None
     speaker._opened_device = None
     speaker._last_output_error = ""
+    speaker._last_default_ca_id = None
     return speaker
 
 
@@ -989,3 +992,183 @@ def test_a_closed_speaker_stays_closed() -> None:
     assert speaker._stream is None, "resume after close must not reopen"
     speaker._sounddevice = object()
     assert speaker.refresh_default_device() is None
+
+
+# ------------------------------------------------- default-output follow
+
+
+class _FakeOutStream:
+    def __init__(self, device: object) -> None:
+        self.device = device
+        self.active = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.active = True
+
+    def stop(self) -> None:
+        self.active = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeSoundDeviceModule:
+    """The slice of sounddevice the follow path touches, with re-init hooks."""
+
+    def __init__(self, default_index: int = 2) -> None:
+        self.calls: list[str] = []
+        self.created: list[_FakeOutStream] = []
+        self._default_index = default_index
+
+        class _Default:
+            def __init__(inner) -> None:
+                inner._outer = self
+
+            @property
+            def device(inner) -> tuple[int, int]:
+                return (0, inner._outer._default_index)
+
+        self.default = _Default()
+
+    def RawOutputStream(self, **kwargs: object) -> _FakeOutStream:
+        stream = _FakeOutStream(kwargs.get("device"))
+        self.created.append(stream)
+        return stream
+
+    def _terminate(self) -> None:
+        self.calls.append("terminate")
+
+    def _initialize(self) -> None:
+        self.calls.append("initialize")
+
+
+class _FakePaHolder:
+    def __init__(self, log: list[str], name: str) -> None:
+        self.log, self.name = log, name
+
+    def pa_release(self) -> None:
+        self.log.append(f"release:{self.name}")
+
+    def pa_reopen(self) -> None:
+        self.log.append(f"reopen:{self.name}")
+
+
+def test_portaudio_reinit_cycles_every_holder_around_the_re_init() -> None:
+    """Pa_Terminate invalidates every stream in the process: holders must all
+    let go BEFORE it and all come back AFTER Pa_Initialize."""
+    session = dev_talk._PortAudioSession()
+    sd = _FakeSoundDeviceModule()
+    log = sd.calls
+    session.register(_FakePaHolder(log, "mic"))
+    session.register(_FakePaHolder(log, "aux"))
+    assert session.reinit(sd) is True
+    assert log == [
+        "release:mic",
+        "release:aux",
+        "terminate",
+        "initialize",
+        "reopen:mic",
+        "reopen:aux",
+    ]
+
+
+def test_portaudio_reinit_without_entry_points_is_a_refusal_not_a_crash() -> None:
+    session = dev_talk._PortAudioSession()
+    log: list[str] = []
+    session.register(_FakePaHolder(log, "mic"))
+    assert session.reinit(object()) is False
+    assert log == [], "holders must not be cycled for a re-init that cannot happen"
+
+
+def test_mic_holder_survives_a_release_reopen_cycle() -> None:
+    built: list[_FakeOutStream] = []
+
+    def build() -> _FakeOutStream:
+        stream = _FakeOutStream("mic")
+        built.append(stream)
+        return stream
+
+    holder = dev_talk._MicHolder(build)
+    first = build()
+    first.start()
+    holder.adopt(first)
+    holder.pa_release()
+    assert first.closed and holder.stream is None
+    holder.pa_reopen()
+    reopened: Any = holder.stream  # mypy narrowed the attribute to None above
+    assert reopened is built[-1] and reopened.active
+    # An empty holder (mic suspended) rides the cycle as a double no-op.
+    idle = dev_talk._MicHolder(build)
+    before = len(built)
+    idle.pa_release()
+    idle.pa_reopen()
+    assert len(built) == before and idle.stream is None
+
+
+def test_follow_system_default_switches_through_a_coordinated_reinit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CoreAudio-visible default change pays one re-init and the PCM ring
+    survives the swap — the reply resumes on the new device."""
+    sd = _FakeSoundDeviceModule(default_index=2)
+    speaker = _bare_speaker(object())
+    speaker._sounddevice = sd
+    speaker._opened_device = 1
+    speaker._last_default_ca_id = 71
+    speaker.play(b"\x11\x22" * 400)  # a reply in flight
+    monkeypatch.setattr(dev_talk, "_coreaudio_default_output_id", lambda: 99)
+
+    message = speaker.follow_system_default()
+
+    assert message == "默认扬声器已切换到设备 2"
+    assert sd.calls == ["terminate", "initialize"]
+    assert speaker._stream is sd.created[-1] and speaker._stream.active
+    assert (speaker._opened_device, speaker._last_default_ca_id) == (2, 99)
+    assert speaker.busy, "the mid-swap buffer must survive onto the new device"
+    # Same id again: no second re-init, and nothing to say.
+    sd.created[-1].active = True
+    assert speaker.follow_system_default() is None
+    assert sd.calls == ["terminate", "initialize"]
+
+
+def test_follow_system_default_defers_to_suspend_and_pinning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dev_talk, "_coreaudio_default_output_id", lambda: 99)
+    pinned = _bare_speaker(object())
+    pinned._sounddevice = _FakeSoundDeviceModule()
+    pinned._device = 3
+    assert pinned.follow_system_default() is None
+
+    suspended = _bare_speaker(None)
+    suspended._sounddevice = _FakeSoundDeviceModule()
+    suspended._suspended = True
+    suspended._last_default_ca_id = 71
+    assert suspended.follow_system_default() is None
+    assert suspended._sounddevice.calls == [], "a parked speaker must not re-init"
+
+
+def test_resume_refreshes_the_table_when_the_default_moved_meanwhile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Page ownership is the free re-init window: every local stream is
+    already closed, so a default that moved costs one table refresh here."""
+    sd = _FakeSoundDeviceModule(default_index=5)
+    speaker = _bare_speaker(None)
+    speaker._sounddevice = sd
+    speaker._suspended = True
+    speaker._last_default_ca_id = 71
+    monkeypatch.setattr(dev_talk, "_coreaudio_default_output_id", lambda: 99)
+
+    speaker.resume()
+
+    assert sd.calls == ["terminate", "initialize"]
+    assert speaker._last_default_ca_id == 99
+    assert speaker._stream is sd.created[-1] and speaker._stream.active
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="CoreAudio 只在 macOS 上有")
+def test_coreaudio_reports_a_real_default_output_on_this_mac() -> None:
+    device_id = dev_talk._coreaudio_default_output_id()
+    assert isinstance(device_id, int) and device_id > 0

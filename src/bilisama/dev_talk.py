@@ -156,6 +156,149 @@ def _as_live_mock_event(event: LiveEvent, room_id: int) -> LiveEvent:
     )
 
 
+def _coreaudio_default_output_id() -> int | None:
+    """The CURRENT macOS default output device, straight from CoreAudio.
+
+    PortAudio freezes its device table and default index at Pa_Initialize, so
+    asking it can never detect a change (probed 2026-08-29 by disassembly).
+    This asks the system instead — AudioObjectGetPropertyData on the
+    kAudioHardwarePropertyDefaultOutputDevice selector — which is what makes
+    a change DETECTABLE; making it usable still takes a re-init cycle.
+    Returns None off macOS or on any failure, which callers read as
+    「detection unavailable, keep the legacy behaviour」.
+    """
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+
+            coreaudio = ctypes.CDLL(
+                "/System/Library/Frameworks/CoreAudio.framework/CoreAudio", use_errno=True
+            )
+
+            class _PropertyAddress(ctypes.Structure):
+                _fields_ = [
+                    ("selector", ctypes.c_uint32),
+                    ("scope", ctypes.c_uint32),
+                    ("element", ctypes.c_uint32),
+                ]
+
+            address = _PropertyAddress(
+                selector=0x644F7574,  # 'dOut' kAudioHardwarePropertyDefaultOutputDevice
+                scope=0x676C6F62,  # 'glob' kAudioObjectPropertyScopeGlobal
+                element=0,  # kAudioObjectPropertyElementMain
+            )
+            device_id = ctypes.c_uint32(0)
+            size = ctypes.c_uint32(ctypes.sizeof(device_id))
+            status = coreaudio.AudioObjectGetPropertyData(
+                ctypes.c_uint32(1),  # kAudioObjectSystemObject
+                ctypes.byref(address),
+                ctypes.c_uint32(0),
+                None,
+                ctypes.byref(size),
+                ctypes.byref(device_id),
+            )
+            if status != 0 or device_id.value == 0:
+                return None
+            return int(device_id.value)
+        except Exception:
+            return None
+    else:
+        # Non-mac platforms: no CoreAudio, so no detection — callers fall
+        # back to the died-stream recovery.
+        return None
+
+
+class _PortAudioHolder(Protocol):
+    """A stream owner that can survive a Pa_Terminate/Pa_Initialize cycle."""
+
+    def pa_release(self) -> None: ...
+
+    def pa_reopen(self) -> None: ...
+
+
+class _PortAudioSession:
+    """Process-wide coordinator for PortAudio re-initialisation.
+
+    Pa_Terminate invalidates EVERY open stream in the process, so a re-init
+    (the only way to refresh the frozen device table) must first ask every
+    holder — today the microphone pump — to let go, and hand the device back
+    afterwards. Registration is threadsafe; the cycle runs on whichever
+    worker thread asked for it.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._holders: list[_PortAudioHolder] = []
+
+    def register(self, holder: _PortAudioHolder) -> None:
+        with self._lock:
+            self._holders.append(holder)
+
+    def unregister(self, holder: _PortAudioHolder) -> None:
+        with self._lock:
+            if holder in self._holders:
+                self._holders.remove(holder)
+
+    def reinit(self, sounddevice: Any) -> bool:
+        """One release → terminate/initialize → reopen cycle. False if the
+        installed sounddevice has no re-init entry points (skip, keep legacy)."""
+        terminate = getattr(sounddevice, "_terminate", None)
+        initialize = getattr(sounddevice, "_initialize", None)
+        if terminate is None or initialize is None:
+            return False
+        with self._lock:
+            holders = list(self._holders)
+            for holder in holders:
+                holder.pa_release()
+            terminate()
+            initialize()
+            for holder in holders:
+                holder.pa_reopen()
+        return True
+
+
+_PORTAUDIO = _PortAudioSession()
+
+
+class _MicHolder:
+    """The microphone stream's half of a PortAudio re-init cycle.
+
+    Owns nothing until told: `adopt` hands it the live stream, `pa_release`
+    closes it and remembers there was one, `pa_reopen` rebuilds through the
+    factory the pump provided. All three run on worker threads.
+    """
+
+    def __init__(self, build: Callable[[], Any]) -> None:
+        self._build = build
+        self.stream: Any = None
+        self._parked = False
+
+    def adopt(self, stream: Any) -> None:
+        self.stream = stream
+
+    def pa_release(self) -> None:
+        stream, self.stream = self.stream, None
+        if stream is not None:
+            self._parked = True
+            _close_audio_stream(stream)
+
+    def pa_reopen(self) -> None:
+        if not self._parked:
+            return
+        self._parked = False
+        stream = self._build()
+        stream.start()
+        self.stream = stream
+
+    def close(self) -> None:
+        stream, self.stream = self.stream, None
+        self._parked = False
+        if stream is not None:
+            _close_audio_stream(stream)
+
+
 class _ParkableRoom(Protocol):
     """The slice of SwitchableRoomSource the mock's room-parking touches."""
 
@@ -455,14 +598,21 @@ async def _pump_mic(
     def on_block(indata: Any, frames: int, time_info: Any, status: Any) -> None:
         loop.call_soon_threadsafe(enqueue, bytes(indata))
 
-    stream = sounddevice.RawInputStream(
-        samplerate=_INPUT_RATE,
-        channels=1,
-        dtype="int16",
-        blocksize=_INPUT_RATE * _FRAME_MS // 1000,
-        device=device,
-        callback=on_block,
-    )
+    def build_stream() -> Any:
+        return sounddevice.RawInputStream(
+            samplerate=_INPUT_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=_INPUT_RATE * _FRAME_MS // 1000,
+            device=device,
+            callback=on_block,
+        )
+
+    # The holder is what lets a default-output follow re-init PortAudio while
+    # the microphone is live: the cycle closes this stream, refreshes the
+    # device table, and hands the same callback a fresh stream.
+    holder = _MicHolder(build_stream)
+    stream = build_stream()
     silence = b"\x00\x00" * (_INPUT_RATE * _FRAME_MS // 1000)
     try:
         # start() inside the try: it can fail on its own (device pulled or
@@ -470,6 +620,8 @@ async def _pump_mic(
         # then — left unreleased it becomes the blocking atexit stall this
         # module fixes everywhere else.
         stream.start()
+        holder.adopt(stream)
+        _PORTAUDIO.register(holder)
         await _uplink(client, queue, speaker, mute, silence)
     finally:
         # NOT `with stream:` — its __exit__ closes on the loop, which is the
@@ -477,7 +629,8 @@ async def _pump_mic(
         # thread; asyncio joins that pool during shutdown, so it always
         # completes (it does NOT make a second Ctrl-C instant — that path exits
         # the process outright, see on_sigint).
-        await asyncio.to_thread(_close_audio_stream, stream)
+        _PORTAUDIO.unregister(holder)
+        await asyncio.to_thread(holder.close)
 
 
 class _Speaker:
@@ -524,7 +677,13 @@ class _Speaker:
         self._suspended = False
         self._opened_device: int | None = None
         self._last_output_error = ""
+        # The CoreAudio identity of the default we are playing on; the
+        # follow-the-default poll compares against THIS, because PortAudio's
+        # own view is frozen (see _coreaudio_default_output_id).
+        self._last_default_ca_id: int | None = None
         self._open()
+        if device is None:
+            self._last_default_ca_id = _coreaudio_default_output_id()
 
     def _feed(self, outdata: Any, frames: int, time_info: Any, status: Any) -> None:
         """PortAudio callback: drain jitter-buffered PCM without touching asyncio."""
@@ -589,12 +748,16 @@ class _Speaker:
     def _open(self) -> None:
         """Take the output device. Leaves _stream None if it cannot be had."""
         device = self._device
-        try:
-            import sounddevice
-        except ImportError:
-            self._stream = None
-            return
-        self._sounddevice = sounddevice
+        if self._sounddevice is None:
+            # Imported once and kept: reopen paths (resume, the follow's
+            # re-init) must keep talking to whatever module the object holds,
+            # which is also what lets a test hand in a fake.
+            try:
+                import sounddevice
+            except ImportError:
+                self._stream = None
+                return
+            self._sounddevice = sounddevice
         try:
             stream = self._start_stream(device)
         except Exception as exc:
@@ -639,7 +802,70 @@ class _Speaker:
         with self._device_lock:
             self._suspended = False
             if self._stream is None and not self._closed:
+                if self._device is None and self._sounddevice is not None:
+                    # The cheapest re-init window there is: every local stream
+                    # is already closed, so a default that moved while the
+                    # page owned the devices costs one table refresh here.
+                    current = _coreaudio_default_output_id()
+                    if current is not None and current != self._last_default_ca_id:
+                        _PORTAUDIO.reinit(self._sounddevice)
+                        self._last_default_ca_id = current
                 self._open()
+
+    def follow_system_default(self) -> str | None:
+        """Move playback to wherever macOS points its default output.
+
+        Detection asks CoreAudio (fresh every call); switching pays the only
+        price PortAudio accepts — a coordinated Pa_Terminate/Pa_Initialize
+        through _PORTAUDIO, which cycles the microphone holder too. The PCM
+        ring survives the swap (_swapping keeps play() buffering), so a reply
+        in flight resumes on the new device instead of losing its middle.
+        Falls back to refresh_default_device's died-stream recovery when
+        CoreAudio has nothing to say (non-mac, or the id is unchanged).
+        """
+        if self._device is not None or self._sounddevice is None:
+            return None
+        current = _coreaudio_default_output_id()
+        if current is not None and current != self._last_default_ca_id:
+            with self._device_lock:
+                if self._suspended or self._closed:
+                    return None
+                # Re-checked under the lock; a racing suspend() wins.
+                message = self._switch_via_reinit(current)
+            if message is not None:
+                return message
+        return self.refresh_default_device()
+
+    def _switch_via_reinit(self, current: int) -> str | None:
+        """The heavy half of follow_system_default. _device_lock is HELD."""
+        old, self._stream = self._stream, None
+        if old is not None:
+            _close_audio_stream(old)
+        self._swapping = True
+        try:
+            if not _PORTAUDIO.reinit(self._sounddevice):
+                # No re-init entry points in this sounddevice build: record
+                # the id so the poll does not spin, reopen on the old table.
+                self._last_default_ca_id = current
+                self._stream = self._start_stream(self._device)
+                return None
+            target = self._default_output_device()
+            replacement = self._start_stream(target)
+        except Exception as exc:
+            self.flush()
+            self._last_default_ca_id = current  # do not thrash every poll
+            message = f"默认扬声器切换失败（{exc}），会继续重试"
+            if message == self._last_output_error:
+                return None
+            self._last_output_error = message
+            return message
+        finally:
+            self._swapping = False
+        self._stream = replacement
+        self._opened_device = target
+        self._last_default_ca_id = current
+        self._last_output_error = ""
+        return f"默认扬声器已切换到设备 {target}"
 
     def refresh_default_device(self) -> str | None:
         """Follow a macOS default-output change without restarting BiliSama.
@@ -815,19 +1041,17 @@ class _Speaker:
 
 
 async def _watch_default_output(speaker: _Speaker) -> None:
-    """Recover the desktop output stream when it dies under the default device.
+    """Keep desktop playback on the macOS default output, for real this time.
 
-    Honest scope (probed 2026-08-29 against the bundled PortAudio dylib):
-    Pa_Initialize freezes BOTH the device list and the default-device index —
-    Pa_GetDefaultOutputDevice reads a static struct with zero syscalls — so a
-    device that appears after startup, and even a default switched between
-    existing devices, is invisible here. What this loop CAN do is notice the
-    open stream going inactive (device yanked) and reopen it, which is why it
-    stays. Real hotplug needs a re-init strategy; ledger entry #90.
+    PortAudio freezes its device table at Pa_Initialize (probed 2026-08-29 by
+    disassembly), so detection asks CoreAudio directly and a change pays for a
+    coordinated re-init (_PORTAUDIO cycles the microphone stream too, and the
+    PCM ring survives the swap). Off macOS the detector returns None and this
+    degrades to what it was before: reopening a stream that died in place.
     """
     while True:
         await asyncio.sleep(3.0)
-        message = await asyncio.to_thread(speaker.refresh_default_device)
+        message = await asyncio.to_thread(speaker.follow_system_default)
         if message:
             print(f"[音频] {message}")
 
