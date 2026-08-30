@@ -244,8 +244,9 @@ endpoint.json 里的 pid 真活着、而且确实是一个 bilisama dev-talk 进
 参数它会明说「这次不生效，想换配置先退出正在跑的」。
 
 脚本自己只认四个选项（同名 `BILISAMA_*` 环境变量也行，选项优先）：
-`--provider`（默认 dashscope）、`--model`（默认 qwen-audio-3.0-realtime-flash，只在
-dashscope 路生效——豆包路模型和音色从 `[speech.volcano]` 读）、`--room`（不给是
+`--provider`（默认 dashscope）、`--model`（默认 qwen-audio-3.0-realtime-flash；这个
+默认值只在 dashscope 路生效——豆包路不显式给就从 `[speech.volcano]` 读，显式给
+`--model 2.2.0.0` 这样的版本号则照传，配对不上音色时启动自检会拦）、`--room`（不给是
 沙箱模式）、`--input-device`（不给自动找内置麦）。**其余参数原样透传给 dev-talk**，
 所以临时旗子直接挂在后面就行：
 

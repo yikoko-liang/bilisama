@@ -18,10 +18,17 @@ ELECTRON_RUNTIME="$PET_DIR/node_modules/electron/dist/Electron.app/Contents/MacO
 ENDPOINT_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bilisama/ui/endpoint.json"
 
 # dashscope 是走通验收的默认路；接豆包的机器用 --provider volcano 或
-# BILISAMA_PROVIDER=volcano（模型与音色那时从 bilisama.toml 的 [speech.volcano]
-# 读，--model 不用传）。
+# BILISAMA_PROVIDER=volcano——不显式给 --model 时，模型（代际）与音色从
+# bilisama.toml 的 [speech.volcano] 读；显式给 --model 2.2.0.0 这样的版本号照传。
 PROVIDER="${BILISAMA_PROVIDER:-dashscope}"
-MODEL="${BILISAMA_REALTIME_MODEL:-qwen-audio-3.0-realtime-flash}"
+# MODEL_SET tells the launch line apart from the built-in default: an explicit
+# model (flag or env) forwards on EVERY provider — volcano reads it as the
+# generation, 1.2.1.1 or 2.2.0.0 — while the dashscope-flavored default below
+# must never leak to another backend.
+MODEL="${BILISAMA_REALTIME_MODEL:-}"
+MODEL_SET=0
+[ -n "$MODEL" ] && MODEL_SET=1
+[ -n "$MODEL" ] || MODEL="qwen-audio-3.0-realtime-flash"
 ROOM_ID="${BILISAMA_ROOM_ID:-}"
 INPUT_DEVICE="${BILISAMA_INPUT_DEVICE:-}"
 
@@ -36,8 +43,10 @@ usage() {
 
 自己认的选项（也可用同名 BILISAMA_* 环境变量，选项优先）：
   --provider <名字>       语音后端（默认 dashscope；BILISAMA_PROVIDER）
-  --model <模型名>        托管服务的模型（默认 qwen-audio-3.0-realtime-flash，
-                          只在 dashscope 路生效；BILISAMA_REALTIME_MODEL）
+  --model <模型名>        托管服务的模型（BILISAMA_REALTIME_MODEL）。默认
+                          qwen-audio-3.0-realtime-flash 只在 dashscope 路生效；
+                          其它后端显式给才转发——火山这里是版本号（1.2.1.1
+                          或 2.2.0.0），换代要连音色一起换，配不上启动自检会拦
   --room <房间号>         连真实直播间，正整数（默认沙箱模式；BILISAMA_ROOM_ID）
   --input-device <编号>   麦克风设备（默认自动找内置麦；BILISAMA_INPUT_DEVICE）
   --check                 只做环境检查，不启动
@@ -127,8 +136,8 @@ while [ "$#" -gt 0 ]; do
     --check) CHECK_ONLY=1 ;;
     --provider)   shift; need_value --provider "$#";     PROVIDER="$1" ;;
     --provider=*) PROVIDER="${1#*=}" ;;
-    --model)      shift; need_value --model "$#";        MODEL="$1" ;;
-    --model=*)    MODEL="${1#*=}" ;;
+    --model)      shift; need_value --model "$#";        MODEL="$1"; MODEL_SET=1 ;;
+    --model=*)    MODEL="${1#*=}"; MODEL_SET=1 ;;
     --room)       shift; need_value --room "$#";         ROOM_ID="$1" ;;
     --room=*)     ROOM_ID="${1#*=}" ;;
     --input-device)   shift; need_value --input-device "$#"; INPUT_DEVICE="$1" ;;
@@ -179,7 +188,9 @@ describe_plan() {
   local room_text="沙箱模式"
   [ -n "$ROOM_ID" ] && room_text="真实房间 $ROOM_ID"
   local model_text="$MODEL"
-  [ "$PROVIDER" != "dashscope" ] && model_text="（从 [speech.$PROVIDER] 读）"
+  if [ "$PROVIDER" != "dashscope" ] && [ "$MODEL_SET" = 0 ]; then
+    model_text="（从 [speech.$PROVIDER] 读）"
+  fi
   local device_text="$INPUT_DEVICE"
   [ -z "$device_text" ] && device_text="无（WAV 模式）"
   printf '后端 %s，模型 %s，输入设备 %s，%s' \
@@ -212,7 +223,9 @@ launch_args=(
   --provider "$PROVIDER"
 )
 [ -n "$INPUT_DEVICE" ] && launch_args+=(--input-device "$INPUT_DEVICE")
-[ "$PROVIDER" = "dashscope" ] && launch_args+=(--model "$MODEL")
+if [ "$PROVIDER" = "dashscope" ] || [ "$MODEL_SET" = 1 ]; then
+  launch_args+=(--model "$MODEL")
+fi
 [ -n "$ROOM_ID" ] && launch_args+=(--room "$ROOM_ID")
 launch_args+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
