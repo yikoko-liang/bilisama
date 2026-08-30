@@ -437,8 +437,8 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "persona.display_name": FieldMeta(
         label="AI 叫什么",
-        hint="它自称什么。出厂填着「豆腐」，而且不跟着人设走——换成 hanako 这类人设时"
-        "要连这一行一起改，否则她还是自称豆腐。留空才回落到人设的目录名",
+        hint="它自称什么，只是个代号，有意不随人设变——切人设换的是性格，名字照旧。"
+        "想让她换个名字就改这里，直播中即改即生效；留空才回落到人设的目录名",
         audience=Audience.STREAMER,
         reload=Reload.LIVE,
         group="人设",

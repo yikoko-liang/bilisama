@@ -2731,11 +2731,15 @@ async def run_director(args: argparse.Namespace) -> int:
                     if wanted == settings.persona.id:
                         return
                     try:
-                        # One batch: the id, and the display name reset so the
-                        # new persona does not keep introducing itself by the
-                        # old one's name (ui_meta warned about exactly this).
+                        # Persona and name are LAYERS, by design (user ruling
+                        # 2026-08-30): the persona is the underlying character,
+                        # display_name is just her handle — 豆腐 can stay 豆腐
+                        # across a personality swap. So the switch touches
+                        # persona.id ONLY; renaming is its own edit
+                        # (persona.display_name, live-editable on the advanced
+                        # page). An earlier version cleared the name here —
+                        # that coupled the two layers exactly backwards.
                         announce(await apply_runtime_edit("persona.id", wanted))
-                        announce(await apply_runtime_edit("persona.display_name", ""))
                     except ConfigEditError as exc:
                         announce(str(exc))
                     return

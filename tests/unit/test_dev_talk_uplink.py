@@ -1268,3 +1268,20 @@ def test_the_wire_path_watchdog_death_is_audible() -> None:
     assert statement.rstrip().endswith(
         "_watch(asyncio.create_task("
     ), "wire 模式的默认输出巡检没有包 _watch——它死了没人听得见"
+
+
+def test_the_assistant_switch_changes_the_persona_and_never_the_name() -> None:
+    """Persona and display_name are LAYERS by design (user ruling 2026-08-30):
+    the persona is the underlying character, the name is just her handle —
+    豆腐 stays 豆腐 across a personality swap unless the operator renames her
+    through persona.display_name's own edit channel. An earlier version
+    cleared the name inside the switch; this reads the source so that
+    coupling cannot quietly come back."""
+    source = _DEV_TALK_PY.read_text(encoding="utf-8")
+    select_block = source.split('if action == "select":', 1)[1].split('if action == "save":', 1)[0]
+    edits = select_block.count("apply_runtime_edit(")
+    assert 'apply_runtime_edit("persona.id"' in select_block
+    assert edits == 1, f"切人设只许改 persona.id 这一条，现在有 {edits} 个编辑调用"
+    assert (
+        'apply_runtime_edit("persona.display_name"' not in select_block
+    ), "切人设不许顺手动名字——名字是独立的一层"
