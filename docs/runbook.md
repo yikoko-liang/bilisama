@@ -417,7 +417,9 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
 
 ### 助手页：直播中换人设
 
-四张人设卡（tofu / butter / hanako / ming），当前那张有标记。切换要二次确认，直播中
+五张人设卡（tofu / butter / hanako / ming / mia），当前那张有标记。mia 是 yiko 分支
+「元气版」人设的移植（高情商元气少女，交互细则更丰富），名字照两层规则跟 display_name
+走，不叫 Miya。切换要二次确认，直播中
 就能切：只换提示词，皮肤和音色跟配置走。每张卡的 identity / personality 都能就地编辑，
 保存写进活副本（`~/.local/share/bilisama/personas/<id>/`），删掉活副本就回到随包原稿。
 切人设**不动名字**：人设和名字是两层，名字只是代号（见下面「名字」一节）——切到
@@ -580,7 +582,7 @@ VAD 阈值。
 人设相关：
 
 ```bash
-.venv/bin/bilisama persona list        # 四个随包人设：tofu + openhanako 移植的 hanako/ming/butter
+.venv/bin/bilisama persona list        # 五个随包人设：tofu、mia（yiko 元气版）+ openhanako 移植的 hanako/ming/butter
 .venv/bin/bilisama persona review      # 生长层翻看 / --promote 合并进性格 / --drop 划掉
 ```
 

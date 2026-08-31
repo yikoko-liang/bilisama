@@ -32,7 +32,7 @@ GLOBAL_PROACTIVE = CONFIG_DIR / "prompts" / "proactive.md"
 # ------------------------------------------------------------ ported personas
 
 
-@pytest.mark.parametrize("pid", ["tofu", "hanako", "ming", "butter"])
+@pytest.mark.parametrize("pid", ["tofu", "hanako", "ming", "butter", "mia"])
 def test_every_shipped_persona_loads_and_substitutes(tmp_path: Path, pid: str) -> None:
     store = PersonaStore(tmp_path / "live", CONFIG_DIR / "personas" / pid)
     anchors = store.anchors({"userName": "主播", "agentName": pid})

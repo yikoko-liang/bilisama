@@ -436,7 +436,7 @@ def test_template_variables_come_from_config() -> None:
     assert template_variables(named)["userName"] == "主播", "the neutral default still works"
 
 
-@pytest.mark.parametrize("persona_id", ["tofu", "hanako", "ming", "butter"])
+@pytest.mark.parametrize("persona_id", ["tofu", "hanako", "ming", "butter", "mia"])
 def test_no_shipped_template_leaks_a_raw_placeholder(persona_id: str) -> None:
     """Every {{name}} any shipped persona uses must be one template_variables
     supplies. A missing key is silent: the raw {{agentName}} simply sits in the
