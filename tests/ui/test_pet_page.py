@@ -1672,7 +1672,13 @@ async def test_picking_a_skin_remounts_the_pet_live(
         await asyncio.sleep(0.01)
 
     await _wait(page, "document.title.includes('豆腐')", timeout_ms=10000)
-    await _wait(page, "document.querySelector('#pet-mount canvas')?.width === 156")
+    # Same allowance as the final wait below: the page is reconnecting to a
+    # server rebuilt on the same port, and the tofu mount only follows the
+    # hello. At the 5 s default this timed out in two of three full gate runs
+    # (2026-09-03) while passing every time on its own (ledger #96).
+    await _wait(
+        page, "document.querySelector('#pet-mount canvas')?.width === 156", timeout_ms=15000
+    )
     await page.click("#corner")
     await page.click("[data-tab='assistants']")
     # Seed the card list the way production does; the CLICK then exercises the
