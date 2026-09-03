@@ -1,16 +1,22 @@
-"""`bilisama dev-talk`: a human voice through OUR stack, before Electron exists.
+"""`bilisama dev-talk`: the entry point that stands the whole stack up.
 
-Stage 2's acceptance line says a real person must be able to talk to it. The
-audio front end is stage 6, so this is the development stand-in: microphone
-(or a WAV file) in, replies out — through RealtimeClient and the dialect
-codecs, not around them. Which makes it the only way to voice-test DashScope
-at all: upstream's own talk client speaks GA event names exclusively, and the
+It started as stage 2's development stand-in — a human voice through OUR
+stack before any front end existed — and the bare-link mode (`run`) is still
+that: microphone or WAV in, replies out, through RealtimeClient and the
+dialect codecs, not around them. `--director` (`run_director`) grew into the
+production entry: the launcher (start_bilisama.sh) execs it, and it assembles
+persona, memory, scheduler, ingest, the UI server and the Electron shell. A
+proper `run`/`serve` command is stage 7 work; until then this IS the product's
+front door, name notwithstanding.
+
+The bare-link mode is also the only way to voice-test DashScope at all:
+upstream's own talk client speaks GA event names exclusively, and the
 DashScope endpoint answers in beta, so that client connects and then plays
 silence (probed live, 2026-08-10).
 
-Wire-level frames are allowed here on purpose. This is a dev tool standing in
-for the P1 front end; the guarded layers (director/ and friends) still know
-nothing below SpeechLink.
+Wire-level frames are allowed here on purpose. This module stands in for the
+P1 front end; the guarded layers (director/ and friends) still know nothing
+below SpeechLink.
 
 Microphone mode needs sounddevice (`uv pip install sounddevice`); WAV mode
 runs on the standard library alone and writes the reply audio next to the
@@ -2376,7 +2382,7 @@ async def run_director(args: argparse.Namespace) -> int:
             """The session is ending: whoever lets go now, stay let go.
 
             release() runs from uvicorn's own task (the audio endpoint's
-            finally, ui/server.py:422), which keeps being scheduled while
+            finally, ui/server.py:479-481), which keeps being scheduled while
             teardown waits on its gather — so a page still holding the
             devices at Ctrl-C hands them back INSIDE
             the shutdown, and resume() would take a fresh microphone and a

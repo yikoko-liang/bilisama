@@ -292,7 +292,7 @@ class PlaybackTally:
         by the speaker alone shows 「思考中」 during generation and drops to
         「空闲」 the moment the server finishes, which is when the page is only
         just starting to play. The receipts counted here are the witness on
-        this side; see VoiceSignals.audio_busy (ui/hub.py:51).
+        this side; see VoiceSignals.audio_busy (ui/hub.py:54).
         """
         return self._outstanding > 0
 

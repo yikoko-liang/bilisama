@@ -64,9 +64,9 @@ class GuardLevel(StrEnum):
 class Medal:
     name: str = ""
     level: int = 0
-    # NO CONSUMER YET. Mapped from DANMU_MSG only (source.py's _medal call for
-    # danmaku passes runame; every other kind passes ""), so it is empty on
-    # most events. Read it and you are reading a field nothing maintains.
+    # Mapped from DANMU_MSG only (source.py's _medal call for danmaku passes
+    # runame; every other kind passes ""), so it is empty on most events. The
+    # panel feed shows it (ui/events.py); nothing else should lean on it.
     up_name: str = ""
     anchor_room_id: int = 0
 
@@ -101,7 +101,7 @@ class Viewer:
     # This one is the easiest to misread: every mapped event fills it.
     face_url: str = ""
     user_level: int = 0  # scoring.py:74 reads this one
-    wealth_level: int = 0  # NO CONSUMER YET; DANMU_MSG fills it, nothing reads it
+    wealth_level: int = 0  # DANMU_MSG fills it; only the panel feed reads it (ui/events.py)
     guard_level: GuardLevel = GuardLevel.NONE
     is_admin: bool = False
     # Set by the bilibili source when the sender is the room's own streamer
@@ -125,8 +125,9 @@ class Viewer:
 
     @property
     def display_name(self) -> str:
-        """NO CONSUMER YET: the fallback wording a greeting would need, kept
-        here so the "一位观众" string has one home rather than three."""
+        """The fallback wording a greeting needs, kept here so the "一位观众"
+        string has one home: the entry welcome (director/intents.py) and the
+        panel feed (ui/events.py) both read it."""
         return self.name or "一位观众"
 
 
@@ -141,16 +142,18 @@ class Gift:
     # 100 == 1 battery == CNY 0.1. Product tiers speak battery, not gold.
     unit_battery: int = 0
     combo_id: str = ""
-    # NO WIRE WRITER, NO CONSUMER. The platform's own combo signals: only the
-    # replay fixtures fill them (tests/fakes/replay.py), because a fixture
+    # NO WIRE WRITER; the panel feed reads combo_count (ui/events.py), nothing
+    # else does. The platform's own combo signals: only the replay fixtures
+    # fill them (tests/fakes/replay.py), because a fixture
     # records what arrived. No mapper in source.py sets either one, and the
     # aggregator settles a combo on its 1.0s idle timer rather than on
     # combo_end (safety.py) — deliberately, since the last hit's combo_end can
     # go missing and an unsettled combo is an unthanked gift.
     combo_count: int = 0
     combo_end: bool | None = None
-    # NO CONSUMER YET: written by GiftComboAggregator._aggregate; the thank-you
-    # text that would say "连击 50 次" is not built yet.
+    # Written by GiftComboAggregator._aggregate and shown in the panel feed
+    # (ui/events.py); the spoken thank-you that would say "连击 50 次" is not
+    # built yet.
     aggregated_count: int = 1  # >1 once several small gifts were merged into one
 
     @property

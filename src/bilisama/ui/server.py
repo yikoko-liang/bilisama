@@ -560,7 +560,8 @@ async def _fill_uplink_silence(
     provider's sense of time — it freezes it, and the streamer's next sentence
     is merged into the turn before it. The local microphone path has honoured
     this from the start: while the mic is muted for the echo shield it pushes
-    a silence block rather than skipping one (dev_talk.py:342-347), and the WAV
+    a silence block rather than skipping one (dev_talk.py:559-564, in _uplink),
+    and the WAV
     pump does the same after the file ends. The page inherited the devices and
     not the rule, and its capture can be missing for a whole session (getUserMedia
     denied, and ws.onopen does not look at the answer) or for the length of a

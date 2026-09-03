@@ -1,17 +1,19 @@
 """The first gate the shipped JavaScript has ever had.
 
-Ledger #52: ~2200 lines of JS — the page's modules plus the Electron shell —
-with no eslint, no prettier, no tsconfig and no step in scripts/gate.sh, while
-the Python beside it goes through black + ruff + mypy --strict. The only cover
-was the browser tier, which skips whole on a machine without chromium, and
-which never loads desktop/preview at all.
+Ledger #52 (2026-08-25): a couple of thousand lines of JS — the page's modules
+plus the Electron shell — had no eslint, no prettier, no tsconfig and no step in
+scripts/gate.sh, while the Python beside it goes through black + ruff + mypy
+--strict. The only cover was the browser tier, which skips whole on a machine
+without chromium, and which never loads desktop/preview at all.
 
 What this pins is deliberately narrow: every shipped file parses, and every
 static import in it resolves to a file that exists. That is the class of
 mistake nothing else here can catch — preload.cjs is loaded by no test and no
 tool, and on a chromium-less machine neither is anything else. It is NOT a
-linter; eslint/prettier would need node_modules at the repo root and a step in
-scripts/gate.sh, and both are still owed (ledger #52 stays open).
+linter: eslint has since landed as the gate's tenth step (eslint.config.mjs,
+`npm install` at the repo root; ledger #52 closed), and this file stays because
+no lint rule checks that a static import resolves to a file that exists.
+prettier is still not wired.
 
 Unmarked, so the gate's unit step runs it. Skips out loud without node.
 """

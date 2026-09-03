@@ -149,7 +149,7 @@ def _json_safe(value: Any) -> Any:
     JSON has no infinity, and the settings page reads this output (plan §7.5).
     `max_speech_ms` defaults to inf, and the launch renderer says the same thing by
     dropping the key, because upstream reads a missing value as "no limit"
-    (bootstrap/s2s_launch.py:90-92). Here every field path has to stay put for the
+    (bootstrap/s2s_launch.py:112-115). Here every field path has to stay put for the
     settings page to find it, so null carries that meaning instead.
     """
     if isinstance(value, dict):

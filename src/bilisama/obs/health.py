@@ -113,7 +113,11 @@ class LinkHealth:
 
 
 def create_app(registry: HealthRegistry) -> FastAPI:
-    """A minimal app exposing GET /health. Mounted by the UI server (server.py:461)."""
+    """A minimal app exposing GET /health.
+
+    Mounted LAST by the UI server (ui/server.py:496): its prefix is the bare
+    token, so anything mounted after it would be swallowed.
+    """
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 
     @app.get("/health")

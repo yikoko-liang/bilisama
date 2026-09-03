@@ -1002,11 +1002,11 @@ _PROVIDERS = frozenset(p.value for p in ProviderName)
 def _scope_by_path(table: dict[str, FieldMeta]) -> None:
     """Anything under `speech.<provider>.` belongs to that provider. Say so.
 
-    Thirty entries take their scope from here today; the twenty-four under
-    `speech.s2s.` are invisible in practice because s2s is the shipped default
-    and `ui/server.py` only hides the sections that are NOT running. The six
-    that changed behaviour are dashscope's and openai_ga's endpoint, model and
-    key status, which the panel used to list while another backend was live.
+    Most entries that take their scope from here sit under `speech.s2s.` and
+    are invisible in practice, because s2s is the shipped default and
+    `ui/server.py` only hides the sections that are NOT running. The ones that
+    changed behaviour are dashscope's and openai_ga's endpoint, model and key
+    status, which the panel used to list while another backend was live.
 
     Thirty entries had left `provider_scoped` blank — every endpoint, model and
     key under dashscope, openai_ga and s2s, plus every knob under
@@ -1092,7 +1092,7 @@ def check_ui_meta(meta: Mapping[str, FieldMeta] | None = None) -> list[str]:
     """Plan §7.7 gate 1: metadata complete enough to render a control.
 
     `group` is in here because it was the one key the gate named and never
-    looked at. All 108 entries carry one today, so nothing would have noticed
+    looked at. Every entry carries one today, so nothing would have noticed
     until a settings page put an unlabelled row in a group called "".
 
     The bounds half of that gate needs the schema rather than the metadata and

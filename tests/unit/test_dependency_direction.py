@@ -6,13 +6,14 @@ check, because it is the kind of promise people keep right up until the afternoo
 they are debugging a stuck turn: director/, persona/, memory/ and tools/ may not
 import realtime.providers.*, and may not carry the protocol's own string literals.
 
-The four packages hold nothing but an empty __init__.py today. That is why the
-per-module checks are parametrised per file and why test_gate_has_anything_to_check
-skips out loud with the count: `pytest -v` then reads as "looked at four empty
-package markers, checked 0 modules", not as "L3 is clean". The planted-violation
-test carries the weight in the meantime by running the real checker over a module
-that breaks the rule in every shape, so the gate is known to bite before it has
-anything to bite.
+When this gate was written the four packages held nothing but an empty
+__init__.py; today director/, persona/, memory/ and ui/ carry real code and
+tools/ is still empty. The shape is unchanged: the per-module checks are
+parametrised per file, empty markers are labelled `:empty` in the ids, and
+test_gate_has_anything_to_check skips out loud with the count should the guarded
+packages ever be empty again, so `pytest -v` never reads "L3 is clean" over an
+empty room. The planted-violation test keeps proving the checker has teeth,
+independent of what the packages hold.
 
 §10.6 says grep. This uses ast instead, deliberately: grep reddens on the docstring
 and the comment that document the rule, and it misses `from ..realtime import

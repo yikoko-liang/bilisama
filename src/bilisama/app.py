@@ -151,7 +151,7 @@ class Assembly:
         # (ui_meta says so), and re-reading per push would let a mid-stream
         # edit shift the cached prefix under the provider.
         # Both keys, always: a partial mapping leaves the raw {{agentName}} in
-        # the prompt (three of the four shipped personas use it in their title).
+        # the prompt (most shipped personas use it in their title).
         # Callers pass persona.template_variables(cfg); this is only the floor.
         # One greeting per VIP per stream (plan section 2.7's acceptance):
         # the fixture's captain walks in twice and gets named once. Assembly

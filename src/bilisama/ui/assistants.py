@@ -1,7 +1,8 @@
 """The assistant page's data: every shipped persona, switchable and editable.
 
-This branch ships four persona packages (config/personas/<id>/), each a pair
-of human-written anchors with a live copy under the data home. The page lists
+This branch ships a handful of persona packages (config/personas/<id>/) —
+list_personas discovers them, so the count is never written down here — each
+a pair of human-written anchors with a live copy under the data home. The page lists
 them as cards, switches the ACTIVE one mid-stream (persona.id is a hooked
 live edit), and edits anchors through PersonaStore.write_anchor — the live
 copy only, so deleting it is always a way back to the shipped text.
