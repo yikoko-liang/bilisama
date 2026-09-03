@@ -2083,6 +2083,7 @@ async def run_director(args: argparse.Namespace) -> int:
         clock=clock,
         max_tokens=live_thresholds().max_output_tokens,
         protect_ms=settings.interaction.sc_protect_ms,
+        protect_paid=settings.interaction.protect_paid_replies,
         variables=variables,
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
@@ -2115,6 +2116,7 @@ async def run_director(args: argparse.Namespace) -> int:
         assembly.configure_interaction(
             max_tokens=live.max_output_tokens,
             protect_ms=settings.interaction.sc_protect_ms,
+            protect_paid=settings.interaction.protect_paid_replies,
             gift_battery_high=settings.interaction.gift_battery_high,
             gift_battery_medium=settings.interaction.gift_battery_medium,
         )

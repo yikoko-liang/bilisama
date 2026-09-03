@@ -107,7 +107,9 @@ on_hit = "drop_sentence"
 [interaction]
 chattiness = "medium"                   # 说话频率的相对档位；实际节奏跟着房间活跃度动态走
 reply_length = "low"                    # 每句说多长，独立于说话频率；low 一句短话
-sc_protect_ms = 4000                    # 旧版兼容字段；主播现在始终可打断，付费事件靠重排队防丢
+protect_paid_replies = false            # 开着时 SC 和高额礼物的答谢在下面的时长内不被主播打断；只有本地引擎能真挡住，
+                                        # 云端照样会断、断了重排队（config validate 会提醒）。关着时主播随时可打断，付费靠重排队防丢
+sc_protect_ms = 4000                    # 上面开关开着时的保护时长（毫秒），到点自动放开；关着时不起作用
 gift_battery_high = 1000                # 高额礼物门槛，单位电池（观众礼物面板上的数，1 电池 = 0.1 元）
 gift_battery_medium = 100               # 中额礼物门槛，同上；不得高于高额门槛
 burst_uniques = 5                       # 以下三项仅兼容旧配置；动态进房合并不再读取

@@ -185,7 +185,7 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
   重排队（:958-1022）。s2s 的 done(cancelled) 先于 speech_started 到，所以 `_on_done` 里用
   `expect_speech_edge` 压住 0.3 秒，防止重排队的意图在两帧之间被再派再杀（:703-756，计划 #29）。
 - 保护段生命周期：dispatch 时起 protect_ms 硬上限任务，settle 和硬上限两处都会 `_end_protection`
-  且只执行一次（:827-870）。今天没有任何生产者置 `protected=True`，见第 14 节。
+  且只执行一次（:827-870）。`protected` 的唯一生产者是 `intent_for`，由 `[interaction] protect_paid_replies` 开关决定（默认关）。
 - 出口守卫：`_on_delta` 命中敏感词就 PlaybackClear + cancel + FAILED@SPEAKING，`on_hit=mute_all`
   时升级成 panic（:682-701）。
 - 回复完成：文本喂给 spoken_sink 当口癖素材、按 write_history 把 assistant 回复写回历史（旁路回复
@@ -202,8 +202,7 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 礼物按电池三档、上舰按舰长 / 提督 / 总督分仪式感、进房对照最近三次不重样。
 
 `intent_for`（:229-313）做映射：礼物按 `total_battery` 分档，高档保 BIG_GIFT、中档降到 VIP_ENTER、
-小额当弹幕；付费事件 `requeue_on_interrupt=True` 但 `protected=False`——主播开口是硬上限，付费保护的
-含义是「回来再说」，不是「盖过去」；弹幕 TTL 20 秒从到达时刻起算。主播自己的弹幕走
+小额当弹幕；付费事件 `requeue_on_interrupt=True`；`protected` 由 `[interaction] protect_paid_replies` 决定（默认关，开了只保护 SC 和高额礼物，2026-09-03 加）——关着时主播开口是硬上限，付费保护的含义是「回来再说」；弹幕 TTL 20 秒从到达时刻起算。主播自己的弹幕走
 `anchor_danmaku_context_item`（:106-122）只写上下文不回复。
 
 这里的逐类规则和 `config/personas/live/event_responses.md` 有意重叠，代码注释明说要靠人手保持同步，
@@ -404,7 +403,7 @@ chattiness 只是乘在上面的系数 1.35 / 1.0 / 0.7，另定普通车道令�
 | custom_tts | engine, voice, speed, api_key_ref | 整节无运行期读者，阶段 4 |
 | audio | input_device, output_device, output_route, echo_guard, input_enabled, output_enabled, noise_sensitivity | 前四个无读者，`tests/unit/test_ui_meta.py:277` 守着这个事实 |
 | safety | wordlist_path, allowlist_path, on_hit | |
-| interaction | chattiness, reply_length, speak 十一开关, sc_protect_ms, gift_battery_high / medium, burst_* 三个, entry_welcome 三分闸, proactive{max_per_hour, wake_interval_s} | burst_* 和 sc_protect_ms 已无实际语义 |
+| interaction | chattiness, reply_length, speak 十一开关, protect_paid_replies, sc_protect_ms, gift_battery_high / medium, burst_* 三个, entry_welcome 三分闸, proactive{max_per_hour, wake_interval_s} | burst_* 已无实际语义；sc_protect_ms 只在 protect_paid_replies 开着时生效 |
 | memory | db_path, distill_every_n_events, retain_event_days, write_batch_ms, clock_granularity_min | db_path 无读者，实际用 room_dir/memory.db |
 | persona | id, data_dir, streamer_name, display_name（≤20）, growth{relationship, voice} | |
 | avatar | renderer sprite / live2d, model_id, expression_source | v4 拆成两轴 |
@@ -510,7 +509,7 @@ import」。
 | 上下文管理 | 静态前缀加动态尾段、变了才推、语音规则和事件规则分作用域、旁路回复镜像写回历史、主播弹幕当共享上下文 | 侧路调用不复用直播会话前缀缓存（#71，本质是架构决定） |
 | 主动性 | 完成，接了房间活跃度、预算、让路、无侧路模型的兜底 | 戳桌宠绕过所有 speak 开关（#48） |
 | 直播互动 | 完成并真房间验过：解析预算、付费侧袋、连击聚合、三态打分、单赢家窗口、延迟池、进房合并、VIP 提升、SC 撤回 | 出厂敏感词表是占位（#92）；follow / like / share 前端已置灰但后端无发声意图（#50）；msg_type 4/5/6 待真房间验证、blivedm 到期 2026-11-13（#95） |
-| 打断判停 | VAD 和判停全在语音后端，P2 不跑 VAD；打断链是 SpeechStarted → cancel + PlaybackClear → 音频队列 flush 标记 → 页面 stopEverything → playback.cancelled；付费保护只在 s2s 真生效，DashScope 探明不可行，付费事件改成靠重排队；回声消除靠 Chromium，真机三组对照 0 次自我打断 | 投机静默窗取常量而不是计划写的分支值（#33）；`audio.echo_guard` 那个能量门没写；延迟基线没量（#16）；受保护段机制没有生产者，已决定保留，`sc_protect_ms` 只管时长、没有开关（#91） |
+| 打断判停 | VAD 和判停全在语音后端，P2 不跑 VAD；打断链是 SpeechStarted → cancel + PlaybackClear → 音频队列 flush 标记 → 页面 stopEverything → playback.cancelled；付费保护只在 s2s 真生效，DashScope 探明不可行，付费事件改成靠重排队；回声消除靠 Chromium，真机三组对照 0 次自我打断 | 投机静默窗取常量而不是计划写的分支值（#33）；`audio.echo_guard` 那个能量门没写；延迟基线没量（#16）；受保护段由 `protect_paid_replies` 开关控制（默认关），只有 s2s 能真挡住打断，云端由 `config validate` 提醒（#91 已关） |
 | 工具调用接口 | 只有收的一半：L2 能收 `ToolCall`（`client.py:541-551`），`dialect.tool_spec` 能翻译两种声明格式 | `tools/` 空包；`ToolRegistry`、`ToolSpec`、`get_stream_status` 不存在；`static_prefix` 的 `tool_block` 无调用方；pin/unpin（#21）和 BackgroundRunner（#64）没开工 |
 | 统一可配置参数 | 完成：单一 toml、profile 覆盖层、用户层、面板热改、114 字段、14 条校验、125 条元数据、v1→v4 迁移 | 一批「配了没人读」的字段（9.5 节）；密钥没有非终端入口；装机后随包配置找不到（#43、#55） |
 | 底层语音原子能力 | 已有：16k/20ms 采集、本地噪声门、Chromium 回声消除、回声探针、16k→24k 重采样、24k 播放（页面或本机 `_Speaker` 带 10 秒缓冲上限）、按段计数的播放回执、CoreAudio 默认输出跟随、设备归属仲裁 | 自研 TTS 链整条没有（TTSEngine / tagparser / chunker / mux）；形象驱动没有；说话动画是伪脉冲，`voice.level` 无生产者（#75）；`custom_tts.voice` 是假音色框（#66） |
@@ -519,8 +518,8 @@ import」。
 
 编号都指向计划 §16.8。
 
-- 受保护段没有生产者：`src/` 里没有一处把 `ReplySpec.protected` 置真，机制和测试都还在（#91）。
-  2026-09-03 拍板保留；`interaction.sc_protect_ms` 只管时长、没有「要不要保护」的开关，所以时长今天空转。
+- 受保护段：2026-09-03 加了 `[interaction] protect_paid_replies` 开关（默认关），开着时 SC 和高额礼物的答谢在
+  `sc_protect_ms` 内不被打断；只有 s2s 能真挡住，云端由 `config validate` 提醒（#91 已关）。
 - 出厂敏感词表是占位，上线前必须换（#92）。
 - 一批代码注释与文案漂移（#93）：2026-09-03 已修——`events.py` 的四个「NO CONSUMER YET」、「四个随包人设」的
   文案、`dev_talk.py` 模块头、`test_dependency_direction.py` 文件头、几处跨文件行号引用。

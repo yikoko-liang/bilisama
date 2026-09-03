@@ -311,6 +311,14 @@ class InteractionConfig(BaseModel):
     # Reuses the three-level enum; the token caps live in derive.py.
     reply_length: Chattiness = Field(Chattiness.LOW)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
+    # Ledger #91. Off: the streamer's next word always lands, and a paid
+    # thank-you that gets cut off is requeued. On: SC and high-tier gift
+    # replies hold the floor for sc_protect_ms — fully on s2s, which disarms
+    # the backend's own barge-in for that long; on hosted backends only the
+    # scheduler half applies, and validate.py says so.
+    protect_paid_replies: bool = Field(False)
+    # The protection window's length. Honoured only while protect_paid_replies
+    # is on; forwarded unconditionally so flipping the switch needs no rebuild.
     sc_protect_ms: int = Field(4000, ge=0, le=15000)
     # Tiers in the frontend battery unit — the number a viewer actually sees
     # on the gift panel (wire price 100 == 1 battery == CNY 0.1). validate.py

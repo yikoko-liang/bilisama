@@ -90,6 +90,7 @@ class Assembly:
         clock: Clock,
         max_tokens: int = 120,
         protect_ms: int = 4000,
+        protect_paid: bool = False,
         variables: Mapping[str, str] | None = None,
         context_refresh_s: float = 10.0,
         clock_granularity_min: int = 1,
@@ -126,6 +127,7 @@ class Assembly:
         self._clock = clock
         self._max_tokens = max_tokens
         self._protect_ms = protect_ms
+        self._protect_paid = protect_paid
         self._refresh_s = context_refresh_s
         self._clock_granularity_min = clock_granularity_min
         self._selector = selector
@@ -324,6 +326,7 @@ class Assembly:
             gift_battery_high=self._gift_battery_high,
             gift_battery_medium=self._gift_battery_medium,
             base_instructions=self.build_event_context() or None,
+            protect_paid=self._protect_paid,
         )
         if intent is not None:
             self.intents_submitted += 1
@@ -513,6 +516,7 @@ class Assembly:
         protect_ms: int | None = None,
         gift_battery_high: int | None = None,
         gift_battery_medium: int | None = None,
+        protect_paid: bool | None = None,
     ) -> None:
         """Apply panel edits to the knobs this assembly snapshotted at build.
 
@@ -527,6 +531,8 @@ class Assembly:
             self._gift_battery_high = gift_battery_high
         if gift_battery_medium is not None:
             self._gift_battery_medium = gift_battery_medium
+        if protect_paid is not None:
+            self._protect_paid = protect_paid
 
     # ------------------------------------------------------------ health
 

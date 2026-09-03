@@ -195,6 +195,9 @@ def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
         "interaction.entry_welcome.naval",
         "interaction.entry_welcome.ranking",
         "interaction.sc_protect_ms",
+        # LIVE with the switch it governs (ledger #91): both reach the Assembly
+        # through refresh_interaction_settings and are read per intent.
+        "interaction.protect_paid_replies",
         "interaction.proactive.max_per_hour",
         "interaction.proactive.wake_interval_s",
         "room.stream_intro",

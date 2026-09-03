@@ -278,6 +278,30 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
                 )
             )
 
+    # Ledger #91. The protection window is the scheduler refusing to cancel a
+    # paid thank-you while the streamer talks, plus the adapter disarming the
+    # backend's own barge-in for that long. Only s2s has the second half
+    # (providers/s2s.py); DashScope swallows the field (probed 2026-08-25,
+    # hosted.py warns once) and volcano has no such switch at all. There the
+    # window is half a promise — she still gets cut off, and the requeue is
+    # what actually saves the thank-you — so say so rather than let the switch
+    # look like it works.
+    if s.interaction.protect_paid_replies and s.speech.provider is not ProviderName.S2S:
+        problems.append(
+            ConfigProblem(
+                field="interaction.protect_paid_replies",
+                message=(
+                    f"付费答谢防打断只有本地语音引擎（s2s）能真挡住：{s.speech.provider.value} "
+                    "的判停会照样打断她，这个开关在这条路上只剩「被打断后重新排队」那一半。"
+                ),
+                fix=(
+                    "接受这个效果就不用改；想真挡住，把 [speech] provider 换成 s2s，"
+                    "或者关掉这个开关。"
+                ),
+                fatal=False,
+            )
+        )
+
     # Plan section 7.6 row 5. The rate mismatch that used to make this a real
     # obstacle is handled now (realtime/resample.py converts the uplink), so
     # what is left is a commercial and regulatory caution, not a technical one:

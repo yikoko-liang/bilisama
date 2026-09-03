@@ -746,3 +746,33 @@ async def test_real_live_rule_files_reach_their_turn_scopes(tmp_path: Path) -> N
     assert "回复长度档位" in voice_scope, "the reply-length line reaches voice turns"
     assert "当前输入：直播间事件" in event_scope
     assert "当前输入：直播间事件" not in voice_scope
+
+
+async def test_paid_protection_flips_live_through_configure_interaction(tmp_path: Path) -> None:
+    """Ledger #91: the switch is read at intent-build time, so a panel edit
+    reaches the NEXT paid reply without a rebuild — the same path the gift
+    tiers and the reply length already take."""
+    kit = build_assembly_kit(tmp_path, speak=SpeakSwitches(super_chat=True))
+
+    def superchat(event_id: str) -> LiveEvent:
+        return LiveEvent(
+            kind=EventKind.SUPER_CHAT,
+            room_id=0,
+            viewer=Viewer(uid=7, name="老板"),
+            text="主播好",
+            value_cny=30.0,
+            event_id=event_id,
+        )
+
+    await kit.assembly.on_event(superchat("sc:1"))
+    assert kit.intents[-1].injection.reply.protected is False, "出厂默认不保护"
+
+    kit.assembly.configure_interaction(protect_paid=True, protect_ms=2500)
+    await kit.assembly.on_event(superchat("sc:2"))
+    reply = kit.intents[-1].injection.reply
+    assert reply.protected is True
+    assert reply.protect_ms == 2500
+
+    kit.assembly.configure_interaction(protect_paid=False)
+    await kit.assembly.on_event(superchat("sc:3"))
+    assert kit.intents[-1].injection.reply.protected is False, "关掉也要立刻生效"

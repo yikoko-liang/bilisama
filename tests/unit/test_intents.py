@@ -15,7 +15,7 @@ import logging
 import pytest
 
 from bilisama.director.intents import burst_welcome_intent, intent_for
-from bilisama.ingest.events import EventKind, LiveEvent, Viewer
+from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Viewer
 
 _BODY = "主播今天玩什么游戏"
 
@@ -282,3 +282,68 @@ def test_entry_welcome_pins_its_context_and_anti_template_rules() -> None:
     assert "变换句子结构" in rules
     assert "咱们正聊着" in rules, "the named anti-template stays named"
     assert "简单欢迎" in rules or "轻量招呼" in rules
+
+
+def _superchat(value: float = 30.0) -> LiveEvent:
+    return LiveEvent(
+        kind=EventKind.SUPER_CHAT,
+        room_id=777,
+        viewer=Viewer(uid=7, name="老板"),
+        text=_BODY,
+        value_cny=value,
+        event_id="sc:9",
+    )
+
+
+def _gift(batteries: int) -> LiveEvent:
+    return LiveEvent(
+        kind=EventKind.GIFT,
+        room_id=777,
+        viewer=Viewer(uid=8, name="金主"),
+        gift=Gift(gift_id=1, name="小心心", num=1, unit_battery=batteries),
+        value_cny=batteries / 10,
+        event_id=f"gift:{batteries}",
+    )
+
+
+def test_paid_protection_stays_off_unless_the_switch_is_on() -> None:
+    """Ledger #91: the protection window only arms when the config says so.
+
+    Off is the shipped default — the streamer's next word always lands — and
+    on adds protection ON TOP of the requeue, never instead of it: a paid
+    thank-you that survives barge-in still comes back if something else kills
+    it.
+    """
+    off = intent_for(_superchat(), now=0.0, protect_ms=2500)
+    on = intent_for(_superchat(), now=0.0, protect_ms=2500, protect_paid=True)
+
+    assert off is not None and on is not None
+    assert off.injection.reply.protected is False
+    assert on.injection.reply.protected is True
+    assert on.injection.reply.protect_ms == 2500, "时长要跟着开关一起送到"
+    assert on.requeue_on_interrupt is True, "保护是加在重排队之上，不是替代它"
+
+
+def test_paid_protection_covers_superchat_and_high_gifts_only() -> None:
+    """Plan section 4.2's rule: SC and big gifts. A medium gift rides the
+    VIP_ENTER rung and a guard buy sits below BIG_GIFT, so neither blocks the
+    streamer for a whole window — they keep the requeue and nothing more."""
+
+    def protected(event: LiveEvent) -> bool:
+        intent = intent_for(event, now=0.0, protect_paid=True)
+        assert intent is not None
+        return intent.injection.reply.protected
+
+    guard = LiveEvent(
+        kind=EventKind.GUARD_BUY,
+        room_id=777,
+        viewer=Viewer(uid=9, name="舰长", guard_level=GuardLevel.CAPTAIN),
+        value_cny=198.0,
+        event_id="guard:1",
+    )
+    assert protected(_superchat()) is True
+    assert protected(_gift(1000)) is True, "高额礼物（>= gift_battery_high）保护"
+    assert protected(_gift(100)) is False, "中额礼物走 VIP_ENTER 档，不保护"
+    assert protected(_gift(5)) is False
+    assert protected(_danmaku()) is False
+    assert protected(guard) is False, "上舰在 BIG_GIFT 之下，按计划 4.2 只重排队"

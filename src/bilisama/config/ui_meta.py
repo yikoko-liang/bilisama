@@ -314,11 +314,22 @@ UI_META: dict[str, FieldMeta] = {
         group="互动",
         order=5,
     ),
+    "interaction.protect_paid_replies": FieldMeta(
+        label="付费答谢防打断",
+        hint=(
+            "开着时，SC 和高额礼物的答谢在保护时长内不被主播打断；只有本地语音引擎能真挡住，"
+            "云端后端照样会被打断，断了重新排队"
+        ),
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=3,
+    ),
     "interaction.sc_protect_ms": FieldMeta(
-        label="旧版付费消息保护时长",
-        hint="已不再生效：主播现在任何时候都能打断，付费答谢靠重新排队防丢",
+        label="付费答谢保护时长",
+        hint="防打断开着时一条答谢最多保护这么久，到点自动放开；关着时这个数不起作用",
         unit="ms",
-        audience=Audience.DEVELOPER,
+        audience=Audience.OPERATOR,
         reload=Reload.LIVE,
         group="互动",
         order=3,

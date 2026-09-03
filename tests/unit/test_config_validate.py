@@ -60,6 +60,7 @@ def _settings(
     config_version: int = CURRENT_VERSION,
     gift_battery_high: int = 1000,
     gift_battery_medium: int = 100,
+    protect_paid_replies: bool = False,
 ) -> Settings:
     """Shipped defaults with a model id, and one axis moved off it.
 
@@ -91,6 +92,7 @@ def _settings(
             "interaction": {
                 "gift_battery_high": gift_battery_high,
                 "gift_battery_medium": gift_battery_medium,
+                "protect_paid_replies": protect_paid_replies,
             },
             "persona": {"growth": {"voice": growth_voice}},
         }
@@ -171,6 +173,13 @@ BROKEN_ONE_WAY_EACH = {
     ),
     "safety.wordlist_path": _Broken(
         _settings(room_id=12345, credential_ref="env:BILI_SESSDATA"), _NO_CONFIG_DIR
+    ),
+    # The window only truly holds on s2s; a hosted backend's own barge-in
+    # still cancels her, so the switch there is half a promise (ledger #91).
+    "interaction.protect_paid_replies": _Broken(
+        _settings(
+            provider=ProviderName.DASHSCOPE, expression_source="lexicon", protect_paid_replies=True
+        )
     ),
     "custom_tts.engine": _Broken(
         _settings(provider=ProviderName.DASHSCOPE, expression_source="lexicon", tts_voice="知性")
@@ -686,3 +695,22 @@ def test_the_shipped_config_names_a_voice() -> None:
     volcano = load(DEFAULT_CONFIG, strict=False).speech.volcano
     assert volcano.speaker, "随包配置又把音色留空了"
     assert not volcano_voice_problems(volcano.model, volcano.speaker)
+
+
+def test_paid_protection_is_only_questioned_where_it_cannot_hold() -> None:
+    """Ledger #91: s2s honours the window, so the switch there is silent; a
+    hosted backend gets the advisory, and with the switch off nobody hears
+    about it at all."""
+    assert "interaction.protect_paid_replies" not in _fields(
+        _settings(provider=ProviderName.S2S, protect_paid_replies=True)
+    )
+    assert "interaction.protect_paid_replies" not in _fields(
+        _settings(provider=ProviderName.DASHSCOPE, expression_source="lexicon")
+    )
+    problem = _one(
+        _settings(
+            provider=ProviderName.DASHSCOPE, expression_source="lexicon", protect_paid_replies=True
+        ),
+        "interaction.protect_paid_replies",
+    )
+    assert problem.fatal is False, "半截保护是提醒，不是拒绝启动"

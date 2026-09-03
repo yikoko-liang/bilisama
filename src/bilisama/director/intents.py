@@ -235,26 +235,31 @@ def intent_for(
     gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
     gift_battery_medium: int = _TIER_DEFAULTS.gift_battery_medium,
     base_instructions: str | None = None,
+    protect_paid: bool = False,
 ) -> Intent | None:
     """Map one live event to an Intent, or None for kinds that never speak here.
 
     Gifts are tiered by the frontend battery unit — the number a viewer sees
     on the gift panel: a high-tier gift keeps the BIG_GIFT slot; a medium one
     rides the VIP_ENTER rung. Both survive streamer interruption by
-    requeueing, and NOTHING here disables barge-in any more: streamer speech
-    is the hard ceiling, and paid protection means "comes back", not "talks
-    over". Anything smaller competes at danmaku priority and expires like one.
+    requeueing. Whether a paid thank-you may ALSO hold the floor against the
+    streamer for protect_ms is the protect_paid switch ([interaction]
+    protect_paid_replies, off by default): on, SC and high-tier gifts — plan
+    section 4.2's rule, priority at or above BIG_GIFT — dispatch protected;
+    everything else, switch or no switch, keeps the requeue and nothing more.
+    Anything smaller competes at danmaku priority and expires like one.
 
     Args:
         event: The normalised live event.
         now: The scheduler's clock, for created_at/expires_at.
         max_tokens: Reply length cap, from the reply_length slider upstream.
-        protect_ms: Legacy knob, still forwarded; no reply is protected here.
+        protect_ms: The protection window, honoured only when protect_paid is on.
         gift_battery_high: Batteries from which a gift outranks a guard buy.
         gift_battery_medium: Batteries from which a gift still counts as paid.
         base_instructions: The event-scoped public context, when the provider
             supports per-reply scoping (Assembly decides; None rides the
             session's own context).
+        protect_paid: Arm the window for SC and high-tier gifts (ledger #91).
 
     Returns:
         An Intent, or None when this kind has no speaking path here
@@ -288,9 +293,12 @@ def intent_for(
         instructions=instruction,
         max_tokens=max_tokens,
         write_history=True,
-        # Never protected: the streamer's next word must always land. Paid
-        # events survive it via requeue_on_interrupt instead.
-        protected=False,
+        # Off by default: the streamer's next word always lands and paid
+        # events survive it via requeue_on_interrupt. On, the scheduler keeps
+        # a protected reply alive through barge-in for protect_ms — and only
+        # s2s disarms the backend's own barge-in to match; validate.py warns
+        # on the others.
+        protected=protect_paid and priority >= Priority.BIG_GIFT,
         protect_ms=protect_ms,
     )
     # Staleness counts from ARRIVAL, not from when the window happened to
