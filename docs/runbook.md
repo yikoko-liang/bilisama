@@ -800,7 +800,7 @@ echo 卡的读数不作数。
 
 后台提炼和主动话题都走侧路模型——跑在对话主链路旁边的便宜辅助模型，配置段
 `[speech.side]`。没配地址它们不干活：生长层开着时
-`config validate` 会提醒；主动话题的缺配在运行期日志（`proactive.no_side_model`）
+`config validate` 会提醒；主动话题的缺配在运行期日志（`proactive.side_model_missing_fallback`）
 和 health 探针里报。health 端点本体在 `obs/health.py`，已经挂在界面服务器上
 （`ui/server.py:496`，地址就是界面 URL 后面接 `health`），面板「高级」页的健康卡
 每 5 秒 fetch 的就是它（`panel.js:156`，只在面板开着时轮询）。
@@ -824,7 +824,7 @@ echo 卡的读数不作数。
 | 9 | 拨到 `on` 再跑一场 | — | 上下文里出现「你说话的样子」「你们的共同经历」两段 | on＝注入；换入限速（每场至多 2 句口癖） |
 | 10 | `persona review --promote v1` 后开新场 | — | personality.md 活副本多出「长出来的性格」段且进了静态前缀 | 晋升口（锚只有人能动） |
 | 11 | 任何时候 `git diff config/personas/` + 对比活副本 | — | 锚文件一个字节没变（review 除外） | 防漂移不变量 |
-| 12 | 不 source path.sh（无侧路模型）跑 director | — | 一切照常，只是不起话题、不做提炼；启动就一句提示，日志有 `proactive.no_side_model` | 降级会说出来，不悄悄少功能 |
+| 12 | 不 source path.sh（无侧路模型）跑 director | — | 一切照常，只是不起话题、不做提炼；启动就一句提示，日志有 `proactive.side_model_missing_fallback` | 降级会说出来，不悄悄少功能 |
 
 第 4/6/8/9 条要配侧路模型（`source path.sh`，或在 `[speech.side]` 里配地址）。
 一轮走完，阶段 3 的验收判据（冷场恰好一次、生长层三态、锚不变、streams_seen 累计）

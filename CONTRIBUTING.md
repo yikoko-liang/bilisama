@@ -9,19 +9,20 @@
 scripts/gate.sh
 ```
 
-今天是九步：
+今天是十步：
 
 | # | 步骤 | 说明 |
 |---|---|---|
-| 1 | `black --check` | `src tests tools` |
+| 1 | `black --check` | `src tests tools scripts` |
 | 2 | `ruff` | 同上 |
-| 3 | `mypy`（全量，strict） | 不带文件参数，扫哪些目录由 `pyproject.toml:112` 的 `files = ["src", "tests", "tools"]` 说了算——命令行再写一遍就是两份定义 |
+| 3 | `mypy`（全量，strict） | 不带文件参数，扫哪些目录由 `pyproject.toml:115` 的 `files = ["src", "tests", "tools", "scripts"]` 说了算——命令行再写一遍就是两份定义 |
 | 4 | `mypy --platform win32` | 假装 Windows 再读一遍 |
-| 5 | 单元测试 | `pytest`，addopts 已摘掉 integration / provider_a / manual / ui_browser |
+| 5 | 单元测试 | `pytest`，addopts 已摘掉 integration / provider_a / ui_browser 三个 marker |
 | 6 | CLI 冒烟 | `config validate` / `show` / `chattiness` / `render-s2s` |
 | 7 | profile 覆盖层 | 三档 profile 各渲染一次，断言覆盖真的生效 |
 | 8 | 集成层（s2s 补丁） | 装了 s2s venv 才跑，见下 |
 | 9 | 界面层（浏览器驱动） | 装了 playwright + chromium 才跑，见下 |
+| 10 | JavaScript 检查（eslint） | 仓库根 `npm install` 之后才跑，见下；扫页面模块、Electron 壳和壳的测试桩 |
 
 第 4 步不是凑数：本机上 `if sys.platform == "win32"` 整段是死代码，一个参数类型写错
 的 msvcrt 调用照样过（2026-08-24 实测）。它是 Windows 分支目前唯一的覆盖。
@@ -30,18 +31,20 @@ CLI 冒烟和 profile 覆盖层也不是凑数：拆 `config` 包那次，`valid
 import，52 个单元测试全绿——因为当时**没有一个测试构造过 `Settings`**。是 CLI 冒烟
 抓到的。在覆盖缺口补上之前，这一层不能省。
 
-### 两个可选层：装了就自动跑
+### 三个可选层：装了就自动跑
 
 第 8 步管 s2s 补丁的自检，要一个单独的 venv（约 385 MiB）；第 9 步开真 chromium 驱动
-真页面，要一次性下个浏览器。两样都装不了无条件跑，所以规矩不是「一定要跑」，而是
+真页面，要一次性下个浏览器；第 10 步的 eslint 要 `npm install` 装到仓库根的 `node_modules`
+（`package.json` 只为它存在，不打包不发布）。三样都装不了无条件跑，所以规矩不是「一定要跑」，而是
 「不跑就得说出来」：装了，门禁自己就把那一层跑了；没装，它打一条显眼的跳过提示，
 并且**不会**在最后声称全部通过。
 
-装一次就够，之后 `scripts/gate.sh` 就覆盖了这两层：
+装一次就够，之后 `scripts/gate.sh` 就覆盖了这三层：
 
 ```bash
 scripts/smoke_provider_b.sh install                                   # 集成层
 uv pip install playwright && .venv/bin/python -m playwright install chromium   # 界面层
+npm install                                                            # JavaScript 层
 ```
 
 s2s 默认装到 `~/.local/share/bilisama/engines/s2s`；换地方用 `BILISAMA_S2S_VENV`，
@@ -52,24 +55,26 @@ s2s 默认装到 `~/.local/share/bilisama/engines/s2s`；换地方用 `BILISAMA_
 .venv/bin/python -m pytest tests/ui -m ui_browser
 ```
 
-门禁最后一行说的是这次到底跑了哪几层，别扫一眼绿色就走。四种可能，一字不差
-（`tests/unit/test_gate.py` 拿桩解释器把门禁整条跑一遍，钉的就是这几行）：
+门禁最后一行说的是这次到底跑了哪几层，别扫一眼绿色就走。三个可选层是八种组合，所以
+它不分支，而是把没跑的层逐个点名，一字不差（`tests/unit/test_gate.py` 拿桩解释器把门禁
+整条跑一遍，钉的就是这一行）：
 
 | 最后一行 | 意思 |
 |---|---|
-| `全部通过（含集成层与界面层）` | 九步都跑了 |
-| `通过，集成层没跑（见上）` | 没装 s2s |
-| `通过，界面层没跑（见上）` | 没装 playwright 或 chromium |
-| `单元层全部通过，集成层与界面层没跑（见上）` | 两样都没装，这次只验了前七步 |
+| `全部通过（含集成层、界面层与 JavaScript 层）` | 十步都跑了 |
+| `单元层全部通过，集成层没跑（见上）` | 没装 s2s；界面层和 eslint 跑了 |
+| `单元层全部通过，集成层、界面层、JavaScript 层没跑（见上）` | 三样都没装，这次只验了前七步 |
+
+中间的组合同理：没跑哪层就点哪层的名，用「、」连起来。
 
 CI 上「没装所以跳过」不是个能接受的答案，所以那边要设
-`BILISAMA_GATE_REQUIRE_INTEGRATION=1` 和 `BILISAMA_GATE_REQUIRE_UI=1`：对应的东西
-找不到就直接判门禁失败，而不是跳过。两个都是拿 `0` 做比较，所以设成 `0` 就是明确
+`BILISAMA_GATE_REQUIRE_INTEGRATION=1`、`BILISAMA_GATE_REQUIRE_UI=1` 和 `BILISAMA_GATE_REQUIRE_JS=1`：对应的东西
+找不到就直接判门禁失败，而不是跳过。三个都是拿 `0` 做比较，所以设成 `0` 就是明确
 关掉，本机不想被拦的时候用。
 
 界面层这一步探的是**浏览器**而不是 pip 包：playwright 装了但 chromium 没下时，
 每条测试都自己跳过、pytest 退 0，只看 import 会让最后一行认领一个什么都没跑的层
-（`gate.sh:129-146`）。
+（`gate.sh:136-151`）。
 
 ## 语言：代码用英文，给人看的用中文
 

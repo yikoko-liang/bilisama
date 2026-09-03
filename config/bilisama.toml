@@ -157,10 +157,11 @@ display_name = "豆腐"                     # 它自称什么。也会作为火�
 relationship = "off"
 voice = "off"
 
-# renderer 三选一：tofu 内置像素机器人「豆腐」（零素材）| sprite 精灵图皮肤包 | live2d 待接入（阶段 5）。
-# model_id 跟着 renderer 解释：tofu 不用填；sprite 填皮肤包目录名；live2d 填模型目录名。
-# 出厂默认 tofu：零素材、无版权包袱，跟代码层的默认一致。想用皮肤包就把 renderer 改成
-# sprite、model_id 填目录名（内部分支带了 kirby，约束见 src/bilisama/ui/web/skins/kirby/README.md）；
+# 两个轴（v4 起，计划 §16.8 第 40 条）：renderer 说「怎么画」——sprite 精灵图皮肤包（含内置豆腐）
+# 或 live2d（配了也还没实现，阶段 5）；model_id 说「画谁」——留空是内置像素机器人「豆腐」（零素材、
+# 无版权包袱），填皮肤包目录名就换肤，用户自己的包放在数据目录 skins/ 下会遮蔽随包同名包，唯独显式
+# 写 "tofu" 会钉住随包那份。老配置里 renderer = "tofu" 的写法由迁移自动改成 sprite + 空 model_id。
+# 内部分支带了 kirby，约束见 src/bilisama/ui/web/skins/kirby/README.md，助手页有意不上架它。
 # 只试一次不用改这里，跑 dev-talk 时加 --skin <名字>。皮肤缺失或损坏会自动退回豆腐。
 [avatar]
 renderer = "sprite"                     # 渲染机制：sprite 精灵图（含内置豆腐）；live2d 待接入
