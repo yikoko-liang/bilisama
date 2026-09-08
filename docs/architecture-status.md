@@ -193,6 +193,11 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 - 每条 Intent 恰好一个 Verdict（`_emit`，:349-376），outcome 乘 phase；过期时记下当时挡它的闸门名
   （:491-531）；播放回执到了才写 spoken@played，否则 spoken@generating（:1041-1071）。
 - `panic_mute`（:307-333）是唯一能杀保护段回复的东西；LinkDown 时清空队列并拒收新意图。
+- 她自起的回复（provider 自己判停生成的那条，`ReplyHandle.implicit`）也记账（2026-09-09）：`_Implicit`（:144）
+  从 ReplyStarted 活到 ReplyDone；杀它只有一条路 `skip_implicit`（:391），语音门、出口守卫、panic 三个调用方
+  共用，幂等，一条取消一条判决（source「voice」，intent_id「voice:<句柄>」）。说完的文字进 `implicit_spoken_sink`，
+  dev_talk 接的是和派发回复同一个 `spoken_line`。门在扇出的 pump 里同步判，可能比调度器自己的任务先看到
+  这条回复，所以 `skip_implicit` 遇到还没登记的 implicit 句柄会先记成已杀，后到的 ReplyStarted 不覆盖。
 
 ### 3.4 intents.py：敌意输入边界
 
@@ -213,6 +218,30 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 `director/output_guard.py`：跨分片子串匹配加白名单缓判（:56-116），`load_guard` 从 `[safety]` 装词表
 （:136-168）。已知缺口写在文件头 14-17 行：回复结束时白名单判决还悬着的命中会放过去。出厂词表是
 占位：`config/safety/wordlist.txt` 只有一条「这是一条测试敏感词」，白名单是空的（计划 #92）。
+
+### 3.6 语音门：她自起的回复接不接（2026-09-09）
+
+麦克风收的是全场声音，语音后端每次判停都会生成一条回复，四家都关不掉。做法是让模型报场景、程序决定接不接：
+
+- `scene_markers.py`（118 行，无依赖，persona 和 director 都 import 它）：六个英文记号 `[AUDIENCE]`
+  `[SELF_TALK]` `[READING]` `[GUEST]` `[UNSURE]` `[DECLINED]` 和中文标签；对她说的不写记号。英文是因为 s2s
+  官方管线的剥字符规则只放行半角 `[]` 和 `\w`。`[DECLINED]` 留给阶段二的探针，麦克风合同不教。
+- `director/turn_protocol.py`（196 行，纯函数）：`MarkerHead` 逐字解码回复开头——`[` 后面是某个记号的前缀就
+  接着攒，不是就放行，闭合 `]` 才定分类，攒满 12 字当没有记号；括号内大小写和下划线随意，裸写要拼得一字不差；
+  `TurnPolicy` 是唯一的策略表，默认只有 TO_ME 说，DECLINED 永远不说。
+- `director/voice_turn.py`（426 行）：`VoiceTurnGate.feed` 在扇出的 pump 里同步跑，implicit 回复的帧攒到开头
+  判定为止，放行按原序，不接就丢帧并回调 `Skip`；文字晚于声音超过 600 毫秒先放行，之后才见记号就切断并冲
+  扬声器（`late_markers`）；攒够 200 帧放行；被攒住就拦下的回复连结束事件也不给播放侧。
+- 接线（`dev_talk.py`）：`_Fanout` 分两族 view，`events()` 给调度器（不延迟，它靠 ReplyStarted 关地板），
+  `gated_events()` 给本机播放和网页；`on_voice_skip`（:2134）把 `Skip` 变成 `scheduler.skip_implicit`，
+  备注写进冷场话题的对话列表（「[主播念弹幕] 主播在念弹幕」）——出货的 s2s 产品路径上这是主播语音唯一的
+  文字痕迹。健康卡多一张 `voice_gate`。
+- 开关 `[interaction] voice_reply`（`config/schema.py:319`，出厂 `when_addressed`，`profiles/chat.toml` 写死
+  `always`）同时管门和提示词：`live_voice_rules(addressing=True)`（`persona/loader.py:124`）把
+  `voice_addressing.md` 拼在 `voice_responses.md` 后面，记号列表从 `scene_markers` 渲染；面板热改时先关门
+  再教记号、先撤记号再开门（`dev_talk.py:2262`）。
+- 假服务器上整条链路测过（`tests/unit/test_voice_gate_wiring.py`）：s2s 与 DashScope 两种帧形、超时放行、
+  迟到切断、攒帧期间意图等待。真实服务上的判对率没量过（计划 §15.28、#99）。
 
 ## 4. 人设：两层锚、两层生长、一份主动话题提示词
 
@@ -311,6 +340,8 @@ write_history=True。没配侧路模型时不闭嘴，改让实时模型自己�
   关库、关链路、关扬声器。
 - 裸链路档（`run`，:3450-3531）只连语音链路不立 L3，dashscope 和 s2s 能驱动，从注册表判断而不是
   硬编码名单（:3631-3658）。
+- `_Fanout`（:1264 起）把链路的一条事件流复制成两族 view：`events()` 原样、`gated_events()` 经语音门
+  （3.6）。调度器读前者，两个播放消费者读后者；门抛异常时那一帧原样放行并记 `dev_talk.voice_gate_failed`。
 
 ## 8. L4 ingest：直播互动漏斗
 
@@ -506,10 +537,10 @@ import」。
 | realtime 抽象（provider） | 完成。SpeechLink + Capabilities + 注册表 + 工厂，四家都能拨号，火山端到端真机验过 | openai_ga 真端点没验过，且它兜底读的 `api_key` 是内网 key（#85）；火山自己复制了一套槽位 / 看门狗策略，等第三个非 OpenAI 协议再抽公共层 |
 | 人设 | 完成。两层锚、两层生长三态开关、晋升口、五个随包人设、面板热切换 | 生长层默认全关，长期数据没有；`display_name` 的长度校验守错字段（#86） |
 | memory | 两层都在，viewer 事实已被在场常客段读到 | `fact.tags` 只写不读；`streamer` scope 有读者无写入方；打断后不截记忆、不发 `item.truncate`（#35、#73） |
-| 上下文管理 | 静态前缀加动态尾段、变了才推、语音规则和事件规则分作用域、旁路回复镜像写回历史、主播弹幕当共享上下文 | 侧路调用不复用直播会话前缀缓存（#71，本质是架构决定） |
+| 上下文管理 | 静态前缀加动态尾段、变了才推、语音规则和事件规则分作用域、旁路回复镜像写回历史、主播弹幕当共享上下文；她自起的回复说完的话和不接时的场景备注都进冷场话题的对话列表（2026-09-09） | 侧路调用不复用直播会话前缀缓存（#71，本质是架构决定）；主播说过什么在 s2s 产品路径上只剩十字备注 |
 | 主动性 | 完成，接了房间活跃度、预算、让路、无侧路模型的兜底 | 戳桌宠绕过所有 speak 开关（#48） |
 | 直播互动 | 完成并真房间验过：解析预算、付费侧袋、连击聚合、三态打分、单赢家窗口、延迟池、进房合并、VIP 提升、SC 撤回 | 出厂敏感词表是占位（#92）；follow / like / share 前端已置灰但后端无发声意图（#50）；msg_type 4/5/6 待真房间验证、blivedm 到期 2026-11-13（#95） |
-| 打断判停 | VAD 和判停全在语音后端，P2 不跑 VAD；打断链是 SpeechStarted → cancel + PlaybackClear → 音频队列 flush 标记 → 页面 stopEverything → playback.cancelled；付费保护只在 s2s 真生效，DashScope 探明不可行，付费事件改成靠重排队；回声消除靠 Chromium，真机三组对照 0 次自我打断 | 投机静默窗取常量而不是计划写的分支值（#33）；`audio.echo_guard` 那个能量门没写；延迟基线没量（#16）；受保护段由 `protect_paid_replies` 开关控制（默认关），只有 s2s 能真挡住打断，云端由 `config validate` 提醒（#91 已关） |
+| 打断判停 | VAD 和判停全在语音后端，P2 不跑 VAD；打断链是 SpeechStarted → cancel + PlaybackClear → 音频队列 flush 标记 → 页面 stopEverything → playback.cancelled；付费保护只在 s2s 真生效，DashScope 探明不可行，付费事件改成靠重排队；回声消除靠 Chromium，真机三组对照 0 次自我打断；她自起的回复过语音门（3.6），出口守卫和紧急闭嘴对它生效（2026-09-09） | 投机静默窗取常量而不是计划写的分支值（#33）；`audio.echo_guard` 那个能量门没写；延迟基线没量（#16）；受保护段由 `protect_paid_replies` 开关控制（默认关），只有 s2s 能真挡住打断，云端由 `config validate` 提醒（#91 已关）；语音门在真实服务上的判对率没量（#99），记号回复留在服务端历史（#97），火山的事件回复可能念出记号（#98） |
 | 工具调用接口 | 只有收的一半：L2 能收 `ToolCall`（`client.py:541-551`），`dialect.tool_spec` 能翻译两种声明格式 | `tools/` 空包；`ToolRegistry`、`ToolSpec`、`get_stream_status` 不存在；`static_prefix` 的 `tool_block` 无调用方；pin/unpin（#21）和 BackgroundRunner（#64）没开工 |
 | 统一可配置参数 | 完成：单一 toml、profile 覆盖层、用户层、面板热改、114 字段、14 条校验、125 条元数据、v1→v4 迁移 | 一批「配了没人读」的字段（9.5 节）；密钥没有非终端入口；装机后随包配置找不到（#43、#55） |
 | 底层语音原子能力 | 已有：16k/20ms 采集、本地噪声门、Chromium 回声消除、回声探针、16k→24k 重采样、24k 播放（页面或本机 `_Speaker` 带 10 秒缓冲上限）、按段计数的播放回执、CoreAudio 默认输出跟随、设备归属仲裁 | 自研 TTS 链整条没有（TTSEngine / tagparser / chunker / mux）；形象驱动没有；说话动画是伪脉冲，`voice.level` 无生产者（#75）；`custom_tts.voice` 是假音色框（#66） |
@@ -527,4 +558,7 @@ import」。
 - msg_type 4/5/6 映射待真房间验证；vendored blivedm 到期测试 2026-11-13 会红（#95）。
 - 仓库内三处文档漂移本轮已修：`CONTRIBUTING.md` 门禁九步改十步；`docs/runbook.md` 的日志事件名
   `proactive.no_side_model` 改成实际的 `proactive.side_model_missing_fallback`；
-  `config/bilisama.toml` 的 `[avatar]` 块注释改成两轴的说法。
+  `config/bilisama.toml` 的 [avatar] 块注释改成两轴的说法。
+- 语音门（2026-09-09，3.6）留下的三条：记号回复三家都会留在服务端历史里，会不会让她越来越倾向报「不是对
+  我说的」要在真实服务上看（#97）；火山没有逐轮通道，事件回复共享会话上下文，可能念出记号（#98）；真实服务
+  探测与判对率验收还没跑（#99）。

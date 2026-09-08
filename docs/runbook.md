@@ -410,6 +410,12 @@ director 档默认在本机起一个界面服务器，启动横幅里有它的�
   `[interaction] sc_protect_ms`，默认 4000 毫秒，「高级」页能改，到点自动放开）；上舰和中额礼物不在
   保护之列，只重排队。只有本地 s2s 引擎能真挡住打断，云端后端照样会被打断、断了重新排队，
   `config validate` 会提醒这一点。
+- **主播说话时接不接**（回复策略卡，2026-09-09 起）：出厂 `when_addressed`，只接对她说的。麦克风收的是
+  全场的声音，主播对观众讲、念弹幕、自言自语、连麦，语音后端都会判停并生成一条回复；开着这个开关，她会先在
+  回复开头报一个场景记号（`[AUDIENCE]` 这类，见 `config/personas/live/voice_addressing.md`），不是对她说的
+  那条在出声前就被拦下并取消，观众什么都听不到。`always` 是老行为，每句都接；`config/profiles/chat.toml`
+  一对一聊天档写死 `always`。直播中切换即生效，切的顺序程序自己管（先关门再教记号；反过来先撤记号再开门）。
+  怎么看它判得对不对，见下面「她怎么不接话了、怎么什么都接」。
 - **手动事件 Mock**：这里注入的弹幕走真实挑选漏斗（打分、开窗、预算），跟终端直敲的
   「敲什么答什么」不是一条路。
 
@@ -654,6 +660,31 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/tofu/pinned.
 ~/.local/share/bilisama/engines/s2s/bin/speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
 ```
 
+### 她怎么不接话了、怎么什么都接（语音门）
+
+主播说话引出的回复不经过调度器派发，是语音后端自己判停后生成的。2026-09-09 起它要过一道门
+（`src/bilisama/director/voice_turn.py`）：回复开头的场景记号说主播不是在对她说话，门就丢掉这条的全部帧并让
+调度器取消它；没有记号的照播。判断靠她自己写的记号，所以「判得对不对」是提示词的事，「拦没拦住」是程序的事，
+两边分开看：
+
+- **面板对话页**：被拦的回复显示成一条判决「voice → skipped@generating(voice.not_addressed) · READING · 主播在念弹幕」，
+  后半段是她报的场景和十字备注；说出去的回复不发判决。守卫命中和紧急闭嘴现在也会杀她自起的回复，判决分别是
+  `failed@speaking(safety.output_blocked)` 和 `cancelled@speaking(policy.panic_mute)`。
+- **健康卡 `voice_gate`**：`mode`、`holding`（此刻攒着的回复数）、`passed`、`skipped`、`timeouts`（文字没在
+  600 毫秒内到、先放行的次数）、`late_markers`（放行之后才看到记号、切断并冲扬声器的次数）、`longest_hold_ms`。
+  三家后端文字都先于声音到，`timeouts` 和 `late_markers` 正常应为 0；不为 0 说明这条后端的帧序和探测结果不一样，
+  先看日志再动常量。
+- **日志**（`runtime.log_level = "debug"`）：`voice_gate.held / passed / skipped / late_marker / marker_midway /
+  marker_unbracketed / mode_changed`，调度器那边是 `scheduler.implicit_killed`。备注在 `note_text` 字段，
+  日志里只记长度，面板上才有字。
+- **验收怎么跑**（走下一节的直播 Mock）：放一段主播对观众说话多、偶尔点名她的录像，20 句以上；逐条对照面板
+  判决和你听到的——对她说的有没有被拦（过度不接）、不是对她说的有没有漏拦（抢话）；数 `voice_gate.skipped`
+  和 `passed`。判对率八成以上算过，不到就按人设改 `voice_addressing.md` 的措辞，不动门。按紧急闭嘴时她正在
+  生成的那句要一起停。
+- **她开始念「AUDIENCE」了**：只会发生在门关着（`always`）而提示词还在教记号的空窗，程序切换时已经排好顺序；
+  真看到了，先 `bilisama config show` 确认 `interaction.voice_reply`，再看日志里 `voice_gate.mode_changed`
+  有没有到。
+
 ## 连真直播间（弹幕）
 
 dev-talk 挂上 `--room` 就连真直播间，一边语音对话一边收真弹幕：
@@ -728,7 +759,8 @@ getDisplayMedia 这件事壳里做不了，所以走外部浏览器。流程照�
 「停止」把输入切回麦克风；房间还连着的话预检保持通过，可以直接再点开始。浏览器
 结束共享才会作废预检，那时要重新选源、重新检测。
 共享音轨里可能带着她自己在直播里的声音，所以这条路不参与回声检测——Mock 场次里
-echo 卡的读数不作数。
+echo 卡的读数不作数。语音门（主播说话时接不接）的验收也走这条路，步骤在上面
+「她怎么不接话了、怎么什么都接」。
 
 ## 人设与生长层
 
