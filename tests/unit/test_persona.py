@@ -717,3 +717,26 @@ def test_live_rule_files_pin_their_core_contract_lines() -> None:
     assert "当前输入：直播间事件" in event
     assert "不是给" in event or "事件数据" in event
     assert "{{" not in voice and "{{" not in event
+
+
+def test_the_scene_marker_contract_rides_the_addressing_switch() -> None:
+    """With the voice gate on, the voice rules teach every scene marker and
+    the 「listen first」 rule; off, not one tag — taught without the gate she
+    would read the marker out loud. DECLINED belongs to the phase-two probes
+    and is never part of the microphone contract."""
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_voice_rules, template_variables
+    from bilisama.scene_markers import MARKERS, SceneCategory
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    variables = template_variables(PersonaConfig())
+    off = live_voice_rules(config_dir, variables)
+    on = live_voice_rules(config_dir, variables, addressing=True)
+    assert on.startswith(off), "the base contract is untouched; the marker rules are appended"
+    for marker in MARKERS:
+        expected = marker.category is not SceneCategory.DECLINED
+        assert (f"[{marker.tag}]" in on) is expected, marker.tag
+        assert f"[{marker.tag}]" not in off, marker.tag
+    assert "先分辨" in on and "最开头" in on
+    assert "接话时直接回应" in off
+    assert "{{" not in on

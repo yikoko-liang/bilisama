@@ -27,6 +27,7 @@ from typing import IO, TYPE_CHECKING, Literal
 from bilisama.config.enums import Chattiness
 from bilisama.obs.logging import get_logger
 from bilisama.paths import data_home
+from bilisama.scene_markers import MARKERS, SceneCategory
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -120,9 +121,40 @@ def live_event_rules(config_dir: Path, variables: Mapping[str, str]) -> str:
     return _live_rules(config_dir, "event_responses.md", variables)
 
 
-def live_voice_rules(config_dir: Path, variables: Mapping[str, str]) -> str:
-    """Load and render the streamer-voice turn contract."""
-    return _live_rules(config_dir, "voice_responses.md", variables)
+def live_voice_rules(
+    config_dir: Path, variables: Mapping[str, str], *, addressing: bool = False
+) -> str:
+    """Load and render the streamer-voice turn contract.
+
+    Args:
+        addressing: Append the scene-marker contract (voice_addressing.md),
+            which teaches her to report who the streamer was talking to at
+            the head of the turn. Only while the voice gate is on
+            (interaction.voice_reply = when_addressed): taught without the
+            gate she would read the marker out to the audience.
+    """
+    rules = _live_rules(config_dir, "voice_responses.md", variables)
+    if not addressing:
+        return rules
+    extra = _live_rules(
+        config_dir,
+        "voice_addressing.md",
+        {**variables, "sceneMarkers": scene_marker_lines()},
+    )
+    return f"{rules}\n\n{extra}"
+
+
+def scene_marker_lines() -> str:
+    """The markers as prompt bullets, from the one vocabulary (scene_markers).
+
+    DECLINED is left out: it is her answer to a turn we asked for, which the
+    microphone contract never does — the phase-two probes teach it themselves.
+    """
+    return "\n".join(
+        f"  - `[{marker.tag}]`：{marker.meaning}"
+        for marker in MARKERS
+        if marker.category is not SceneCategory.DECLINED
+    )
 
 
 @contextlib.contextmanager

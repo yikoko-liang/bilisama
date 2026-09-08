@@ -296,6 +296,19 @@ UI_META: dict[str, FieldMeta] = {
         group="互动",
         order=2,
     ),
+    "interaction.voice_reply": FieldMeta(
+        label="主播说话时接不接",
+        hint=(
+            "always 每句都接；when_addressed 只接对她说的——她先听出主播在跟谁说，"
+            "对观众讲、念弹幕、自言自语、连麦时不开口"
+        ),
+        widget="segmented",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=3,
+        aliases=("接话", "抢话"),
+    ),
     "interaction.gift_battery_high": FieldMeta(
         label="高额礼物门槛",
         hint="按观众礼物面板上的电池数分档（1 电池 = 0.1 元）；到这个数按高额答谢",

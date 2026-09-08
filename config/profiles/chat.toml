@@ -1,5 +1,8 @@
 # 纯聊天：会主动起话题，但不接弹幕（L1）
 
+[interaction]
+voice_reply = "always"                  # 一对一聊天：主播每句都是对她说的，不用先分辨
+
 [interaction.speak]
 danmaku = false
 entry = false

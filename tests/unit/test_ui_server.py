@@ -195,6 +195,9 @@ def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
         "interaction.entry_welcome.naval",
         "interaction.entry_welcome.ranking",
         "interaction.sc_protect_ms",
+        # LIVE: run_reload_hook re-renders the voice rules (the marker
+        # contract rides this switch) and, once wired, flips the voice gate.
+        "interaction.voice_reply",
         # LIVE with the switch it governs (ledger #91): both reach the Assembly
         # through refresh_interaction_settings and are read per intent.
         "interaction.protect_paid_replies",

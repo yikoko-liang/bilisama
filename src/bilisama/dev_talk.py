@@ -50,7 +50,7 @@ from urllib.parse import parse_qsl
 import websockets
 
 from bilisama.config.derive import DerivedThresholds, effective_thresholds
-from bilisama.config.enums import Chattiness, ProviderName
+from bilisama.config.enums import Chattiness, ProviderName, VoiceReplyMode
 from bilisama.event_pacing import EventPacingSnapshot
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.obs.health import LinkHealth
@@ -1772,10 +1772,16 @@ async def run_director(args: argparse.Namespace) -> int:
 
     persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
     variables = template_variables(settings.persona, reply_length=settings.interaction.reply_length)
+
+    def addressing_enabled() -> bool:
+        # Read through settings every time: the panel flips this live, and
+        # the prompt half must follow the switch wherever it is re-rendered.
+        return settings.interaction.voice_reply is VoiceReplyMode.WHEN_ADDRESSED
+
     # The two turn contracts (config/personas/live/). Loaded once here; a
     # missing file is a packaging error and refuses to start rather than
     # running a stream that cannot tell the streamer's voice from a danmaku.
-    voice_rules = live_voice_rules(config_path.parent, variables)
+    voice_rules = live_voice_rules(config_path.parent, variables, addressing=addressing_enabled())
     event_rules = live_event_rules(config_path.parent, variables)
 
     # Side-model resolution, most reliable first: explicit config wins, then
@@ -2139,7 +2145,9 @@ async def run_director(args: argparse.Namespace) -> int:
         variables = template_variables(
             settings.persona, reply_length=settings.interaction.reply_length
         )
-        voice_rules = live_voice_rules(config_path.parent, variables)
+        voice_rules = live_voice_rules(
+            config_path.parent, variables, addressing=addressing_enabled()
+        )
         event_rules = live_event_rules(config_path.parent, variables)
         assembly.replace_persona(
             persona,
@@ -2175,6 +2183,12 @@ async def run_director(args: argparse.Namespace) -> int:
             return True
         if path == "room.stream_intro":
             await assembly.refresh_context()
+            return True
+        if path == "interaction.voice_reply":
+            # The prompt half of the switch: re-render the voice rules with or
+            # without the marker contract and push them. The gate half lands
+            # with the wiring and has to be ordered against this push.
+            await refresh_persona_settings()
             return True
         if path.startswith("persona.") or path == "interaction.reply_length":
             await refresh_persona_settings()
