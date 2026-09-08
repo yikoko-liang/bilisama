@@ -159,13 +159,93 @@ async def test_skip_implicit_can_ask_for_the_speakers_to_be_flushed() -> None:
         assert _drain(scheduler) == [PlaybackClear(reason="voice_not_addressed")]
 
 
-async def test_a_handle_the_scheduler_never_saw_start_is_ignored() -> None:
+async def test_a_handle_that_is_not_her_turn_or_already_over_is_ignored() -> None:
     async with _running() as (scheduler, server, _):
         await _her_turn_in_flight(scheduler, server)
-        scheduler.skip_implicit(link.ReplyHandle(implicit=True), reason=SkipReason.PANIC_MUTE)
+        scheduler.skip_implicit(link.ReplyHandle(), reason=SkipReason.PANIC_MUTE)
+        scheduler.skip_implicit(
+            link.ReplyHandle(implicit=True, stale=True), reason=SkipReason.PANIC_MUTE
+        )
         await asyncio.sleep(0.05)
         assert scheduler.verdicts == []
         assert server.recorded.count("response.cancel") == 0, "a stray handle must not cancel"
+
+
+class _ScriptedLink:
+    """A link whose event stream the test feeds by hand, so the order in
+    which the scheduler's task sees frames is exactly the test's."""
+
+    quiet_window_s = 1.0
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
+        self.cancelled: list[link.ReplyHandle] = []
+
+    async def events(self) -> AsyncIterator[link.LinkEvent]:
+        while True:
+            yield await self.queue.get()
+
+    async def cancel(self, handle: link.ReplyHandle) -> None:
+        self.cancelled.append(handle)
+
+    async def connect(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+    async def suspend(self) -> None: ...
+
+    async def resume(self) -> None: ...
+
+    async def set_context(self, instructions: str) -> None: ...
+
+    async def push_audio(self, pcm: bytes) -> None: ...
+
+    async def add_context_item(self, text: str, *, role: str = "user") -> None: ...
+
+    async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
+        return link.ReplyHandle()
+
+    async def end_protection(self) -> None: ...
+
+
+async def test_a_kill_that_lands_before_the_turn_started_is_honoured() -> None:
+    """The gate decides inside the fan-out's pump, which can read a turn's
+    ReplyStarted and its first delta from one queue without yielding — so the
+    kill can reach the scheduler before its own task saw the turn start. The
+    record is booked killed on the spot; the start keeps it, the done closes
+    it, and nothing is spoken or remembered."""
+    scripted = _ScriptedLink()
+    hers: list[str] = []
+    clock = SystemClock()
+    scheduler = Scheduler(
+        cast(link.SpeechLink, scripted),
+        SpeakingFloor(clock),
+        clock,
+        implicit_spoken_sink=hers.append,
+    )
+    runner = asyncio.create_task(scheduler.run())
+    try:
+        handle = link.ReplyHandle(implicit=True)
+        scripted.queue.put_nowait(link.ReplyStarted(handle))
+        scripted.queue.put_nowait(link.ReplyTextDelta(handle, "[AUDIENCE] 讲故事"))
+        # No await in between: the scheduler's task has not run yet.
+        scheduler.skip_implicit(
+            handle, reason=SkipReason.VOICE_NOT_ADDRESSED, detail="AUDIENCE · 讲故事"
+        )
+        assert scheduler.status()["implicit_active"] is True
+        await asyncio.sleep(0.02)
+        assert scripted.cancelled == [handle]
+        assert scheduler.status()["implicit_active"] is True, "the start kept the killed record"
+        scripted.queue.put_nowait(
+            link.ReplyDone(handle, link.ReplyStatus.COMPLETED, text="[AUDIENCE] 讲故事")
+        )
+        await asyncio.sleep(0.02)
+        assert scheduler.status()["implicit_active"] is False
+        assert [v.reason for v in scheduler.verdicts] == [SkipReason.VOICE_NOT_ADDRESSED]
+        assert hers == [], "a killed turn is not a spoken line, completed or not"
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
 
 
 async def test_the_output_guard_covers_her_own_turn() -> None:

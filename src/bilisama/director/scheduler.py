@@ -401,12 +401,13 @@ class Scheduler:
         """Kill the provider's own VAD turn — the one path that does.
 
         Three callers: the voice gate (the streamer is not talking to her),
-        the output guard (a blocked word in her own turn) and panic. Only a
-        turn this scheduler saw start is killed; a handle it never booked is
-        ignored, so a late call cannot cancel whoever holds the slot by then.
-        Idempotent on the record — the second caller finds `killed` set and
-        does nothing — and the link's own bookkeeping makes a second cancel
-        frame impossible regardless.
+        the output guard (a blocked word in her own turn) and panic. A handle
+        that is not the provider's own turn, or one already finished (stale),
+        is ignored, so a late call cannot cancel whoever holds the slot by
+        then — the link's cancel() only sends for a live record of this very
+        handle anyway. Idempotent on the record — the second caller finds
+        `killed` set and does nothing — and the link's own bookkeeping makes a
+        second cancel frame impossible regardless.
 
         Args:
             handle: The turn's handle, as seen on its ReplyStarted.
@@ -422,7 +423,19 @@ class Scheduler:
                 skipped@generating; the guard and panic write their own.
         """
         implicit = self._implicit
-        if implicit is None or implicit.handle is not handle or implicit.killed:
+        if implicit is None or implicit.handle is not handle:
+            if not handle.implicit or handle.stale:
+                return
+            # The gate decides inside the fan-out's pump, and the pump can
+            # read a turn's ReplyStarted and its first delta out of one queue
+            # without yielding — so the kill can land here before this task
+            # has seen the turn start. Book it now, already killed; the start
+            # that arrives later keeps this record (_open_implicit), and the
+            # done closes it as usual. A stale handle is a finished turn: the
+            # link would not cancel it and there is nothing left to book.
+            implicit = _Implicit(handle=handle, started_at=self._clock.monotonic())
+            self._implicit = implicit
+        if implicit.killed:
             return
         implicit.killed = True
         if clear_playback and not implicit.cleared:
@@ -792,8 +805,12 @@ class Scheduler:
     def _open_implicit(self, handle: link.ReplyHandle) -> None:
         # Every adapter emits ReplyStarted ahead of the turn's first delta
         # (client.py's three first-frame emits, volcano's _handle_for), so
-        # this is the one place a turn is booked; a delta whose handle was
-        # never booked is a late frame and _guard_implicit ignores it.
+        # this is where a turn is booked — unless skip_implicit got here
+        # first from the gate, in which case the killed record stands. A
+        # delta whose handle was never booked is a late frame and
+        # _guard_implicit ignores it.
+        if self._implicit is not None and self._implicit.handle is handle:
+            return
         self._implicit = _Implicit(handle=handle, started_at=self._clock.monotonic())
         if self._guard is not None:
             self._guard.reset()
