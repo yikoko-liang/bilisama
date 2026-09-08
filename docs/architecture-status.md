@@ -241,9 +241,10 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
   `voice_addressing.md` 拼在 `voice_responses.md` 后面，记号列表从 `scene_markers` 渲染；面板热改时先关门
   再教记号、先撤记号再开门（`dev_talk.py:2262`）。
 - 假服务器上整条链路测过（`tests/unit/test_voice_gate_wiring.py`）：s2s 与 DashScope 两种帧形、超时放行、
-  迟到切断、攒帧期间意图等待。真实服务探测（`tests/integration/test_voice_gate_probes.py`，2026-09-09）：DashScope
-  出厂模型和火山 O2.0 都按合同写了记号；DashScope 文字领先音频 210 毫秒，火山文字音频同刻到，都在 600 毫秒暂存内；
-  记号回复留在两家的历史里（#97）。s2s 没跑，判对率没量（计划 §15.28、#99）。
+  迟到切断、攒帧期间意图等待。真实服务探测（`tests/integration/test_voice_gate_probes.py`，2026-09-09）：三家都按合同写了记号；
+  DashScope 文字领先音频 210 毫秒，火山文字音频同刻到，s2s 官方管线一个 `transcript.done` 先于全部音频，都在 600 毫秒
+  暂存内；s2s 上首段处取消 1 毫秒内 `done(cancelled)`、零音频帧、只砍 TTS 不回滚历史；记号回复留在三家的历史里（#97）。
+  s2s 产品配置（`stt: none`）没跑，判对率没量（计划 §15.28、#99）。
 
 ## 4. 人设：两层锚、两层生长、一份主动话题提示词
 

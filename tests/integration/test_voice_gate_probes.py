@@ -15,7 +15,8 @@ the facts it exists to learn are printed, not asserted, because the point is
 to find out.
 
 What the first runs found (2026-09-09, DashScope on the profile's default
-model, volcano O2.0; the s2s server was not up):
+model, volcano O2.0, s2s official pipeline — paraformer / qwen3.7-flash /
+Qwen3-TTS — from config/s2s/official-pipe.local.json):
 
 - Both hosted backends write the marker for an audience line with the
   contract in the session: 「[AUDIENCE] 主播在跟观众打招呼。」 and
@@ -35,6 +36,13 @@ model, volcano O2.0; the s2s server was not up):
   progress」). A conversation-none create was accepted once and refused once
   across two runs; the condition is not understood — the single-slot rule in
   capabilities.py stands until it is.
+- s2s official pipeline: she writes 「[AUDIENCE] 主播在跟观众打招呼」 too; the
+  whole Chinese reply arrives as ONE output_audio_transcript.done ahead of
+  18 audio deltas. A response.cancel sent at that fragment is answered by
+  done(cancelled) within 1 ms and NO audio delta ever reaches the client;
+  the server logs 「TTS generation cancelled (interruption)」 and nothing
+  about the LLM — the history is not rolled back, the audio never starts.
+  The next line, addressed to her, completes normally and without a marker.
 """
 
 from __future__ import annotations
@@ -543,9 +551,31 @@ async def _s2s_ws() -> Any:
         pytest.skip(
             "没有跑着的 s2s 服务器（127.0.0.1:8765）。起法见 scripts/make_official_pipe_config.py"
         )
-    ws = await websockets.connect(SERVER_URL, max_size=None)
+    # One pipeline, and the slot is released a moment after the previous
+    # connection closes (test_real_server's ws fixture): retry on the limit
+    # error rather than fail the second probe on the first one's tail.
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while True:
+        ws = await websockets.connect(SERVER_URL, max_size=16 * 1024 * 1024)
+        try:
+            first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+        except websockets.ConnectionClosed:
+            first = {"error": {"type": "session_limit_reached"}}
+        if first.get("type") == "session.created":
+            break
+        await ws.close()
+        limit = (first.get("error") or {}).get("type") == "session_limit_reached"
+        assert limit and asyncio.get_running_loop().time() < deadline, first
+        await asyncio.sleep(1.0)
+    # The GA server validates the body against the OpenAI session models,
+    # which need `type: realtime` (the codec's session_update adds it too).
     await ws.send(
-        json.dumps({"type": "session.update", "session": {"instructions": _instructions()}})
+        json.dumps(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "instructions": _instructions()},
+            }
+        )
     )
     await asyncio.sleep(0.5)
     return ws
@@ -577,22 +607,25 @@ async def _s2s_turn(
     return frames, cancelled_at
 
 
+# The GA dialect's names, which the running s2s server speaks (dialect.py's
+# GA table); the beta names are DashScope's.
+_S2S_TRANSCRIPT_DONE = "response.output_audio_transcript.done"
+_S2S_AUDIO_DELTA = "response.output_audio.delta"
+_S2S_TEXT_DELTA = "response.output_text.delta"
+
+
 def _s2s_summary(frames: list[dict[str, Any]]) -> dict[str, Any]:
     types = [str(f.get("type")) for f in frames]
     reply_kinds = [
-        t
-        for t in types
-        if t in ("response.audio_transcript.done", "response.audio.delta", "response.text.delta")
+        t for t in types if t in (_S2S_TRANSCRIPT_DONE, _S2S_AUDIO_DELTA, _S2S_TEXT_DELTA)
     ]
     transcript = "".join(
-        str(f.get("transcript") or "")
-        for f in frames
-        if f.get("type") == "response.audio_transcript.done"
-    )
+        str(f.get("transcript") or "") for f in frames if f.get("type") == _S2S_TRANSCRIPT_DONE
+    ) or "".join(str(f.get("delta") or "") for f in frames if f.get("type") == _S2S_TEXT_DELTA)
     return {
         "first_reply_frame": reply_kinds[0] if reply_kinds else None,
-        "transcript_done_count": types.count("response.audio_transcript.done"),
-        "audio_deltas": types.count("response.audio.delta"),
+        "transcript_done_count": types.count(_S2S_TRANSCRIPT_DONE),
+        "audio_deltas": types.count(_S2S_AUDIO_DELTA),
         "done_status": [
             (f.get("response") or {}).get("status")
             for f in frames
@@ -600,6 +633,12 @@ def _s2s_summary(frames: list[dict[str, Any]]) -> dict[str, Any]:
         ],
         "head": transcript[:40],
         "head_is_marker": transcript.lstrip().startswith("["),
+        "frame_types": sorted(set(types)),
+        "errors": [
+            str((f.get("error") or {}).get("message"))[:80]
+            for f in frames
+            if f.get("type") == "error"
+        ],
     }
 
 
@@ -627,9 +666,7 @@ async def test_s2s_cancel_at_first_transcript_and_speak_again() -> None:
     and whether the next turn still completes with text."""
     ws = await _s2s_ws()
     try:
-        frames, cancelled_at = await _s2s_turn(
-            ws, _AUDIENCE_LINE, cancel_at="response.audio_transcript.done"
-        )
+        frames, cancelled_at = await _s2s_turn(ws, _AUDIENCE_LINE, cancel_at=_S2S_TRANSCRIPT_DONE)
         first = _s2s_summary(frames)
         done_at = time.monotonic()
         _probe(
