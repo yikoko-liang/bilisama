@@ -326,11 +326,16 @@ async def test_implicit_reply_is_booked_from_its_first_frame() -> None:
             done = await _next_event(events, link.ReplyDone)
             assert isinstance(done, link.ReplyDone)
             assert done.status is link.ReplyStatus.COMPLETED
+            # Minted from a frame nobody asked for: the handle says so, which
+            # is what lets the voice gate tell her own turn from ours.
+            assert done.handle.implicit
             # The slot must be free again: a fresh request completes too.
-            await linkobj.request_reply(link.ReplySpec(instructions="接一句"))
+            ours = await linkobj.request_reply(link.ReplySpec(instructions="接一句"))
+            assert not ours.implicit
             done2 = await _next_event(events, link.ReplyDone)
             assert isinstance(done2, link.ReplyDone)
             assert done2.status is link.ReplyStatus.COMPLETED
+            assert done2.handle is ours
         finally:
             await linkobj.aclose()
 
@@ -365,7 +370,10 @@ async def test_hosted_implicit_created_books_the_slot() -> None:
             await server.release_pending_reply()
             first = await _next_event(events, link.ReplyDone)
             assert isinstance(first, link.ReplyDone)
-            await request
+            # Announced by created rather than by a first frame, still hers.
+            assert first.handle.implicit
+            ours = await request
+            assert not ours.implicit
             second = await _next_event(events, link.ReplyDone)
             assert isinstance(second, link.ReplyDone)
             assert second.status is link.ReplyStatus.COMPLETED
@@ -768,3 +776,30 @@ async def test_a_queued_request_says_how_long_it_waited() -> None:
     assert waited, "the second create queued behind the first and said nothing"
     assert waited[0]["purpose"] == "reply"
     assert waited[0]["waited_ms"] >= 0
+
+
+async def test_cancelling_one_handle_twice_sends_one_cancel() -> None:
+    """A bare response.cancel names no reply: it kills whoever holds the slot.
+    Two callers cancelling the same reply (the voice gate and the scheduler's
+    guard can both decide to) must therefore cost one frame, not two — the
+    second frame would land after the done and murder the next reply.
+
+    The two cancels are gathered rather than awaited in turn: the second must
+    short-circuit on the record's own bookkeeping, before any done frame from
+    the server could have settled the record and made the test trivially pass.
+    """
+    script = Script(delta_chunks=4, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            handle = await linkobj.request_reply(link.ReplySpec(instructions="讲个长故事"))
+            events = linkobj.events()
+            await _next_event(events, link.ReplyTextDelta)
+            await asyncio.gather(linkobj.cancel(handle), linkobj.cancel(handle))
+            done = await _next_event(events, link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.CANCELLED
+            assert server.recorded.count("response.cancel") == 1
+        finally:
+            await linkobj.aclose()

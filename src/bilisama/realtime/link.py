@@ -62,10 +62,17 @@ class ReplySpec:
 @dataclass(slots=True)
 class ReplyHandle:
     """One requested reply. `stale` flips when the reply was superseded;
-    late frames carrying it are dropped without ceremony."""
+    late frames carrying it are dropped without ceremony.
+
+    `implicit` marks a reply the provider started on its own VAD turn — the
+    streamer's voice, never one of our requests. Set at construction by the
+    adapter that minted the handle and never flipped afterwards: the voice
+    gate and the scheduler key on it to tell her own turn from ours.
+    """
 
     handle_id: int = field(default_factory=lambda: next(_handle_ids))
     stale: bool = False
+    implicit: bool = False
 
 
 class ReplyStatus(StrEnum):
