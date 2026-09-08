@@ -84,7 +84,7 @@ async def _wait_verdicts(scheduler: Scheduler, count: int, *, timeout: float = 8
 async def test_status_reports_an_idle_scheduler() -> None:
     """The shape the health card renders, on a scheduler with nothing to do.
 
-    Four keys, and none of them optional: the card and the panel both index into
+    Five keys, and none of them optional: the card and the panel both index into
     this dict, so a renamed key is a KeyError on the operator's screen rather
     than a missing line.
     """
@@ -94,6 +94,7 @@ async def test_status_reports_an_idle_scheduler() -> None:
             "queued": 0,
             "active_source": None,
             "dispatching": False,
+            "implicit_active": False,
         }
 
 

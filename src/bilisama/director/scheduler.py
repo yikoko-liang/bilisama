@@ -34,6 +34,12 @@ What it guarantees, and where each promise is tested:
   expires_at of their own, so the retry has to bring its own.
 - spoken@played when a playback receipt says the audience heard it out,
   spoken@generating when nobody is reporting playback at all.
+- The provider's own VAD turn — the streamer's voice, never an Intent — is
+  booked while it lives (_Implicit) and has exactly one kill path,
+  skip_implicit: the voice gate, the output guard and panic all go through
+  it, so a turn dies once, with one cancel and one verdict (source "voice").
+  A completed turn's text reaches implicit_spoken_sink so her own side of the
+  microphone conversation is not invisible to memory.
 """
 
 from __future__ import annotations
@@ -135,6 +141,23 @@ class _Parked:
 
 
 @dataclass(slots=True)
+class _Implicit:
+    """The provider's own VAD turn while it lives.
+
+    Opened on its ReplyStarted, closed on its ReplyDone. `killed` is what makes
+    skip_implicit idempotent across its three callers — the gate decides in
+    the fan-out's task and the guard in this one, so both can land for the
+    same reply in either order. `cleared` guards the PlaybackClear the same
+    way _Active.cleared does (A10).
+    """
+
+    handle: link.ReplyHandle
+    started_at: float
+    killed: bool = False
+    cleared: bool = False
+
+
+@dataclass(slots=True)
 class _Entry:
     sort_key: tuple[int, int]
     intent: Intent
@@ -159,6 +182,7 @@ class Scheduler:
         guard: StreamGuard | Callable[[str], bool] | None = None,
         on_hit: Literal["drop_sentence", "mute_all"] = "drop_sentence",
         spoken_sink: Callable[[str], None] | None = None,
+        implicit_spoken_sink: Callable[[str], None] | None = None,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -173,6 +197,11 @@ class Scheduler:
         # them as voice-exemplar raw material (section 4.6). Interrupted or
         # guard-killed replies never reach it, which IS the quality filter.
         self._spoken_sink = spoken_sink
+        # The same for her own microphone turns, completed and not killed.
+        # Separate from spoken_sink so an entry point can wire one and not
+        # the other; dev-talk wires both to the same line.
+        self._implicit_spoken_sink = implicit_spoken_sink
+        self._implicit: _Implicit | None = None
         self._heap: list[_Entry] = []
         self._seq = itertools.count()
         # Dedup keys live from submit until SETTLE, not until dispatch: the
@@ -317,6 +346,7 @@ class Scheduler:
             parked=len(self._parked),
             active_source=victim.intent.source if victim is not None else "",
             active_protected=victim is not None and self._protection_active(victim),
+            implicit_active=self._implicit is not None,
         )
         self._panicked = True
         self.controls.put_nowait(PlaybackClear(reason="panic_mute"))
@@ -328,6 +358,18 @@ class Scheduler:
         if active is not None:
             active.cleared = True
             self._spawn(self._speech.cancel(active.handle), name="scheduler:panic-cancel")
+        implicit = self._implicit
+        if implicit is not None:
+            # Her own turn dies with everything else — the red button used to
+            # leave it talking to the end. The clear above already emptied
+            # both speakers, so this one needs only the cancel and a verdict.
+            implicit.cleared = True
+            self.skip_implicit(
+                implicit.handle,
+                reason=SkipReason.PANIC_MUTE,
+                outcome=Outcome.CANCELLED,
+                phase=Phase.SPEAKING,
+            )
         # An in-flight dispatch (self._dispatching) has no handle to cancel
         # yet; the post-dispatch recheck honours the flag the moment it lands.
         self._wake.set()
@@ -345,6 +387,69 @@ class Scheduler:
         log.info("scheduler.panic_released", queued=len(self._heap))
         self._panicked = False
         self._wake.set()
+
+    def skip_implicit(
+        self,
+        handle: link.ReplyHandle,
+        *,
+        reason: SkipReason,
+        detail: str = "",
+        clear_playback: bool = False,
+        outcome: Outcome = Outcome.SKIPPED,
+        phase: Phase = Phase.GENERATING,
+    ) -> None:
+        """Kill the provider's own VAD turn — the one path that does.
+
+        Three callers: the voice gate (the streamer is not talking to her),
+        the output guard (a blocked word in her own turn) and panic. Only a
+        turn this scheduler saw start is killed; a handle it never booked is
+        ignored, so a late call cannot cancel whoever holds the slot by then.
+        Idempotent on the record — the second caller finds `killed` set and
+        does nothing — and the link's own bookkeeping makes a second cancel
+        frame impossible regardless.
+
+        Args:
+            handle: The turn's handle, as seen on its ReplyStarted.
+            reason: Which caller, in the shared vocabulary.
+            detail: What the panel shows next to the reason (the gate's
+                ruling); empty for the guard on purpose — the blocked word
+                stays out of the record, as it does for dispatched replies.
+            clear_playback: The audience may already be hearing this turn
+                (the gate's hold timed out, the guard fired mid-sentence), so
+                ask L1 to flush. The gate's normal path passes False: nothing
+                of a held turn ever reached a speaker.
+            outcome, phase: The verdict's pair. The gate's default reads
+                skipped@generating; the guard and panic write their own.
+        """
+        implicit = self._implicit
+        if implicit is None or implicit.handle is not handle or implicit.killed:
+            return
+        implicit.killed = True
+        if clear_playback and not implicit.cleared:
+            implicit.cleared = True
+            self.controls.put_nowait(PlaybackClear(reason=_clear_reason(reason)))
+        self._spawn(self._speech.cancel(handle), name="scheduler:implicit-cancel")
+        spoken_ms = self._spoken_ms(implicit.started_at)
+        intent_id = f"voice:{handle.handle_id}"
+        with bind(intent_id=intent_id):
+            log.info(
+                "scheduler.implicit_killed",
+                reason=str(reason),
+                detail=detail,
+                spoken_ms=spoken_ms,
+                cleared=implicit.cleared,
+            )
+        self._emit(
+            Verdict(
+                intent_id=intent_id,
+                source="voice",
+                outcome=outcome,
+                phase=phase,
+                reason=reason,
+                detail=detail,
+                spoken_ms=spoken_ms,
+            )
+        )
 
     def _emit(self, verdict: Verdict) -> None:
         """Every intent's one terminal record, to the sink AND to the log.
@@ -387,6 +492,7 @@ class Scheduler:
             "queued": len(self._heap),
             "active_source": active.intent.source if active else None,
             "dispatching": self._dispatching,
+            "implicit_active": self._implicit is not None,
         }
 
     # ------------------------------------------------------------ the loop
@@ -447,6 +553,8 @@ class Scheduler:
             # in the rule-5 shared-response-id trap (A2).
             if self._active is None or event.handle is not self._active.handle:
                 self._floor.on_implicit(True)
+            if event.handle.implicit:
+                self._open_implicit(event.handle)
         elif isinstance(event, link.ReplyAudioDelta):
             self._mark_output_started(event.handle)
         elif isinstance(event, link.ReplyTextDelta):
@@ -454,6 +562,8 @@ class Scheduler:
         elif isinstance(event, link.ReplyDone):
             if self._active is None or event.handle is not self._active.handle:
                 self._floor.on_implicit(False)
+            if event.handle.implicit:
+                self._close_implicit(event)
             self._on_done(event)
         elif isinstance(event, link.LinkDown):
             # The transport already settled every record (FAILED dones are
@@ -679,7 +789,53 @@ class Scheduler:
         if active is not None and handle is active.handle:
             active.output_started = True
 
+    def _open_implicit(self, handle: link.ReplyHandle) -> None:
+        # Every adapter emits ReplyStarted ahead of the turn's first delta
+        # (client.py's three first-frame emits, volcano's _handle_for), so
+        # this is the one place a turn is booked; a delta whose handle was
+        # never booked is a late frame and _guard_implicit ignores it.
+        self._implicit = _Implicit(handle=handle, started_at=self._clock.monotonic())
+        if self._guard is not None:
+            self._guard.reset()
+
+    def _close_implicit(self, event: link.ReplyDone) -> None:
+        implicit = self._implicit
+        if implicit is None or implicit.handle is not event.handle:
+            return
+        self._implicit = None
+        if implicit.killed or event.status is not link.ReplyStatus.COMPLETED:
+            # Killed turns already have their verdict; a turn the provider
+            # itself cut (the streamer spoke over her) gets none — the panel
+            # shows the barge-in, and there is no intent to account for.
+            return
+        if self._implicit_spoken_sink is not None and event.text:
+            self._implicit_spoken_sink(event.text)
+
+    def _guard_implicit(self, event: link.ReplyTextDelta) -> None:
+        implicit = self._implicit
+        if implicit is None or implicit.handle is not event.handle or implicit.killed:
+            return
+        if self._guard is None:
+            return
+        if self._guard.hit(event.text) is None:
+            return
+        # Same treatment as a dispatched reply: kill the sentence, claw back
+        # what played, escalate when configured. The audience may be hearing
+        # this one already — the gate only holds a turn for its first frames.
+        self.skip_implicit(
+            event.handle,
+            reason=SkipReason.OUTPUT_BLOCKED,
+            clear_playback=True,
+            outcome=Outcome.FAILED,
+            phase=Phase.SPEAKING,
+        )
+        if self._on_hit == "mute_all":
+            self.panic_mute()
+
     def _on_delta(self, event: link.ReplyTextDelta) -> None:
+        if event.handle.implicit:
+            self._guard_implicit(event)
+            return
         active = self._active
         if active is None or event.handle is not active.handle:
             return
@@ -1120,6 +1276,20 @@ class Scheduler:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(_report_failure)
+
+
+# PlaybackClear reasons are short words L1 logs and the panel shows; the
+# existing ones ("barge_in", "panic_mute", "output_blocked", "link_failed")
+# are not the verdict vocabulary, so the kill path maps rather than reuses.
+_CLEAR_REASONS: dict[SkipReason, str] = {
+    SkipReason.OUTPUT_BLOCKED: "output_blocked",
+    SkipReason.PANIC_MUTE: "panic_mute",
+    SkipReason.VOICE_NOT_ADDRESSED: "voice_not_addressed",
+}
+
+
+def _clear_reason(reason: SkipReason) -> str:
+    return _CLEAR_REASONS.get(reason, reason.value.partition(".")[2])
 
 
 def _report_failure(task: asyncio.Task[Any]) -> None:

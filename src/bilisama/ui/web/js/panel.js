@@ -575,8 +575,11 @@ export function createPanel({ send }) {
     entry.appendChild(el("span", "when", clock(data.ts)));
     if (kind === "verdict") {
       const reason = data.reason ? `(${data.reason})` : "";
+      // The voice gate's ruling rides in `detail` (「AUDIENCE · 在聊天气」);
+      // dispatched replies leave it empty and the line reads as before.
+      const detail = data.detail ? ` · ${data.detail}` : "";
       entry.appendChild(
-        el("span", "", `${data.source} → ${data.outcome}@${data.phase}${reason}`),
+        el("span", "", `${data.source} → ${data.outcome}@${data.phase}${reason}${detail}`),
       );
     } else if (kind === "reply") {
       entry.appendChild(el("span", "who", "她"));

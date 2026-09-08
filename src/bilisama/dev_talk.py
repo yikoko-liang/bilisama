@@ -1928,6 +1928,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     "outcome": str(verdict.outcome),
                     "phase": str(verdict.phase),
                     "reason": str(verdict.reason) if verdict.reason else "",
+                    "detail": verdict.detail,
                 },
             )
 
@@ -1962,6 +1963,9 @@ async def run_director(args: argparse.Namespace) -> int:
         # One clean spoken line, two readers: the distiller's voice-exemplar
         # buffer and the proactive loop's dialogue material.
         spoken_sink=spoken_line,
+        # Her own microphone turns go the same way: what she said to the
+        # streamer used to reach no memory at all (plan, voice gate 5.3).
+        implicit_spoken_sink=spoken_line,
     )
 
     from bilisama.event_pacing import EventPacer

@@ -153,6 +153,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "scheduler.event_failed",
         "scheduler.gate_blocked",
         "scheduler.history_write_failed",
+        "scheduler.implicit_killed",
         "scheduler.panic_muted",
         "scheduler.panic_released",
         "scheduler.preempted",
