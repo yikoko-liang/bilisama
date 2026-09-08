@@ -77,10 +77,11 @@ async def test_a_marked_head_is_dropped_and_reported_once() -> None:
     hers = rig.start()
     assert rig.gate.feed(_text(hers, "[AUDIENCE] 在聊天气")) == ()
     assert rig.skips == [Skip(hers, Ruling(SceneCategory.AUDIENCE, "在聊天气"), False)]
-    # Everything after the decision is dropped, the done still passes.
+    # Everything after the decision is dropped, the end included: nothing of
+    # this turn reached the views, so they have nothing to close.
     assert rig.gate.feed(_audio(hers)) == ()
     assert rig.gate.feed(_text(hers, "，我插不上话")) == ()
-    assert rig.gate.feed(_done(hers)) == (_done(hers),)
+    assert rig.gate.feed(_done(hers)) == ()
     assert rig.skips == [Skip(hers, Ruling(SceneCategory.AUDIENCE, "在聊天气"), False)]
     assert rig.gate.skipped(hers.handle_id)
     assert rig.gate.status()["skipped"] == 1
@@ -133,6 +134,10 @@ async def test_audio_leading_text_is_released_by_the_timer_and_a_late_marker_flu
     assert rig.skips == [Skip(hers, Ruling(SceneCategory.SELF_TALK, "主播在嘀咕"), True)]
     assert rig.gate.status()["late_markers"] == 1
     assert rig.gate.feed(_audio(hers, 3)) == (), "dropped from here on"
+    # The views did hear the start of this one, so they get its end.
+    assert rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED)) == (
+        _done(hers, link.ReplyStatus.CANCELLED),
+    )
 
 
 async def test_a_full_buffer_is_released_rather_than_grown() -> None:
@@ -149,7 +154,7 @@ async def test_a_reply_that_ends_inside_a_marker_is_dropped_without_a_ruling() -
     rig = _Rig()
     hers = rig.start()
     assert rig.gate.feed(_text(hers, "[AU")) == ()
-    assert rig.gate.feed(_done(hers)) == (_done(hers),)
+    assert rig.gate.feed(_done(hers)) == ()
     assert rig.skips == [Skip(hers, None, False)]
     assert rig.gate.skipped(hers.handle_id)
 
@@ -168,7 +173,7 @@ async def test_a_reply_that_ends_on_a_marker_is_still_skipped() -> None:
     rig = _Rig()
     hers = rig.start()
     assert rig.gate.feed(_text(hers, "UNSURE")) == (), "bare tag, no separator yet"
-    assert rig.gate.feed(_done(hers)) == (_done(hers),)
+    assert rig.gate.feed(_done(hers)) == ()
     assert rig.skips == [Skip(hers, Ruling(SceneCategory.UNSURE, "", unbracketed=True), False)]
 
 
@@ -213,6 +218,7 @@ async def test_switching_to_always_releases_the_hold_but_keeps_the_safety_net() 
     third = rig.start()
     assert rig.gate.feed(_text(third, "[GUEST] 连麦")) == ()
     assert rig.skips == [Skip(third, Ruling(SceneCategory.GUEST, "连麦"), True)]
+    assert rig.gate.feed(_done(third)) == (_done(third),), "its frames were flowing: end passes"
     rig.gate.set_mode(VoiceReplyMode.WHEN_ADDRESSED)
     fourth = rig.start()
     assert rig.gate.feed(_audio(fourth)) == (), "holding again"
@@ -222,7 +228,7 @@ async def test_two_consecutive_turns_do_not_interfere() -> None:
     rig = _Rig()
     first = rig.start()
     assert rig.gate.feed(_text(first, "[AUDIENCE] 讲故事")) == ()
-    assert rig.gate.feed(_done(first)) == (_done(first),)
+    assert rig.gate.feed(_done(first)) == ()
     second = rig.start()
     plain = _text(second, "好的")
     assert rig.gate.feed(plain) == (plain,)

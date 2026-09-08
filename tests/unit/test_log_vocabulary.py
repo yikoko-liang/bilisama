@@ -68,6 +68,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "dev_talk.speech_close_failed",
         "dev_talk.task_died",
         "dev_talk.turn_done",
+        "dev_talk.voice_gate_failed",
         "dev_talk.ui_close_failed",
         "dev_talk.ui_endpoint_file_unwritable",
         "dev_talk.ui_port_unavailable",

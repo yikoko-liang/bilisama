@@ -316,7 +316,7 @@ class InteractionConfig(BaseModel):
     # enforces. The prompt that teaches the markers rides this same switch
     # (persona/loader.py live_voice_rules), so the two halves cannot split:
     # taught without the gate she would read「AUDIENCE」to the audience.
-    voice_reply: VoiceReplyMode = Field(VoiceReplyMode.ALWAYS)
+    voice_reply: VoiceReplyMode = Field(VoiceReplyMode.WHEN_ADDRESSED)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
     # Ledger #91. Off: the streamer's next word always lands, and a paid
     # thank-you that gets cut off is requeued. On: SC and high-tier gift

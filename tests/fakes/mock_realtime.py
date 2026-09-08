@@ -170,6 +170,12 @@ class Script:
     delta_chunks: int = 3
     # Gap between deltas, so a test can slip an interruption in mid-reply.
     delta_interval_s: float = 0.0
+    # Audio ahead of its own text by this much, per piece. No shipped provider
+    # has been seen to do this (plan §三: all three send text first); it exists
+    # to exercise the voice gate's timeout path, where the frames are released
+    # before the head can be read and a marker arriving afterwards has to
+    # flush the speakers. Audio replies only.
+    text_lag_s: float = 0.0
     audio_ms_per_delta: int = 40
     # How much audio the client must append after speech_stopped before the
     # speculative window closes. An audio clock, not a wall clock: upstream
@@ -820,17 +826,21 @@ class MockRealtimeServer:
                 # all-text done. GA (s2s) streams NOTHING per piece — its text
                 # arrives as one output_audio_transcript.done PER LLM CHUNK
                 # (handlers/response.py:362), sent right here.
+                audio_frame = {
+                    "response_id": rid,
+                    "delta": base64.b64encode(_pcm(self.script.audio_ms_per_delta)).decode(),
+                }
+                if self.script.text_lag_s > 0:
+                    await self.send(dia.ServerEvent.AUDIO_DELTA, **audio_frame)
+                    await asyncio.sleep(self.script.text_lag_s)
                 if self._is_hosted():
                     await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
                 else:
                     await self.send(
                         dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=piece
                     )
-                await self.send(
-                    dia.ServerEvent.AUDIO_DELTA,
-                    response_id=rid,
-                    delta=base64.b64encode(_pcm(self.script.audio_ms_per_delta)).decode(),
-                )
+                if self.script.text_lag_s <= 0:
+                    await self.send(dia.ServerEvent.AUDIO_DELTA, **audio_frame)
             else:
                 await self.send(dia.ServerEvent.TEXT_DELTA, response_id=rid, delta=piece)
             if self.script.delta_interval_s:

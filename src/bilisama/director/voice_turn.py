@@ -144,7 +144,7 @@ class VoiceTurnGate:
                     self._emit_all(self._release(turn, why="mode"))
 
     def skipped(self, handle_id: int) -> bool:
-        """Whether this reply was dropped here — ui_feed hides its done."""
+        """Whether this reply was dropped here (the health card and tests)."""
         return handle_id in self._skipped_ids
 
     def status(self) -> dict[str, Any]:
@@ -195,6 +195,9 @@ class VoiceTurnGate:
             head=self._decoder_factory(),
             opened_at=self._clock.monotonic(),
             holding=holding,
+            # Under ALWAYS the frames flow straight to the views, which is
+            # what "released" means to the done below.
+            released=not holding,
         )
         if holding:
             log.debug("voice_gate.held", handle_id=handle.handle_id)
@@ -234,9 +237,13 @@ class VoiceTurnGate:
         if turn is None:
             return (event,)
         self._disarm(turn)
-        if turn.skipped or not turn.holding:
-            # The done passes either way: the scheduler already saw it, and
-            # ui_feed asks skipped() to hide the ones dropped here.
+        if turn.skipped:
+            # Skipped while held: nothing of this turn reached the views, so
+            # its end is nobody's business downstream either (the scheduler
+            # has the ungated view). Skipped after a release — the late
+            # marker — the views did see frames, and get the end too.
+            return (event,) if turn.released else ()
+        if not turn.holding:
             return (event,)
         if event.status is not link.ReplyStatus.COMPLETED:
             # Cut, failed or timed out while held: the head never plays.
@@ -251,13 +258,13 @@ class VoiceTurnGate:
         state = turn.head.finish()
         if state is HeadState.DANGLING:
             self._skip(turn, ruling=None, clear_playback=False)
-            return (event,)
+            return ()
         if state is HeadState.MARKED:
             ruling = turn.head.ruling
             assert ruling is not None  # MARKED says so
             if self._policy.action(ruling) is TurnAction.SKIP:
                 self._skip(turn, ruling=ruling, clear_playback=False)
-                return (event,)
+                return ()
         # Plain, undecidable, or a scene the policy answers: she must not go
         # mute over a head we could not read.
         return (*self._release(turn, why="end"), event)
