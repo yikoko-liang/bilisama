@@ -31,3 +31,15 @@ class GrowthMode(StrEnum):
     OFF = "off"
     COLLECT = "collect"
     ON = "on"
+
+
+class VoiceReplyMode(StrEnum):
+    """Whether her own microphone turn plays unconditionally.
+
+    WHEN_ADDRESSED: the voice gate (director/voice_turn.py) holds each turn
+    for its head and drops the ones whose scene marker says the streamer was
+    not talking to her. ALWAYS: today's behaviour — every VAD turn plays.
+    """
+
+    ALWAYS = "always"
+    WHEN_ADDRESSED = "when_addressed"
