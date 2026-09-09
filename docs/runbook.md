@@ -667,20 +667,54 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/tofu/pinned.
 调度器取消它；没有记号的照播。判断靠她自己写的记号，所以「判得对不对」是提示词的事，「拦没拦住」是程序的事，
 两边分开看：
 
-- **面板对话页**：被拦的回复显示成一条判决「voice → skipped@generating(voice.not_addressed) · READING · 主播在念弹幕」，
-  后半段是她报的场景和十字备注；说出去的回复不发判决。守卫命中和紧急闭嘴现在也会杀她自起的回复，判决分别是
+- **面板「聊天记录」页**：被拦的回复显示成一条判决「voice → skipped@generating(voice.not_addressed) · READING · 主播在念弹幕」，
+  后半段是她报的场景和备注；说出去的回复不发判决。守卫命中和紧急闭嘴现在也会杀她自起的回复，判决分别是
   `failed@speaking(safety.output_blocked)` 和 `cancelled@speaking(policy.panic_mute)`。
+  **备注经常是空的，判决只剩一个 `[AUDIENCE]`**：记号和备注分在两片文字里到时，解析器读到 `]` 当场定判决、之后不再看
+  （`director/turn_protocol.py:157-164`）。DashScope 逐字流式，验收里 16 条被拦的备注全空；火山和 s2s 整段一次到，备注完整。
+  备注不影响接不接，只影响这行好不好读，以及阶段二拿它当素材（台账 #100）。
 - **健康卡 `voice_gate`**：`mode`、`holding`（此刻攒着的回复数）、`passed`、`skipped`、`timeouts`（文字没在
   600 毫秒内到、先放行的次数）、`late_markers`（放行之后才看到记号、切断并冲扬声器的次数）、`longest_hold_ms`。
-  三家后端文字都先于声音到，`timeouts` 和 `late_markers` 正常应为 0；不为 0 说明这条后端的帧序和探测结果不一样，
-  先看日志再动常量。
+  DashScope 文字领先音频约 210 毫秒，s2s 整条回复的文字先于全部音频，这两家 `longest_hold_ms` 应该是 0；
+  **火山是文字和音频同一刻到、音频还略先一点**，所以它攒几十毫秒是正常的（验收里 49 毫秒）。三家验收时
+  `timeouts` 和 `late_markers` 都是 0，涨了先看是不是回复特别长或者网络抖了，别急着动常量。`late_markers`
+  还有一条无害的来路：门关着（`always`）而她照样写了记号，那一次也计进去（`voice_turn.py:288-309`）。
 - **日志**（`runtime.log_level = "debug"`）：`voice_gate.held / passed / skipped / late_marker / marker_midway /
   marker_unbracketed / mode_changed`，调度器那边是 `scheduler.implicit_killed`。备注在 `note_text` 字段，
-  日志里只记长度，面板上才有字。
+  日志按观众内容的规矩只记长度，字在面板判决那一行；上面说的空备注，日志记 0、面板也没字。
 - **验收怎么跑**（走下一节的直播 Mock）：放一段主播对观众说话多、偶尔点名她的录像，20 句以上；逐条对照面板
   判决和你听到的——对她说的有没有被拦（过度不接）、不是对她说的有没有漏拦（抢话）；数 `voice_gate.skipped`
   和 `passed`。判对率八成以上算过，不到就按人设改 `voice_addressing.md` 的措辞，不动门。按紧急闭嘴时她正在
-  生成的那句要一起停。
+  生成的那句要一起停。**判决要在主面板的「聊天记录」页看，不是 Chrome 里那个 Mock 控制台**：控制台只播转写和
+  说出去的回复，被拦的那句在它眼里彻底静默，分不出「拦住了」和「后端根本没回」。
+- **换后端跑同一套验收**：Mock 那条路对三家一视同仁——标签页音轨在进 provider 之前就和麦克风合成同一份
+  16 kHz / 20 毫秒 PCM（`ui/audio.py` 的 `AudioInputSwitch`），Mock 这一侧没有任何按后端分叉的地方。换后端只能
+  重开进程（`speech.provider` 是「重连生效」级别，面板改会被拒）：
+
+  ```bash
+  source path.sh
+  .venv/bin/bilisama dev-talk --director --provider volcano
+  .venv/bin/bilisama dev-talk --director --provider dashscope --model qwen-audio-3.0-realtime-flash
+  ```
+
+  重开之后界面口令换了，Chrome 里原来那个控制台页作废，要从新面板重新点「直播 Mock · 打开」、重新选源、重新预检；
+  健康卡计数随进程清零，所以两轮的数天然分开。起之前确认 `interaction.voice_reply` 是 `when_addressed`，而且当前
+  profile 不是 `chat`——chat 档把它写死成 `always`，门等于没开。按后端各有几条要当心：
+
+  - **火山，音色配错会伪装成「什么都接」**：`[speech.volcano]` 的 `model` 和 `speaker` 必须配对（出厂 `1.2.1.1` ＋
+    `zh_female_vv_jupiter_bigtts`）。留空或配成克隆音色，服务端自带的角色会压过整段人设，记号合同也在人设里，
+    她于是一个记号都不写、门全放行——现象和门坏了一模一样。版本与音色不配对 `config validate` 和启动都会拦；
+    官方音色名拼错拦不住，看启动后有没有 `ClientError:InvalidSpeaker`。
+  - **火山，手工验收用出厂的 O2.0**：SC2.0（`2.2.0.0`）每次推上下文都是换会话，那 114 毫秒里上行音频直接丢
+    （`providers/volcano.py:849-866`）；Mock 场次真实事件不断、上下文推得勤，等于隔一会儿吃掉一小段主播音轨。
+    O2.0 走 `UpdateConfig`，不换会话。
+  - **火山，留意她把记号念给观众听**：它没有逐轮指令通道，弹幕礼物的回复和语音轮共用同一份会话指令，里面装着记号
+    合同；语音门只解码她自起的回合，事件回复开头要是带了记号就会被念出来（台账 #98）。Mock 接的是真实房间事件，
+    最容易在这里撞上，听到了记一条。
+  - **DashScope**：`[speech.dashscope] endpoint` 出厂是空的，靠 `path.sh` 的 `dashscope_url` 兜底，没有就起不来。
+  - **控制台的「浏览器语音」只有火山会出字**：它的建会话请求无条件带 ASR 段；s2s 产品配置是 `stt: none`，
+    DashScope 我们从没开过 `input_audio_transcription`，这两家那一行永远空着，不是 Mock 坏了。
+
 - **她开始念「AUDIENCE」了**：只会发生在门关着（`always`）而提示词还在教记号的空窗，程序切换时已经排好顺序；
   真看到了，先 `bilisama config show` 确认 `interaction.voice_reply`，再看日志里 `voice_gate.mode_changed`
   有没有到。
@@ -765,8 +799,16 @@ getDisplayMedia 这件事壳里做不了，所以走外部浏览器。流程照�
 「停止」把输入切回麦克风；房间还连着的话预检保持通过，可以直接再点开始。浏览器
 结束共享才会作废预检，那时要重新选源、重新检测。
 共享音轨里可能带着她自己在直播里的声音，所以这条路不参与回声检测——Mock 场次里
-echo 卡的读数不作数。语音门（主播说话时接不接）的验收也走这条路，步骤在上面
+echo 卡的读数不作数。
+
+**三家后端都能跑 Mock**：标签页音轨走的就是麦克风那条上行，在进 provider 之前已经和麦克风合成同一份
+16 kHz / 20 毫秒 PCM，Mock 这一侧没有按后端分叉的代码。用哪家由起 dev-talk 时的 `--provider` 决定，
+换家要重开进程。语音门（主播说话时接不接）的验收也走这条路，命令、各家的坑和怎么读判决都在上面
 「她怎么不接话了、怎么什么都接」。
+
+**Mock 期间别让那个 Chrome 标签页进后台。** 本机麦克风那条路在没声音时会补静音帧，把 provider 的音频时钟
+喂着；Mock 这条路没有这个填充，而且 Mock 一开麦克风那边的填充也被丢掉了。标签页被浏览器节流或者共享中断，
+上行就整段静默——s2s 上会把主播下一句并进上一个回合。这条是读代码得出的，还没实测（台账 #101）。
 
 ## 人设与生长层
 
