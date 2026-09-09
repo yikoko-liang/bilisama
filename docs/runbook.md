@@ -712,8 +712,9 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/tofu/pinned.
     合同；语音门只解码她自起的回合，事件回复开头要是带了记号就会被念出来（台账 #98）。Mock 接的是真实房间事件，
     最容易在这里撞上，听到了记一条。
   - **DashScope**：`[speech.dashscope] endpoint` 出厂是空的，靠 `path.sh` 的 `dashscope_url` 兜底，没有就起不来。
-  - **控制台的「浏览器语音」只有火山会出字**：它的建会话请求无条件带 ASR 段；s2s 产品配置是 `stt: none`，
-    DashScope 我们从没开过 `input_audio_transcription`，这两家那一行永远空着，不是 Mock 坏了。
+  - **控制台的「浏览器语音」只有 s2s 产品配置不出字**：火山的建会话请求无条件带 ASR 段；DashScope 虽然我们从没
+    设过 `input_audio_transcription`，它默认就回 `conversation.item.input_audio_transcription` 帧（2026-09-09
+    真端点实测，面板「聊天记录」页那些「你 ……」就是它）。只有 s2s 出货配置是 `stt: none`，那一行永远空着。
 
 - **她开始念「AUDIENCE」了**：只会发生在门关着（`always`）而提示词还在教记号的空窗，程序切换时已经排好顺序；
   真看到了，先 `bilisama config show` 确认 `interaction.voice_reply`，再看日志里 `voice_gate.mode_changed`
