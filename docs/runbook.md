@@ -684,6 +684,12 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/tofu/pinned.
 - **她开始念「AUDIENCE」了**：只会发生在门关着（`always`）而提示词还在教记号的空窗，程序切换时已经排好顺序；
   真看到了，先 `bilisama config show` 确认 `interaction.voice_reply`，再看日志里 `voice_gate.mode_changed`
   有没有到。
+- **不用直播 Mock 也能量**：`tools/voice_gate_acceptance.py --provider dashscope|s2s|volcano`（先 `source path.sh`；
+  s2s 要先按上面「起本地语音服务器」把官方管线起起来）。它走真实链路、扇出、门和调度器，主播台词用 macOS `say`
+  合成，扬声器换成计数，22 句逐句打分，报两个数：「该不该说判对」（她只在对她说的时候出声）和「记号分类准确」；
+  前者八成以上、过度不接不超过一句就放行。2026-09-09 首轮三家都过：DashScope 95%（过度不接 1）、火山 O2.0 95%
+  （漏拦 1）、s2s 官方管线 91%（漏拦 2），三家零超时零迟到记号。判错的都是边界句：名字和「大家」同时出现、
+  自言自语说成问句、收尾的「大家晚安」。
 
 ## 连真直播间（弹幕）
 
