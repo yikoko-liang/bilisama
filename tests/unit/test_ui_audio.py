@@ -12,6 +12,7 @@ import asyncio
 import math
 import random
 import struct
+import wave
 
 from bilisama.clock import FakeClock
 from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
@@ -639,3 +640,96 @@ async def test_pause_drops_everything_and_browser_election_is_exclusive() -> Non
     switch.use_browser(False)
     await switch.push_browser_audio(_loud_frame())
     assert switch.blocked_browser_frames == 1
+
+
+# ------------------------------------------------------------- UplinkRecorder
+
+
+async def test_recorder_captures_exactly_what_the_backend_received(
+    tmp_path: object,
+) -> None:
+    """The tap is downstream of both gates, which is the point of the file.
+
+    A recording of the microphone would show speech the model never heard;
+    replaying it would then prove nothing about a session that disagreed.
+    """
+    from pathlib import Path as _Path
+
+    from bilisama.ui.audio import AudioInputSwitch, UplinkRecorder
+
+    assert isinstance(tmp_path, _Path)
+    out = tmp_path / "uplink.wav"
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    recorder = UplinkRecorder(out, flush_seconds=0.02)
+    switch = AudioInputSwitch(sink, recorder=recorder)
+    await switch.push_audio(_loud_frame())
+    switch.set_enabled(False)
+    await switch.push_audio(_loud_frame())  # substituted silence, and recorded as such
+    recorder.close()
+
+    with wave.open(str(out)) as w:
+        assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+        written = w.readframes(w.getnframes())
+    assert written == b"".join(sent), "the file is the wire, byte for byte"
+    assert written[640:] == bytes(640), "the muted frame was recorded as the silence it became"
+
+
+async def test_recorder_survives_an_unwritable_path_without_taking_the_uplink_down(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    from bilisama.ui.audio import AudioInputSwitch, UplinkRecorder
+
+    assert isinstance(tmp_path, _Path)
+    blocked = tmp_path / "wall"
+    blocked.write_text("not a directory", encoding="utf-8")
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    recorder = UplinkRecorder(blocked / "uplink.wav", flush_seconds=0.02)
+    switch = AudioInputSwitch(sink, recorder=recorder)
+    await switch.push_audio(_loud_frame())
+    await switch.push_audio(_loud_frame())
+
+    assert recorder.stopped, "a failed write stops recording rather than retrying every 20 ms"
+    assert len(sent) == 2, "and the uplink keeps its frames — losing the file is not losing audio"
+
+
+async def test_recorder_caps_a_runaway_session_and_close_is_idempotent(
+    tmp_path: object,
+) -> None:
+    from pathlib import Path as _Path
+
+    from bilisama.ui.audio import UplinkRecorder
+
+    assert isinstance(tmp_path, _Path)
+    out = tmp_path / "capped.wav"
+    recorder = UplinkRecorder(out, flush_seconds=0.02, max_seconds=0.04)
+    for _ in range(10):
+        recorder.feed(_loud_frame())
+    assert recorder.stopped, "the cap holds; an all-day session must not fill the disk"
+    capped = recorder.seconds
+    recorder.feed(_loud_frame())
+    assert recorder.seconds == capped, "frames after the cap are dropped, not counted"
+    recorder.close()
+    recorder.close()  # twice is a no-op, not a crash on a closed file
+    with wave.open(str(out)) as w:
+        assert w.getnframes() > 0, "what was captured before the cap is still playable"
+
+
+async def test_recorder_is_optional_and_absent_by_default() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    async def sink(pcm: bytes) -> None:
+        return None
+
+    switch = AudioInputSwitch(sink)
+    await switch.push_audio(_loud_frame())
+    assert "recorded_s" not in switch.status(), "no recorder, no row in the health card"

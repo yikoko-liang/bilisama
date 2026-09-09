@@ -38,6 +38,7 @@ import wave
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from bilisama.clock import SystemClock
 from bilisama.config.enums import VoiceReplyMode
@@ -60,6 +61,15 @@ _CONFIG = _REPO / "config"
 _FRAME = 640  # 20 ms of 16 kHz mono s16le
 _TAIL_S = 2.5  # silence after each line, so the server's VAD closes the turn
 _REPLY_TIMEOUT_S = 30.0
+# A replay ends when the recording does, mid-turn as often as not; this is
+# how long to keep listening afterwards for the reply already in flight.
+_REPLAY_DRAIN_S = 15.0
+# A --model string only reaches the config field through this table, which is
+# what lets the field keep its Literal type instead of an unchecked cast.
+_VOLCANO_GENERATIONS: dict[str, Literal["1.2.1.1", "2.2.0.0"]] = {
+    "1.2.1.1": "1.2.1.1",
+    "2.2.0.0": "2.2.0.0",
+}
 
 # The streamer's lines, with who they were for. Punctuation is kept out of
 # the spoken text: `say` pauses on it and the pause splits one line into two
@@ -160,6 +170,9 @@ class _Books:
     audio: dict[int, int] = field(default_factory=dict)
     dones: list[link.ReplyDone] = field(default_factory=list)
     started: list[int] = field(default_factory=list)
+    # Replay only: heard-and-said in arrival order, so a recorded session can
+    # be read as a conversation instead of a pile of handles.
+    timeline: list[tuple[str, int, str]] = field(default_factory=list)
 
 
 def _say(text: str) -> bytes:
@@ -179,6 +192,20 @@ def _say(text: str) -> bytes:
             return pcm
 
 
+def _load_wav(path: Path) -> bytes:
+    """A recorded uplink, in the one format the uplink itself uses."""
+    with wave.open(str(path)) as w:
+        if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (16000, 1, 2):
+            raise SystemExit(
+                f"{path} 是 {w.getframerate()}Hz/{w.getnchannels()}声道/"
+                f"{w.getsampwidth() * 8}bit，回放必须和上行同格式：16kHz 单声道 16bit"
+            )
+        pcm: bytes = w.readframes(w.getnframes())
+        if not pcm:
+            raise SystemExit(f"{path} 是空的，没有可回放的音频")
+        return pcm
+
+
 async def _push(speech: link.SpeechLink, pcm: bytes) -> None:
     for i in range(0, len(pcm), _FRAME):
         await speech.push_audio(pcm[i : i + _FRAME])
@@ -191,6 +218,9 @@ async def _watch_raw(view: AsyncIterator[link.LinkEvent], books: _Books) -> None
             books.started.append(event.handle.handle_id)
         elif isinstance(event, link.ReplyDone) and event.handle.implicit:
             books.dones.append(event)
+            books.timeline.append(("said", event.handle.handle_id, event.text.strip()))
+        elif isinstance(event, link.UserTranscriptDone) and event.text.strip():
+            books.timeline.append(("heard", -1, event.text.strip()))
 
 
 async def _watch_speakers(view: AsyncIterator[link.LinkEvent], books: _Books) -> None:
@@ -231,6 +261,37 @@ async def _one_line(
     return result
 
 
+def _render_replay(books: _Books) -> str:
+    """A replay has no expected answers — only what was heard, said and gated.
+
+    Ground truth would have to be hand-labelled per utterance, and the point
+    of a replay is the audio, not the labels: if a recorded session writes
+    markers here but not in production, the difference is no longer the audio.
+    """
+    rows: list[str] = []
+    replies = 0
+    marked = 0
+    skipped = 0
+    for kind, handle_id, text in books.timeline:
+        if kind == "heard":
+            rows.append(f"  主播说  {text}")
+            continue
+        replies += 1
+        if text.startswith("["):
+            marked += 1
+        skip = books.skips.get(handle_id)
+        if skip is None:
+            verdict = "放行"
+        else:
+            skipped += 1
+            ruling = skip.ruling
+            verdict = f"拦下 {ruling.category.value if ruling is not None else '残记号'}"
+        rows.append(f"  她 [{verdict}] {text[:70]}")
+    rows.append("")
+    rows.append(f"她自起的回复 {replies} 条：开头带记号 {marked} 条，门拦下 {skipped} 条")
+    return "\n".join(rows)
+
+
 def _render(results: list[Result]) -> str:
     rows = ["#  | 期望       | 她写的开头                     | 门     | 音频帧 | 判定"]
     for i, r in enumerate(results, 1):
@@ -245,26 +306,51 @@ def _render(results: list[Result]) -> str:
     return "\n".join(rows)
 
 
-async def _run(provider: str) -> int:
+async def _run(provider: str, model: str, voice: str, replay: Path | None = None) -> int:
     logging.basicConfig(level=logging.WARNING)
     settings = load(_CONFIG / "bilisama.toml")
-    endpoint = resolve_endpoint(settings, provider=provider, url=None, model=None, env=os.environ)
+    endpoint = resolve_endpoint(
+        settings, provider=provider, url=None, model=model or None, env=os.environ
+    )
     persona = PersonaStore.from_config(settings.persona, config_dir=_CONFIG)
     variables = template_variables(settings.persona, reply_length=settings.interaction.reply_length)
+    if model and provider == "volcano":
+        # The volcano generation is config, not part of the address: its model
+        # picks which persona field the session uses (system_role on O2.0,
+        # character_manifest on SC2.0), and that turns out to decide whether
+        # the marker contract is obeyed at all. Voice must move with it.
+        generation = _VOLCANO_GENERATIONS.get(model)
+        if generation is None:
+            raise SystemExit("火山的 --model 只有 1.2.1.1（O2.0）和 2.2.0.0（SC2.0）")
+        settings.speech.volcano.model = generation
+        if voice:
+            settings.speech.volcano.speaker = voice
     built = build_link(
         LinkRequest(
             endpoint=endpoint,
             settings=settings,
+            voice=voice if provider != "volcano" else "",
             bot_name=variables["agentName"],
+            model_explicit=bool(model),
             env=os.environ,
             text_replies=False,
         )
     )
-    print(f"后端：{endpoint.provider.value}  地址：{built.url}")
-    print("合成台词…", end="", flush=True)
-    audio = [_say(line.text) for line in LINES]
-    silence = b"\x00" * int(16000 * _TAIL_S) * 2
-    print(f" {len(LINES)} 句")
+    detail = f"  模型：{model}" if model else ""
+    if provider == "volcano":
+        detail += f"  音色：{settings.speech.volcano.speaker}"
+    print(f"后端：{endpoint.provider.value}{detail}  地址：{built.url}")
+    audio: list[bytes] = []
+    silence = b""
+    recorded = b""
+    if replay is None:
+        print("合成台词…", end="", flush=True)
+        audio = [_say(line.text) for line in LINES]
+        silence = b"\x00" * int(16000 * _TAIL_S) * 2
+        print(f" {len(LINES)} 句")
+    else:
+        recorded = _load_wav(replay)
+        print(f"回放 {replay}：{len(recorded) / 32000:.0f} 秒，按实时速度推")
 
     clock = SystemClock()
     speech = _Fanout(built.link)
@@ -298,18 +384,29 @@ async def _run(provider: str) -> int:
     try:
         await speech.set_context(_instructions(persona, variables))
         await asyncio.sleep(1.0)
-        for line, pcm in zip(LINES, audio, strict=True):
-            result = await _one_line(speech, books, line, pcm, silence)
-            results.append(result)
-            print(
-                f"{len(results):>2}/{len(LINES)} {line.expected.value:<10} → "
-                f"{'拦下' if result.skipped else result.status:<9} {result.head}"
-            )
+        if replay is not None:
+            await _push(speech, recorded)
+            print(f"音频推完，再等 {_REPLAY_DRAIN_S:.0f} 秒收最后一轮…")
+            await asyncio.sleep(_REPLAY_DRAIN_S)
+        else:
+            for line, pcm in zip(LINES, audio, strict=True):
+                result = await _one_line(speech, books, line, pcm, silence)
+                results.append(result)
+                print(
+                    f"{len(results):>2}/{len(LINES)} {line.expected.value:<10} → "
+                    f"{'拦下' if result.skipped else result.status:<9} {result.head}"
+                )
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await speech.aclose()
+
+    if replay is not None:
+        print()
+        print(_render_replay(books))
+        print(f"门：{gate.status()}")
+        return 0
 
     print()
     print(_render(results))
@@ -335,8 +432,17 @@ async def _run(provider: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="语音门验收：真实后端、合成台词、逐句对照")
     parser.add_argument("--provider", required=True, choices=["s2s", "dashscope", "volcano"])
+    parser.add_argument("--model", default="", help="覆盖模型；火山上它决定人设走哪个字段")
+    parser.add_argument("--voice", default="", help="覆盖音色；火山上必须和模型代际配对")
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        default=None,
+        help="不合成台词，改回放一段 dev-talk --record-uplink 录下的上行 WAV："
+        "同一份指令、同一个门，换成真实直播的音频",
+    )
     args = parser.parse_args(argv)
-    return asyncio.run(_run(args.provider))
+    return asyncio.run(_run(args.provider, args.model, args.voice, args.replay))
 
 
 if __name__ == "__main__":

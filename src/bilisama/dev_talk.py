@@ -1903,7 +1903,7 @@ async def run_director(args: argparse.Namespace) -> int:
         )
     )
     from bilisama.realtime.providers.hosted import HostedLink
-    from bilisama.ui.audio import AudioInputSwitch
+    from bilisama.ui.audio import AudioInputSwitch, UplinkRecorder
 
     inner: link.SpeechLink = built.link
     hosted_link = inner if isinstance(inner, HostedLink) else None
@@ -1919,8 +1919,14 @@ async def run_director(args: argparse.Namespace) -> int:
     # Every uplink frame — page socket or local sounddevice — passes this one
     # switch: pause gate, input toggle (silence-substituted), noise gate, and
     # the live-mock source election all live here (ui/audio.py).
+    uplink_recorder: UplinkRecorder | None = None
+    if args.record_uplink is not None:
+        uplink_recorder = UplinkRecorder(args.record_uplink)
+        print(f"[录音] 上行音频写到 {args.record_uplink}（模型听到的那一路，退出时收尾）")
     audio_input = AudioInputSwitch(
-        speech.push_audio, noise_sensitivity=settings.audio.noise_sensitivity
+        speech.push_audio,
+        noise_sensitivity=settings.audio.noise_sensitivity,
+        recorder=uplink_recorder,
     )
 
     # The pause total-gate's state, shared by the panel handler and hello().
@@ -3454,6 +3460,13 @@ async def run_director(args: argparse.Namespace) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # After the gather, so no pump can still be feeding it.
+        if uplink_recorder is not None:
+            uplink_recorder.close()
+            print(
+                f"[录音] {uplink_recorder.path} 收尾完成，共 {uplink_recorder.seconds:.0f} 秒",
+                file=sys.stderr,
+            )
         # The prompt died with its task; unpatch stdout before the shutdown
         # chain prints, and point logging back at stderr.
         console_patch.close()
@@ -3676,6 +3689,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wav", type=Path, default=None, help="不用麦克风，喂一段 16kHz 单声道 WAV"
+    )
+    parser.add_argument(
+        "--record-uplink",
+        type=Path,
+        default=None,
+        help="把送给语音后端的音频录成 16kHz 单声道 WAV（噪声门之后，即模型听到的），"
+        "用来回放排查；每小时约 115 MB，满 2 小时自动停",
     )
     parser.add_argument(
         "--mute-while-speaking",
