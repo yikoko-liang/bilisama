@@ -1663,6 +1663,10 @@ async def test_picking_a_skin_remounts_the_pet_live(
     # The static /skins mount is fixed at server build; rebuild on the same
     # port with the root in place (the reconnect test's pattern) so the page
     # can actually fetch skins/candy/pet.json.
+    # This is a live-swap test: finish the initial mount before taking its
+    # server away. Otherwise an in-flight tofu request fails and leaves the
+    # intentional CSS fallback, which an unchanged reconnect does not remount.
+    await _wait(page, "document.querySelector('#pet-mount canvas')?.width === 156")
     harness.user_skins_root = user_root
     await harness.server.stop()
     _build_server(harness.hub, [harness], port=harness.port)

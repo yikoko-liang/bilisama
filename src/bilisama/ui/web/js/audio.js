@@ -12,6 +12,7 @@
 // chunk leaves an audible seam every time the main thread is busy.
 
 const DOWNLINK_RATE = 24000; // what the providers send (plan section 3.1)
+const MONITOR_RATE = 16000;
 
 export function createAudio({ onOwner }) {
   // Receipts go out on THIS socket, not the control one. They describe the
@@ -38,6 +39,9 @@ export function createAudio({ onOwner }) {
   let nextStart = 0;
   let live = []; // scheduled sources, so a barge-in can stop them all
   let playedMs = 0; // of the current utterance, for playback.cancelled
+  let monitorNextStart = 0;
+  let monitorLive = [];
+  let monitorError = "";
   let analyser = null; // input level, for the panel's meter
   let wantedInput = undefined; // deviceId the streamer picked, if any
   // Bumped by every stopCapture(), so a getUserMedia still in flight can tell
@@ -71,6 +75,7 @@ export function createAudio({ onOwner }) {
       }
       attempt = 0;
       onOwner(role);
+      resumeAudio();
       startCapture();
     };
     ws.onmessage = (message) => {
@@ -82,7 +87,13 @@ export function createAudio({ onOwner }) {
         // and start playing again, which is the beat of voice the streamer
         // heard carrying on after the text had stopped.
         try {
-          if (JSON.parse(message.data).event === "playback.clear") stopEverything();
+          const { event, data } = JSON.parse(message.data);
+          if (event === "playback.clear") stopEverything();
+          if (event === "test.voice") scheduleMonitor(data);
+          if (event === "test.voice.clear" && Number.isSafeInteger(data?.seq)) {
+            stopMonitor();
+            report("test.voice.cleared", { seq: data.seq });
+          }
         } catch {
           // Not ours; a socket that only ever carries our own frames should
           // still not die on one it cannot read.
@@ -97,6 +108,8 @@ export function createAudio({ onOwner }) {
       // live one's capture chain.
       if (socket !== ws) return;
       stopCapture();
+      stopEverything();
+      stopMonitor();
       onOwner(null);
       if (closed) return;
       if (event.code === 4409 || event.code === 1001) {
@@ -157,7 +170,7 @@ export function createAudio({ onOwner }) {
       letGo(granted);
       return null;
     }
-    context = context ?? new AudioContext();
+    ensureContext();
     await context.audioWorklet.addModule(new URL("./capture-worklet.js", import.meta.url));
     if (superseded()) {
       letGo(granted);
@@ -200,6 +213,96 @@ export function createAudio({ onOwner }) {
     stream = null;
   }
 
+  function reportMonitorReady() {
+    const ready = context?.state === "running" && !monitorError;
+    report("test.voice.ready", {
+      version: 1,
+      ready,
+      error: ready ? "" : monitorError || "请在音频页面点击一次，启用预制语音监听",
+    });
+  }
+
+  function ensureContext() {
+    if (!context) {
+      context = new AudioContext();
+      context.addEventListener("statechange", reportMonitorReady);
+    }
+    return context;
+  }
+
+  function resumeAudio() {
+    if (closed || socket?.readyState !== WebSocket.OPEN) return;
+    ensureContext();
+    reportMonitorReady();
+    if (context.state === "suspended") {
+      context.resume().then(reportMonitorReady).catch(() => {
+        monitorError = "浏览器禁止播放，请在音频页面点击后重试";
+        reportMonitorReady();
+      });
+    }
+  }
+
+  function unlockAudio() {
+    monitorError = "";
+    resumeAudio();
+  }
+
+  function stopMonitor() {
+    monitorLive.forEach((source) => {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // A source may have ended just before this ordered clear arrived.
+      }
+      source.disconnect();
+    });
+    monitorLive = [];
+    monitorNextStart = 0;
+  }
+
+  function scheduleMonitor(data) {
+    if (context?.state !== "running" || monitorError) {
+      reportMonitorReady();
+      return;
+    }
+    try {
+      if (data?.sample_rate !== MONITOR_RATE || typeof data.pcm !== "string") {
+        throw new Error("预制语音监听格式无效");
+      }
+      const binary = atob(data.pcm);
+      if (!binary.length || binary.length % 2) throw new Error("预制语音监听数据不完整");
+      if (monitorNextStart - context.currentTime > 2) {
+        throw new Error("预制语音监听积压，请停止测试后重试");
+      }
+      const buffer = context.createBuffer(1, binary.length / 2, MONITOR_RATE);
+      const channel = buffer.getChannelData(0);
+      for (let i = 0; i < channel.length; i += 1) {
+        const sample = binary.charCodeAt(2 * i) | (binary.charCodeAt(2 * i + 1) << 8);
+        channel[i] = (sample >= 32768 ? sample - 65536 : sample) / 32768;
+      }
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      // Only an empty/underrun lane needs a cushion. Re-applying it on each
+      // frame would turn send-loop jitter into a gap between every 20 ms block.
+      const start = monitorNextStart > context.currentTime
+        ? monitorNextStart
+        : context.currentTime + 0.12;
+      source.start(start);
+      monitorNextStart = start + buffer.duration;
+      monitorLive.push(source);
+      source.onended = () => {
+        monitorLive = monitorLive.filter((other) => other !== source);
+        source.disconnect();
+      };
+    } catch (error) {
+      stopMonitor();
+      monitorError = String(error);
+      reportMonitorReady();
+    }
+  }
+
   function stopEverything() {
     const heard = Math.round(playedMs);
     live.forEach((source) => {
@@ -218,7 +321,7 @@ export function createAudio({ onOwner }) {
 
   function schedule(samples) {
     if (!samples.length) return;
-    context = context ?? new AudioContext();
+    ensureContext();
     // Autoplay policy parks a context until a gesture. In the shell there is
     // rarely one before she first speaks, so ask every time — resume() on a
     // running context is free.
@@ -255,6 +358,8 @@ export function createAudio({ onOwner }) {
     };
   }
 
+  window.addEventListener("pointerdown", unlockAudio);
+  window.addEventListener("keydown", unlockAudio);
   open();
 
   return {
@@ -350,14 +455,14 @@ export function createAudio({ onOwner }) {
      * none of it is in there, whatever this control is set to.
      */
     async useOutput(deviceId) {
-      context = context ?? new AudioContext();
+      ensureContext();
       if (typeof context.setSinkId !== "function") return false;
       await context.setSinkId(deviceId || "");
       return true;
     },
     /** A short tone down the real playback path, to confirm the right speaker. */
     async test() {
-      context = context ?? new AudioContext();
+      ensureContext();
       if (context.state === "suspended") await context.resume().catch(() => {});
       const osc = context.createOscillator();
       const gain = context.createGain();
@@ -389,6 +494,10 @@ export function createAudio({ onOwner }) {
       closed = true;
       clearTimeout(retryTimer);
       stopCapture();
+      stopEverything();
+      stopMonitor();
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
       socket?.close();
     },
   };

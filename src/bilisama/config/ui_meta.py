@@ -977,6 +977,20 @@ UI_META: dict[str, FieldMeta] = {
     "custom_tts.api_key_ref": FieldMeta(
         label="语音引擎 Key", secret=True, reload=Reload.RESTART, group="声音", order=4
     ),
+    "test_voice.endpoint": FieldMeta(label="测试台词合成地址", group="测试语音", order=1),
+    "test_voice.resource_id": FieldMeta(
+        label="测试台词模型", hint="默认 Seed TTS 2.0，不改变助手音色", group="测试语音", order=2
+    ),
+    "test_voice.speaker": FieldMeta(label="预制台词音色", group="测试语音", order=3),
+    "test_voice.api_key_ref": FieldMeta(
+        label="测试台词凭据引用", secret=True, group="测试语音", order=4
+    ),
+    "test_voice.request_timeout_s": FieldMeta(
+        label="台词合成超时", unit="s", group="测试语音", order=5
+    ),
+    "test_voice.speech_rate": FieldMeta(
+        label="预制台词语速", hint="0 为原速；-50 为半速，100 为两倍速", group="测试语音", order=6
+    ),
     "custom_tts.engine": FieldMeta(
         label="语音引擎",
         hint="可插拔；主力规划是 IndexTTS（授权和 GPU 到位即切），qwen3_cloud 是当前默认",

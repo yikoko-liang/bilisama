@@ -27,15 +27,21 @@ Two things are pinned here:
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from bilisama.bootstrap import s2s_launch
+from bilisama.config import load
+from tests.unit.test_s2s_launch import _fake_upstream
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GATE = _REPO_ROOT / "scripts" / "gate.sh"
@@ -245,6 +251,42 @@ def _run_gate(
 
 
 # ------------------------------------------------------------ Reconciliation
+
+
+@pytest.mark.parametrize("upstream_present", [False, True])
+def test_gate_cli_really_renders_s2s_without_changing_default_provider(
+    tmp_path: Path, upstream_present: bool
+) -> None:
+    """Run the real CLI block, not the successful recorder used for tier flow."""
+    source = _GATE.read_text(encoding="utf-8")
+    smoke = source.split('step "CLI 冒烟"', 1)[1].split('step "profile 覆盖层"', 1)[0]
+    base = _REPO_ROOT / "config/bilisama.toml"
+    before = base.read_bytes()
+    cfg = load(base, strict=False, user_profiles_root=tmp_path / "profiles")
+    upstream = tmp_path / "upstream"
+    if upstream_present:
+        _fake_upstream(upstream, s2s_launch.render(cfg.speech.s2s))
+    completed = subprocess.run(
+        ["bash", "-eu", "-c", smoke],
+        cwd=_REPO_ROOT,
+        env={
+            **os.environ,
+            "PY": sys.executable,
+            "WORK": str(tmp_path),
+            "XDG_DATA_HOME": str(tmp_path / "xdg"),
+            "BILISAMA_S2S_ROOT": str(upstream),
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    rendered = json.loads((tmp_path / "s2s.json").read_text(encoding="utf-8"))
+    assert rendered == s2s_launch.render(cfg.speech.s2s)
+    assert base.read_bytes() == before
+    if not upstream_present:
+        assert "没有上游检出" in completed.stdout
 
 
 def _unaccounted(pyproject: str, gate: str) -> set[str]:

@@ -430,6 +430,20 @@ class RuntimeConfig(BaseModel):
     log_viewer_content: bool = Field(False)
 
 
+class TestVoiceConfig(BaseModel):
+    """Seed TTS input fixtures; independent from the assistant's output voice."""
+
+    __test__ = False
+    model_config = {"extra": "forbid"}
+
+    endpoint: str = Field("https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse")
+    resource_id: str = Field("seed-tts-2.0", min_length=1)
+    speaker: str = Field("zh_female_vv_uranus_bigtts", min_length=1, max_length=128)
+    api_key_ref: str = Field("volcano_api_key")
+    request_timeout_s: float = Field(60.0, gt=0, le=300, allow_inf_nan=False)
+    speech_rate: int = Field(0, ge=-50, le=100)
+
+
 class Settings(BaseModel):
     """Root config. Every module reads from this object and nowhere else."""
 
@@ -441,6 +455,7 @@ class Settings(BaseModel):
     room: RoomConfig = Field(default_factory=RoomConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     custom_tts: CustomTTSConfig = Field(default_factory=CustomTTSConfig)
+    test_voice: TestVoiceConfig = Field(default_factory=TestVoiceConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)

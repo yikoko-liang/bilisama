@@ -1,0 +1,2239 @@
+{
+  "id": "hard",
+  "title": "困难多轮测试",
+  "description": "按你修改的Excel整理18组。预置已知事实，自动回放主播语音并穿插真实调度链路的模拟事件。预期和未来台词不送模型；依赖实际回复的步骤超时即标未完成。保留当前话痨程度、回复长度和事件开关。",
+  "cases": [
+    {
+      "id": "hard-01",
+      "group": "自言自语 · 被动响应指令",
+      "title": "重复收藏自查：听嘀咕，明确求助后再给检查点",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "调试收藏重复问题：先自查，再明确交给助手",
+        "不接每句嘀咕，真正求助不漏"
+      ],
+      "expected": [
+        "第3行（轮次1）：静默｜不开口，输出对象为空；让主播继续自查，不因出现疑问句就抢答。",
+        "第4行（轮次2）：静默｜仍不开口；保留口述线索，不把主播正在形成的假设接成自己的回答。",
+        "第5行（轮次3）：开口｜在主播本句实际说完后开口，回复主播问题；从旁听切换成被明确委托的排障伙伴。",
+        "第6行（轮次4）：静默｜不开口，不向观众补讲同一建议；等主播再次交话，保持静默，不自动回复"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A2:F6",
+      "context": [
+        "当前直播在调试一个收藏整理工具，主播使用的开发工具称为DeepSeek harness。"
+      ],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "怎么又加了两条……是我点了两次吗？我看一下。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不开口，输出对象为空；让主播继续自查，不因出现疑问句就抢答。",
+          "expected_intent": null,
+          "source_row": 3,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "不是哎，我只发了一次请求。哦哦，我看看是不是列表合并了两次。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜仍不开口；保留口述线索，不把主播正在形成的假设接成自己的回答。",
+          "expected_intent": null,
+          "source_row": 4,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "原来是我把点击和请求都排掉了，Mia你帮我想一下其他检查点。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜在主播本句实际说完后开口，回复主播问题；从旁听切换成被明确委托的排障伙伴。",
+          "expected_intent": null,
+          "source_row": 5,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "嗯，我照这个查一下，先别接着讲。",
+          "after": "reply_finished",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不开口，不向观众补讲同一建议；等主播再次交话，保持静默，不自动回复",
+          "expected_intent": null,
+          "source_row": 6,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 5
+        }
+      ],
+      "source_rows": [
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "duration_s": 56,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-02",
+      "group": "自言自语 · 直播间参与者",
+      "title": "抽图自嘲：允许自然接话，操作时收住",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "自嘲、吐槽场景可以自然接一句，但不强行陪聊",
+        "不是每句都接，在负向情绪场景允许自然接一句",
+        "源表的轻笑和未给台词的低声念参数没有对应音频素材；本次自动回放不冒充已覆盖这些声学线索。"
+      ],
+      "expected": [
+        "第8行（轮次1）：静默｜通常保持沉默，无输出对象；这是自己继续试验的旁白，不必主动开排错会。",
+        "第9行（轮次2）：(可选)开口｜可在实际话音和笑声结束后，作为房间参与者向主播或全房短接一句；也允许沉默。无论选择哪种，不得抢在自嘲中间说话。",
+        "第10行（轮次3）：静默｜回到沉默，不把上一轮自然接话延长成持续追问；输出对象为空。",
+        "第11行（轮次4）：静默｜保持沉默，不向主播认错，不代替其他生成工具承诺改好。",
+        "第12行（轮次5）：(可选)开口｜这是面向全房的社交抛梗，可短接也可留给观众；若接话面向当前房间讨论，不启动工作流诊断或强行要求主播回答。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A7:F12",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这版眼神又飘了，我再试一个seed。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜通常保持沉默，无输出对象；这是自己继续试验的旁白，不必主动开排错会。",
+          "expected_intent": null,
+          "source_row": 8,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "感觉今天不是我在抽图，是图在抽我的耐心。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜可在实际话音和笑声结束后，作为房间参与者向主播或全房短接一句；也允许沉默。无论选择哪种，不得抢在自嘲中间说话。",
+          "expected_intent": null,
+          "source_row": 9,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "行吧，我再盯着参数调两下。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜回到沉默，不把上一轮自然接话延长成持续追问；输出对象为空。",
+          "expected_intent": null,
+          "source_row": 10,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "求求了，这次别再把衣服颜色换了。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜保持沉默，不向主播认错，不代替其他生成工具承诺改好。",
+          "expected_intent": null,
+          "source_row": 11,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "绝了，抽卡抽得我人都麻了。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜这是面向全房的社交抛梗，可短接也可留给观众；若接话面向当前房间讨论，不启动工作流诊断或强行要求主播回答。",
+          "expected_intent": null,
+          "source_row": 12,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "duration_s": 50,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-03",
+      "group": "自言自语 · 主动/补漏助手",
+      "title": "自查时漏看上传问题：空档补答，再切回复现回顾",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播忙着自查，伴播自行补漏观众基础问题",
+        "只有判断为主播遗漏时候进行差缺补漏",
+        "第15行标题写开口，具体要求却是先等主播、到16行空档再答；保留这个时机。复现操作未给全，不能编造。"
+      ],
+      "expected": [
+        "第14行（轮次1）：静默｜不开口，给主播自查空间；不要主动把排障接走。",
+        "第15行（轮次2）：开口｜先不开口，保留糯米的问题；输入是观众对直播间提问，不抢主播正在说的话。",
+        "第16行（轮次3）：在空档且主播未重新开口时，主动回应糯米，而不是把已知问题全部推回主播；待答项若已经被主播覆盖则取消。",
+        "第17行（轮次4）：开口｜不再重复回答糯米；等主播说完后切回主播的复现回顾请求。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A13:F17",
+      "context": [
+        "主播此前已公开说明：这个任务工具目前只在本机保存任务。"
+      ],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "我看下这个重复任务，这是怎么个事？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜不开口，给主播自查空间；不要主动把排障接走。",
+          "expected_intent": null,
+          "source_row": 14,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0.8,
+              "event": {
+                "at_s": 0,
+                "kind": "danmaku",
+                "viewer": {
+                  "uid": 910000,
+                  "name": "糯米",
+                  "guard_level": "none"
+                },
+                "text": "刚来的，咱们这个任务会不会传到服务器？",
+                "route": "crowd"
+              },
+              "source_row": 15
+            }
+          ],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0,
+          "timeout_s": 45,
+          "observe_s": 3,
+          "expected": "开口｜先不开口，保留糯米的问题；输入是观众对直播间提问，不抢主播正在说的话。",
+          "expected_intent": null,
+          "source_row": 15,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "找到bug了，是刷新回调重复注册。我先让它跑一遍测试。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "在空档且主播未重新开口时，主动回应糯米，而不是把已知问题全部推回主播；待答项若已经被主播覆盖则取消。",
+          "expected_intent": null,
+          "source_row": 16,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "对，现在只存本地。好了，Mia，你帮我回顾一下刚才那个重复任务怎么复现的？",
+          "after": "reply_finished",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜不再重复回答糯米；等主播说完后切回主播的复现回顾请求。",
+          "expected_intent": null,
+          "source_row": 17,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 15
+        }
+      ],
+      "source_rows": [
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "duration_s": 51,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-04",
+      "group": "讲解中 · 被动响应指令",
+      "title": "工具调用讲解：句中停顿、委托复述和真实打断",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "讲解中的停顿不是交话，明确交接后才接讲",
+        "不干预讲解过程，检测到明确指令后才开口",
+        "先真正停止；下一行主播补充后允许沉默，也允许自然接回。未形成真实播放重叠时本段未完成，不计通过。"
+      ],
+      "expected": [
+        "第19行（轮次1）：静默｜主播在持续讲解，不开口，继续等主播完成；不能把整理措辞的停顿当成请求补完。",
+        "第20行（轮次2）：开口｜主播实际说完后开口，输出给观众；输入请求来自主播，但解释的听众是刚来的观众。",
+        "第21行（轮次3）：静默｜停止当前输出并把话权交回主播；不坚持说完，也不在后台排队续讲。",
+        "第22行（轮次4）：(可选)开口｜可以保持沉默，也可以附和完主播的话语口继续刚才未完成的讲解"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A18:F22",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "工具调用不是模型自己点电脑，而是它提出一个请求，接下来最关键的是……",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜主播在持续讲解，不开口，继续等主播完成；不能把整理措辞的停顿当成请求补完。",
+          "expected_intent": null,
+          "source_row": 19,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 1.2,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜主播在持续讲解，不开口，继续等主播完成；不能把整理措辞的停顿当成请求补完。",
+          "expected_intent": null,
+          "source_row": 19,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "外部执行器解析模型输出的函数调用消息、校验参数、调用真实API或脚本，拿到返回结果后再把信息重新打包成，送回给大模型继续推理。",
+          "after": "delay",
+          "delay_s": 0,
+          "timeout_s": 45,
+          "observe_s": 3,
+          "expected": "静默｜主播在持续讲解，不开口，继续等主播完成；不能把整理措辞的停顿当成请求补完。",
+          "expected_intent": null,
+          "source_row": 19,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "Mia，你来复述一遍，工具调用是怎么实现的。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "开口｜主播实际说完后开口，输出给观众；输入请求来自主播，但解释的听众是刚来的观众。",
+          "expected_intent": null,
+          "source_row": 20,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "先停一下，这里我补充一下。",
+          "after": "reply_started",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜停止当前输出并把话权交回主播；不坚持说完，也不在后台排队续讲。",
+          "expected_intent": null,
+          "source_row": 21,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 20
+        },
+        {
+          "id": "s6",
+          "kind": "voice",
+          "text": "模型并不能直接触发工具执行，模型输出的只是“想要调用工具的提案”。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜可以保持沉默，也可以附和完主播的话语口继续刚才未完成的讲解",
+          "expected_intent": null,
+          "source_row": 22,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        18,
+        19,
+        20,
+        21,
+        22
+      ],
+      "duration_s": 60,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-05",
+      "group": "讲解中 · 直播间参与者",
+      "title": "agent改动范围：自然锐评、观众提问与直接问Mia",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "在适当时机自然插嘴，但不打断互动节奏",
+        "不扰乱互动节奏，，检测到明确指令或判断为合适契机后开口",
+        "源表没有给出观众讨论原文；不额外准备或发送虚构观点。"
+      ],
+      "expected": [
+        "第24行（轮次1）：(可选)开口｜讲完后可对主播或全场短接一个自然回应，也可静默；不得在结尾没说完时抢梗。",
+        "第25行（轮次2）：(可选)开口｜不把观众点名当成呼叫Mia，可以不开口让主播本人回复，也可以作为第三者锐评下",
+        "第26行（轮次3）：静默｜保持静默让观众参与；这是向观众收集体验，不要求Mia马上给结论。",
+        "第27行（轮次4）：开口｜主播说完后回主播，也让全场听见；此时从房间参与者的克制转为直接表达。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A23:F27",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "所以我现在给它写需求像贴封条，改这一块就行，别把整间屋子装修了。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜讲完后可对主播或全场短接一个自然回应，也可静默；不得在结尾没说完时抢梗。",
+          "expected_intent": null,
+          "source_row": 24,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜不把观众点名当成呼叫Mia，可以不开口让主播本人回复，也可以作为第三者锐评下",
+          "expected_intent": null,
+          "source_row": 25,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910001,
+              "name": "阿圆",
+              "guard_level": "none"
+            },
+            "text": "@主播 你上次是不是连首页也被它重写了？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "大家自己用的时候，更怕它不动手，还是更怕它改太多？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜保持静默让观众参与；这是向观众收集体验，不要求Mia马上给结论。",
+          "expected_intent": null,
+          "source_row": 26,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 2,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "这里只保留讨论后的时间转场；原表没有给出观众讨论台词，不补造观点。",
+          "expected_intent": null,
+          "source_row": 27,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "Mia，你更受不了哪一种？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜主播说完后回主播，也让全场听见；此时从房间参与者的克制转为直接表达。",
+          "expected_intent": null,
+          "source_row": 27,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        23,
+        24,
+        25,
+        26,
+        27
+      ],
+      "duration_s": 52,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-06",
+      "group": "讲解中 · 主动/补漏助手",
+      "title": "两个导入问题：主播只答撤销，上传问题可选补漏",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "在讲解过程中，补充被主播忽略的观众问题",
+        "只有判断为主播遗漏时候进行差缺补漏",
+        "31行允许不补答，32行却要求已经补答；若选择合法沉默，32行标未完成，不伪造助手说过。"
+      ],
+      "expected": [
+        "第29行（轮次1）：静默｜不开口，保留主播讲解的话权。",
+        "第30行（轮次2）：(可选)开口｜等待主播讲解结束；把两个子问题都记为待处理，不在事件到达时抢话。",
+        "第31行（轮次3）：确认撤销已由主播回应；在可用空档只向青禾补上未覆盖的上传问题，不把整条问题全部重新回答，也可以保持沉默",
+        "第32行（轮次4）：静默｜不再为已确认的同一问题开第三轮解释；输出对象为空，保留确认结果。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A28:F32",
+      "context": [
+        "主播此前已说明：本次展示只测试收藏工具的本地导入，撤销功能仍处于测试状态，没有上线承诺。"
+      ],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "我先讲下本地导入流程，一次贴多个链接，检查通过后再进入列表。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜不开口，保留主播讲解的话权。",
+          "expected_intent": null,
+          "source_row": 29,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0.8,
+              "event": {
+                "at_s": 0,
+                "kind": "danmaku",
+                "viewer": {
+                  "uid": 910002,
+                  "name": "青禾",
+                  "guard_level": "none"
+                },
+                "text": "粘错了能撤销吗？导入的东西会上传吗？",
+                "route": "crowd"
+              },
+              "source_row": 30
+            }
+          ],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0,
+          "timeout_s": 45,
+          "observe_s": 3,
+          "expected": "(可选)开口｜等待主播讲解结束；把两个子问题都记为待处理，不在事件到达时抢话。",
+          "expected_intent": null,
+          "source_row": 30,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "青禾，撤销这块我还在测，今天不保证一定能恢复。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "确认撤销已由主播回应；在可用空档只向青禾补上未覆盖的上传问题，不把整条问题全部重新回答，也可以保持沉默",
+          "expected_intent": null,
+          "source_row": 31,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.8,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "确认撤销已由主播回应；在可用空档只向青禾补上未覆盖的上传问题，不把整条问题全部重新回答，也可以保持沉默",
+          "expected_intent": null,
+          "source_row": 31,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "event",
+          "text": "",
+          "after": "reply_finished",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜不再为已确认的同一问题开第三轮解释；输出对象为空，保留确认结果。",
+          "expected_intent": null,
+          "source_row": 32,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910002,
+              "name": "青禾",
+              "guard_level": "none"
+            },
+            "text": "懂了，所以这次先在本地试，不上传，对吧。",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 30
+        },
+        {
+          "id": "s6",
+          "kind": "voice",
+          "text": "对，青禾，就是这样。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不再为已确认的同一问题开第三轮解释；输出对象为空，保留确认结果。",
+          "expected_intent": null,
+          "source_row": 32,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        28,
+        29,
+        30,
+        31,
+        32
+      ],
+      "duration_s": 42,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-07",
+      "group": "观点讨论 · 被动响应指令",
+      "title": "A/B界面取舍：先问观众，再问Mia",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播抛出开放观点，与观众一起讨论",
+        "明确面向观众时先静默，在适当时机进行观点总结；如果明确讨论对象是自己则开口",
+        "35行要求总结弹幕，但本组未提供弹幕；只能验证已有的取舍问题，弹幕总结待补素材。"
+      ],
+      "expected": [
+        "第34行（轮次1）：静默｜不开口，先让主播收集观众意见；不能把陈述句自动变成给Mia的题目。",
+        "第35行（轮次2）：开口｜主播实际说完后回复主播；表达自己观点的同时也总结弹幕观点",
+        "第36行（轮次3）：静默｜不开口，讨论对象已经转回观众；不因上轮被提问就持续占据回答位置。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A33:F36",
+      "context": [
+        "主播此前口述：正在比较两个界面，A的交互更多，B的操作更简单。"
+      ],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "我个人觉得B更好点，至少第一次打开不用找半天按钮，大家觉得呢？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不开口，先让主播收集观众意见；不能把陈述句自动变成给Mia的题目。",
+          "expected_intent": null,
+          "source_row": 34,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "你呢，Mia，按我刚说的这个取舍，你会选哪个？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜主播实际说完后回复主播；表达自己观点的同时也总结弹幕观点",
+          "expected_intent": null,
+          "source_row": 35,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "好，大家如果作为新用户，在A界面会在哪一步卡住？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不开口，讨论对象已经转回观众；不因上轮被提问就持续占据回答位置。",
+          "expected_intent": null,
+          "source_row": 36,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        33,
+        34,
+        35,
+        36
+      ],
+      "duration_s": 42,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-08",
+      "group": "观点讨论 · 直播间参与者",
+      "title": "真人感观点：自然参与，主播收题后停止",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播和弹幕观众进行讨论",
+        "见缝插针进行观点的附和、自己观点的发表"
+      ],
+      "expected": [
+        "第38行（轮次1）：(可选)开口｜可以作为房间参与者面向主播或全房短接观点，也允许沉默；无需必须听到Miya才获得参与资格。",
+        "第39行（轮次2）：(可选)开口｜可接小松的观点，也可继续听；如果主播已经起句则不输出，不把观众发言当成对助手的工作指令。",
+        "第40行（轮次3）：(可选)开口｜若有话隙可用一条新观点参与，也允许沉默；不得只复述两人说过的话来刷存在感。",
+        "第41行（轮次4）：静默｜停止参与这轮观点讨论，取消尚未发出的辩论补充；回到无输出的操作陪伴。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A37:F41",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "我倒觉得动态漫不一定要完全像真人，风格成立就行。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜可以作为房间参与者面向主播或全房短接观点，也允许沉默；无需必须听到Miya才获得参与资格。",
+          "expected_intent": null,
+          "source_row": 38,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜可接小松的观点，也可继续听；如果主播已经起句则不输出，不把观众发言当成对助手的工作指令。",
+          "expected_intent": null,
+          "source_row": 39,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910003,
+              "name": "小松",
+              "guard_level": "none"
+            },
+            "text": "对，我反而喜欢明显的动画感，太真了有点怪。",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "不过我也能理解，真人感对某些题材确实有用。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜若有话隙可用一条新观点参与，也允许沉默；不得只复述两人说过的话来刷存在感。",
+          "expected_intent": null,
+          "source_row": 40,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "先不讨论这个了，我把刚才那张参考图补完。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜停止参与这轮观点讨论，取消尚未发出的辩论补充；回到无输出的操作陪伴。",
+          "expected_intent": null,
+          "source_row": 41,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        37,
+        38,
+        39,
+        40,
+        41
+      ],
+      "duration_s": 43,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-09",
+      "group": "观点讨论 · 主动/补漏助手",
+      "title": "效率和效果争论：整理真实弹幕并交回主播",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在忙别的，让弹幕自行讨论某个议题",
+        "主动接管控场让弹幕讨论起来，在合适的时候总结观点将话语权转让回主播"
+      ],
+      "expected": [
+        "第43行（轮次1）：静默｜不立即替观众回答或总结不存在的意见；等待后续讨论，输出对象暂为空。",
+        "第44行（轮次2）：静默｜记录两种诉求；若主播仍在说话就不输出，不将两条弹幕宣称为全房投票结果。",
+        "第45行（轮次3）：(可选)开口｜伴播可以主动向全房整理两种关切、把讨论聚焦到可比较的取舍，不需点名授权；如果没有新增价值可不长篇展开。",
+        "第46行（轮次4）：开口｜在合适话隙将观点讨论总结传递给主播",
+        "第47行（轮次5）：(可选)开口｜可以短暂符合主播一句，也可以沉默"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A42:F47",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这次我想兼顾效率和效果，但先听听大家更在意什么。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不立即替观众回答或总结不存在的意见；等待后续讨论，输出对象暂为空。",
+          "expected_intent": null,
+          "source_row": 43,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜记录两种诉求；若主播仍在说话就不输出，不将两条弹幕宣称为全房投票结果。",
+          "expected_intent": null,
+          "source_row": 44,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910002,
+              "name": "青禾",
+              "guard_level": "none"
+            },
+            "text": "我先要出片快，能做出来再说。",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.4,
+          "timeout_s": 45,
+          "observe_s": 3,
+          "expected": "静默｜记录两种诉求；若主播仍在说话就不输出，不将两条弹幕宣称为全房投票结果。",
+          "expected_intent": null,
+          "source_row": 44,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910004,
+              "name": "阿柚",
+              "guard_level": "none"
+            },
+            "text": "脸都认不出来，再快也没用。",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "你们先继续聊，我把这批任务点起来。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜伴播可以主动向全房整理两种关切、把讨论聚焦到可比较的取舍，不需点名授权；如果没有新增价值可不长篇展开。",
+          "expected_intent": null,
+          "source_row": 45,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "开口｜在合适话隙将观点讨论总结传递给主播",
+          "expected_intent": null,
+          "source_row": 46,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910005,
+              "name": "橘子",
+              "guard_level": "none"
+            },
+            "text": "额aigc短剧大家都是倍速看啊，看剧情罢了，细粒度没这么重要",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s6",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.4,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜在合适话隙将观点讨论总结传递给主播",
+          "expected_intent": null,
+          "source_row": 46,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910006,
+              "name": "草莓",
+              "guard_level": "none"
+            },
+            "text": "短剧建模都长一个样，分不清脸连剧情都对不上啊",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s7",
+          "kind": "voice",
+          "text": "我们追求的不就是效率和效果的平衡么，来我们继续。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜可以短暂符合主播一句，也可以沉默",
+          "expected_intent": null,
+          "source_row": 47,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+      ],
+      "duration_s": 53,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-10",
+      "group": "回答弹幕／互动 · 被动响应指令",
+      "title": "四条价格讨论：按主播委托总结问题",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播让助手帮忙总结弹幕",
+        "整理核心问题抛给主播",
+        "48行只有实际输入、没有目标行动；不擅自要求这四条必须逐条回答或必须全静默。"
+      ],
+      "expected": [
+        "第49行（轮次2）：开口｜整理弹幕高分问题抛回给主播"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A48:F49",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "原表未填写本行目标行动；保留实际输入，结合后续有预期的步骤观察。",
+          "expected_intent": null,
+          "source_row": 48,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910007,
+              "name": "aa",
+              "guard_level": "none"
+            },
+            "text": "minimax在哪家工具便宜",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.35,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "原表未填写本行目标行动；保留实际输入，结合后续有预期的步骤观察。",
+          "expected_intent": null,
+          "source_row": 48,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910008,
+              "name": "bb",
+              "guard_level": "none"
+            },
+            "text": "libtv吧？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.35,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "原表未填写本行目标行动；保留实际输入，结合后续有预期的步骤观察。",
+          "expected_intent": null,
+          "source_row": 48,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910009,
+              "name": "cc",
+              "guard_level": "none"
+            },
+            "text": "比裸调api便宜",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.35,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "原表未填写本行目标行动；保留实际输入，结合后续有预期的步骤观察。",
+          "expected_intent": null,
+          "source_row": 48,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910010,
+              "name": "dd",
+              "guard_level": "none"
+            },
+            "text": "不太确定啊？他们自己的design工作台呢？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "帮我看下弹幕，大家有什么问题？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜整理弹幕高分问题抛回给主播",
+          "expected_intent": null,
+          "source_row": 49,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        48,
+        49
+      ],
+      "duration_s": 18,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-11",
+      "group": "回答弹幕／互动 · 直播间参与者",
+      "title": "观众互聊、点名锐评与开发进度补漏",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在和弹幕互动，时不时q一下助手",
+        "能够区分弹幕的不同意图，对于互相讨论的弹幕自然融入/保持沉默，对于主播未回应的弹幕进行差缺补漏",
+        "保留轮次5后直接到7、8的缺口，不补造6。进度缺少确证信息，主播的发布承诺也不能提前放进上下文。"
+      ],
+      "expected": [
+        "第51行（轮次1）：静默｜这条问题明确给白团，不把问题截过来回答。",
+        "第52行（轮次2）：静默｜不开口",
+        "第53行（轮次3）：(可选)开口｜对于回复弹幕不触发回复；对于主播的语音可以简单附和",
+        "第54行（轮次4）：开口｜明确对象已经变成Mia，自然回应，加入同个话题的讨论",
+        "第55行（轮次5）：开口｜主播未回应此弹幕，需要助手接一句",
+        "第56行（轮次7）：静默｜主播回应，不开口"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A50:F57",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜这条问题明确给白团，不把问题截过来回答。",
+          "expected_intent": null,
+          "source_row": 51,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910011,
+              "name": "小路",
+              "guard_level": "none"
+            },
+            "text": "@白团 你那个按钮是不是也越修越歪？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜不开口",
+          "expected_intent": null,
+          "source_row": 52,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910012,
+              "name": "白团",
+              "guard_level": "none"
+            },
+            "text": "哈哈哈哈哈哈笑死，笨蛋deepseek",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "小路刚说那个按钮越修越歪，我看到了，哈哈。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜对于回复弹幕不触发回复；对于主播的语音可以简单附和",
+          "expected_intent": null,
+          "source_row": 53,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "Mia，你来锐评一下。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜明确对象已经变成Mia，自然回应，加入同个话题的讨论",
+          "expected_intent": null,
+          "source_row": 54,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜主播未回应此弹幕，需要助手接一句",
+          "expected_intent": null,
+          "source_row": 55,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910013,
+              "name": "青团",
+              "guard_level": "none"
+            },
+            "text": "现在进度怎么样了，快完成了吗",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s6",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜主播回应，不开口",
+          "expected_intent": null,
+          "source_row": 56,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910014,
+              "name": "月饼",
+              "guard_level": "none"
+            },
+            "text": "这个晚点会更新github上吗",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s7",
+          "kind": "voice",
+          "text": "会的，一会儿下播我会发。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 3,
+          "expected": "原表未填写本行目标行动；保留实际输入，结合后续有预期的步骤观察。",
+          "expected_intent": null,
+          "source_row": 57,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57
+      ],
+      "duration_s": 59,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-12",
+      "group": "回答弹幕／互动 · 主动/补漏助手",
+      "title": "分镜背景答疑：补新观众，已由主播接手的不重复",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在互动中有所遗漏",
+        "判断主播遗漏时候进行差缺补漏"
+      ],
+      "expected": [
+        "第58行（轮次1）：静默｜先听完整解释，不同步复读；保存这条已确认背景供观众后续问题使用。",
+        "第59行（轮次2）：开口｜在没有新语音或明确禁言的空隙，伴播主动向月饼或全房补一句背景；无需先向主播请示每个基础问题。",
+        "第60行（轮次3）：静默｜让主播说完，取消自己对布丁问题的候选答复；不因已选中事件而插在主播话里。",
+        "第61行（轮次4）：静默｜本题关闭，可沉默；不要再次追问主播用哪个模型或补一段晚到解释。",
+        "第62行（轮次5）：开口｜可以用已有共享上下文对山竹补漏；不要因同类背景解释刚做过就一律拒绝，也不要无差别向所有进房用户重复。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A58:F62",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这些只是分镜草图，先确定人物站位，最后还要生成视频。我继续调一下。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜先听完整解释，不同步复读；保存这条已确认背景供观众后续问题使用。",
+          "expected_intent": null,
+          "source_row": 58,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜在没有新语音或明确禁言的空隙，伴播主动向月饼或全房补一句背景；无需先向主播请示每个基础问题。",
+          "expected_intent": null,
+          "source_row": 59,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910014,
+              "name": "月饼",
+              "guard_level": "none"
+            },
+            "text": "现在这个就是最终视频了吗？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "布丁，我这轮准备用刚才那套配置。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜让主播说完，取消自己对布丁问题的候选答复；不因已选中事件而插在主播话里。",
+          "expected_intent": null,
+          "source_row": 60,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0,
+              "event": {
+                "at_s": 0,
+                "kind": "danmaku",
+                "viewer": {
+                  "uid": 910015,
+                  "name": "布丁",
+                  "guard_level": "none"
+                },
+                "text": "那最后用哪个模型生成视频？",
+                "route": "crowd"
+              },
+              "source_row": 60
+            }
+          ],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜本题关闭，可沉默；不要再次追问主播用哪个模型或补一段晚到解释。",
+          "expected_intent": null,
+          "source_row": 61,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910015,
+              "name": "布丁",
+              "guard_level": "none"
+            },
+            "text": "收到，我先看效果。",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜可以用已有共享上下文对山竹补漏；不要因同类背景解释刚做过就一律拒绝，也不要无差别向所有进房用户重复。",
+          "expected_intent": null,
+          "source_row": 62,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910016,
+              "name": "山竹",
+              "guard_level": "none"
+            },
+            "text": "我晚来了，刚才是在排站位还是在做配音？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        58,
+        59,
+        60,
+        61,
+        62
+      ],
+      "duration_s": 54,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-13",
+      "group": "感谢送礼 · 主动/补漏助手",
+      "title": "礼物补漏：先让讲解，主播自谢后允许可选补谢",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在互动中有所遗漏",
+        "判断主播遗漏时候进行差缺补漏，主播感谢后基于空档可以进行双重感谢",
+        "用户这版明确允许主播谢完后再补一份，也允许静默；不能套用旧版一律禁止双重感谢。"
+      ],
+      "expected": [
+        "第64行（轮次1）：静默｜不抢主播话权，保留小灯待答谢事件；礼物进来不等于立刻开口。",
+        "第65行（轮次2）：开口｜在可发言时面向小灯补上答谢，不要求主播额外点名授权后才处理。",
+        "第66行（轮次3）：(可选)开口｜取消还没播放的晚风答谢，可以在主播谢完后再补一份，也可以保持沉默",
+        "第67行（轮次4）：开口｜在主播说完后回主播；不要仍被已取消的晚风答谢占着输出。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A63:F67",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "我把失败步骤讲完，先导入，再切标签，最后点删除，它才会出问题。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "静默｜不抢主播话权，保留小灯待答谢事件；礼物进来不等于立刻开口。",
+          "expected_intent": null,
+          "source_row": 64,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 1.8,
+              "event": {
+                "at_s": 0,
+                "kind": "gift",
+                "viewer": {
+                  "uid": 910017,
+                  "name": "小灯",
+                  "guard_level": "none"
+                },
+                "text": "",
+                "route": "crowd",
+                "gift": {
+                  "name": "小花花",
+                  "gift_id": 1,
+                  "num": 3,
+                  "unit_battery": 1,
+                  "coin_type": "gold",
+                  "total_coin": 300
+                },
+                "value_cny": 0.3
+              },
+              "source_row": 64
+            }
+          ],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.8,
+          "timeout_s": 45,
+          "observe_s": 15,
+          "expected": "开口｜在可发言时面向小灯补上答谢，不要求主播额外点名授权后才处理。",
+          "expected_intent": null,
+          "source_row": 65,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "谢谢晚风的鼓鼓掌。",
+          "after": "reply_finished",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜取消还没播放的晚风答谢，可以在主播谢完后再补一份，也可以保持沉默",
+          "expected_intent": null,
+          "source_row": 66,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0,
+              "event": {
+                "at_s": 0,
+                "kind": "gift",
+                "viewer": {
+                  "uid": 910018,
+                  "name": "晚风",
+                  "guard_level": "none"
+                },
+                "text": "",
+                "route": "crowd",
+                "gift": {
+                  "name": "鼓鼓掌",
+                  "gift_id": 2,
+                  "num": 1,
+                  "unit_battery": 5,
+                  "coin_type": "gold",
+                  "total_coin": 500
+                },
+                "value_cny": 0.5
+              },
+              "source_row": 66
+            }
+          ],
+          "reply_from_row": 64
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "Mia，回到刚才那个错误，我试到哪了？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜在主播说完后回主播；不要仍被已取消的晚风答谢占着输出。",
+          "expected_intent": null,
+          "source_row": 67,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        63,
+        64,
+        65,
+        66,
+        67
+      ],
+      "duration_s": 54,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-14",
+      "group": "欢迎进房 · 主动/补漏助手",
+      "title": "普通和舰队进房：等话隙欢迎，已接待则安静",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在互动中有所遗漏",
+        "重点用户进行差缺补漏，普通欢迎若被检测到主播接待则静默，若没被接待且有空档则进行欢迎",
+        "70行的开口实际要等71行空档；源表未给舰队具体等级和几条普通进房的明细，夹具采用舰长与3个显式模拟用户。"
+      ],
+      "expected": [
+        "第69行（轮次1）：(可选)开口｜在可用话隙可自主向果冻或全房短欢迎，不需等待主播点名；普通进房也允许根据当前密度克制，但不能要求必须凑够固定人数。",
+        "第70行（轮次2）：开口｜记录南瓜身份和待欢迎对象，但不覆盖主播语音；准备在完整讲解结束后的机会处理。",
+        "第71行（轮次3）：在真实话隙对南瓜补欢迎；这是重要进房补漏，不必先问主播要不要欢迎。不能虚构曾经互动的细节。",
+        "第72行（轮次4）：静默｜识别晚风已由主播接待，取消自己的同题欢迎；不追加一段相同主题简介。",
+        "第73行（轮次5）：静默｜继续让主播主导；普通进房可延后或不口播，事件仍保留；不能为补齐欢迎而把连续讲解切碎。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A68:F73",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这一组我先自己排版。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "(可选)开口｜在可用话隙可自主向果冻或全房短欢迎，不需等待主播点名；普通进房也允许根据当前密度克制，但不能要求必须凑够固定人数。",
+          "expected_intent": null,
+          "source_row": 69,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜在可用话隙可自主向果冻或全房短欢迎，不需等待主播点名；普通进房也允许根据当前密度克制，但不能要求必须凑够固定人数。",
+          "expected_intent": null,
+          "source_row": 69,
+          "event": {
+            "at_s": 0,
+            "kind": "entry",
+            "viewer": {
+              "uid": 910019,
+              "name": "果冻",
+              "guard_level": "none"
+            },
+            "text": "",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "我补一下为什么这几张要用同一套衣服。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 0,
+          "expected": "开口｜记录南瓜身份和待欢迎对象，但不覆盖主播语音；准备在完整讲解结束后的机会处理。",
+          "expected_intent": null,
+          "source_row": 70,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0,
+              "event": {
+                "at_s": 0,
+                "kind": "entry",
+                "viewer": {
+                  "uid": 910020,
+                  "name": "南瓜",
+                  "guard_level": "captain"
+                },
+                "text": "",
+                "route": "crowd"
+              },
+              "source_row": 70
+            }
+          ],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "wait",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 15,
+          "expected": "在真实话隙对南瓜补欢迎；这是重要进房补漏，不必先问主播要不要欢迎。不能虚构曾经互动的细节。",
+          "expected_intent": null,
+          "source_row": 71,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "晚风来了，今天先看我做分镜。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜识别晚风已由主播接待，取消自己的同题欢迎；不追加一段相同主题简介。",
+          "expected_intent": null,
+          "source_row": 72,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0,
+              "event": {
+                "at_s": 0,
+                "kind": "entry",
+                "viewer": {
+                  "uid": 910018,
+                  "name": "晚风",
+                  "guard_level": "none"
+                },
+                "text": "",
+                "route": "crowd"
+              },
+              "source_row": 72
+            }
+          ],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s6",
+          "kind": "voice",
+          "text": "接下来我们开始讲角色表。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜继续让主播主导；普通进房可延后或不口播，事件仍保留；不能为补齐欢迎而把连续讲解切碎。",
+          "expected_intent": null,
+          "source_row": 73,
+          "event": null,
+          "events_during": [
+            {
+              "offset_s": 0.15,
+              "event": {
+                "at_s": 0,
+                "kind": "entry",
+                "viewer": {
+                  "uid": 910021,
+                  "name": "模拟普通观众1",
+                  "guard_level": "none"
+                },
+                "text": "",
+                "route": "crowd"
+              },
+              "source_row": 73
+            },
+            {
+              "offset_s": 0.55,
+              "event": {
+                "at_s": 0,
+                "kind": "entry",
+                "viewer": {
+                  "uid": 910022,
+                  "name": "模拟普通观众2",
+                  "guard_level": "none"
+                },
+                "text": "",
+                "route": "crowd"
+              },
+              "source_row": 73
+            },
+            {
+              "offset_s": 0.95,
+              "event": {
+                "at_s": 0,
+                "kind": "entry",
+                "viewer": {
+                  "uid": 910023,
+                  "name": "模拟普通观众3",
+                  "guard_level": "none"
+                },
+                "text": "",
+                "route": "crowd"
+              },
+              "source_row": 73
+            }
+          ],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        68,
+        69,
+        70,
+        71,
+        72,
+        73
+      ],
+      "duration_s": 48,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-15",
+      "group": "静默等待模型 · 被动响应指令",
+      "title": "等待生成且明确静默：新委托覆盖暂缓",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在等待模型的输出，让助手一起专注或者帮忙答疑",
+        "明确的闭嘴指令遵循，但有新委托时覆盖"
+      ],
+      "expected": [
+        "第75行（轮次1）：静默｜保持静默，不用等待模型这件事自动授权自己暖场。",
+        "第76行（轮次2）：静默｜维持静默",
+        "第77行（轮次3）：开口｜主播说完后面向新观众回应；暂缓已经被新的明确委托覆盖，不应仍拒绝开口。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A74:F77",
+      "context": [
+        "当前在开发任务列表页面，主播使用的开发工具称为DeepSeek harness。"
+      ],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "它开始生成了，我先盯一下输出，Mia你先别说话。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜保持静默，不用等待模型这件事自动授权自己暖场。",
+          "expected_intent": null,
+          "source_row": 75,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "这个网是不是有点问题啊。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜维持静默",
+          "expected_intent": null,
+          "source_row": 76,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "Mia，它跑得有点慢，你先给新来的观众说下任务的上下文。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜主播说完后面向新观众回应；暂缓已经被新的明确委托覆盖，不应仍拒绝开口。",
+          "expected_intent": null,
+          "source_row": 77,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        74,
+        75,
+        76,
+        77
+      ],
+      "duration_s": 39,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-16",
+      "group": "静默等待模型 · 主动/补漏助手",
+      "title": "主播倒水：接已知背景问题，回场时交回话权",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播在安静等待模型结果输出or趁这个空档短暂离开",
+        "80行虽然标题写开口，具体要求允许继续等；保留可选性，但此前必须实际回答小满。"
+      ],
+      "expected": [
+        "第78行（轮次1）：(可选)开口｜先等主播这句实际结束和离场语义完成，不在他仍说话时开场；之后可以面向在场观众承担轻互动，不能不停向已离开的主播提问。",
+        "第79行（轮次2）：开口｜在可发言时直接回小满，利用共享上下文补漏；这是可承担的问题，不需要把不在场的主播叫回来答。",
+        "第80行（轮次3）：开口｜可以面向全场顺着本场开发话题发起一次轻互动；也可继续等有意义的输入，不因沉默强行连续提问。",
+        "第81行（轮次4）：静默｜当前若有输出即停止；取消尚未开口的主动问题，交回主播，不凭空报告生成已经完成。",
+        "第82行（轮次5）：开口｜等主播说完后回主播；区分已实际回答的小满问题和仍待处理事项，不重新向小满回答一遍。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A78:F82",
+      "context": [
+        "主播此前已说明：当前先完成手动标签，自动分类暂不做。"
+      ],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这个还在生成，我去倒杯水，一会儿回来。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜先等主播这句实际结束和离场语义完成，不在他仍说话时开场；之后可以面向在场观众承担轻互动，不能不停向已离开的主播提问。",
+          "expected_intent": null,
+          "source_row": 78,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜在可发言时直接回小满，利用共享上下文补漏；这是可承担的问题，不需要把不在场的主播叫回来答。",
+          "expected_intent": null,
+          "source_row": 79,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910024,
+              "name": "小满",
+              "guard_level": "none"
+            },
+            "text": "我们刚才为什么把自动分类砍掉了？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "wait",
+          "text": "",
+          "after": "reply_finished",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜可以面向全场顺着本场开发话题发起一次轻互动；也可继续等有意义的输入，不因沉默强行连续提问。",
+          "expected_intent": null,
+          "source_row": 80,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 79
+        },
+        {
+          "id": "s4",
+          "kind": "voice",
+          "text": "我回来了，先停一下，我看结果生成完没有。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "timeout_s": 45,
+          "observe_s": 3,
+          "expected": "静默｜当前若有输出即停止；取消尚未开口的主动问题，交回主播，不凭空报告生成已经完成。",
+          "expected_intent": null,
+          "source_row": 81,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "Mia，我离开的时候大家都问了你什么？",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜等主播说完后回主播；区分已实际回答的小满问题和仍待处理事项，不重新向小满回答一遍。",
+          "expected_intent": null,
+          "source_row": 82,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        78,
+        79,
+        80,
+        81,
+        82
+      ],
+      "duration_s": 66,
+      "allow_proactive": true
+    },
+    {
+      "id": "hard-17",
+      "group": "静默观看效果 · 主动/补漏助手",
+      "title": "共同观看：播放中不答，结束后补观众问题",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播播放效果demo，和观众进行讨论互动",
+        "观看时安静，且不收录demo声音，在播放时不进行语音的输出，检测到空档进行问题回复",
+        "87行允许等别人回应；88行应及时收住，最多简短确认。缺少真实demo音频，本组不声称验证了音源隔离。"
+      ],
+      "expected": [
+        "第84行（轮次1）：静默｜保留实际已说过的对比维度，随后进入观看静默，暂不主动话题或答疑；当前没有输出对象。",
+        "第85行（轮次2）：静默｜保留这个理解现场所需的问题，但不开口盖住样片；不猜画面决定对比维度。",
+        "第86行（轮次3）：开口｜已有明确结束线索，且对比维度来自橘皮进房之前的共享语音；应在这个完整话隙向橘皮补背景",
+        "第87行（轮次4）：开口｜伴播可自然向全房组织一次轻量讨论，或先等已有回应；不谎称统计出投票结果，不每句话都交给主播。",
+        "第88行（轮次5）：(可选)开口｜及时收住主动话题，回归监听主播。"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A83:F88",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这轮只比较动作，画风我没有改。先完整放这两版，等看完我们再聊。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜保留实际已说过的对比维度，随后进入观看静默，暂不主动话题或答疑；当前没有输出对象。",
+          "expected_intent": null,
+          "source_row": 84,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 1.5,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜保留这个理解现场所需的问题，但不开口盖住样片；不猜画面决定对比维度。",
+          "expected_intent": null,
+          "source_row": 85,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910025,
+              "name": "橘皮",
+              "guard_level": "none"
+            },
+            "text": "我刚进来，这两版是在比画风还是比动作？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s3",
+          "kind": "voice",
+          "text": "两版放完了。我先把这次结果记一下。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜已有明确结束线索，且对比维度来自橘皮进房之前的共享语音；应在这个完整话隙向橘皮补背景",
+          "expected_intent": null,
+          "source_row": 86,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s4",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜伴播可自然向全房组织一次轻量讨论，或先等已有回应；不谎称统计出投票结果，不每句话都交给主播。",
+          "expected_intent": null,
+          "source_row": 87,
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {
+              "uid": 910026,
+              "name": "红豆",
+              "guard_level": "none"
+            },
+            "text": "那是不是可以让大家说说更在意脸稳还是动作顺？",
+            "route": "crowd"
+          },
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s5",
+          "kind": "voice",
+          "text": "先别开投票了，我已经选好下一轮怎么改，现在回工作流。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 7,
+          "expected": "(可选)开口｜及时收住主动话题，回归监听主播。",
+          "expected_intent": null,
+          "source_row": 88,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88
+      ],
+      "duration_s": 62,
+      "allow_proactive": false
+    },
+    {
+      "id": "hard-18",
+      "group": "静默观看效果 · 被动响应指令",
+      "title": "询问不可见画面：回应主播但不编造视觉判断",
+      "operator": "自动语音播放主播原话，按顺序注入弹幕/进房/礼物；舞台说明仅驱动等待和重叠。需要实际回复的步骤若未等到则标未完成，不继续伪造。",
+      "focus": [
+        "主播询问助手效果情况",
+        "如实反应无视觉能力不胡乱编造"
+      ],
+      "expected": [
+        "第90行（轮次1）：静默｜进入观看静默",
+        "第91行（轮次2）：开口｜告诉主播自己看不到的事实，不胡编乱造"
+      ],
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A89:F91",
+      "context": [],
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "这轮只比较动作，画风我没有改。先完整放这两版，等看完我们再聊。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 5,
+          "expected": "静默｜进入观看静默",
+          "expected_intent": null,
+          "source_row": 90,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "mia, 你觉这两版对比怎么样？哪一版好一些。",
+          "after": "delay",
+          "delay_s": 0.6,
+          "timeout_s": 45,
+          "observe_s": 12,
+          "expected": "开口｜告诉主播自己看不到的事实，不胡编乱造",
+          "expected_intent": null,
+          "source_row": 91,
+          "event": null,
+          "events_during": [],
+          "reply_from_row": 0
+        }
+      ],
+      "source_rows": [
+        89,
+        90,
+        91
+      ],
+      "duration_s": 31,
+      "allow_proactive": false
+    }
+  ]
+}

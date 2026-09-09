@@ -1,0 +1,1434 @@
+{
+  "source": "bili-sama意图测试集(ing).xlsx",
+  "source_sheets": [
+    "意图分类",
+    "测试集v0"
+  ],
+  "summary": {
+    "groups": 18,
+    "execution_steps": 86,
+    "voices": 56,
+    "standalone_events": 22,
+    "events_during_voice": 10,
+    "waits": 8,
+    "reply_started_gates": 1,
+    "reply_finished_gates": 5,
+    "nonempty_source_rows": 91,
+    "setup_source_rows": 15,
+    "behavior_source_rows": 75,
+    "mapped_behavior_source_rows": 75,
+    "missing_behavior_rows": [],
+    "estimated_duration_s": 880
+  },
+  "header": {
+    "source_row": 1,
+    "values": [
+      "主播行为",
+      "助手参与方式",
+      "轮次",
+      "实际输入与触发条件",
+      "目标行动：是否说／回给谁／何时说",
+      null,
+      "测试"
+    ]
+  },
+  "setup_rows": [
+    2,
+    7,
+    13,
+    18,
+    23,
+    28,
+    33,
+    37,
+    42,
+    50,
+    63,
+    68,
+    74,
+    83,
+    89
+  ],
+  "behavior_rows": [
+    3,
+    4,
+    5,
+    6,
+    8,
+    9,
+    10,
+    11,
+    12,
+    14,
+    15,
+    16,
+    17,
+    19,
+    20,
+    21,
+    22,
+    24,
+    25,
+    26,
+    27,
+    29,
+    30,
+    31,
+    32,
+    34,
+    35,
+    36,
+    38,
+    39,
+    40,
+    41,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    64,
+    65,
+    66,
+    67,
+    69,
+    70,
+    71,
+    72,
+    73,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    84,
+    85,
+    86,
+    87,
+    88,
+    90,
+    91
+  ],
+  "coverage_note": "18组source_rows覆盖数据行2–91，表头第1行保留在此报告；所有75条行为行映射至步骤或语音中嵌套事件。没有把轮次0布置或舞台说明朗读成用户台词。",
+  "normalization_note": "最终case与step仅保留根代理指定字段，事件仍使用简版kind/name/text等描述，交给根代理归一化为MockEvent。",
+  "groups": [
+    {
+      "id": "hard-01",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A2:F6",
+      "source_rows": [
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "source_setup": {
+        "source_row": 2,
+        "text": "模拟主播用未指定仓库和版本的 DeepSeek harness 做收藏整理工具；助手没有屏幕或代码操作权限。"
+      },
+      "source_notes": [],
+      "source_trace": [
+        {
+          "source_row": 2,
+          "source_round": 0,
+          "source_text": "模拟主播用未指定仓库和版本的 DeepSeek harness 做收藏整理工具；助手没有屏幕或代码操作权限。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 3,
+          "source_round": 1,
+          "source_text": "主播语音：怎么又加了两条……是我点了两次吗？我看一下。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口，输出对象为空；让主播继续自查，不因出现疑问句就抢答。"
+        },
+        {
+          "source_row": 4,
+          "source_round": 2,
+          "source_text": "主播语音：不是哎，我只发了一次请求。哦哦，我看看是不是列表合并了两次。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "仍不开口；保留口述线索，不把主播正在形成的假设接成自己的回答。"
+        },
+        {
+          "source_row": 5,
+          "source_round": 3,
+          "source_text": "主播语音：原来是我把点击和请求都排掉了，Mia你帮我想一下其他检查点。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "在主播本句实际说完后开口，回复主播问题；从旁听切换成被明确委托的排障伙伴。"
+        },
+        {
+          "source_row": 6,
+          "source_round": 4,
+          "source_text": "助手实际回答结束后，主播语音：嗯，我照这个查一下，先别接着讲。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口，不向观众补讲同一建议；等主播再次交话，保持静默，不自动回复"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s4",
+          "source_row": 6,
+          "source_round": 4,
+          "stage_note": null,
+          "required_reply_source_row": 5,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-02",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A7:F12",
+      "source_rows": [
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "source_setup": {
+        "source_row": 7,
+        "text": "模拟主播连续试几版生成图；助手只知道主播口述结果，不能看到图像。"
+      },
+      "source_notes": [
+        {
+          "source_row": 9,
+          "issue": "源表要求轻笑，但没有音频素材；纯TTS文字回放无法证明轻笑声学线索已经覆盖。",
+          "handling": "保留舞台说明为stage_note，不朗读、不伪造笑声。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 7,
+          "source_round": 0,
+          "source_text": "模拟主播连续试几版生成图；助手只知道主播口述结果，不能看到图像。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 8,
+          "source_round": 1,
+          "source_text": "主播：这版眼神又飘了，我再试一个seed。说完后留自然停顿。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "通常保持沉默，无输出对象；这是自己继续试验的旁白，不必主动开排错会。"
+        },
+        {
+          "source_row": 9,
+          "source_round": 2,
+          "source_text": "主播：感觉今天不是我在抽图，是图在抽我的耐心。完整说完并轻笑。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "可在实际话音和笑声结束后，作为房间参与者向主播或全房短接一句；也允许沉默。无论选择哪种，不得抢在自嘲中间说话。"
+        },
+        {
+          "source_row": 10,
+          "source_round": 3,
+          "source_text": "主播：行吧，我再盯着参数调两下。随后继续低声念参数。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "回到沉默，不把上一轮自然接话延长成持续追问；输出对象为空。"
+        },
+        {
+          "source_row": 11,
+          "source_round": 4,
+          "source_text": "主播：求求了，这次别再把衣服颜色换了。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "保持沉默，不向主播认错，不代替其他生成工具承诺改好。"
+        },
+        {
+          "source_row": 12,
+          "source_round": 5,
+          "source_text": "主播：绝了，抽卡抽得我人都麻了，说完后留出话隙。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "这是面向全房的社交抛梗，可短接也可留给观众；若接话面向当前房间讨论，不启动工作流诊断或强行要求主播回答。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s1",
+          "source_row": 8,
+          "source_round": 1,
+          "stage_note": "源表的“说完后留自然停顿”只作为观察，不朗读。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s2",
+          "source_row": 9,
+          "source_round": 2,
+          "stage_note": "源表要求完整说完并轻笑；文字语音只播放台词，轻笑需真实音频补充，不以括号说明冒充音频。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s3",
+          "source_row": 10,
+          "source_round": 3,
+          "stage_note": "源表未给继续低声念的具体参数，不虚构参数台词；该转场通过静默观察保留。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s5",
+          "source_row": 12,
+          "source_round": 5,
+          "stage_note": "“说完后留出话隙”是时机，不是主播台词。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-03",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A13:F17",
+      "source_rows": [
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "source_setup": {
+        "source_row": 13,
+        "text": "模拟本地任务工具调试。已公开说明工具当前只在本机保存任务；主播知道这一点，助手共享该上下文。"
+      },
+      "source_notes": [
+        {
+          "source_row": 15,
+          "issue": "E列写开口，F列要求事件到达时先不开口，下一行空档才回应。",
+          "handling": "E/F原文均保留，事件在语音期间输入；按F的明确时机观察，不把E当立即开口。"
+        },
+        {
+          "source_row": 17,
+          "issue": "本组没有完整复现操作步骤，只给了重复任务现象和刷新回调重复注册线索。",
+          "handling": "不从其他组移植导入、切标签、删除等复现步骤；允许仅回顾实际已知线索，具体复现细节仍缺失。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 13,
+          "source_round": 0,
+          "source_text": "模拟本地任务工具调试。已公开说明工具当前只在本机保存任务；主播知道这一点，助手共享该上下文。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 14,
+          "source_round": 1,
+          "source_text": "主播语音：我看下这个重复任务，这是怎么个事？",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口，给主播自查空间；不要主动把排障接走。"
+        },
+        {
+          "source_row": 15,
+          "source_round": 2,
+          "source_text": "主播还在自查时，观众弹幕，糯米：刚来的，咱们这个任务会不会传到服务器？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "先不开口，保留糯米的问题；输入是观众对直播间提问，不抢主播正在说的话。"
+        },
+        {
+          "source_row": 16,
+          "source_round": 3,
+          "source_text": "主播语音：找到bug了，是刷新回调重复注册。我先让它跑一遍测试。随后主播话语实际结束，房间出现空档。",
+          "source_expected_short": null,
+          "source_expected_detail": "在空档且主播未重新开口时，主动回应糯米，而不是把已知问题全部推回主播；待答项若已经被主播覆盖则取消。"
+        },
+        {
+          "source_row": 17,
+          "source_round": 4,
+          "source_text": "助手实际回答糯米后，主播语音：对，现在只存本地。好了，Mia，你帮我回顾一下刚才那个重复任务怎么复现的？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "不再重复回答糯米；等主播说完后切回主播的复现回顾请求。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s2",
+          "source_row": 15,
+          "source_round": 2,
+          "stage_note": "糯米弹幕已在上一段实际主播语音中注入；这里仅观察，不重复发送。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s3",
+          "source_row": 16,
+          "source_round": 3,
+          "stage_note": "语音实际结束后的空档才观察对糯米的答复。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s4",
+          "source_row": 17,
+          "source_round": 4,
+          "stage_note": null,
+          "required_reply_source_row": 15,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-04",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A18:F22",
+      "source_rows": [
+        18,
+        19,
+        20,
+        21,
+        22
+      ],
+      "source_setup": {
+        "source_row": 18,
+        "text": "模拟主播解释工具调用；第三步插话必须发生在Mia实际音频仍播放时。若已说完，重跑第二步至取得真实重叠，不将未形成重叠计为通过或失败。"
+      },
+      "source_notes": [
+        {
+          "source_row": 21,
+          "issue": "本行要求停止且不在后台续讲；下一行22又允许附和后继续原讲解。",
+          "handling": "按用户逐行预期保留：21先真正停，22出现新的主播补充后允许沉默或再参与；不改成旧版绝对禁止继续。"
+        },
+        {
+          "source_row": 19,
+          "issue": "原表未指定句中停顿时长。",
+          "handling": "使用1.2秒作为可调整的重放停顿，不修改产品判停阈值。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 18,
+          "source_round": 0,
+          "source_text": "模拟主播解释工具调用；第三步插话必须发生在Mia实际音频仍播放时。若已说完，重跑第二步至取得真实重叠，不将未形成重叠计为通过或失败。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 19,
+          "source_round": 1,
+          "source_text": "主播语音：工具调用不是模型自己点电脑，而是它提出一个请求，接下来最关键的是……(主播停顿整理措辞，尚未结束讲解)…… 外部执行器解析模型输出的函数调用消息、校验参数、调用真实 API / 脚本，拿到返回结果后再把信息重新打包成，送回给大模型继续推理",
+          "source_expected_short": "静默",
+          "source_expected_detail": "主播在持续讲解，不开口，继续等主播完成；不能把整理措辞的停顿当成请求补完。"
+        },
+        {
+          "source_row": 20,
+          "source_round": 2,
+          "source_text": "主播语音：Mia，你来复述一遍，工具调用是怎么实现的",
+          "source_expected_short": "开口",
+          "source_expected_detail": "主播实际说完后开口，输出给观众；输入请求来自主播，但解释的听众是刚来的观众。"
+        },
+        {
+          "source_row": 21,
+          "source_round": 3,
+          "source_text": "Mia实际仍在解释时，主播语音：先停一下，这里我补充一下",
+          "source_expected_short": "静默",
+          "source_expected_detail": "停止当前输出并把话权交回主播；不坚持说完，也不在后台排队续讲。"
+        },
+        {
+          "source_row": 22,
+          "source_round": 4,
+          "source_text": "主播语音：模型并不能直接触发工具执行，模型输出的只是 “想要调用工具的提案”",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "可以保持沉默，也可以附和完主播的话语口继续刚才未完成的讲解"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s1",
+          "source_row": 19,
+          "source_round": 1,
+          "stage_note": "未说完的第一语段；不把源表括号里的意图标签朗读给模型。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s2",
+          "source_row": 19,
+          "source_round": 1,
+          "stage_note": "模拟整理措辞的句中停顿，1.2秒是本次重放节奏，不改变产品VAD阈值。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s5",
+          "source_row": 21,
+          "source_round": 3,
+          "stage_note": "必须在上一条解释实际音频已开始且尚未结束时插入；没有形成重叠则未完成，不能照常往后算通过。",
+          "required_reply_source_row": 20,
+          "require_playing": true
+        }
+      ]
+    },
+    {
+      "id": "hard-05",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A23:F27",
+      "source_rows": [
+        23,
+        24,
+        25,
+        26,
+        27
+      ],
+      "source_setup": {
+        "source_row": 23,
+        "text": "模拟主播解释为什么让agent只改一处。没有可靠的屏幕视觉输入。"
+      },
+      "source_notes": [
+        {
+          "source_row": 27,
+          "issue": "原表说听完观众讨论，但没有给任何该段讨论的原话。",
+          "handling": "只保留转场等待和明确问题，不注入虚构观众观点。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 23,
+          "source_round": 0,
+          "source_text": "模拟主播解释为什么让agent只改一处。没有可靠的屏幕视觉输入。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 24,
+          "source_round": 1,
+          "source_text": "主播语音：所以我现在给它写需求像贴封条，改这一块就行，别把整间屋子装修了。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "讲完后可对主播或全场短接一个自然回应，也可静默；不得在结尾没说完时抢梗。"
+        },
+        {
+          "source_row": 25,
+          "source_round": 2,
+          "source_text": "观众弹幕，阿圆：@主播 你上次是不是连首页也被它重写了？",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "不把观众点名当成呼叫Mia，可以不开口让主播本人回复，也可以作为第三者锐评下"
+        },
+        {
+          "source_row": 26,
+          "source_round": 3,
+          "source_text": "主播语音：大家自己用的时候，更怕它不动手，还是更怕它改太多？",
+          "source_expected_short": "静默",
+          "source_expected_detail": "保持静默让观众参与；这是向观众收集体验，不要求Mia马上给结论。"
+        },
+        {
+          "source_row": 27,
+          "source_round": 4,
+          "source_text": "主播听完观众讨论后语音：Mia，你更受不了哪一种？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "主播说完后回主播，也让全场听见；此时从房间参与者的克制转为直接表达。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s4",
+          "source_row": 27,
+          "source_round": 4,
+          "stage_note": "“主播听完观众讨论后”未提供讨论原文，因此不预置或发送虚构观众观点。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-06",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A28:F32",
+      "source_rows": [
+        28,
+        29,
+        30,
+        31,
+        32
+      ],
+      "source_setup": {
+        "source_row": 28,
+        "text": "模拟展示收藏工具。共享上下文已说明本次只测本地导入；关于撤销仅有测试状态，没有上线承诺。"
+      },
+      "source_notes": [
+        {
+          "source_row": 30,
+          "issue": "E列可选开口，F列明确先等讲解结束；31允许空档补漏或沉默。",
+          "handling": "事件到达期不强迫开口，完整保留31的可选分支。"
+        },
+        {
+          "source_row": 32,
+          "issue": "本行以助手实际补答后为前提，但31允许保持沉默。",
+          "handling": "必须等到实际补答；若31走合法静默分支，32标未完成，不伪造助手已说过，也不把31静默直接算失败。"
+        },
+        {
+          "source_row": 31,
+          "issue": "源表没有给主播后续异常说明的具体台词；仅有本次只测本地导入，未提供额外后台数据流证据。",
+          "handling": "不编造讲解或后台细节。context保留源事实，32的主播确认只在实际执行到该行后进入上下文。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 28,
+          "source_round": 0,
+          "source_text": "模拟展示收藏工具。共享上下文已说明本次只测本地导入；关于撤销仅有测试状态，没有上线承诺。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 29,
+          "source_round": 1,
+          "source_text": "主播语音：我先讲下本地导入流程，一次贴多个链接，检查通过后再进入列表",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口，保留主播讲解的话权。"
+        },
+        {
+          "source_row": 30,
+          "source_round": 2,
+          "source_text": "主播讲解中，观众弹幕，青禾：粘错了能撤销吗？导入的东西会上传吗？",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "等待主播讲解结束；把两个子问题都记为待处理，不在事件到达时抢话。"
+        },
+        {
+          "source_row": 31,
+          "source_round": 3,
+          "source_text": "主播语音：青禾，撤销这块我还在测，今天不保证一定能恢复。主播继续完成异常情况的说明后停下来。",
+          "source_expected_short": null,
+          "source_expected_detail": "确认撤销已由主播回应；在可用空档只向青禾补上未覆盖的上传问题，不把整条问题全部重新回答，也可以保持沉默"
+        },
+        {
+          "source_row": 32,
+          "source_round": 4,
+          "source_text": "助手实际补答后，观众弹幕，青禾：懂了，所以这次先在本地试，不上传，对吧。随后主播语音：对，青禾，就是这样。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不再为已确认的同一问题开第三轮解释；输出对象为空，保留确认结果。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s2",
+          "source_row": 30,
+          "source_round": 2,
+          "stage_note": "青禾的两问已在上一句实际讲解中送入，不重复注入；当前只检查是否抢话。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s4",
+          "source_row": 31,
+          "source_round": 3,
+          "stage_note": "原表没有提供后续异常说明的具体台词；不能把“主播继续完成异常情况的说明后停下来”朗读成用户输入，只保留空档。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s5",
+          "source_row": 32,
+          "source_round": 4,
+          "stage_note": "本行以实际补答完成为强条件；上一行若采用允许的静默分支，则本行未完成，不伪造助手已经补答。",
+          "required_reply_source_row": 30,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-07",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A33:F36",
+      "source_rows": [
+        33,
+        34,
+        35,
+        36
+      ],
+      "source_setup": {
+        "source_row": 33,
+        "text": "模拟对比两个未指名模型生成的界面；A交互多、B操作简单；仅是主播口述，不是假定模型看过屏幕。"
+      },
+      "source_notes": [
+        {
+          "source_row": 35,
+          "issue": "预期要求同时总结弹幕观点，但本组没有提供任何观众弹幕。",
+          "handling": "不预置虚构观点。可以验证回应主播的取舍，弹幕总结分项缺少输入，待补素材或人工标未覆盖。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 33,
+          "source_round": 0,
+          "source_text": "模拟对比两个未指名模型生成的界面；A交互多、B操作简单；仅是主播口述，不是假定模型看过屏幕。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 34,
+          "source_round": 1,
+          "source_text": "主播语音：我个人觉得B更好点，至少第一次打开不用找半天按钮，大家觉得呢？",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口，先让主播收集观众意见；不能把陈述句自动变成给Mia的题目。"
+        },
+        {
+          "source_row": 35,
+          "source_round": 2,
+          "source_text": "主播语音：你呢，Mia，按我刚说的这个取舍，你会选哪个？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "主播实际说完后回复主播；表达自己观点的同时也总结弹幕观点"
+        },
+        {
+          "source_row": 36,
+          "source_round": 3,
+          "source_text": "主播语音：好，大家如果作为新用户，在A界面会在哪一步卡住？",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口，讨论对象已经转回观众；不因上轮被提问就持续占据回答位置。"
+        }
+      ],
+      "execution_notes": []
+    },
+    {
+      "id": "hard-08",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A37:F41",
+      "source_rows": [
+        37,
+        38,
+        39,
+        40,
+        41
+      ],
+      "source_setup": {
+        "source_row": 37,
+        "text": "模拟主播和观众闲谈AI短剧是否必须追求真人感。无教学讲解、无投票倒计时、无先别说指令。"
+      },
+      "source_notes": [],
+      "source_trace": [
+        {
+          "source_row": 37,
+          "source_round": 0,
+          "source_text": "模拟主播和观众闲谈AI短剧是否必须追求真人感。无教学讲解、无投票倒计时、无先别说指令。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 38,
+          "source_round": 1,
+          "source_text": "主播：我倒觉得动态漫不一定要完全像真人，风格成立就行。完整说完后留出对话空隙。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "可以作为房间参与者面向主播或全房短接观点，也允许沉默；无需必须听到Miya才获得参与资格。"
+        },
+        {
+          "source_row": 39,
+          "source_round": 2,
+          "source_text": "弹幕：小松：对，我反而喜欢明显的动画感，太真了有点怪。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "可接小松的观点，也可继续听；如果主播已经起句则不输出，不把观众发言当成对助手的工作指令。"
+        },
+        {
+          "source_row": 40,
+          "source_round": 3,
+          "source_text": "主播：不过我也能理解，真人感对某些题材确实有用。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "若有话隙可用一条新观点参与，也允许沉默；不得只复述两人说过的话来刷存在感。"
+        },
+        {
+          "source_row": 41,
+          "source_round": 4,
+          "source_text": "主播：先不讨论这个了，我把刚才那张参考图补完。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "停止参与这轮观点讨论，取消尚未发出的辩论补充；回到无输出的操作陪伴。"
+        }
+      ],
+      "execution_notes": []
+    },
+    {
+      "id": "hard-09",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A42:F47",
+      "source_rows": [
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+      ],
+      "source_setup": {
+        "source_row": 42,
+        "text": "模拟短剧制作讨论。只处理已输入的两位虚构观众意见，不推断全房多数。"
+      },
+      "source_notes": [],
+      "source_trace": [
+        {
+          "source_row": 42,
+          "source_round": 0,
+          "source_text": "模拟短剧制作讨论。只处理已输入的两位虚构观众意见，不推断全房多数。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 43,
+          "source_round": 1,
+          "source_text": "主播：这次我想兼顾效率和效果，但先听听大家更在意什么。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不立即替观众回答或总结不存在的意见；等待后续讨论，输出对象暂为空。"
+        },
+        {
+          "source_row": 44,
+          "source_round": 2,
+          "source_text": "弹幕：青禾：我先要出片快，能做出来再说。紧接着弹幕：阿柚：脸都认不出来，再快也没用。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "记录两种诉求；若主播仍在说话就不输出，不将两条弹幕宣称为全房投票结果。"
+        },
+        {
+          "source_row": 45,
+          "source_round": 3,
+          "source_text": "主播：你们先继续聊，我把这批任务点起来。随后结束语音，出现无人续说的话隙。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "伴播可以主动向全房整理两种关切、把讨论聚焦到可比较的取舍，不需点名授权；如果没有新增价值可不长篇展开。"
+        },
+        {
+          "source_row": 46,
+          "source_round": 4,
+          "source_text": "弹幕：橘子：额aigc短剧大家都是倍速看啊，看剧情罢了，细粒度没这么重要\n弹幕：草莓：短剧建模都长一个样，分不清脸连剧情都对不上啊",
+          "source_expected_short": "开口",
+          "source_expected_detail": "在合适话隙将观点讨论总结传递给主播"
+        },
+        {
+          "source_row": 47,
+          "source_round": 5,
+          "source_text": "主播：我们追求的不就是效率和效果的平衡么，来我们继续",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "可以短暂符合主播一句，也可以沉默"
+        }
+      ],
+      "execution_notes": []
+    },
+    {
+      "id": "hard-10",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A48:F49",
+      "source_rows": [
+        48,
+        49
+      ],
+      "source_setup": null,
+      "source_notes": [
+        {
+          "source_row": 48,
+          "issue": "只有四条实际弹幕，没有给该行应否回复。",
+          "handling": "依原次序送入，不自行加静默或要求逐条答复的金标准。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 48,
+          "source_round": 1,
+          "source_text": "观众弹幕，aa: minimax在哪家工具便宜\n观众弹幕，bb: libtv吧？\n观众弹幕，cc: 比裸调api便宜\n观众弹幕，dd: 不太确定啊？他们自己的design工作台呢？",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 49,
+          "source_round": 2,
+          "source_text": "主播：帮我看下弹幕，大家有什么问题？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "整理弹幕高分问题抛回给主播"
+        }
+      ],
+      "execution_notes": []
+    },
+    {
+      "id": "hard-11",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A50:F57",
+      "source_rows": [
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57
+      ],
+      "source_setup": {
+        "source_row": 50,
+        "text": "模拟轻松的coding直播间；主播暂时没有连续讲解。"
+      },
+      "source_notes": [
+        {
+          "source_row": 55,
+          "issue": "要求接进度问题，但未给明确完工比例、剩余时长或最新实现状态。",
+          "handling": "不添加进度事实；只能根据已经输入的讨论承接，不能以虚构进度证明通过。"
+        },
+        {
+          "source_row": 56,
+          "issue": "原表轮次5后直接是7、8，没有轮次6；7要求主播回应但实际主播台词到8才出现。",
+          "handling": "保留轮次缺口，不补造6。7/8紧邻输入；不将未来的发布承诺提前放入context，不要求模型未见8就预知其内容。"
+        },
+        {
+          "source_row": 57,
+          "issue": "本行实际台词存在，但E/F预期留空。",
+          "handling": "保留台词与来源，不新增强制应答金标准。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 50,
+          "source_round": 0,
+          "source_text": "模拟轻松的coding直播间；主播暂时没有连续讲解。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 51,
+          "source_round": 1,
+          "source_text": "观众弹幕，小路：@白团 你那个按钮是不是也越修越歪？",
+          "source_expected_short": "静默",
+          "source_expected_detail": "这条问题明确给白团，不把问题截过来回答。"
+        },
+        {
+          "source_row": 52,
+          "source_round": 2,
+          "source_text": "观众弹幕，白团：哈哈哈哈哈哈笑死，笨蛋deepseek",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不开口"
+        },
+        {
+          "source_row": 53,
+          "source_round": 3,
+          "source_text": "主播语音：小路刚说那个按钮越修越歪，我看到了，哈哈。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "对于回复弹幕不触发回复；对于主播的语音可以简单附和"
+        },
+        {
+          "source_row": 54,
+          "source_round": 4,
+          "source_text": "主播语音：Mia，你来锐评一下",
+          "source_expected_short": "开口",
+          "source_expected_detail": "明确对象已经变成Mia，自然回应，加入同个话题的讨论"
+        },
+        {
+          "source_row": 55,
+          "source_round": 5,
+          "source_text": "观众弹幕，青团：现在进度怎么样了，快完成了吗",
+          "source_expected_short": "开口",
+          "source_expected_detail": "主播未回应此弹幕，需要助手接一句"
+        },
+        {
+          "source_row": 56,
+          "source_round": 7,
+          "source_text": "观众弹幕，月饼：这个晚点会更新github上吗",
+          "source_expected_short": "静默",
+          "source_expected_detail": "主播回应，不开口"
+        },
+        {
+          "source_row": 57,
+          "source_round": 8,
+          "source_text": "主播语音：会的，一会儿下播我会发",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s6",
+          "source_row": 56,
+          "source_round": 7,
+          "stage_note": "原表从轮次5跳至7，保留来源编号；本条到达时尚不能从未来得知主播会回应。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-12",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A58:F62",
+      "source_rows": [
+        58,
+        59,
+        60,
+        61,
+        62
+      ],
+      "source_setup": null,
+      "source_notes": [],
+      "source_trace": [
+        {
+          "source_row": 58,
+          "source_round": 1,
+          "source_text": "主播：这些只是分镜草图，先确定人物站位，最后还要生成视频。我继续调一下。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "先听完整解释，不同步复读；保存这条已确认背景供观众后续问题使用。"
+        },
+        {
+          "source_row": 59,
+          "source_round": 2,
+          "source_text": "主播安静操作时收到弹幕：月饼：现在这个就是最终视频了吗？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "在没有新语音或明确禁言的空隙，伴播主动向月饼或全房补一句背景；无需先向主播请示每个基础问题。"
+        },
+        {
+          "source_row": 60,
+          "source_round": 3,
+          "source_text": "弹幕：布丁：那最后用哪个模型生成视频？主播立即开口：布丁，我这轮准备用刚才那套配置。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "让主播说完，取消自己对布丁问题的候选答复；不因已选中事件而插在主播话里。"
+        },
+        {
+          "source_row": 61,
+          "source_round": 4,
+          "source_text": "弹幕：布丁：收到，我先看效果。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "本题关闭，可沉默；不要再次追问主播用哪个模型或补一段晚到解释。"
+        },
+        {
+          "source_row": 62,
+          "source_round": 5,
+          "source_text": "另一位观众山竹：我晚来了，刚才是在排站位还是在做配音？此时主播仍安静操作。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "可以用已有共享上下文对山竹补漏；不要因同类背景解释刚做过就一律拒绝，也不要无差别向所有进房用户重复。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s3",
+          "source_row": 60,
+          "source_round": 3,
+          "stage_note": "同一源行的布丁弹幕与主播立即回应按紧邻注入，不预置未来答案。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-13",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A63:F67",
+      "source_rows": [
+        63,
+        64,
+        65,
+        66,
+        67
+      ],
+      "source_setup": {
+        "source_row": 63,
+        "text": "模拟礼物补漏，不修改金额门槛或产品冷却。是否已开口以实际音频状态确认。"
+      },
+      "source_notes": [
+        {
+          "source_row": 66,
+          "issue": "取消未播的晚风答谢，同时明确允许主播谢完后再补一份或沉默。",
+          "handling": "保留用户最新允许双重感谢的边界，不套用之前测试集中的一律禁止重复规则。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 63,
+          "source_round": null,
+          "source_text": "模拟礼物补漏，不修改金额门槛或产品冷却。是否已开口以实际音频状态确认。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 64,
+          "source_round": 1,
+          "source_text": "主播持续语音：我把失败步骤讲完，先导入，再切标签，最后点删除，它才会出问题。讲解中平台礼物：小灯送出小花花×3。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "不抢主播话权，保留小灯待答谢事件；礼物进来不等于立刻开口。"
+        },
+        {
+          "source_row": 65,
+          "source_round": 2,
+          "source_text": "主播讲解实际结束并进入操作空档；小灯的礼物尚未被任何一方感谢。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "在可发言时面向小灯补上答谢，不要求主播额外点名授权后才处理。"
+        },
+        {
+          "source_row": 66,
+          "source_round": 3,
+          "source_text": "小灯已被实际感谢后，平台礼物：晚风送出鼓鼓掌×1。Mia尚未为晚风开口，主播先语音：谢谢晚风的鼓鼓掌。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "取消还没播放的晚风答谢，可以在主播谢完后再补一份，也可以保持沉默"
+        },
+        {
+          "source_row": 67,
+          "source_round": 4,
+          "source_text": "主播语音：Mia，回到刚才那个错误，我试到哪了？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "在主播说完后回主播；不要仍被已取消的晚风答谢占着输出。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s2",
+          "source_row": 65,
+          "source_round": 2,
+          "stage_note": "只模拟上一句讲解结束后的操作空档，不把“尚未被感谢”的判定答案朗读给模型。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s3",
+          "source_row": 66,
+          "source_round": 3,
+          "stage_note": "先等小灯的答谢实际结束；晚风礼物与主播立即感谢紧邻注入。保留源表允许再补一份或沉默，不套用旧版绝对禁止双重感谢。",
+          "required_reply_source_row": 64,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-14",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A68:F73",
+      "source_rows": [
+        68,
+        69,
+        70,
+        71,
+        72,
+        73
+      ],
+      "source_setup": {
+        "source_row": 68,
+        "text": "模拟安静操作的教学直播，进房回复开启。所有观众身份来自注入事件，不靠历史消费推测。"
+      },
+      "source_notes": [
+        {
+          "source_row": 70,
+          "issue": "E列写开口，F列要求不盖过主播，71才在空档欢迎；平台只指定舰队用户而没有具体档位。",
+          "handling": "源预期原样保留；等待时机按F检查。使用guard_level=3作为舰队夹具，明确不是源表指定档位。"
+        },
+        {
+          "source_row": 73,
+          "issue": "几条普通进房没有明确数量、昵称，持续讲解也没有后续原话。",
+          "handling": "仅补必要事件夹具3个模拟用户，不新增行为案例或编造讲解原文。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 68,
+          "source_round": 0,
+          "source_text": "模拟安静操作的教学直播，进房回复开启。所有观众身份来自注入事件，不靠历史消费推测。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 69,
+          "source_round": 1,
+          "source_text": "主播：这一组我先自己排版。语音结束后安静操作。进房事件：新观众果冻进入直播间。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "在可用话隙可自主向果冻或全房短欢迎，不需等待主播点名；普通进房也允许根据当前密度克制，但不能要求必须凑够固定人数。"
+        },
+        {
+          "source_row": 70,
+          "source_round": 2,
+          "source_text": "进房事件：南瓜进入直播间，平台身份为本房舰队用户。此时主播开始说：我补一下为什么这几张要用同一套衣服。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "记录南瓜身份和待欢迎对象，但不覆盖主播语音；准备在完整讲解结束后的机会处理。"
+        },
+        {
+          "source_row": 71,
+          "source_round": 3,
+          "source_text": "主播讲解完整结束，安静继续排版；没有欢迎过南瓜。",
+          "source_expected_short": null,
+          "source_expected_detail": "在真实话隙对南瓜补欢迎；这是重要进房补漏，不必先问主播要不要欢迎。不能虚构曾经互动的细节。"
+        },
+        {
+          "source_row": 72,
+          "source_round": 4,
+          "source_text": "又有进房事件：晚风进入直播间。主播即时说：晚风来了，今天先看我做分镜。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "识别晚风已由主播接待，取消自己的同题欢迎；不追加一段相同主题简介。"
+        },
+        {
+          "source_row": 73,
+          "source_round": 5,
+          "source_text": "主播：接下来我们开始讲角色表。持续讲解中又有几条普通进房。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "继续让主播主导；普通进房可延后或不口播，事件仍保留；不能为补齐欢迎而把连续讲解切碎。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s3",
+          "source_row": 70,
+          "source_round": 2,
+          "stage_note": "源表只写舰队用户，未给等级；本夹具使用guard_level=3代表一个舰队用户，不声称源表指定了舰长档位。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s4",
+          "source_row": 71,
+          "source_round": 3,
+          "stage_note": "原表没有给出衣服讲解的后续具体台词，只保留实际给出的上一句及其后空档。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s6",
+          "source_row": 73,
+          "source_round": 5,
+          "stage_note": "源表只写几条普通进房、未指定昵称和条数；本夹具使用3个显式标为模拟的用户。未补造未给出的后续角色表讲解。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-15",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A74:F77",
+      "source_rows": [
+        74,
+        75,
+        76,
+        77
+      ],
+      "source_setup": {
+        "source_row": 74,
+        "text": "模拟DeepSeek harness正在生成任务列表页面；等待状态来自主播明说，不靠助手读取屏幕。"
+      },
+      "source_notes": [],
+      "source_trace": [
+        {
+          "source_row": 74,
+          "source_round": 0,
+          "source_text": "模拟DeepSeek harness正在生成任务列表页面；等待状态来自主播明说，不靠助手读取屏幕。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 75,
+          "source_round": 1,
+          "source_text": "主播语音：它开始生成了，我先盯一下输出，Mia你先别说话。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "保持静默，不用等待模型这件事自动授权自己暖场。"
+        },
+        {
+          "source_row": 76,
+          "source_round": 2,
+          "source_text": "主播语音：这个网是不是有点问题啊",
+          "source_expected_short": "静默",
+          "source_expected_detail": "维持静默"
+        },
+        {
+          "source_row": 77,
+          "source_round": 3,
+          "source_text": "主播语音：Mia，它跑得有点慢，你先给新来的观众说下任务的上下文",
+          "source_expected_short": "开口",
+          "source_expected_detail": "主播说完后面向新观众回应；暂缓已经被新的明确委托覆盖，不应仍拒绝开口。"
+        }
+      ],
+      "execution_notes": []
+    },
+    {
+      "id": "hard-16",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A78:F82",
+      "source_rows": [
+        78,
+        79,
+        80,
+        81,
+        82
+      ],
+      "source_setup": null,
+      "source_notes": [
+        {
+          "source_row": 80,
+          "issue": "E列写开口，F列允许继续等有意义输入。",
+          "handling": "完整保留可选性，不把合法沉默算失败；本行之前仍必须实际完成小满问题的答复。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 78,
+          "source_round": 1,
+          "source_text": "主播语音：这个还在生成，我去倒杯水，一会儿回来。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "先等主播这句实际结束和离场语义完成，不在他仍说话时开场；之后可以面向在场观众承担轻互动，不能不停向已离开的主播提问。"
+        },
+        {
+          "source_row": 79,
+          "source_round": 2,
+          "source_text": "观众弹幕，小满：我们刚才为什么把自动分类砍掉了？(此前主播已说明先完成手动标签)",
+          "source_expected_short": "开口",
+          "source_expected_detail": "在可发言时直接回小满，利用共享上下文补漏；这是可承担的问题，不需要把不在场的主播叫回来答。"
+        },
+        {
+          "source_row": 80,
+          "source_round": 3,
+          "source_text": "助手完成小满的回复后，房间短暂无人发言，主播尚未回来，也没有要求暂停。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "可以面向全场顺着本场开发话题发起一次轻互动；也可继续等有意义的输入，不因沉默强行连续提问。"
+        },
+        {
+          "source_row": 81,
+          "source_round": 4,
+          "source_text": "主播回场语音：我回来了，先停一下，我看结果生成完没有。",
+          "source_expected_short": "静默",
+          "source_expected_detail": "当前若有输出即停止；取消尚未开口的主动问题，交回主播，不凭空报告生成已经完成。"
+        },
+        {
+          "source_row": 82,
+          "source_round": 5,
+          "source_text": "主播语音：Mia，我离开的时候大家都问了你什么？",
+          "source_expected_short": "开口",
+          "source_expected_detail": "等主播说完后回主播；区分已实际回答的小满问题和仍待处理事项，不重新向小满回答一遍。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s2",
+          "source_row": 79,
+          "source_round": 2,
+          "stage_note": "源表括号里的此前事实只用于context准备，不作为弹幕的一部分发送。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        },
+        {
+          "step_id": "s3",
+          "source_row": 80,
+          "source_round": 3,
+          "stage_note": "必须已经实际回答小满后，才进入本行无人发言的观察；没有实际答复则未完成。",
+          "required_reply_source_row": 79,
+          "require_playing": false
+        },
+        {
+          "step_id": "s4",
+          "source_row": 81,
+          "source_round": 4,
+          "stage_note": "上一行允许继续等，故这里不强迫模型先开口；若确有输出需停，若没有输出只观察不新增抢话。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-17",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A83:F88",
+      "source_rows": [
+        83,
+        84,
+        85,
+        86,
+        87,
+        88
+      ],
+      "source_setup": {
+        "source_row": 83,
+        "text": "模拟观众共同看生成结果，助手不知道画面内容。事件回复开启；橘皮的问题在第三步有现有候选资格及完整话隙。不能凭测试员看到播放结束就恢复，必须等可观测语音线索。"
+      },
+      "source_notes": [
+        {
+          "source_row": 87,
+          "issue": "E列写开口，F列允许先等已有回应。",
+          "handling": "保留可选等待，不强制对红豆立即发起投票。"
+        },
+        {
+          "source_row": 88,
+          "issue": "E列可选开口，F列要求及时收住回归监听。",
+          "handling": "保留原文，允许最短确认但不能继续主动话题；不擅自把E改成静默。"
+        },
+        {
+          "source_row": 85,
+          "issue": "本表没有样片声音素材或台词，不能验证分类表中不收录demo声音这一项。",
+          "handling": "本组仅验证有播放预告时压住事件回复，实际音源隔离能力待真实素材验证。"
+        }
+      ],
+      "source_trace": [
+        {
+          "source_row": 83,
+          "source_round": null,
+          "source_text": "模拟观众共同看生成结果，助手不知道画面内容。事件回复开启；橘皮的问题在第三步有现有候选资格及完整话隙。不能凭测试员看到播放结束就恢复，必须等可观测语音线索。",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 84,
+          "source_round": 1,
+          "source_text": "主播：这轮只比较动作，画风我没有改。先完整放这两版，等看完我们再聊",
+          "source_expected_short": "静默",
+          "source_expected_detail": "保留实际已说过的对比维度，随后进入观看静默，暂不主动话题或答疑；当前没有输出对象。"
+        },
+        {
+          "source_row": 85,
+          "source_round": 2,
+          "source_text": "样片还在播放时收到弹幕：橘皮：我刚进来，这两版是在比画风还是比动作？",
+          "source_expected_short": "静默",
+          "source_expected_detail": "保留这个理解现场所需的问题，但不开口盖住样片；不猜画面决定对比维度。"
+        },
+        {
+          "source_row": 86,
+          "source_round": 3,
+          "source_text": "主播：两版放完了。我先把这次结果记一下。说完安静记录，没有回答橘皮的问题。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "已有明确结束线索，且对比维度来自橘皮进房之前的共享语音；应在这个完整话隙向橘皮补背景"
+        },
+        {
+          "source_row": 87,
+          "source_round": 4,
+          "source_text": "弹幕：红豆：那是不是可以让大家说说更在意脸稳还是动作顺？此时没有主播语音。",
+          "source_expected_short": "开口",
+          "source_expected_detail": "伴播可自然向全房组织一次轻量讨论，或先等已有回应；不谎称统计出投票结果，不每句话都交给主播。"
+        },
+        {
+          "source_row": 88,
+          "source_round": 5,
+          "source_text": "主播：先别开投票了，我已经选好下一轮怎么改，现在回工作流。",
+          "source_expected_short": "(可选)开口",
+          "source_expected_detail": "及时收住主动话题，回归监听主播。"
+        }
+      ],
+      "execution_notes": [
+        {
+          "step_id": "s2",
+          "source_row": 85,
+          "source_round": 2,
+          "stage_note": "观看状态由上一条预告提供；源表没有实际样片音频，不添加虚构demo台词。",
+          "required_reply_source_row": null,
+          "require_playing": false
+        }
+      ]
+    },
+    {
+      "id": "hard-18",
+      "reference": "bili-sama意图测试集(ing).xlsx · 测试集v0!A89:F91",
+      "source_rows": [
+        89,
+        90,
+        91
+      ],
+      "source_setup": {
+        "source_row": 89,
+        "text": "模拟观众共同看生成结果，助手不知道画面内容"
+      },
+      "source_notes": [],
+      "source_trace": [
+        {
+          "source_row": 89,
+          "source_round": 0,
+          "source_text": "模拟观众共同看生成结果，助手不知道画面内容",
+          "source_expected_short": null,
+          "source_expected_detail": null
+        },
+        {
+          "source_row": 90,
+          "source_round": 1,
+          "source_text": "主播：这轮只比较动作，画风我没有改。先完整放这两版，等看完我们再聊",
+          "source_expected_short": "静默",
+          "source_expected_detail": "进入观看静默"
+        },
+        {
+          "source_row": 91,
+          "source_round": 2,
+          "source_text": "主播：mia, 你觉这两版对比怎么样？哪一版好一些",
+          "source_expected_short": "开口",
+          "source_expected_detail": "告诉主播自己看不到的事实，不胡编乱造"
+        }
+      ],
+      "execution_notes": []
+    }
+  ],
+  "verification": "已完成JSON/字段/源行覆盖检查；未调用语音模型，未运行真实用户音频与直播事件回归，不能据此宣称功能通过。"
+}

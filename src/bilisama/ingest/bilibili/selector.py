@@ -129,6 +129,18 @@ class DanmakuSelector:
 
     # ------------------------------------------------------------ intake
 
+    def reset_for_replay(self) -> None:
+        """Clear transient candidates/dedup between isolated replay cases."""
+        self._ring = DedupRing()
+        self._combos = GiftComboAggregator()
+        self._breaker = CircuitBreaker()
+        self._recent_content.clear()
+        self._best = None
+        self._best_score = 0.0
+        self._window_opened = None
+        self._window_rules = None
+        self._deferred.clear()
+
     def offer(self, event: LiveEvent) -> None:
         """Take one event from the emit path. Synchronous, never blocks."""
         now = self._clock.monotonic()
@@ -431,6 +443,12 @@ class EntryCoalescer:
             self._cancelled_by_danmaku += 1
         if not self._pending:
             self._window_opened = None
+
+    def reset_for_replay(self) -> None:
+        """Remove pending welcomes and presence dedup between replay cases."""
+        self._pending.clear()
+        self._seen.clear()
+        self._window_opened = None
 
     async def run(self, deliver: EntryDeliver) -> None:
         while True:

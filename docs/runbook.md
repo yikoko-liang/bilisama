@@ -91,7 +91,7 @@ export volcano_api_key=...
 
 | 字段 | 说明 |
 |---|---|
-| `model` | **出厂 `1.2.1.1`（O2.0）**。`2.2.0.0` 是 SC2.0，见下面那节 |
+| `model` | **出厂 `2.2.0.0`（SC2.0）**。`1.2.1.1` 是 O2.0，见下面那节 |
 | `speaker` | **必须跟版本配对**，见下。直播中可换（面板助手页或改配置）：换的是会话不是连接，正在说的那句说完后切，对话记忆不断（机制 mock 层已测；真端点行为待验证） |
 | `end_smooth_window_ms` | 停多久算一句说完了。这条路上唯一的判停旋钮——它没有 `server_vad` 之外的判停类型 |
 
@@ -237,17 +237,21 @@ BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json scripts/smoke_provider_b
 ./start_bilisama.sh
 ```
 
+默认使用豆包：`volcano` / `2.2.0.0` / `saturn_zh_female_keainvsheng_tob`。
+双击 `.command` 和直接执行 `bilisama dev-talk --director` 也使用这组默认配置；
+`avatar.expression_source` 配成兼容豆包的 `lexicon`，不向语音中插入会被念出的表情标签。
+
 它先检查 .venv、`path.sh` 凭据和桌面壳装没装，缺什么用中文明说；然后按名字探测
 MacBook 内置麦克风（蓝牙耳机的麦不会被误选成输入），最后以全装配档（`--director`）
 启动。**幂等**：后端已经活着时只补拉桌面壳，不会起第二个语音会话——判断依据是
 endpoint.json 里的 pid 真活着、而且确实是一个 bilisama dev-talk 进程；这时候再传
 参数它会明说「这次不生效，想换配置先退出正在跑的」。
 
-脚本自己只认四个选项（同名 `BILISAMA_*` 环境变量也行，选项优先）：
-`--provider`（默认 dashscope）、`--model`（默认 qwen-audio-3.0-realtime-flash；这个
-默认值只在 dashscope 路生效——豆包路不显式给就从 `[speech.volcano]` 读，显式给
-`--model 2.2.0.0` 这样的版本号则照传，配对不上音色时启动自检会拦）、`--room`（不给是
-沙箱模式）、`--input-device`（不给自动找内置麦）。**其余参数原样透传给 dev-talk**，
+脚本自己只认五个选项（同名 `BILISAMA_*` 环境变量也行，选项优先）：
+`--provider`（默认 volcano）、`--model`（火山默认 `2.2.0.0`，DashScope 默认
+`qwen-audio-3.0-realtime-flash`）、`--voice`（火山默认
+`saturn_zh_female_keainvsheng_tob`）、`--room`（不给是沙箱模式）、`--input-device`
+（不给自动找内置麦）。模型与音色必须配对，配错会被启动自检拦下。**其余参数原样透传给 dev-talk**，
 所以临时旗子直接挂在后面就行：
 
 ```bash
@@ -255,11 +259,11 @@ endpoint.json 里的 pid 真活着、而且确实是一个 bilisama dev-talk 进
 ```
 
 ```bash
-BILISAMA_PROVIDER=volcano ./start_bilisama.sh --persona hanako
+./start_bilisama.sh --provider dashscope --voice longanlingxin
 ```
 
 ```bash
-./start_bilisama.sh --open --voice longanlufeng
+./start_bilisama.sh --open
 ```
 
 只想检查环境不连模型（会把解析出的后端/模型/设备/房间和透传参数都打出来）：
@@ -444,9 +448,17 @@ hanako 她还是自称豆腐；要连名字一起换，去高级页改 `persona.
 
 ### 测试页
 
-两套随包测试集（功能验收和业务测试）逐卡运行、人工判定，用法和通过标准见
-[docs/mvp-validation-plan.md](mvp-validation-plan.md)。页面右上还有「直播 Mock」的
-入口（见下面单独一章）。
+当前两套为“简单意图测试”（14 例）和“困难多轮测试”（用户 Excel 的 18 组）。
+点“自动运行”后，先用 Seed TTS 2.0 准备台词（首次需要云端合成，后续复用本地缓存），
+再播出台词，并将同一份 PCM 按每帧 32 ms 的实际节拍送入当前语音服务。
+测试输入使用 `[test_voice]` 配置和环境变量 `volcano_api_key`，不更换助手音色。
+34 个直播事件按步骤实际进入正常调度链，包括简单集的念弹幕、谢礼场景。
+台词从当前音频页面播放，不通过麦克风再录入。
+停止或暂停会清掉台词播放，收到页面停止确认后才恢复输入；若没有确认，会保持暂停并提示处理。
+运行前断开真实直播间、停止 Live Mock，保持扬声器开启。停止测试会释放音频输入，不修改原麦克风勾选。
+当前后端尚未回传七类意图标签，执行完成仍需人工检查对象、是否开口和时机；DECLINED 的第二阶段
+入口未接入，对应两例明确标为未完成。详细用法、来源和限制见 [意图测试页](intent-test-console.md)。
+顶部保留“直播 Mock”入口（见下面单独一章）；旧功能/业务 JSON 仍供后端回归使用。
 
 ### 高级页
 

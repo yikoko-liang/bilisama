@@ -87,6 +87,16 @@ class EventPacer:
         self._consumed: dict[str, int] = {}
         self._denied: dict[str, int] = {}
 
+    def reset_for_replay(self) -> None:
+        """Start an isolated replay with a quiet-room budget, keeping policy."""
+        self._danmaku.clear()
+        self._entries.clear()
+        self._paid.clear()
+        self._activity = RoomActivity.QUIET
+        self._downshift_since = None
+        self._last_refill = self._clock.monotonic()
+        self._tokens = self._capacity(self._chattiness())
+
     def note_event(self, event: LiveEvent) -> None:
         """Add one platform event. Console events and microphone turns stay out."""
         if event.room_id <= 0:

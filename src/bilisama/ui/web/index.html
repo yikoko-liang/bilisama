@@ -219,8 +219,9 @@
       </section>
 
       <section id="tab-tests" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-tests">
-        <div class="page-heading"><h1>测试</h1><p>逐条运行功能验收和主播业务场景。</p></div>
+        <div class="page-heading"><h1>测试</h1><p>逐条自动运行简单意图和困难多轮场景，检查回应对象与时机。</p></div>
         <div class="live-mock-launch"><div><strong>直播 Mock</strong><p>共享浏览器音轨，接入真实直播间事件，检测通过后开始验证。</p></div><button id="live-mock-open" type="button">打开</button></div>
+        <p id="test-audio-notice" class="test-audio-notice">点击自动运行后，会播出预制台词并实时送入语音模型，你可以听到台词和助手的回复，无需照读。台词由 Seed TTS 2.0 合成，首次会将台词发送到火山语音服务，之后复用本地缓存，不是操作者的真实声音。弹幕、礼物和进房步骤会实际注入对应事件。运行时临时屏蔽麦克风，请先断开真实直播间、停止 Live Mock。停止或暂停会停止台词播放。每次只运行一例；当前后端未提供实际意图分类，执行完成后仍需人工判断。</p>
         <div id="test-set-switch" class="test-set-switch" role="tablist" aria-label="测试集"></div>
         <p id="test-description" class="test-description">测试集载入中…</p>
         <div class="test-tools"><select id="test-candidate" aria-label="主播过滤" hidden></select><span id="test-count" class="test-count"></span><button id="test-stop" class="test-stop" type="button" disabled>停止当前</button></div>

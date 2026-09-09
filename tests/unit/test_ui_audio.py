@@ -639,3 +639,64 @@ async def test_pause_drops_everything_and_browser_election_is_exclusive() -> Non
     switch.use_browser(False)
     await switch.push_browser_audio(_loud_frame())
     assert switch.blocked_browser_frames == 1
+
+
+async def test_test_audio_excludes_both_live_sources_and_preserves_election() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    switch = AudioInputSwitch(sink)
+    switch.use_browser(True)
+    switch.set_test_active(True)
+    await switch.push_audio(_loud_frame())
+    await switch.push_browser_audio(_loud_frame())
+    assert not sent, "neither live microphone may mix into scripted test audio"
+    await switch.push_test_audio(_loud_frame())
+    assert len(sent) == 1
+    assert switch.status()["test_active"] is True
+    switch.set_test_active(False)
+    await switch.push_test_audio(_loud_frame())
+    await switch.push_audio(_loud_frame())
+    assert len(sent) == 1
+    await switch.push_browser_audio(_loud_frame())
+    assert len(sent) == 2 and switch.browser_active
+
+
+async def test_explicit_test_audio_bypasses_microphone_off_but_respects_pause() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    switch = AudioInputSwitch(sink)
+    switch.set_enabled(False)
+    switch.set_test_active(True)
+    await switch.push_test_audio(_loud_frame())
+    assert sent == [_loud_frame()], "starting a test is separate consent from opening the mic"
+    switch.set_paused(True)
+    await switch.push_test_audio(_loud_frame())
+    assert len(sent) == 1, "the suspended transport must receive no test frames either"
+    switch.set_paused(False)
+    switch.set_test_active(False)
+    await switch.push_audio(_loud_frame())
+    assert sent[-1] == bytes(640) and not switch.enabled
+
+
+async def test_test_audio_still_passes_the_shared_noise_gate() -> None:
+    from bilisama.ui.audio import AudioInputSwitch
+
+    sent: list[bytes] = []
+
+    async def sink(pcm: bytes) -> None:
+        sent.append(pcm)
+
+    switch = AudioInputSwitch(sink, noise_sensitivity=0)
+    switch.set_test_active(True)
+    await switch.push_test_audio(_loud_frame(amplitude=1))
+    assert sent == [bytes(640)]

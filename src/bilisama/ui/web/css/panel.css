@@ -868,3 +868,23 @@ input.cfg-edit:focus {
 .test-result { font-size: 12px; color: var(--ink-dim); }
 .test-stop { padding: 4px 12px; border: 1px solid var(--panel-edge); border-radius: var(--radius-s); background: var(--panel); color: var(--ink); cursor: pointer; }
 .test-stop:disabled { opacity: 0.45; cursor: default; }
+.test-audio-notice { margin: var(--space-3); padding: 10px 12px; background: color-mix(in srgb, var(--accent) 7%, var(--panel)); border-radius: var(--radius-s); color: var(--ink-dim); font-size: 12px; line-height: 1.7; }
+.test-context, .test-records { margin-top: 12px; }
+.test-context summary, .test-records summary { cursor: pointer; color: var(--ink-dim); }
+.test-context ul { margin-top: 8px; }
+.test-classification { margin: 6px 0; font-size: 12px; color: var(--ink-dim); }
+.test-steps { padding-left: 24px; margin: 8px 0 12px; }
+.test-step { padding: 10px 12px; margin-bottom: 8px; background: color-mix(in srgb, var(--ink-faint) 8%, transparent); border-radius: var(--radius-s); }
+.test-step-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.test-source { color: var(--ink-faint); font-size: 11px; }
+.test-step-timing { color: var(--ink-dim); font-size: 11.5px; margin: 5px 0; }
+.test-step-expected { margin: 7px 0 0; white-space: pre-wrap; }
+.test-during-events { padding-left: 18px; margin: 6px 0; color: var(--ink-dim); }
+.test-observation { border-top: 1px solid var(--panel-edge); padding: 10px 0; overflow-wrap: anywhere; }
+.test-observation h5 { margin: 0 0 6px; font-size: 12px; }
+.test-observation p { margin-top: 5px; }
+.test-records > .test-reference { margin: 8px 0; }
+.test-incomplete { padding: 3px 12px; border-radius: var(--radius-s); border: 1px solid var(--panel-edge); background: var(--panel); color: var(--ink-dim); cursor: pointer; }
+.test-pass:disabled { opacity: 0.45; cursor: default; }
+.test-judge { flex-wrap: wrap; }
+.test-incomplete[hidden] { display: none; }

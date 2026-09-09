@@ -21,7 +21,7 @@ credential_ref = "env:BILI_SESSDATA"       # 登录态 cookie 的引用；没设
 stream_intro = ""                           # 本场直播在做什么，一两句话；会进提示词，也参与弹幕相关性判断
 
 [speech]
-provider = "s2s"                        # s2s | dashscope | volcano | openai_ga
+provider = "volcano"                    # s2s | dashscope | volcano | openai_ga
 
 [speech.s2s]
 endpoint = "ws://127.0.0.1:8765/v1/realtime"
@@ -68,16 +68,25 @@ endpoint = ""
 api_key_ref = "volcano_api_key"
 # 1.2.1.1 = O2.0，人设走一段文字描述，配官方音色；
 # 2.2.0.0 = SC2.0，人设走角色档案，配克隆音色。换版本要跟着换音色。
-model = "1.2.1.1"
+model = "2.2.0.0"
 # 必须填。留空不是「用个默认嗓子」——服务端那个默认音色自带它自己的角色，会盖过人设，
 # 问她是谁她答「豆包」（2026-08-28 真端点复现）。官方四个音色见 docs/runbook.md。
-speaker = "zh_female_vv_jupiter_bigtts"
+speaker = "saturn_zh_female_keainvsheng_tob"
 end_smooth_window_ms = 1500             # 停多久算一句说完了。这条路上唯一的判停旋钮
 
 [speech.side]                           # 主动话题、记忆蒸馏、事实抽取都用它，挑便宜的
 base_url = ""
 model = ""
 api_key_ref = "side"
+
+[test_voice]
+# Synthesizes test input only; the assistant keeps speech.volcano.speaker.
+endpoint = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
+resource_id = "seed-tts-2.0"
+speaker = "zh_female_vv_uranus_bigtts"
+api_key_ref = "volcano_api_key"
+request_timeout_s = 60.0
+speech_rate = 0
 
 # 我们自己的可插拔 TTS 链路（阶段 4 交付），只在语音后端不自带音频时生效。
 # 主力规划是 IndexTTS（授权和 GPU 到位即切，见计划 §4.8）；qwen3_cloud 只是当前能跑的默认。
@@ -168,7 +177,7 @@ voice = "off"
 [avatar]
 renderer = "sprite"                     # 渲染机制：sprite 精灵图（含内置豆腐）；live2d 待接入
 model_id = ""                           # 留空 = 内置豆腐；填皮肤包目录名换肤（助手页也能点选）
-expression_source = "tag"               # 只在我们自己做 TTS 时安全
+expression_source = "lexicon"           # Volcano owns audio; do not inject spoken expression tags.
 
 [runtime]
 ui_port = 0

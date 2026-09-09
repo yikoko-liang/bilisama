@@ -707,8 +707,17 @@ class _HalfDeadBroker(AudioBroker):
         send: Callable[[bytes], None],
         close: Callable[[], None] | None = None,
         flush: Callable[[], None] | None = None,
+        monitor: Callable[[bytes], None] | None = None,
+        clear_monitor: Callable[[int], None] | None = None,
     ) -> bool:
-        await super().claim(who, send=send, close=close, flush=flush)
+        await super().claim(
+            who,
+            send=send,
+            close=close,
+            flush=flush,
+            monitor=monitor,
+            clear_monitor=clear_monitor,
+        )
         raise RuntimeError("PortAudio 没关掉")
 
 

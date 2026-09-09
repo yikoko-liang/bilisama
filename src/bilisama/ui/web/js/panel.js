@@ -1174,14 +1174,167 @@ export function createPanel({ send }) {
   // ------------------------------------------------------------ test console
 
   let testSets = [];
-  let activeTestSet = "functional";
+  let activeTestSet = "simple";
   let activeCandidate = "";
   let testState = { status: "idle", case_id: "" };
-  // Local only, on purpose: the pass/fail button is the human's scratchpad
-  // for THIS sitting, not a record the backend keeps.
+  // Keep each case's latest run across tabs, but never carry a judgment from
+  // an earlier execution into a new one. The backend does not persist these.
+  const testRuns = new Map();
   const testJudgments = new Map();
 
-  const isTestRunning = () => ["running", "event"].includes(testState.status);
+  const isTestRunning = () => ["preparing", "running", "step", "event"].includes(testState.status);
+
+  const rememberTestState = (state) => {
+    testState = state;
+    if (!state.case_id) return;
+    const previous = testRuns.get(state.case_id);
+    const sameRun = previous && previous.run_id === state.run_id;
+    if (!sameRun) testJudgments.delete(state.case_id);
+    testRuns.set(state.case_id, sameRun ? { ...previous, ...state } : state);
+  };
+
+  const testStatusText = (state) => {
+    if (state.status === "completed") return "执行完成，待人工判定";
+    if (state.status === "incomplete") return `执行未完成：${state.text || "请检查逐轮记录后重试"}`;
+    if (state.status === "stopped") return "已停止，本轮未完成";
+    if (["failed", "error"].includes(state.status)) return state.text || "运行失败";
+    if (state.status === "preparing") return "正在准备测试音频…";
+    if (state.status === "event") {
+      return `已注入 ${state.index ?? 0}/${state.total ?? 0}：${state.text ?? ""}`;
+    }
+    if (["running", "step"].includes(state.status)) {
+      const phase = {
+        preparing: "准备音频", voice: "发送预制语音", observing: "观察回复", waiting: "等待条件",
+      }[state.phase] || "执行中";
+      const progress = state.total ? ` ${state.index ?? 0}/${state.total}` : "";
+      return `${phase}${progress}${state.text ? `：${state.text}` : ""}`;
+    }
+    return "";
+  };
+
+  const testEventText = (event) => {
+    if (typeof event === "string") return event;
+    if (!event) return "直播事件";
+    if (event.summary) return event.summary;
+    const kind = {
+      danmaku: "弹幕", gift: "礼物", super_chat: "SC", guard_buy: "上舰",
+      vip_enter: "VIP 进房", entry: "普通进房", follow: "关注", like: "点赞", share: "分享",
+    }[event.kind] || event.kind || "事件";
+    const gift = event.gift;
+    const detail = gift
+      ? `${gift.name} ×${gift.num ?? 1} · ${(gift.unit_battery ?? 0) * (gift.num ?? 1)} 电池`
+      : event.text;
+    const name = event.viewer?.name || event.name;
+    return `${name ? `${name} · ` : ""}${kind}${detail ? `：${detail}` : ""}`;
+  };
+
+  const testStepTiming = (step) => {
+    const after = {
+      delay: "按顺序执行",
+      reply_started: "等待助手开始播报且仍在播报",
+      reply_finished: "等待助手播报结束",
+    }[step.after] || "按顺序执行";
+    const delay = step.delay_s ? `，再延后 ${step.delay_s} 秒` : "";
+    const timeout = step.after && step.after !== "delay" ? `（最多等 ${step.timeout_s ?? 30} 秒）` : "";
+    const target = step.reply_from_row && step.after !== "delay"
+      ? `等待Excel第${step.reply_from_row}行引发的回复；` : "";
+    return `${target}${after}${timeout}${delay}；本步输入后观察 ${step.observe_s ?? 0} 秒`;
+  };
+
+  const renderTestSteps = (card, item) => {
+    if (item.context?.length) {
+      const context = el("details", "test-context");
+      context.appendChild(el("summary", "", `预置上下文（${item.context.length} 条）`));
+      const lines = el("ul", "test-expected");
+      for (const line of item.context) lines.appendChild(el("li", "", line));
+      context.appendChild(lines);
+      card.appendChild(context);
+    }
+    if (item.expected_intent) {
+      card.appendChild(el("p", "test-classification", `预期分类：${item.expected_intent}`));
+    }
+    card.appendChild(el("p", "test-classification", "实际分类：当前后端未提供；沉默不代表识别正确。"));
+    card.appendChild(el("h5", "test-label", `自动执行步骤（共 ${item.steps.length} 轮）`));
+    const steps = el("ol", "test-steps");
+    for (const step of item.steps) {
+      const row = el("li", "test-step");
+      const kind = { voice: "预制语音", event: "直播事件", wait: "静默观察", proactive: "主动询问" }[step.kind] || step.kind;
+      const heading = el("div", "test-step-head");
+      heading.appendChild(el("strong", "", `${step.id} · ${kind}`));
+      if (step.source_row) heading.appendChild(el("span", "test-source", `Excel 第 ${step.source_row} 行`));
+      row.appendChild(heading);
+      row.appendChild(el("p", "test-step-timing", testStepTiming(step)));
+      if (step.kind === "event") row.appendChild(el("p", "test-copy", testEventText(step.event)));
+      else if (step.text) row.appendChild(el("p", "test-copy", step.text));
+      if (step.kind === "proactive") {
+        row.appendChild(el("p", "test-reference", "当前后端未提供第二阶段主动询问入口，本步会标为未完成。"));
+      }
+      if (step.events_during?.length) {
+        const events = el("ul", "test-during-events");
+        for (const edge of step.events_during) {
+          const source = edge.source_row ? `（Excel 第 ${edge.source_row} 行）` : "";
+          events.appendChild(el("li", "", `语音开始后 ${edge.offset_s ?? edge.at_s ?? 0} 秒：${testEventText(edge.event || edge)}${source}`));
+        }
+        row.appendChild(events);
+      }
+      if (step.expected_intent) row.appendChild(el("p", "test-classification", `预期分类：${step.expected_intent}`));
+      row.appendChild(el("p", "test-step-expected", `本轮预期：${step.expected}`));
+      steps.appendChild(row);
+    }
+    card.appendChild(steps);
+  };
+
+  const appendTestReplyReceipt = (row, reply, includeText = false) => {
+    if (includeText) row.appendChild(el("p", "test-copy", `助手回复：${reply.text || "无回复文本，仅记录音频或状态回执"}`));
+    const replyStatus = {
+      completed: "生成完成", cancelled: "已打断", generating: "生成中", failed: "失败",
+    }[reply.status] || reply.status || (reply.done ? "生成结束" : "生成中");
+    row.appendChild(el("p", "test-reference", `回复 ${reply.handle_id ?? reply.handle ?? ""}：${replyStatus} · ${reply.audio_chunks ?? 0} 个音频分片`));
+  };
+
+  const renderTestObservations = (container, state) => {
+    container.textContent = "";
+    const observations = state?.observations || [];
+    const unattributed = state?.unattributed_replies || [];
+    const unmatchedAsr = state?.unmatched_asr || [];
+    if (!observations.length && !unattributed.length && !unmatchedAsr.length) return;
+    const title = el("summary", "", `本轮实际记录（${observations.length} 轮）`);
+    const details = el("details", "test-records");
+    details.open = true;
+    details.appendChild(title);
+    details.appendChild(el("p", "test-reference", "按输入时序关联，并非语义归因；以下记录不能单独证明意图识别正确。"));
+    for (const observation of observations) {
+      const row = el("section", "test-observation");
+      const status = { observed: "已观察", timeout: "未满足执行条件", observing: "观察中" }[observation.status] || "已记录";
+      row.appendChild(el("h5", "", `${observation.step_id} · ${status}`));
+      if (observation.expected) row.appendChild(el("p", "test-copy", `本轮预期：${observation.expected}`));
+      if (observation.expected_intent) row.appendChild(el("p", "test-copy", `预期分类：${observation.expected_intent}`));
+      row.appendChild(el("p", "test-classification", "实际分类：当前后端未提供"));
+      const missingAsr = unmatchedAsr.length
+        ? "本步未关联到识别回执；另有未匹配记录，见下方" : "未收到识别回执";
+      const missingReply = unattributed.length
+        ? "本步未关联到回复；另有未归因记录，见下方" : "未收到回复（不能据此判定识别正确）";
+      row.appendChild(el("p", "test-copy", `语音识别：${observation.asr?.length ? observation.asr.join("\n") : missingAsr}`));
+      row.appendChild(el("p", "test-copy", `助手回复：${observation.replies?.length ? observation.replies.join("\n") : missingReply}`));
+      row.appendChild(el("p", "test-reference", `收到音频分片：${observation.audio_chunks ?? 0}（不等于实际播放完成）`));
+      for (const reply of observation.reply_details || []) {
+        appendTestReplyReceipt(row, reply);
+      }
+      for (const event of observation.events || []) {
+        row.appendChild(el("p", "test-reference", `已注入事件：${testEventText(event)}`));
+      }
+      details.appendChild(row);
+    }
+    if (unattributed.length || unmatchedAsr.length) {
+      const row = el("section", "test-observation test-unattributed");
+      row.appendChild(el("h5", "", "未能关联到具体轮次的记录"));
+      row.appendChild(el("p", "test-reference", "以下记录没有可靠的轮次归属，不推断回应对象或意图，也不计为某一轮的正确回复。音频分片不等于实际播放完成。"));
+      for (const text of unmatchedAsr) row.appendChild(el("p", "test-copy", `未匹配语音识别：${text}`));
+      for (const reply of unattributed) appendTestReplyReceipt(row, reply, true);
+      details.appendChild(row);
+    }
+    container.appendChild(details);
+  };
 
   const applyTestState = () => {
     if (!testCases) return;
@@ -1191,37 +1344,37 @@ export function createPanel({ send }) {
       testStop.disabled = !running;
     }
     for (const card of testCases.querySelectorAll(".test-card")) {
-      const selected = card.dataset.caseId === testState.case_id;
+      const caseId = card.dataset.caseId;
+      const state = testRuns.get(caseId) || { status: "idle" };
+      const selected = caseId === testState.case_id;
+      card.dataset.status = state.status;
       card.classList.toggle("running", selected && running);
-      card.classList.toggle("failed", selected && testState.status === "failed");
+      card.classList.toggle("failed", state.status === "failed");
       const run = card.querySelector(".test-run");
       run.disabled = running;
-      run.textContent = selected && running ? "运行中…" : "运行";
+      run.textContent = selected && running ? "运行中…" : card.dataset.execution === "voice" ? "自动运行" : "运行";
       const status = card.querySelector(".test-status");
-      if (!selected) {
-        status.textContent = "";
-        continue;
-      }
-      if (testState.status === "running") status.textContent = "已启动，等待第一条事件";
-      else if (testState.status === "event") {
-        status.textContent = `已注入 ${testState.index ?? 0}/${testState.total ?? 0}：${testState.text ?? ""}`;
-      } else if (testState.status === "completed") status.textContent = testState.text ?? "事件已注入";
-      else if (testState.status === "stopped") status.textContent = "已停止";
-      else if (testState.status === "failed" || testState.status === "error") {
-        status.textContent = testState.text ?? "运行失败";
-      }
+      status.textContent = testStatusText(state);
+      renderTestObservations(card.querySelector(".test-observations"), state);
       const judge = card.querySelector(".test-judge");
-      judge.hidden = testState.status !== "completed";
+      judge.hidden = !["completed", "incomplete"].includes(state.status) || state.run_id == null;
+      card.querySelector(".test-pass").disabled = state.status !== "completed";
+      card.querySelector(".test-incomplete").hidden = state.status !== "incomplete";
+      const judgment = testJudgments.get(caseId);
+      const current = judgment && judgment.runId === state.run_id ? judgment.value : "";
+      if (current) card.dataset.judgment = current;
+      else delete card.dataset.judgment;
+      card.querySelector(".test-result").textContent = current
+        ? `本轮：${{ pass: "通过", fail: "失败", incomplete: "未完成" }[current]}` : "";
     }
   };
 
   const setJudgment = (caseId, value) => {
-    testJudgments.set(caseId, value);
-    const card = testCases.querySelector(`[data-case-id="${CSS.escape(caseId)}"]`);
-    if (!card) return;
-    card.dataset.judgment = value;
-    const result = card.querySelector(".test-result");
-    result.textContent = value === "pass" ? "本轮：通过" : "本轮：失败";
+    const state = testRuns.get(caseId);
+    if (!state || state.run_id == null || !["completed", "incomplete"].includes(state.status)) return;
+    if (value === "pass" && state.status !== "completed") return;
+    testJudgments.set(caseId, { runId: state.run_id, value });
+    applyTestState();
   };
 
   const renderTestCases = () => {
@@ -1265,6 +1418,7 @@ export function createPanel({ send }) {
     for (const item of visible) {
       const card = el("article", "test-card");
       card.dataset.caseId = item.id;
+      card.dataset.execution = item.execution || "events";
       const head = el("div", "test-card-head");
       const titleWrap = el("div");
       titleWrap.appendChild(el("h4", "test-title", item.title));
@@ -1273,21 +1427,25 @@ export function createPanel({ send }) {
       if (item.candidate_name) {
         meta.appendChild(el("span", "test-tag candidate", item.candidate_name));
       }
-      meta.appendChild(el("span", "test-duration", `${item.duration_s}s`));
+      meta.appendChild(el("span", "test-duration", `${item.duration_s}s${item.steps?.length ? " · 实际时长随回复变化" : ""}`));
       titleWrap.appendChild(meta);
       head.appendChild(titleWrap);
-      const run = el("button", "test-run", "运行");
+      const run = el("button", "test-run", item.execution === "voice" ? "自动运行" : "运行");
       run.type = "button";
       run.addEventListener("click", () => {
+        if (isTestRunning()) return;
+        testJudgments.delete(item.id);
+        rememberTestState({ status: "preparing", case_id: item.id, run_id: null, observations: [] });
+        applyTestState();
         if (!send("test.run", { case_id: item.id })) {
-          testState = { status: "failed", case_id: item.id, text: "连接断开，测试没有启动" };
+          rememberTestState({ status: "failed", case_id: item.id, text: "连接断开，测试没有启动" });
           applyTestState();
         }
       });
       head.appendChild(run);
       card.appendChild(head);
 
-      card.appendChild(el("h5", "test-label", "你要做"));
+      card.appendChild(el("h5", "test-label", item.steps?.length ? "执行说明" : "你要做"));
       card.appendChild(el("p", "test-copy", item.operator));
       if (item.focus?.length) {
         card.appendChild(el("h5", "test-label", "重点观察"));
@@ -1295,17 +1453,18 @@ export function createPanel({ send }) {
         for (const line of item.focus) focus.appendChild(el("li", "", line));
         card.appendChild(focus);
       }
-      const eventCount = item.event_count ?? item.events.length;
-      card.appendChild(el("h5", "test-label", `会注入（共 ${eventCount} 个事件/动作）`));
-      const events = el("div", "test-events");
-      if (!item.events.length) {
-        events.appendChild(el("span", "test-no-event", "无直播事件，只测麦克风或定时行为"));
+      if (item.steps?.length) renderTestSteps(card, item);
+      else {
+        const eventCount = item.event_count ?? item.events?.length ?? 0;
+        card.appendChild(el("h5", "test-label", `会注入（共 ${eventCount} 个事件/动作）`));
+        const events = el("div", "test-events");
+        if (!item.events?.length) events.appendChild(el("span", "test-no-event", "无直播事件，只测麦克风或定时行为"));
+        for (const event of item.events || []) {
+          events.appendChild(el("span", "test-event", `${event.at_s}s  ${event.summary}`));
+        }
+        card.appendChild(events);
       }
-      for (const event of item.events) {
-        events.appendChild(el("span", "test-event", `${event.at_s}s  ${event.summary}`));
-      }
-      card.appendChild(events);
-      card.appendChild(el("h5", "test-label", "通过标准"));
+      card.appendChild(el("h5", "test-label", "人工检查标准"));
       const expected = el("ul", "test-expected");
       for (const line of item.expected) expected.appendChild(el("li", "", line));
       card.appendChild(expected);
@@ -1314,6 +1473,7 @@ export function createPanel({ send }) {
         card.appendChild(el("p", "test-reference", item.reference));
       }
       card.appendChild(el("p", "test-status"));
+      card.appendChild(el("div", "test-observations"));
 
       const judge = el("div", "test-judge");
       judge.hidden = true;
@@ -1324,16 +1484,14 @@ export function createPanel({ send }) {
       const fail = el("button", "test-fail", "失败");
       fail.type = "button";
       fail.addEventListener("click", () => setJudgment(item.id, "fail"));
+      const incomplete = el("button", "test-incomplete", "记为未完成");
+      incomplete.type = "button";
+      incomplete.addEventListener("click", () => setJudgment(item.id, "incomplete"));
       judge.appendChild(pass);
       judge.appendChild(fail);
+      judge.appendChild(incomplete);
       judge.appendChild(el("span", "test-result"));
       card.appendChild(judge);
-      const existing = testJudgments.get(item.id);
-      if (existing) {
-        card.dataset.judgment = existing;
-        card.querySelector(".test-result").textContent =
-          existing === "pass" ? "本轮：通过" : "本轮：失败";
-      }
       testCases.appendChild(card);
     }
     applyTestState();
@@ -1364,7 +1522,7 @@ export function createPanel({ send }) {
   const loadTestCatalog = (catalog, initialState) => {
     testSets = catalog?.sets ?? [];
     if (!testSets.some((item) => item.id === activeTestSet)) activeTestSet = testSets[0]?.id ?? "";
-    testState = initialState ?? { status: "idle", case_id: "" };
+    rememberTestState(initialState ?? { status: "idle", case_id: "" });
     renderTestSets();
     renderTestCases();
   };
@@ -1532,7 +1690,7 @@ export function createPanel({ send }) {
       }
       if (event === "event.feed") {
         if (data.kind === "test") {
-          testState = data;
+          rememberTestState(data);
           applyTestState();
           return;
         }
@@ -1600,6 +1758,8 @@ export function createPanel({ send }) {
         roomEventsEl.appendChild(el("p", "empty", "等待直播间事件…"));
       }
       testState = { status: "idle", case_id: "" };
+      testRuns.clear();
+      testJudgments.clear();
       applyTestState();
       // The local lines went with them, so they are news again — otherwise a
       // reconnect silently retires the one notice explaining a dead skin.

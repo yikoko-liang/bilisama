@@ -57,16 +57,32 @@ $PY -m bilisama.cli config chattiness >/dev/null
 # Reconcile field names against the upstream checkout when it exists. Without
 # one the render still has to run — a missing sibling directory must not fail
 # the whole gate on a machine that never installed s2s (D10).
+# Render the shipped S2S fields in an isolated configuration. The user's
+# default provider may be cloud-hosted; changing it is not part of this smoke.
+BILISAMA_GATE_WORK="$WORK" $PY - <<'S2S_CONFIG'
+import os
+import shutil
+from pathlib import Path
+
+from bilisama.config import ProviderName, Settings
+from bilisama.config.persist import TomlConfigWriter
+
+target = Path(os.environ["BILISAMA_GATE_WORK"]) / "s2s-config.toml"
+shutil.copyfile("config/bilisama.toml", target)
+writer = TomlConfigWriter(target, Settings(active_profile=""))
+writer.write("active_profile", "")
+writer.write("speech.provider", ProviderName.S2S)
+S2S_CONFIG
 S2S_UPSTREAM="${BILISAMA_S2S_ROOT:-../speech-to-speech}"
 if [ -d "$S2S_UPSTREAM" ]; then
   $PY -m bilisama.cli config render-s2s \
-      --config config/bilisama.toml \
+      --config "$WORK/s2s-config.toml" \
       --out "$WORK/s2s.json" \
       --s2s-root "$S2S_UPSTREAM" >/dev/null
 else
   printf '\033[33m▸ render-s2s：没有上游检出（%s），这次没对账字段名\033[0m\n' "$S2S_UPSTREAM"
   $PY -m bilisama.cli config render-s2s \
-      --config config/bilisama.toml \
+      --config "$WORK/s2s-config.toml" \
       --out "$WORK/s2s.json" >/dev/null
 fi
 

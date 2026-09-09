@@ -2,7 +2,7 @@
 # The streamer's entrance: checks the environment in Chinese, fills sensible
 # defaults, then hands over to `bilisama dev-talk --director`.
 #
-# The script OWNS four knobs (--provider/--model/--room/--input-device, each
+# The script OWNS five knobs (--provider/--model/--voice/--room/--input-device, each
 # flag > BILISAMA_* env > default) because it has something to add to them:
 # credential checks, mic auto-detection, room validation. Every other flag
 # passes through to dev-talk untouched, so this file never becomes another
@@ -17,18 +17,12 @@ ELECTRON="$PET_DIR/node_modules/.bin/electron"
 ELECTRON_RUNTIME="$PET_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 ENDPOINT_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bilisama/ui/endpoint.json"
 
-# dashscope 是走通验收的默认路；接豆包的机器用 --provider volcano 或
-# BILISAMA_PROVIDER=volcano——不显式给 --model 时，模型（代际）与音色从
-# bilisama.toml 的 [speech.volcano] 读；显式给 --model 2.2.0.0 这样的版本号照传。
-PROVIDER="${BILISAMA_PROVIDER:-dashscope}"
-# MODEL_SET tells the launch line apart from the built-in default: an explicit
-# model (flag or env) forwards on EVERY provider — volcano reads it as the
-# generation, 1.2.1.1 or 2.2.0.0 — while the dashscope-flavored default below
-# must never leak to another backend.
+# Volcano SC2.0 is the shipped streamer path. Provider-specific defaults are
+# filled only after argument parsing, so overriding the provider never leaks a
+# Volcano model or speaker into DashScope or a local backend.
+PROVIDER="${BILISAMA_PROVIDER:-volcano}"
 MODEL="${BILISAMA_REALTIME_MODEL:-}"
-MODEL_SET=0
-[ -n "$MODEL" ] && MODEL_SET=1
-[ -n "$MODEL" ] || MODEL="qwen-audio-3.0-realtime-flash"
+VOICE="${BILISAMA_VOICE:-}"
 ROOM_ID="${BILISAMA_ROOM_ID:-}"
 INPUT_DEVICE="${BILISAMA_INPUT_DEVICE:-}"
 
@@ -42,11 +36,11 @@ usage() {
 用法：./start_bilisama.sh [选项] [其余 dev-talk 参数]
 
 自己认的选项（也可用同名 BILISAMA_* 环境变量，选项优先）：
-  --provider <名字>       语音后端（默认 dashscope；BILISAMA_PROVIDER）
-  --model <模型名>        托管服务的模型（BILISAMA_REALTIME_MODEL）。默认
-                          qwen-audio-3.0-realtime-flash 只在 dashscope 路生效；
-                          其它后端显式给才转发——火山这里是版本号（1.2.1.1
-                          或 2.2.0.0），换代要连音色一起换，配不上启动自检会拦
+  --provider <名字>       语音后端（默认 volcano；BILISAMA_PROVIDER）
+  --model <模型名>        托管服务的模型（BILISAMA_REALTIME_MODEL）。火山默认
+                          2.2.0.0；DashScope 默认 qwen-audio-3.0-realtime-flash
+  --voice <音色>          火山默认 saturn_zh_female_keainvsheng_tob
+                          （BILISAMA_VOICE）；换版本时必须一起换匹配音色
   --room <房间号>         连真实直播间，正整数（默认沙箱模式；BILISAMA_ROOM_ID）
   --input-device <编号>   麦克风设备（默认自动找内置麦；BILISAMA_INPUT_DEVICE）
   --check                 只做环境检查，不启动
@@ -55,7 +49,6 @@ usage() {
 其余参数原样交给 dev-talk，常用的比如：
   --skin kirby            本次换皮肤包（不改配置文件）
   --persona hanako        临时换人设
-  --voice longanlufeng    临时换音色试听
   --open                  界面起来后自动开浏览器
   --no-pet                只要浏览器界面，不要悬浮窗
 完整清单见 .venv/bin/bilisama dev-talk --help。
@@ -63,7 +56,7 @@ usage() {
 例子：
   ./start_bilisama.sh
   ./start_bilisama.sh --room 21452505 --skin kirby
-  BILISAMA_PROVIDER=volcano ./start_bilisama.sh --persona hanako
+  ./start_bilisama.sh --provider dashscope --voice longanlingxin
 EOF
 }
 
@@ -121,7 +114,7 @@ raise SystemExit(1)
 PY
 }
 
-# --- 参数解析：四个自有选项收走，其余原样透传 --------------------------------
+# --- 参数解析：五个自有选项收走，其余原样透传 --------------------------------
 
 need_value() {
   # $1 = flag name, $2 = remaining arg count after the flag
@@ -136,8 +129,10 @@ while [ "$#" -gt 0 ]; do
     --check) CHECK_ONLY=1 ;;
     --provider)   shift; need_value --provider "$#";     PROVIDER="$1" ;;
     --provider=*) PROVIDER="${1#*=}" ;;
-    --model)      shift; need_value --model "$#";        MODEL="$1"; MODEL_SET=1 ;;
-    --model=*)    MODEL="${1#*=}"; MODEL_SET=1 ;;
+    --model)      shift; need_value --model "$#";        MODEL="$1" ;;
+    --model=*)    MODEL="${1#*=}" ;;
+    --voice)      shift; need_value --voice "$#";        VOICE="$1" ;;
+    --voice=*)    VOICE="${1#*=}" ;;
     --room)       shift; need_value --room "$#";         ROOM_ID="$1" ;;
     --room=*)     ROOM_ID="${1#*=}" ;;
     --input-device)   shift; need_value --input-device "$#"; INPUT_DEVICE="$1" ;;
@@ -146,6 +141,16 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ -z "$MODEL" ]; then
+  case "$PROVIDER" in
+    volcano) MODEL="2.2.0.0" ;;
+    dashscope) MODEL="qwen-audio-3.0-realtime-flash" ;;
+  esac
+fi
+if [ -z "$VOICE" ] && [ "$PROVIDER" = "volcano" ]; then
+  VOICE="saturn_zh_female_keainvsheng_tob"
+fi
 
 has_extra() {
   local wanted="$1" arg
@@ -187,14 +192,14 @@ fi
 describe_plan() {
   local room_text="沙箱模式"
   [ -n "$ROOM_ID" ] && room_text="真实房间 $ROOM_ID"
-  local model_text="$MODEL"
-  if [ "$PROVIDER" != "dashscope" ] && [ "$MODEL_SET" = 0 ]; then
-    model_text="（从 [speech.$PROVIDER] 读）"
-  fi
+  local model_text="${MODEL:-从 [speech.$PROVIDER] 读}"
   local device_text="$INPUT_DEVICE"
   [ -z "$device_text" ] && device_text="无（WAV 模式）"
-  printf '后端 %s，模型 %s，输入设备 %s，%s' \
-    "$PROVIDER" "$model_text" "$device_text" "$room_text"
+  printf '后端 %s，模型 %s' "$PROVIDER" "$model_text"
+  if [ -n "$VOICE" ]; then
+    printf '，音色 %s' "$VOICE"
+  fi
+  printf '，输入设备 %s，%s' "$device_text" "$room_text"
   if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
     printf '，透传参数：%s' "${EXTRA_ARGS[*]}"
   fi
@@ -223,9 +228,8 @@ launch_args=(
   --provider "$PROVIDER"
 )
 [ -n "$INPUT_DEVICE" ] && launch_args+=(--input-device "$INPUT_DEVICE")
-if [ "$PROVIDER" = "dashscope" ] || [ "$MODEL_SET" = 1 ]; then
-  launch_args+=(--model "$MODEL")
-fi
+[ -n "$MODEL" ] && launch_args+=(--model "$MODEL")
+[ -n "$VOICE" ] && launch_args+=(--voice "$VOICE")
 [ -n "$ROOM_ID" ] && launch_args+=(--room "$ROOM_ID")
 launch_args+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 

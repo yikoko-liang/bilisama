@@ -195,6 +195,47 @@ class MockAction(BaseModel):
         return "平台撤回指定 SC"
 
 
+IntentLabel = Literal["TO_ME", "AUDIENCE", "SELF_TALK", "READING", "GUEST", "UNSURE", "DECLINED"]
+
+
+class ScenarioEvent(BaseModel):
+    """An event offset measured from the start of a voice step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    offset_s: float = Field(ge=0, le=180)
+    event: MockEvent
+    source_row: int = 0
+
+
+class ScenarioStep(BaseModel):
+    """Input facts and operator-only expectations stay in separate fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(min_length=1)
+    kind: Literal["voice", "event", "wait", "proactive"]
+    text: str = ""
+    after: Literal["delay", "reply_started", "reply_finished"] = "delay"
+    delay_s: float = Field(default=0, ge=0, le=180)
+    timeout_s: float = Field(default=30, gt=0, le=180)
+    observe_s: float = Field(default=5, ge=0, le=180)
+    expected: str = Field(min_length=1)
+    expected_intent: IntentLabel | None = None
+    source_row: int = 0
+    event: MockEvent | None = None
+    reply_from_row: int = Field(default=0, ge=0)
+    events_during: list[ScenarioEvent] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_input(self) -> ScenarioStep:
+        if self.kind == "voice" and not self.text.strip():
+            raise ValueError("语音步骤必须包含实际台词")
+        if (self.kind == "event") != (self.event is not None):
+            raise ValueError("只有事件步骤必须提供 event")
+        if self.events_during and self.kind != "voice":
+            raise ValueError("只有语音步骤支持语音中注入事件")
+        return self
+
+
 class MockTestCase(BaseModel):
     """One human-observed acceptance or business test."""
 
@@ -213,9 +254,19 @@ class MockTestCase(BaseModel):
     events: list[MockEvent] = Field(default_factory=list)
     bursts: list[MockBurst] = Field(default_factory=list)
     actions: list[MockAction] = Field(default_factory=list)
+    context: list[str] = Field(default_factory=list)
+    steps: list[ScenarioStep] = Field(default_factory=list)
+    expected_intent: IntentLabel | None = None
+    source_rows: list[int] = Field(default_factory=list)
+    allow_proactive: bool = False
 
     @model_validator(mode="after")
     def validate_timeline(self) -> MockTestCase:
+        if self.steps and (self.events or self.bursts or self.actions):
+            raise ValueError("多轮语音步骤不能混用旧的固定时间线")
+        step_ids = [step.id for step in self.steps]
+        if len(step_ids) != len(set(step_ids)):
+            raise ValueError("步骤 id 不能重复")
         times = [item[0] for item in self.timeline()]
         if times != sorted(times):
             raise ValueError("events、bursts 和 actions 必须按 at_s 升序排列")
@@ -263,6 +314,13 @@ class MockTestCase(BaseModel):
             "candidate_name": self.candidate_name,
             "event_count": len(self.timeline()),
             "events": preview,
+            "context": self.context,
+            "steps": [step.model_dump(mode="json") for step in self.steps],
+            "expected_intent": self.expected_intent,
+            "source_rows": self.source_rows,
+            "allow_proactive": self.allow_proactive,
+            "execution": "voice" if self.steps else "events",
+            "classification_available": False,
         }
 
 
@@ -271,7 +329,7 @@ class MockTestSet(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: Literal["functional", "business"]
+    id: Literal["functional", "business", "simple", "hard"]
     title: str = Field(min_length=1)
     description: str = Field(min_length=1)
     cases: list[MockTestCase] = Field(min_length=1)
@@ -281,8 +339,11 @@ class MockTestCatalog:
     """Validated lookup and UI projection for both shipped test sets."""
 
     def __init__(self, sets: list[MockTestSet]) -> None:
-        if [test_set.id for test_set in sets] != ["functional", "business"]:
-            raise ValueError("测试集必须依次包含 functional 和 business")
+        if [test_set.id for test_set in sets] not in (
+            ["functional", "business"],
+            ["simple", "hard"],
+        ):
+            raise ValueError("测试集必须依次包含 functional 和 business，或 simple 和 hard")
         cases = [case for test_set in sets for case in test_set.cases]
         ids = [case.id for case in cases]
         if len(ids) != len(set(ids)):
@@ -312,10 +373,10 @@ class MockTestCatalog:
         }
 
 
-def load_test_catalog(root: Path) -> MockTestCatalog:
+def load_test_catalog(root: Path, *, intent: bool = False) -> MockTestCatalog:
     """Load the two tracked JSON test sets from the config directory."""
     sets: list[MockTestSet] = []
-    for name in ("functional", "business"):
+    for name in (("simple", "hard") if intent else ("functional", "business")):
         path = root / f"{name}.json"
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

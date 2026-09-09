@@ -693,6 +693,8 @@ def test_the_shipped_config_names_a_voice() -> None:
     from bilisama.config.validate import volcano_voice_problems
 
     volcano = load(DEFAULT_CONFIG, strict=False).speech.volcano
+    assert volcano.model == "2.2.0.0"
+    assert volcano.speaker == "saturn_zh_female_keainvsheng_tob"
     assert volcano.speaker, "随包配置又把音色留空了"
     assert not volcano_voice_problems(volcano.model, volcano.speaker)
 

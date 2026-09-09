@@ -1869,6 +1869,9 @@ async def run_director(args: argparse.Namespace) -> int:
 
     # The pause total-gate's state, shared by the panel handler and hello().
     runtime_paused = False
+    intent_test_active = False
+    intent_test_allow_proactive = False
+    intent_test_context = ""
     # Which panic the PAUSE triggered, so resume releases only its own: a
     # streamer who hit 紧急叫停 first keeps her red button held through a
     # pause/resume cycle.
@@ -2030,7 +2033,9 @@ async def run_director(args: argparse.Namespace) -> int:
     def proactive_submit(intent: Intent) -> None:
         # Read the switch at submit time, not at wiring time: panel.set flips
         # it mid-stream, and ui_meta already promises Reload.LIVE for it.
-        if settings.interaction.speak.proactive:
+        if settings.interaction.speak.proactive and (
+            not intent_test_active or intent_test_allow_proactive
+        ):
             scheduler.submit(intent)
 
     proactive = ProactiveTopicLoop(
@@ -2096,7 +2101,9 @@ async def run_director(args: argparse.Namespace) -> int:
         event_observer=publish_room_event,
         voice_rules=voice_rules,
         event_rules=event_rules,
-        stream_intro=lambda: settings.room.stream_intro,
+        stream_intro=lambda: "\n\n".join(
+            line for line in (settings.room.stream_intro, intent_test_context) if line
+        ),
         per_reply_scope=profile_for(provider).caps.per_reply_base_instructions,
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
@@ -2166,6 +2173,8 @@ async def run_director(args: argparse.Namespace) -> int:
         be REFUSED by the caller — applying it in memory with no consumer
         re-poked is the lie the widened gate makes possible.
         """
+        if intent_test_active:
+            raise ValueError("自动测试进行中，请先停止测试再修改配置")
         if path in _RELOG_ON_EDIT:
             relog()
             return True
@@ -2229,6 +2238,8 @@ async def run_director(args: argparse.Namespace) -> int:
         or persist failure rolls the in-memory value back and re-runs the
         hook so consumers see the old value again.
         """
+        if intent_test_active:
+            raise ConfigEditError("自动测试进行中，请先停止测试再修改配置")
         resolved_parent = settings
         for part in path.split(".")[:-1]:
             resolved_parent = getattr(resolved_parent, part)
@@ -2324,10 +2335,17 @@ async def run_director(args: argparse.Namespace) -> int:
     # QueueSource into the SAME assembly the live room feeds. A broken
     # catalog refuses to start — a card that cannot load is a card that would
     # silently not run on the night someone relies on it.
-    from bilisama.ui.test_runner import MockTestRunner, load_test_catalog
+    from bilisama.ui.intent_test_runner import (
+        IntentTestRunner,
+        ScenarioHooks,
+        ScenarioSource,
+        check_scenario_ready,
+    )
+    from bilisama.ui.test_audio import TestVoiceAudio, stop_test_voice_monitor
+    from bilisama.ui.test_runner import load_test_catalog
 
     try:
-        test_catalog = load_test_catalog(config_path.parent / "testsets")
+        test_catalog = load_test_catalog(config_path.parent / "testsets", intent=True)
     except (OSError, ValueError) as exc:
         raise SystemExit(f"测试集读不了：{exc}") from exc
 
@@ -2337,10 +2355,131 @@ async def run_director(args: argparse.Namespace) -> int:
             # the chat page ignores it, the test page filters for it.
             hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "test", **state})
 
-    tests_source = QueueSource("ui-tests")
-    test_runner = MockTestRunner(
-        test_catalog, tests_source, clock, notify=test_notify, revoke=scheduler.revoke
+    tests_source = ScenarioSource("ui-tests")
+    test_audio = TestVoiceAudio(room_dir.parent / "test-voice-cache", config=settings.test_voice)
+
+    def check_test_ready() -> None:
+        state = scheduler.status()
+        check_scenario_ready(
+            paused=runtime_paused,
+            panicked=bool(state["panicked"]),
+            room_connected=bool(room_source.status().get("connected")),
+            live_mock_running=bool(live_mock.state().get("running")),
+            link_connected=bool(link_health.status().get("connected")),
+            output_enabled=settings.audio.output_enabled,
+            busy=bool(
+                state["active_source"]
+                or state["dispatching"]
+                or state["queued"]
+                or floor.streamer_speaking
+                or floor.turn_pending
+                or floor.implicit_active
+                or _audio_busy(speaker, tally)
+                or selector.status()["window_open"]
+                or selector.status()["deferred_count"]
+                or entries.status()["pending"]
+            ),
+        )
+        if broker is None or not broker.monitor_ready:
+            raise ValueError(
+                "测试台词播放尚未就绪，请打开新版桌宠或浏览器音频页，点击页面启用声音后重试"
+            )
+
+    def monitor_test_voice(pcm: bytes) -> None:
+        if broker is None:
+            raise RuntimeError("测试台词播放已断开，请重新打开音频页面后重试")
+        broker.monitor_test_voice(pcm)
+
+    def pause_after_monitor_failure() -> None:
+        nonlocal runtime_paused
+        runtime_paused = True
+        audio_input.set_paused(True)
+        panic_by_pause.add("pause")
+        sync_panel()
+
+    async def begin_test(context: list[str]) -> None:
+        nonlocal intent_test_active, intent_test_allow_proactive, intent_test_context
+        intent_test_active = True
+        case = test_catalog.case(str(test_runner.state()["case_id"]))
+        intent_test_allow_proactive = case.allow_proactive
+        tests_source.accepted_run = int(str(test_runner.state()["run_id"]))
+        audio_input.set_test_active(True)
+        selector.reset_for_replay()
+        entries.reset_for_replay()
+        event_pacer.reset_for_replay()
+        proactive.note_activity()
+        intent_test_context = "\n".join(context)
+        await assembly.refresh_context()
+
+    async def end_test() -> None:
+        nonlocal intent_test_active, intent_test_allow_proactive, intent_test_context
+        # The lease was acquired only in an idle, disconnected room. No real
+        # live event can enter while it is held, so this drain owns test work.
+        tests_source.accepted_run = None
+        intent_test_context = ""
+        assembly.set_event_input_enabled(False)
+        selector.reset_for_replay()
+        entries.reset_for_replay()
+        was_panicked = bool(scheduler.status()["panicked"])
+        scheduler.panic_mute()
+        try:
+            try:
+                try:
+                    await stop_test_voice_monitor(broker, pause_after_monitor_failure)
+                finally:
+                    for handle in test_runner.unfinished_handles:
+                        await asyncio.wait_for(speech.cancel(handle), timeout=3)
+            finally:
+                try:
+                    speaker.flush()
+                    if broker is not None:
+                        broker.flush()
+                    # Let the scheduler's own cancellation tasks settle.
+                    await asyncio.sleep(0)
+                finally:
+                    # A refused cancel must not skip restoration of the
+                    # shared model context. Preserve the original exception.
+                    await assembly.refresh_context()
+        finally:
+            event_pacer.reset_for_replay()
+            proactive.note_activity()
+            audio_input.set_test_active(False)
+            intent_test_active = False
+            intent_test_allow_proactive = False
+            if not was_panicked and not runtime_paused:
+                scheduler.release_panic()
+            assembly.set_event_input_enabled(not runtime_paused)
+
+    test_runner = IntentTestRunner(
+        test_catalog,
+        tests_source,
+        clock,
+        notify=test_notify,
+        hooks=ScenarioHooks(
+            check_ready=check_test_ready,
+            audio=test_audio.pcm,
+            begin=begin_test,
+            end=end_test,
+            push_audio=audio_input.push_test_audio,
+            playback_busy=lambda: _audio_busy(speaker, tally),
+            response_busy=lambda: bool(
+                floor.implicit_active or floor.turn_pending or scheduler.status()["dispatching"]
+            ),
+            monitor_audio=monitor_test_voice,
+        ),
     )
+
+    async def observe_test_link() -> None:
+        async for event in speech.events():
+            source_event_id = ""
+            if isinstance(
+                event,
+                (link.ReplyStarted, link.ReplyTextDelta, link.ReplyAudioDelta, link.ReplyDone),
+            ):
+                intent = scheduler.reply_intent(event.handle.handle_id)
+                if intent is not None and intent.event is not None:
+                    source_event_id = intent.event.event_id
+            test_runner.observe(event, source_event_id=source_event_id)
 
     from bilisama.ui.live_mock import LiveMockController
 
@@ -2437,9 +2576,14 @@ async def run_director(args: argparse.Namespace) -> int:
             return  # a bare Enter injects nothing and lectures nobody
         panic = _panic_command(line)
         if panic is not None:
+            if panic:
+                await test_runner.stop()
             # Backlog #47: this is the only entrance without a browser.
             _apply_panic(panic, scheduler, lambda said: print(f"[叫停] {said}"))
             sync_panel()  # the page's red button must not disagree with the terminal
+            return
+        if test_runner.active:
+            print("自动测试已接管输入，请先停止测试再手动注入")
             return
         event = _parse_console_event(line, next(seq))
         if event is None:
@@ -2648,6 +2792,8 @@ async def run_director(args: argparse.Namespace) -> int:
             sync_panel = push_panel_state
 
             async def on_poke(_data: dict[str, Any]) -> None:
+                if test_runner.active:
+                    return
                 poke.poke()  # False = cooldown; the page animates either way
 
             async def on_panel_set(data: dict[str, Any]) -> None:
@@ -2655,6 +2801,7 @@ async def run_director(args: argparse.Namespace) -> int:
                 if "paused" in data:
                     want = bool(data["paused"])
                     if want and not runtime_paused:
+                        await test_runner.stop()
                         # The order is the design (plan A2): gate events, gate
                         # the microphone, silence the mouth, then hang up.
                         runtime_paused = True
@@ -2667,6 +2814,8 @@ async def run_director(args: argparse.Namespace) -> int:
                         print("[面板] 已暂停：事件、麦克风、播报和语音连接都停了")
                     elif not want and runtime_paused:
                         try:
+                            if broker is not None:
+                                await broker.recover_test_voice_monitor()
                             await speech.resume()
                         except Exception as exc:
                             print(f"[面板] 恢复失败，保持暂停：{str(exc)[:120]}")
@@ -2676,7 +2825,10 @@ async def run_director(args: argparse.Namespace) -> int:
                                     {
                                         "kind": "error",
                                         "code": "resume_failed",
-                                        "detail": "语音连接没能恢复，先保持暂停；稍后再试一次",
+                                        "detail": (
+                                            "音频页面或语音连接尚未就绪，"
+                                            "先保持暂停，检查后再试一次"
+                                        ),
                                     },
                                 )
                             hub_state = panel_state()
@@ -2692,11 +2844,15 @@ async def run_director(args: argparse.Namespace) -> int:
                         print("[面板] 已恢复")
                 if "panic_mute" in data:
                     if bool(data["panic_mute"]):
+                        await test_runner.stop()
                         scheduler.panic_mute()
                         print("[面板] 紧急叫停")
                     else:
                         scheduler.release_panic()
                         print("[面板] 恢复说话")
+
+                if test_runner.active:
+                    raise ValueError("自动测试进行中，请先停止测试再修改设置或连接直播间")
 
                 def announce(line: str) -> None:
                     print(f"[面板] {line}")
@@ -2846,6 +3002,8 @@ async def run_director(args: argparse.Namespace) -> int:
 
             async def _restore_room_after_mock() -> None:
                 nonlocal live_mock_parked_room
+                if test_runner.active:
+                    return
                 live_mock_parked_room = await _restore_live_room(
                     room_source, live_mock_parked_room, print
                 )
@@ -2855,6 +3013,8 @@ async def run_director(args: argparse.Namespace) -> int:
                 # bring the parked room back first (preflight holds its own
                 # source, so the real room may stay live until start parks it
                 # again).
+                if test_runner.active:
+                    raise ValueError("请先停止自动测试，再配置直播 Mock")
                 await _restore_room_after_mock()
                 capture = data.get("capture")
                 await live_mock.check(
@@ -2863,14 +3023,20 @@ async def run_director(args: argparse.Namespace) -> int:
                 )
 
             async def on_live_mock_start(_data: dict[str, Any]) -> None:
+                if test_runner.active:
+                    raise ValueError("请先停止自动测试，再启动直播 Mock")
                 await _park_room_for_mock()
                 await live_mock.start()
 
             async def on_live_mock_stop(_data: dict[str, Any]) -> None:
+                if test_runner.active:
+                    return
                 await live_mock.stop()
                 await _restore_room_after_mock()
 
             async def on_live_mock_capture_stop(_data: dict[str, Any]) -> None:
+                if test_runner.active:
+                    return
                 await live_mock.capture_stopped()
                 await _restore_room_after_mock()
 
@@ -2879,12 +3045,14 @@ async def run_director(args: argparse.Namespace) -> int:
                 try:
                     await test_runner.start(case_id)
                 except ValueError as exc:
-                    test_notify({"status": "error", "case_id": case_id, "text": str(exc)})
+                    test_notify({"status": "failed", "case_id": case_id, "text": str(exc)})
 
             async def on_test_stop(_data: dict[str, Any]) -> None:
                 await test_runner.stop()
 
             async def on_console_line(data: dict[str, Any]) -> None:
+                if test_runner.active:
+                    raise ValueError("自动测试已接管输入，请先停止测试再手动注入")
                 text = data.get("text")
                 if isinstance(text, str):
                     await handle_line(text, as_live=bool(data.get("as_live")))
@@ -3215,6 +3383,7 @@ async def run_director(args: argparse.Namespace) -> int:
         # the main flow waits on `stop`, so without it a task that raises just
         # vanishes. See _watch.
         tasks = [
+            asyncio.create_task(observe_test_link(), name="director:test-observe"),
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
             asyncio.create_task(proactive.run(), name="director:proactive"),
             asyncio.create_task(
@@ -3344,6 +3513,7 @@ async def run_director(args: argparse.Namespace) -> int:
         # gets the devices back. The page's release lands during the gather
         # below, and a microphone started there is in no list and is cancelled
         # by nothing.
+        await test_runner.stop()
         local_pair.stop_reviving()
         # local_pair.mic separately: the broker may have replaced the microphone
         # task after this list was built, and the replacement is not in it.

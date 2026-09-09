@@ -78,10 +78,20 @@ class AudioBroker:
 
     __slots__ = (
         "_announce",
+        "_clear_monitor",
         "_close",
         "_flush",
         "_local",
         "_lock",
+        "_monitor",
+        "_monitor_clear_acked",
+        "_monitor_clear_event",
+        "_monitor_clear_seq",
+        "_monitor_dirty",
+        "_monitor_error",
+        "_monitor_generation",
+        "_monitor_play_generation",
+        "_monitor_ready",
         "_on_handoff",
         "_owner",
         "_send",
@@ -117,6 +127,16 @@ class AudioBroker:
         self._send: Callable[[bytes], None] | None = None
         self._close: Callable[[], None] | None = None
         self._flush: Callable[[], None] | None = None
+        self._monitor: Callable[[bytes], None] | None = None
+        self._clear_monitor: Callable[[int], None] | None = None
+        self._monitor_ready = False
+        self._monitor_error = ""
+        self._monitor_clear_seq = 0
+        self._monitor_clear_acked = 0
+        self._monitor_clear_event = asyncio.Event()
+        self._monitor_dirty = False
+        self._monitor_generation = 0
+        self._monitor_play_generation = 0
         # Held across the whole of claim() and release(). Both await in the
         # middle: dev-talk's local pair wraps blocking PortAudio calls in
         # asyncio.to_thread (dev_talk's _LocalPair), which hands the loop away
@@ -136,6 +156,21 @@ class AudioBroker:
         """True when the sounddevice pair is the one being heard."""
         return self._owner is None
 
+    @property
+    def monitor_ready(self) -> bool:
+        """A current, monitor-capable page has confirmed playable audio."""
+        return (
+            self._owner is not None
+            and self._monitor is not None
+            and self._clear_monitor is not None
+            and self._monitor_ready
+        )
+
+    @property
+    def monitor_generation(self) -> int:
+        """Identify the current audio claim when validating private receipts."""
+        return self._monitor_generation
+
     async def claim(
         self,
         who: AudioOwner,
@@ -143,6 +178,8 @@ class AudioBroker:
         send: Callable[[bytes], None],
         close: Callable[[], None] | None = None,
         flush: Callable[[], None] | None = None,
+        monitor: Callable[[bytes], None] | None = None,
+        clear_monitor: Callable[[int], None] | None = None,
     ) -> bool:
         """Hand the devices to a page, if it outranks whoever has them.
 
@@ -155,6 +192,8 @@ class AudioBroker:
                 goes on claiming to hold devices it lost.
             flush: How to drop everything queued for this client and tell it to
                 stop playing. See flush().
+            monitor: Optional 16 kHz test-input monitoring, separate from replies.
+            clear_monitor: Stop only monitoring and echo the supplied sequence.
 
         Returns:
             True if the caller now owns the devices. False means someone
@@ -170,6 +209,12 @@ class AudioBroker:
             self._send = send
             self._close = close
             self._flush = flush
+            self._monitor = monitor
+            self._clear_monitor = clear_monitor
+            self._monitor_ready = False
+            self._monitor_generation += 1
+            self._monitor_error = ""
+            self._monitor_clear_event.set()
             if not first:
                 # A handover, whether or not the loser left a close callback.
                 self._handoff()
@@ -193,6 +238,11 @@ class AudioBroker:
             self._send = None
             self._close = None
             self._flush = None
+            self._monitor = None
+            self._clear_monitor = None
+            self._monitor_ready = False
+            self._monitor_generation += 1
+            self._monitor_clear_event.set()
             self._handoff()
             if self._local is not None:
                 await self._local.resume()
@@ -224,6 +274,94 @@ class AudioBroker:
         """
         if self._send is not None:
             self._send(pcm)
+
+    def test_voice_ready(self, ready: bool, error: str = "") -> None:
+        """Accept capability/playability receipts from the owning audio socket."""
+        self._monitor_ready = ready
+        self._monitor_error = error
+
+    def monitor_test_voice(self, pcm: bytes) -> None:
+        """Monitor test input without counting it as assistant output."""
+        if not self.monitor_ready or self._monitor is None:
+            detail = self._monitor_error or "请打开音频页面并点击页面启用声音"
+            raise RuntimeError(f"预制语音监听未就绪：{detail}")
+        if not pcm or len(pcm) % 2:
+            raise RuntimeError("预制语音监听数据无效，需要 16 kHz 单声道 PCM")
+        self._check_monitor_connection()
+        self._monitor(pcm)
+        self._monitor_dirty = True
+        self._monitor_play_generation = self._monitor_generation
+
+    def clear_test_voice(self) -> None:
+        """Order a monitor-only stop; callers await its receipt before unmuting."""
+        self._check_monitor_connection()
+        if self._owner is None or self._clear_monitor is None:
+            return
+        self._monitor_clear_seq += 1
+        self._monitor_clear_event.clear()
+        self._clear_monitor(self._monitor_clear_seq)
+
+    def test_voice_cleared(self, seq: int) -> None:
+        """Only the requested sequence can acknowledge a monitor stop."""
+        if seq == self._monitor_clear_seq and seq > self._monitor_clear_acked:
+            self._monitor_clear_acked = seq
+            self._monitor_dirty = False
+            self._monitor_clear_event.set()
+
+    async def wait_test_voice_clear(self) -> None:
+        """Fail closed if the page never confirms that the monitor stopped."""
+        target = self._monitor_clear_seq
+        generation = self._monitor_generation
+
+        async def wait_ack() -> None:
+            while True:
+                self._check_monitor_connection()
+                if self._owner is None or self._monitor_clear_acked >= target:
+                    return
+                if self._monitor_generation != generation:
+                    raise RuntimeError("预制语音监听设备已切换，请确认旧页面已停止播放")
+                self._monitor_clear_event.clear()
+                await self._monitor_clear_event.wait()
+
+        try:
+            await asyncio.wait_for(wait_ack(), timeout=2.0)
+        except TimeoutError as exc:
+            raise RuntimeError("预制语音监听停止确认超时，请检查音频页面后再恢复输入") from exc
+
+    def _check_monitor_connection(self) -> None:
+        if self._monitor_dirty and self._monitor_play_generation != self._monitor_generation:
+            raise RuntimeError("预制语音监听连接已变化，无法确认旧页面停止播放，请检查后再恢复输入")
+
+    async def recover_test_voice_monitor(self) -> None:
+        """Explicit user recovery confirms a stop on the replacement page.
+
+        A new claim alone never clears uncertainty about its predecessor. The
+        user must request recovery, with the current page playable and able to
+        acknowledge this new stop before input may be restored.
+        """
+        if not self._monitor_dirty or self._monitor_play_generation == self._monitor_generation:
+            return
+        if not self.monitor_ready or self._clear_monitor is None:
+            raise RuntimeError("预制语音监听尚未恢复，请打开音频页面并点击启用声音，再点击恢复")
+        generation = self._monitor_generation
+        self._monitor_clear_seq += 1
+        target = self._monitor_clear_seq
+        self._monitor_clear_event.clear()
+        self._clear_monitor(target)
+
+        async def wait_recovery() -> None:
+            while self._monitor_clear_acked < target:
+                if self._monitor_generation != generation or not self.monitor_ready:
+                    raise RuntimeError("预制语音监听恢复时连接发生变化，请检查音频页面后重试")
+                self._monitor_clear_event.clear()
+                await self._monitor_clear_event.wait()
+
+        try:
+            await asyncio.wait_for(wait_recovery(), timeout=2.0)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "预制语音监听恢复确认超时，仍保持暂停，请检查音频页面后重试"
+            ) from exc
 
     def announce_through(self, announce: Callable[[AudioOwner | None], None]) -> None:
         """Say who holds the devices this way from now on.
@@ -601,7 +739,9 @@ class AudioInputSwitch:
     forever), and the noise gate (a local dBFS threshold with an 8-frame
     hold, silence-substituted for the same clock reason). It also elects the
     active source: microphone by default, the live-mock browser track when
-    told — the loser's frames are counted, never mixed.
+    told — the loser's frames are counted, never mixed. An explicitly started
+    audio test temporarily owns this election without changing either setting.
+    Test input bypasses the microphone checkbox, but never pause or noise gates.
 
     Lives Python-side rather than in the page's worklet on purpose: the
     server already treats the page as untrustworthy for audio continuity
@@ -614,6 +754,7 @@ class AudioInputSwitch:
     def __init__(self, sink: AudioSink, *, noise_sensitivity: int = 50) -> None:
         self._sink = sink
         self._browser_active = False
+        self._test_active = False
         self._enabled = True
         self._paused = False
         self._noise_sensitivity = max(0, min(100, noise_sensitivity))
@@ -621,8 +762,10 @@ class AudioInputSwitch:
         self._voice_hold_frames = 0
         self.microphone_frames = 0
         self.browser_frames = 0
+        self.test_frames = 0
         self.blocked_microphone_frames = 0
         self.blocked_browser_frames = 0
+        self.blocked_test_frames = 0
         self.silenced_frames = 0
 
     @property
@@ -631,8 +774,16 @@ class AudioInputSwitch:
 
     @property
     def enabled(self) -> bool:
-        """Whether the active input may reach the speech backend."""
+        """Whether live microphone/browser input may reach the speech backend."""
         return self._enabled
+
+    @property
+    def test_active(self) -> bool:
+        return self._test_active
+
+    def set_test_active(self, active: bool) -> None:
+        """Elect explicit test playback while preserving the user's live source."""
+        self._test_active = active
 
     def set_enabled(self, enabled: bool) -> None:
         """Pause or resume user audio without changing the selected source."""
@@ -686,14 +837,14 @@ class AudioInputSwitch:
     def use_browser(self, enabled: bool) -> None:
         self._browser_active = enabled
 
-    async def _forward(self, pcm: bytes) -> None:
+    async def _forward(self, pcm: bytes, *, explicit_test: bool = False) -> None:
         if self._paused:
             return
         # Metered before the enable gate, deliberately: with the input off the
         # device panel must still show the microphone is ALIVE — a frozen
         # meter reads as a broken mic, not a closed switch.
         filtered = self._noise_filtered(pcm)
-        if self._enabled:
+        if self._enabled or explicit_test:
             await self._sink(filtered)
             return
         self.silenced_frames += 1
@@ -701,29 +852,40 @@ class AudioInputSwitch:
 
     async def push_audio(self, pcm: bytes) -> None:
         """Microphone-compatible method used by the existing audio pumps."""
-        if self._browser_active:
+        if self._test_active or self._browser_active:
             self.blocked_microphone_frames += 1
             return
         self.microphone_frames += 1
         await self._forward(pcm)
 
     async def push_browser_audio(self, pcm: bytes) -> None:
-        if not self._browser_active:
+        if self._test_active or not self._browser_active:
             self.blocked_browser_frames += 1
             return
         self.browser_frames += 1
         await self._forward(pcm)
+
+    async def push_test_audio(self, pcm: bytes) -> None:
+        """Accept only an explicitly elected test, subject to the global pause."""
+        if not self._test_active:
+            self.blocked_test_frames += 1
+            return
+        self.test_frames += 1
+        await self._forward(pcm, explicit_test=True)
 
     def status(self) -> dict[str, object]:
         return {
             "enabled": self._enabled,
             "paused": self._paused,
             "browser_active": self._browser_active,
+            "test_active": self._test_active,
             "noise_sensitivity": self._noise_sensitivity,
             "signal_level": self._signal_level,
             "microphone_frames": self.microphone_frames,
             "browser_frames": self.browser_frames,
+            "test_frames": self.test_frames,
             "blocked_microphone_frames": self.blocked_microphone_frames,
             "blocked_browser_frames": self.blocked_browser_frames,
+            "blocked_test_frames": self.blocked_test_frames,
             "silenced_frames": self.silenced_frames,
         }

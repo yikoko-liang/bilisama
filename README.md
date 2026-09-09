@@ -45,8 +45,8 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 
 `--director` 还自带一个桌宠网页界面（形象、说话气泡、面板），启动横幅里有地址，
 加 `--open` 自动开浏览器；桌面悬浮窗形态在 `desktop/preview/`。用法见 runbook
-「桌宠预览」一节。面板的「测试」页内置两套测试集（功能验收加六位候选主播的业务
-小直播），逐卡运行人工判定；同一页还能打开「直播 Mock」，共享一个带音频的 Chrome
+「桌宠预览」一节。面板的「测试」页内置简单意图与困难多轮两套测试集，自动回放语音、
+穿插直播事件，逐卡人工判定；用法见 [意图测试页](docs/intent-test-console.md)。同一页还能打开「直播 Mock」，共享一个带音频的 Chrome
 标签页、填真实房间号，用直播画面的声音代替麦克风做全链路验证——两样的用法和
 通过标准见 [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md)。
 
@@ -64,6 +64,9 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/runbook.md](docs/runbook.md) | 操作手册：一键启动、起服务器、dev-talk、面板六页、直播 Mock、常见坑 |
 | [docs/architecture-status.md](docs/architecture-status.md) | 架构现状梳理（2026-09-03）：四个功能域逐模块实现到哪、接缝在哪、哪些字段有名无实；跟计划对着读 |
 | [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：四道门、测试卡、业务评分标准、历次回归记录 |
+| [docs/intent-classification.md](docs/intent-classification.md) | 互动场景验收：8种主播状态、3种参与方式，分别检查回复对象、应答选择与时机；未实现分类模块 |
+| [docs/intent-test-console.md](docs/intent-test-console.md) | 当前测试页：14例简单意图、用户Excel整理的18组多轮场景；真实语音回放、事件注入和人工判定 |
+| [docs/intent-scenarios.md](docs/intent-scenarios.md) | 原始48条多轮互动测试设计；预期与当前实现风险分开，当前可运行版本见意图测试页文档 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |
 | [docs/live2d-licensing.md](docs/live2d-licensing.md) | Live2D 对外发布前必须先办完的五件事，以及现在走到哪 |

@@ -190,6 +190,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "ui.server_died",
         "ui.server_stop_failed",
         "ui.server_stop_timeout",
+        "ui.test_voice_reap_timeout",
+        "ui.test_voice_cache_cleanup_failed",
         "ui.uplink_dropped",
         "ui.uplink_page_resumed",
         "ui.uplink_resumed",

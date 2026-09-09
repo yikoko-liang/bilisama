@@ -17,12 +17,14 @@ Three design points, each guarding a promise made elsewhere:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import math
 import os
 import socket
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from pathlib import Path
 from typing import Any
@@ -85,6 +87,103 @@ _UPLINK_SILENCE = b"\x00" * 640
 # that the hole left in the audio clock is well inside one turn-detection
 # window (the shortest silence any provider ends a turn on is ~200 ms).
 _UPLINK_GAP_S = 0.1
+
+
+class _AudioOutbound:
+    """Two bounded lanes with shared wire ordering and independent clears."""
+
+    def __init__(self) -> None:
+        self._assistant: deque[tuple[int, bytes | str]] = deque()
+        self._monitor: deque[tuple[int, bytes | str]] = deque()
+        self._sequence = 0
+        self._available = asyncio.Event()
+        self._closed = False
+
+    def _append(self, lane: deque[tuple[int, bytes | str]], payload: bytes | str) -> None:
+        self._sequence += 1
+        lane.append((self._sequence, payload))
+        self._available.set()
+
+    def send(self, pcm: bytes) -> None:
+        """Preserve the assistant lane's existing drop-newest policy."""
+        if not self._closed and len(self._assistant) < _AUDIO_QUEUE:
+            self._append(self._assistant, pcm)
+
+    def monitor(self, pcm: bytes) -> None:
+        """A dropped test utterance invalidates the run instead of going silent."""
+        if self._closed:
+            raise RuntimeError("预制语音监听连接已关闭，请重新打开音频页面")
+        if len(self._monitor) >= _AUDIO_QUEUE:
+            raise RuntimeError("预制语音监听队列已满，请停止测试并检查音频页面")
+        self._append(
+            self._monitor,
+            json.dumps(
+                {
+                    "event": "test.voice",
+                    "data": {
+                        "pcm": base64.b64encode(pcm).decode("ascii"),
+                        "sample_rate": 16000,
+                    },
+                }
+            ),
+        )
+
+    def flush(self) -> None:
+        self._assistant.clear()
+        if not self._closed:
+            self._append(self._assistant, _CLEAR_MARKER)
+
+    def clear_monitor(self, seq: int) -> None:
+        self._monitor.clear()
+        if not self._closed:
+            self._append(
+                self._monitor,
+                json.dumps({"event": "test.voice.clear", "data": {"seq": seq}}),
+            )
+
+    def close(self) -> None:
+        self._closed = True
+        self._assistant.clear()
+        self._monitor.clear()
+        self._available.set()
+
+    async def get(self) -> bytes | str | None:
+        while not self._closed:
+            lanes = [lane for lane in (self._assistant, self._monitor) if lane]
+            if lanes:
+                return min(lanes, key=lambda lane: lane[0][0]).popleft()[1]
+            self._available.clear()
+            await self._available.wait()
+        return None
+
+
+def _monitor_receipt(raw: str, broker: AudioBroker, generation: int) -> bool:
+    """Monitor receipts are private to the owning audio socket, not controls."""
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(message, dict):
+        return False
+    event = message.get("event")
+    if not isinstance(event, str) or event not in {"test.voice.ready", "test.voice.cleared"}:
+        return False
+    if generation != broker.monitor_generation:
+        return True
+    data = message.get("data")
+    if not isinstance(data, dict):
+        return True
+    if event == "test.voice.ready":
+        error = data.get("error", "")
+        broker.test_voice_ready(
+            type(data.get("version")) is int and data["version"] == 1 and data.get("ready") is True,
+            error[:300] if isinstance(error, str) else "",
+        )
+    else:
+        seq = data.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+            broker.test_voice_cleared(seq)
+    return True
 
 
 # ------------------------------------------------------------ socket & files
@@ -388,42 +487,7 @@ def create_ui_app(
             # The shell's preload declares itself; a plain tab cannot, which is
             # exactly the distinction we want to rank on.
             who: AudioOwner = "shell" if ws.query_params.get("role") == "shell" else "browser"
-            outbound: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=_AUDIO_QUEUE)
-
-            def send(pcm: bytes) -> None:
-                # Drop the NEWEST under pressure, the opposite of the control
-                # hub. A late sample is worse than a missing one: keeping it
-                # would push everything behind it further out of time, which
-                # is the backlog this project already measured once.
-                if not outbound.full():
-                    outbound.put_nowait(pcm)
-
-            # None through the queue is the pump's hang-up sentinel; reused
-            # here so a displaced client is told to let go of its microphone
-            # rather than left capturing into a socket nobody reads.
-            def close() -> None:
-                # The queue is bounded, and a page that stopped reading fills
-                # it — audio arrives faster than it plays, which is how this
-                # project once measured 106 seconds of unplayed sound inside
-                # 48 seconds of wall clock. Putting the sentinel without
-                # looking would raise QueueFull out of claim() at exactly the
-                # moment the devices change hands, leaving the broker pointing
-                # at a socket that is about to be closed and the local pair
-                # parked forever. Everything queued goes first: it belongs to a
-                # client that just lost the devices, and the new owner is
-                # already being fed the same reply.
-                while not outbound.empty():
-                    outbound.get_nowait()
-                outbound.put_nowait(None)
-
-            def flush() -> None:
-                # Everything still queued belongs to the utterance that was
-                # just interrupted. The marker goes on afterwards, so by the
-                # time the page reads it, it has seen every stale sample and
-                # can drop the lot in one go.
-                while not outbound.empty():
-                    outbound.get_nowait()
-                outbound.put_nowait(_CLEAR_MARKER)
+            outbound = _AudioOutbound()
 
             # None until claim() answers. A claim that fails partway has
             # already pointed the broker at this socket (AudioBroker.claim
@@ -440,7 +504,14 @@ def create_ui_app(
             # that lasts the whole session.
             heard_at = time.monotonic()
             try:
-                granted = await broker.claim(who, send=send, close=close, flush=flush)
+                granted = await broker.claim(
+                    who,
+                    send=outbound.send,
+                    close=outbound.close,
+                    flush=outbound.flush,
+                    monitor=outbound.monitor,
+                    clear_monitor=outbound.clear_monitor,
+                )
                 if not granted:
                     # Someone stronger has the devices. Say so and hang up
                     # rather than sit on a socket nobody feeds. Nothing is
@@ -448,6 +519,7 @@ def create_ui_app(
                     # must not push silence over the holder's microphone.
                     await ws.close(code=4409)
                     return
+                monitor_generation = broker.monitor_generation
                 pump = asyncio.create_task(_pump_audio(ws, outbound), name="ui:audio-out")
                 if on_audio is not None:
                     filler = asyncio.create_task(
@@ -473,6 +545,8 @@ def create_ui_app(
                         continue
                     text = message.get("text")
                     if text is not None:
+                        if _monitor_receipt(text, broker, monitor_generation):
+                            continue
                         await _dispatch(text, handlers)
             except WebSocketDisconnect:
                 pass
@@ -595,7 +669,7 @@ async def _fill_uplink_silence(
         dropped = await _forward_uplink(on_audio, _UPLINK_SILENCE, dropped)
 
 
-async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | str | None]) -> None:
+async def _pump_audio(ws: WebSocket, queue: _AudioOutbound) -> None:
     """Move downlink PCM onto the wire until the socket goes away.
 
     Text rides the same queue as the samples so that a stop is ordered behind

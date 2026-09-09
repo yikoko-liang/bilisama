@@ -1,0 +1,468 @@
+{
+  "id": "simple",
+  "title": "简单意图测试",
+  "description": "7类意图各2例。自动注入真实语音，记录识别文本与助手行为。当前后端没有分类标签回传；DECLINED的第二阶段入口尚未接入，不能自动计算分类准确率。",
+  "cases": [
+    {
+      "id": "simple-01",
+      "group": "TO_ME",
+      "title": "直接点名提问",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "主播说完后回答主播，不要求他再去问别人。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "TO_ME",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "Mia，你帮我解释一下什么是工具调用。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "主播说完后回答主播，不要求他再去问别人。",
+          "expected_intent": "TO_ME"
+        }
+      ]
+    },
+    {
+      "id": "simple-02",
+      "group": "TO_ME",
+      "title": "自然称呼你",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "回答当前正在提问的主播，给一个自己的判断。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [
+        "主播刚向助手介绍：先查是否重复注册回调，或者先查是否发了两次请求。"
+      ],
+      "expected_intent": "TO_ME",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "你觉得这两个检查步骤，我应该先试哪一个？",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "回答当前正在提问的主播，给一个自己的判断。",
+          "expected_intent": "TO_ME"
+        }
+      ]
+    },
+    {
+      "id": "simple-03",
+      "group": "AUDIENCE",
+      "title": "向观众收集意见",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "先把答话机会留给观众，不替所有观众作答。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "AUDIENCE",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "直播间的朋友们，你们平时更常用哪个模型？弹幕告诉我。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "先把答话机会留给观众，不替所有观众作答。",
+          "expected_intent": "AUDIENCE"
+        }
+      ]
+    },
+    {
+      "id": "simple-04",
+      "group": "AUDIENCE",
+      "title": "面对观众讲解",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "不把教学旁白当成向助手提问，不抢讲解。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "AUDIENCE",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "大家看这里，工具调用分成两步，我先讲第一步，然后再讲第二步。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "不把教学旁白当成向助手提问，不抢讲解。",
+          "expected_intent": "AUDIENCE"
+        }
+      ]
+    },
+    {
+      "id": "simple-05",
+      "group": "SELF_TALK",
+      "title": "疑问句自查",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "不因出现问句立即给排错建议。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "SELF_TALK",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "怎么又报错了……我先看一下日志，应该是这里没改。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "不因出现问句立即给排错建议。",
+          "expected_intent": "SELF_TALK"
+        }
+      ]
+    },
+    {
+      "id": "simple-06",
+      "group": "SELF_TALK",
+      "title": "操作旁白",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "保持监听，不把操作旁白当成给助手的执行指令。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "SELF_TALK",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "把这个参数改成三，再点运行，嗯，我自己再试一下。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "保持监听，不把操作旁白当成给助手的执行指令。",
+          "expected_intent": "SELF_TALK"
+        }
+      ]
+    },
+    {
+      "id": "simple-07",
+      "group": "READING",
+      "title": "念观众弹幕并接答",
+      "operator": "先实际注入小松的弹幕，随即播放主播接答的预制语音；事件和语音分别进入正式链路。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "识别主播在读并回应弹幕，不重复抢答同一问题。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "READING",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 0,
+          "timeout_s": 30,
+          "expected": "实际收到小松的弹幕，紧接主播自行接答；是否重复抢答结合下一步观察。",
+          "event": {
+            "at_s": 0,
+            "kind": "danmaku",
+            "viewer": {"uid": 930007, "name": "小松"},
+            "text": "这个工具会上传文件吗？",
+            "route": "crowd"
+          }
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "小松问，这个工具会上传文件吗？我来回答，当前只保存在本地。",
+          "after": "delay",
+          "delay_s": 0,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "识别主播在读并回应弹幕，不重复抢答同一问题。",
+          "expected_intent": "READING"
+        }
+      ]
+    },
+    {
+      "id": "simple-08",
+      "group": "READING",
+      "title": "主播正在感谢礼物",
+      "operator": "先实际注入小灯送出小花花三朵的礼物，随即播放主播感谢的预制语音；事件和语音分别进入正式链路。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "识别主播正在感谢，不把谢礼当成在感谢助手或要求助手回复。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "READING",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "event",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 0,
+          "timeout_s": 30,
+          "expected": "实际收到小灯的小花花三朵，紧接主播自行感谢；结合下一步观察助手是否误接话。",
+          "event": {
+            "at_s": 0,
+            "kind": "gift",
+            "viewer": {"uid": 930008, "name": "小灯"},
+            "text": "",
+            "route": "crowd",
+            "gift": {
+              "gift_id": 1,
+              "name": "小花花",
+              "num": 3,
+              "unit_battery": 1,
+              "coin_type": "gold",
+              "total_coin": 300
+            },
+            "value_cny": 0.3
+          }
+        },
+        {
+          "id": "s2",
+          "kind": "voice",
+          "text": "谢谢小灯送的小花花，谢谢支持，我接着把这个步骤讲完。",
+          "after": "delay",
+          "delay_s": 0,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "识别主播正在感谢，不把谢礼当成在感谢助手或要求助手回复。",
+          "expected_intent": "READING"
+        }
+      ]
+    },
+    {
+      "id": "simple-09",
+      "group": "GUEST",
+      "title": "与连麦者说话",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "不接管给老张的指令，不假装自己正在共享屏幕。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [
+        "老张是目前连麦中的嘉宾，不是助手的名字。"
+      ],
+      "expected_intent": "GUEST",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "老张，你那边能听到吗？先共享一下你的屏幕。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "不接管给老张的指令，不假装自己正在共享屏幕。",
+          "expected_intent": "GUEST"
+        }
+      ]
+    },
+    {
+      "id": "simple-10",
+      "group": "GUEST",
+      "title": "向旁边的人说话",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "不把给小李的话当成助手的任务。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [
+        "小李是主播旁边的人，不是助手。"
+      ],
+      "expected_intent": "GUEST",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "小李，你帮我把桌上的水递一下，我接着讲。",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "不把给小李的话当成助手的任务。",
+          "expected_intent": "GUEST"
+        }
+      ]
+    },
+    {
+      "id": "simple-11",
+      "group": "UNSURE",
+      "title": "指代不明的半句话",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "对象无法确定时克制，不武断代入助手并长篇回答。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [],
+      "expected_intent": "UNSURE",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "那个……你先等一下，这个怎么说呢？",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "对象无法确定时克制，不武断代入助手并长篇回答。",
+          "expected_intent": "UNSURE"
+        }
+      ]
+    },
+    {
+      "id": "simple-12",
+      "group": "UNSURE",
+      "title": "缺少对象的追问",
+      "operator": "点击自动运行后不必朗读；预制语音会直接送入当前语音服务。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "不能可靠确定对象时不抢答；单独记录不确定，而非凭沉默判对。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [
+        "刚才主播同时听到了观众留言和连麦嘉宾的发言，没有指明现在问谁。"
+      ],
+      "expected_intent": "UNSURE",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "voice",
+          "text": "刚才那个，你说的是哪一个？",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "不能可靠确定对象时不抢答；单独记录不确定，而非凭沉默判对。",
+          "expected_intent": "UNSURE"
+        }
+      ]
+    },
+    {
+      "id": "simple-13",
+      "group": "DECLINED",
+      "title": "没有新信息的主动询问",
+      "operator": "需要第二阶段主动询问入口；当前版本会明确标为未完成。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "第二阶段被主动询问后判断没有值得补充的内容；预期[不说]，不能用普通语音静默冒充。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [
+        "刚才已经解释过同一个参数，现场没有新增问题。"
+      ],
+      "expected_intent": "DECLINED",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "proactive",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "第二阶段被主动询问后判断没有值得补充的内容；预期[不说]，不能用普通语音静默冒充。",
+          "expected_intent": "DECLINED"
+        }
+      ]
+    },
+    {
+      "id": "simple-14",
+      "group": "DECLINED",
+      "title": "重复话题候选",
+      "operator": "需要第二阶段主动询问入口；当前版本会明确标为未完成。",
+      "focus": [
+        "只看回复对象、是否需要开口和开口时机；不要求逐字命中参考回答。"
+      ],
+      "expected": [
+        "主动询问候选价值不足时拒绝开口；此项必须有第二阶段入口才能验证。"
+      ],
+      "reference": "用户提供的意图分类图，2026-09-09",
+      "duration_s": 20,
+      "context": [
+        "最近一次主动提到的主题已经讨论完毕，当前没有新的材料。"
+      ],
+      "expected_intent": "DECLINED",
+      "steps": [
+        {
+          "id": "s1",
+          "kind": "proactive",
+          "text": "",
+          "after": "delay",
+          "delay_s": 0.5,
+          "observe_s": 10,
+          "timeout_s": 30,
+          "expected": "主动询问候选价值不足时拒绝开口；此项必须有第二阶段入口才能验证。",
+          "expected_intent": "DECLINED"
+        }
+      ]
+    }
+  ]
+}
