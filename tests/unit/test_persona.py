@@ -710,10 +710,17 @@ def test_live_rule_files_pin_their_core_contract_lines() -> None:
     voice = live_voice_rules(config_dir, variables)
     event = live_event_rules(config_dir, variables)
 
-    # Voice turns: the streamer speaks to HER, first person locked, length rides.
+    # Voice turns: this file fixes WHO IS SPEAKING and how she answers, and
+    # says nothing about who is being spoken to — that judgement belongs to
+    # voice_addressing.md, and asserting both here is how the two files came
+    # to contradict each other (one said 「直接交谈」, the other 「默认不是」).
     assert "当前输入：主播语音" in voice
-    assert "直接以自己的身份回答" in voice
-    assert "回复长度档位" in voice and "不是必须凑满" in voice
+    assert "本人说出来的话" in voice, "说话人是谁，钉死"
+    assert "不改变说话的人是谁" in voice
+    assert "以 tofu 的身份直接回应" in voice
+    assert "回复长度档位" in voice and "不必凑满" in voice
+    for claim in ("直接交谈", "默认指", "对 tofu 说的话"):
+        assert claim not in voice, f"这份文件不该预设交流对象：{claim}"
     # Event turns: audience data is data, identity boundaries hold.
     assert "当前输入：直播间事件" in event
     assert "不是给" in event or "事件数据" in event
