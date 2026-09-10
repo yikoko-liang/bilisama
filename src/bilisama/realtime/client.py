@@ -54,6 +54,15 @@ __all__ = ["RealtimeClient", "ReplyRecord", "SessionRefused"]
 log = get_logger(__name__)
 
 _WATCHDOG_S = 25.0  # plan section 3.3 rule 2
+# How long after our own response.cancel an error naming a missing response is
+# read as that cancel's echo rather than as news. One round trip is tens of
+# milliseconds; this is loose enough to cover a slow one and far too tight to
+# swallow an unrelated rejection minutes later.
+_CANCEL_ECHO_S = 2.0
+# Wordings that mean "there was nothing to cancel". Provider text, so matched
+# as substrings, lower-cased. DashScope says the first; the others are here so
+# a sibling wording does not reopen the red line the first one used to draw.
+_CANCEL_MISS_HINTS = ("no active response", "no response to cancel", "not in response")
 
 
 class SessionRefused(ConnectionError):
@@ -156,6 +165,10 @@ class RealtimeClient:
         # handle that the docstring's tombstone promise was supposed to stop.
         self._tombstones: deque[str] = deque(maxlen=64)
         self._tombstone_set: set[str] = set()
+        # When we last sent a response.cancel, so its own error echo can be
+        # told from an unrelated rejection. Starts far enough back that the
+        # first error of a session is never mistaken for one.
+        self._cancel_sent_at = float("-inf")
 
     # ------------------------------------------------------------ lifecycle
 
@@ -298,7 +311,22 @@ class RealtimeClient:
         if record is None or record.done.is_set() or record.cancel_sent:
             return
         record.cancel_sent = True
+        self._cancel_sent_at = self._clock.monotonic()
         await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
+
+    def _is_stale_cancel_error(self, message: str) -> bool:
+        """Is this the server telling us our cancel found nothing to cancel?
+
+        Two conditions, both required. The wording has to name a missing
+        response — provider text, so matched loosely — and a cancel of ours
+        has to have gone out moments ago. Requiring the second is what keeps
+        a genuinely rejected request visible: the same sentence arriving
+        unprompted still reaches the streamer.
+        """
+        if self._clock.monotonic() - self._cancel_sent_at > _CANCEL_ECHO_S:
+            return False
+        lowered = message.lower()
+        return any(hint in lowered for hint in _CANCEL_MISS_HINTS)
 
     def _record_of(self, handle: link.ReplyHandle) -> ReplyRecord | None:
         for record in (*self._replies.values(), *self._awaiting_created):
@@ -575,7 +603,17 @@ class RealtimeClient:
             emit(link.UserTranscriptDone(str(payload.get("transcript") or "")))
         elif kind is dia.ServerEvent.ERROR:
             error = payload.get("error") or {}
-            emit(link.LinkError(str(error.get("type") or ""), str(error.get("message") or "")))
+            code, message = str(error.get("type") or ""), str(error.get("message") or "")
+            if self._is_stale_cancel_error(message):
+                # Our own cancel, answered after its reply had already ended.
+                # Nothing was wrong and nothing is actionable — the turn was
+                # silenced by the gate either way — so it stays out of the
+                # streamer's chat. It also must not reach the settle below:
+                # this error rejects no create, and failing one would be a
+                # real reply lost to a benign race.
+                log.debug("link.cancel_found_nothing", error_text=message)
+                return
+            emit(link.LinkError(code, message))
             # A rejected create gets neither created nor done — without this,
             # the slot we cleared for it stays shut for the full 25 s watchdog
             # (C5). Rule 4's spirit: wrong books wedge US, so free them. On

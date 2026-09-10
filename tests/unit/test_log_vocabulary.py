@@ -114,6 +114,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "link.reply_first_frame",
         "link.reply_requested",
         "link.rotating",
+        "link.cancel_found_nothing",
         "link.slot_freed",
         "link.slot_taken",
         "link.slot_waited",

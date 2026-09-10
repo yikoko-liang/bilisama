@@ -803,3 +803,67 @@ async def test_cancelling_one_handle_twice_sends_one_cancel() -> None:
             assert server.recorded.count("response.cancel") == 1
         finally:
             await linkobj.aclose()
+
+
+async def test_a_cancel_that_found_nothing_is_not_the_streamer_s_problem() -> None:
+    """The one error the client swallows, and why it may.
+
+    The voice gate mutes a turn the moment its tag closes, then keeps decoding
+    for up to 300 ms to catch the note before it cancels. That window gives the
+    reply time to finish on its own, so the cancel often lands on a response
+    that is already over and DashScope answers `invalid_request_error`. Nothing
+    is wrong and nothing is actionable — the turn was silenced either way — but
+    it used to reach the streamer's chat as a line of red English, on 20% of
+    skips in production (3% before the window existed).
+
+    Narrow on purpose: only an error naming a missing response, and only while
+    a cancel we sent is still in flight. Anything else still comes up.
+    """
+    script = Script(delta_chunks=30, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            handle = await linkobj.request_reply(link.ReplySpec(instructions="讲个长故事"))
+            await _next_event(events, link.ReplyTextDelta)
+            await linkobj.cancel(handle)
+            await asyncio.sleep(0.1)  # let the frame land before reading the log
+            assert server.recorded.count("response.cancel") == 1
+            # What DashScope answers when the reply beat the cancel there.
+            await server.send(
+                dia.ServerEvent.ERROR,
+                error={
+                    "type": "invalid_request_error",
+                    "message": "Conversation has no active response.",
+                },
+            )
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(_next_event(events, link.LinkError), timeout=0.6)
+        finally:
+            await linkobj.aclose()
+
+
+async def test_an_unprompted_invalid_request_still_reaches_the_streamer() -> None:
+    """The suppression is scoped to a cancel we just sent, not to the code.
+
+    Same error text, no cancel in flight: it must come up, or a real rejected
+    request would go missing for the same reason the benign one does.
+    """
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script()) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            await server.send(
+                dia.ServerEvent.ERROR,
+                error={
+                    "type": "invalid_request_error",
+                    "message": "Conversation has no active response.",
+                },
+            )
+            err = await asyncio.wait_for(_next_event(events, link.LinkError), timeout=2.0)
+            assert isinstance(err, link.LinkError)
+            assert err.code == "invalid_request_error"
+        finally:
+            await linkobj.aclose()
