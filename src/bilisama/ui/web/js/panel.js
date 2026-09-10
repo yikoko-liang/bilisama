@@ -155,6 +155,43 @@ export function createPanel({ send }) {
 
   let healthInFlight = false;
 
+  // 意图判断的状态条，系统页和聊天记录页各一份。回答两个问题：开没开，以及
+  // 正在不正在起作用。第二个问题需要单列，因为「开着但一条都没拦」和「关着」
+  // 在别的地方长得一模一样——累计拦截率被开场那段好成绩稀释，日志里放行的轮次
+  // 又不写字，2026-09-09 排查时两次把前者读成了后者。
+  const GATE_STRIPS = ["gate-strip-system", "gate-strip-chat"];
+
+  const renderGate = (gate) => {
+    for (const id of GATE_STRIPS) {
+      const strip = document.getElementById(id);
+      if (!strip) continue;
+      const modeEl = strip.querySelector(".gate-mode");
+      const detailEl = strip.querySelector(".gate-detail");
+      if (!gate || typeof gate !== "object") {
+        strip.dataset.state = "unknown";
+        modeEl.textContent = "读不到";
+        detailEl.textContent = "健康接口没给 voice_gate";
+        continue;
+      }
+      const seen = gate.recent_turns ?? 0;
+      const held = gate.recent_skipped ?? 0;
+      if (gate.mode !== "when_addressed") {
+        strip.dataset.state = "off";
+        modeEl.textContent = "关 · 每句都接";
+        detailEl.textContent = `她自起的回复一律播出，共 ${gate.passed ?? 0} 条`;
+        continue;
+      }
+      // A full window with nothing held is the collapse, and it is the whole
+      // reason this strip exists. Not-yet-full is just a young session.
+      const idle = seen >= 20 && held === 0;
+      strip.dataset.state = idle ? "idle" : "working";
+      modeEl.textContent = "开 · 只接对我说的";
+      detailEl.textContent = idle
+        ? `最近 ${seen} 轮一条都没拦下 —— 她可能已经开始逐句接话`
+        : `最近 ${seen} 轮拦下 ${held} 条 · 全场拦下 ${gate.skipped ?? 0} 条`;
+    }
+  };
+
   const refreshHealth = async () => {
     if (healthInFlight) return; // a hung endpoint must not stack requests
     healthInFlight = true;
@@ -162,6 +199,7 @@ export function createPanel({ send }) {
       const snapshot = await (
         await fetch("health", { signal: AbortSignal.timeout(4000) })
       ).json();
+      renderGate(snapshot.components?.voice_gate);
       healthEl.textContent = "";
       for (const [name, data] of Object.entries(snapshot.components ?? {})) {
         const card = el("div", "card" + (data && data.error ? " err" : ""));
@@ -178,6 +216,7 @@ export function createPanel({ send }) {
         healthEl.appendChild(card);
       }
     } catch {
+      renderGate(null);
       healthEl.textContent = "";
       healthEl.appendChild(el("p", "empty", "健康接口暂时拿不到"));
     } finally {
