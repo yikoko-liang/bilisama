@@ -27,7 +27,7 @@ from typing import IO, TYPE_CHECKING, Literal
 from bilisama.config.enums import Chattiness
 from bilisama.obs.logging import get_logger
 from bilisama.paths import data_home
-from bilisama.scene_markers import MARKERS, SceneCategory
+from bilisama.scene_markers import MARKERS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -145,16 +145,13 @@ def live_voice_rules(
 
 
 def scene_marker_lines() -> str:
-    """The markers as prompt bullets, from the one vocabulary (scene_markers).
+    """The marker as a prompt bullet, from the one vocabulary (scene_markers).
 
-    DECLINED is left out: it is her answer to a turn we asked for, which the
-    microphone contract never does — the phase-two probes teach it themselves.
+    One line since the five scenes merged into ``[SKIP]``. It stays rendered
+    rather than typed into the prompt so the tag has a single home; the
+    contract's examples spell it out too, and a test holds those in step.
     """
-    return "\n".join(
-        f"  - `[{marker.tag}]`：{marker.meaning}"
-        for marker in MARKERS
-        if marker.category is not SceneCategory.DECLINED
-    )
+    return "\n".join(f"  - `[{marker.tag}]`：{marker.meaning}" for marker in MARKERS)
 
 
 @contextlib.contextmanager

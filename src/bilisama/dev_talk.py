@@ -2148,8 +2148,10 @@ async def run_director(args: argparse.Namespace) -> int:
         if ruling is not None and ruling.note:
             # What she heard the streamer doing. On the s2s product path this
             # is the only trace of the streamer's own voice that exists above
-            # the link, so it goes where the streamer transcript would.
-            proactive.note_dialogue("streamer", f"[主播{ruling.label}] {ruling.note}")
+            # the link, so it goes where the streamer transcript would. The
+            # label used to lead this line; with one tag left it said 「先听」
+            # every time, which is about the gate rather than the streamer.
+            proactive.note_dialogue("streamer", f"[主播语音] {ruling.note}")
 
     # Which of her own microphone turns may play (plan, voice gate). Decides
     # in the fan-out's pump; the scheduler's kill path does the rest. Reads

@@ -34,6 +34,7 @@ from typing import Any
 from bilisama.clock import Clock
 from bilisama.config.enums import VoiceReplyMode
 from bilisama.director.turn_protocol import (
+    NOTE_MAX_CHARS,
     HeadState,
     MarkerHead,
     Ruling,
@@ -57,6 +58,13 @@ _HOLD_MAX_S = 0.6
 _HOLD_CAP_FRAMES = 200
 # How many skipped handle ids the gate remembers for ui_feed's benefit.
 _SKIPPED_REMEMBERED = 64
+# How long the gate keeps DECODING a turn it has already muted, to catch the
+# note the provider streams after the tag. Muting is not delayed by this —
+# the frames stop at the closing bracket — only the cancel is, and only until
+# the note is full or this expires. Without the window, a provider that
+# streams character by character never sends the note in time: production
+# logged 298 empty notes out of 302 skips on 2026-09-09.
+_NOTE_WINDOW_S = 0.3
 
 Emit = Callable[[link.LinkEvent], None]
 
@@ -80,8 +88,13 @@ class _Turn:
     holding: bool
     frames: list[link.LinkEvent] = field(default_factory=list)
     released: bool = False
+    # Muted: the tag was read, the frames stop here, nothing more will play.
+    # Skipped: the verdict went out and the scheduler killed the turn. Between
+    # the two the gate is still decoding, collecting the note.
+    muted: bool = False
     skipped: bool = False
     timer: asyncio.Task[None] | None = None
+    note_timer: asyncio.Task[None] | None = None
     midway_logged: bool = False
 
 
@@ -211,6 +224,13 @@ class VoiceTurnGate:
             return (event,)
         if turn.skipped:
             return ()
+        if turn.muted:
+            # Decided and silenced, still reading: these are the words of the
+            # note, and they arrive after the bracket that ended the turn.
+            turn.head.feed(event.text)
+            if self._note_is_full(turn):
+                self._settle(turn, clear_playback=False)
+            return ()
         state = turn.head.feed(event.text)
         if turn.holding:
             turn.frames.append(event)
@@ -222,7 +242,7 @@ class VoiceTurnGate:
         turn = self._turns.get(event.handle.handle_id)
         if turn is None:
             return (event,)
-        if turn.skipped:
+        if turn.skipped or turn.muted:
             return ()
         if not turn.holding:
             return (event,)
@@ -242,6 +262,13 @@ class VoiceTurnGate:
             # its end is nobody's business downstream either (the scheduler
             # has the ungated view). Skipped after a release — the late
             # marker — the views did see frames, and get the end too.
+            return (event,) if turn.released else ()
+        if turn.muted:
+            # The reply ended inside the note window. Better than the timer:
+            # the note is whole, and the cancel is moot on a turn that is
+            # already over — which is what 3% of production cancels raced.
+            turn.head.finish()
+            self._settle(turn, clear_playback=False)
             return (event,) if turn.released else ()
         if not turn.holding:
             return (event,)
@@ -280,7 +307,7 @@ class VoiceTurnGate:
             assert ruling is not None
             if self._policy.action(ruling) is TurnAction.SPEAK:
                 return self._release(turn, why="speak")
-            self._skip(turn, ruling=ruling, clear_playback=False)
+            self._mute(turn, clear_playback=False)
             return ()
         if len(turn.frames) >= self._hold_cap_frames:
             return self._release(turn, why="cap")
@@ -306,7 +333,7 @@ class VoiceTurnGate:
                     category=ruling.category.value,
                     mode=self._mode.value,
                 )
-                self._skip(turn, ruling=ruling, clear_playback=True)
+                self._mute(turn, clear_playback=True)
                 return ()
         elif not turn.midway_logged and _looks_like_marker(event.text):
             # A marker that is not at the head is prose to the gate — half of
@@ -334,10 +361,53 @@ class VoiceTurnGate:
         )
         return frames
 
+    def _mute(self, turn: _Turn, *, clear_playback: bool) -> None:
+        """Stop the turn reaching the speakers, then wait for its note.
+
+        Everything the room could hear ends here. What is still owed is the
+        verdict — and the note that rides on it, which the provider has not
+        finished streaming. A turn whose audio already played (a late marker)
+        cannot wait: it settles at once so the flush is immediate.
+        """
+        self._disarm(turn)
+        turn.frames.clear()
+        turn.holding = False
+        turn.muted = True
+        if clear_playback or self._note_is_full(turn):
+            # Nothing to wait for: the audio is already out and needs the
+            # flush now, or the whole note arrived in the same chunk as the
+            # tag — which is what a provider that batches its text does.
+            self._settle(turn, clear_playback=clear_playback)
+            return
+        task = asyncio.ensure_future(self._note_window(turn))
+        task.set_name(f"voice-gate:note:{turn.handle.handle_id}")
+        turn.note_timer = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _note_window(self, turn: _Turn) -> None:
+        await self._clock.sleep(_NOTE_WINDOW_S)
+        if not turn.skipped:
+            self._settle(turn, clear_playback=False)
+
+    def _note_is_full(self, turn: _Turn) -> bool:
+        ruling = turn.head.ruling
+        return ruling is not None and len(ruling.note) >= NOTE_MAX_CHARS
+
+    def _settle(self, turn: _Turn, *, clear_playback: bool) -> None:
+        """Emit the verdict and let the scheduler kill the turn."""
+        if turn.skipped:
+            return
+        if turn.note_timer is not None:
+            turn.note_timer.cancel()
+            turn.note_timer = None
+        self._skip(turn, ruling=turn.head.ruling, clear_playback=clear_playback)
+
     def _skip(self, turn: _Turn, *, ruling: Ruling | None, clear_playback: bool) -> None:
         self._disarm(turn)
         turn.frames.clear()
         turn.holding = False
+        turn.muted = True
         turn.skipped = True
         self._skipped += 1
         self._skipped_ids.append(turn.handle.handle_id)
@@ -367,6 +437,9 @@ class VoiceTurnGate:
     def _drop_all(self) -> None:
         for turn in self._turns.values():
             self._disarm(turn)
+            if turn.note_timer is not None:
+                turn.note_timer.cancel()
+                turn.note_timer = None
         self._turns.clear()
 
     # ------------------------------------------------------------ the timer

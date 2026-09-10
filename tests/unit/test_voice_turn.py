@@ -37,6 +37,10 @@ class _Rig:
         )
         self.gate.attach(self.emitted.append)
 
+    async def settle(self) -> None:
+        """Run out the note window, so a muted turn reports its verdict."""
+        await self.clock.advance(0.31)
+
     def start(self, *, implicit: bool = True) -> link.ReplyHandle:
         handle = link.ReplyHandle(implicit=implicit)
         assert self.gate.feed(link.ReplyStarted(handle)) == (link.ReplyStarted(handle),)
@@ -61,7 +65,7 @@ async def test_frames_that_are_not_her_own_turn_pass_untouched() -> None:
     rig = _Rig()
     ours = rig.start(implicit=False)
     for event in (
-        _text(ours, "[AUDIENCE] 我们派发的回复不进门"),
+        _text(ours, "[SKIP] 我们派发的回复不进门"),
         _audio(ours),
         link.SpeechStarted(),
         link.UserTranscriptDone("主播说的"),
@@ -72,19 +76,50 @@ async def test_frames_that_are_not_her_own_turn_pass_untouched() -> None:
     assert rig.skips == []
 
 
-async def test_a_marked_head_is_dropped_and_reported_once() -> None:
+async def test_a_marked_head_mutes_at_once_and_settles_with_the_whole_note() -> None:
+    """Two moments, not one: the mute lands on the bracket, the verdict waits.
+
+    Silencing her cannot wait — the bracket closes and no frame of this turn
+    reaches a speaker again. The verdict can, because the note rides on it and
+    the note is the words AFTER the bracket, which a provider streaming
+    character by character has not sent yet.
+    """
     rig = _Rig()
     hers = rig.start()
-    assert rig.gate.feed(_text(hers, "[AUDIENCE] 在聊天气")) == ()
-    assert rig.skips == [Skip(hers, Ruling(SceneCategory.AUDIENCE, "在聊天气"), False)]
-    # Everything after the decision is dropped, the end included: nothing of
-    # this turn reached the views, so they have nothing to close.
-    assert rig.gate.feed(_audio(hers)) == ()
-    assert rig.gate.feed(_text(hers, "，我插不上话")) == ()
+    assert rig.gate.feed(_text(hers, "[SKIP] 在聊")) == ()
+    assert rig.gate.feed(_audio(hers)) == (), "muted before any verdict went out"
+    assert rig.skips == [], "the note is still arriving"
+    assert rig.gate.feed(_text(hers, "天气和明天的安排")) == ()
+    await rig.settle()
+    whole = Skip(hers, Ruling(SceneCategory.SKIP, "在聊天气和明天的安排"), False)
+    assert rig.skips == [whole]
+    # Everything after is dropped, the end included: nothing of this turn
+    # reached the views, so they have nothing to close.
     assert rig.gate.feed(_done(hers)) == ()
-    assert rig.skips == [Skip(hers, Ruling(SceneCategory.AUDIENCE, "在聊天气"), False)]
+    assert rig.skips == [whole], "reported once"
     assert rig.gate.skipped(hers.handle_id)
     assert rig.gate.status()["skipped"] == 1
+
+
+async def test_a_reply_that_ends_inside_the_note_window_settles_at_once() -> None:
+    """The end is better news than the timer: the note is whole and the turn
+    is already over, so there is nothing left to race a cancel against."""
+    rig = _Rig()
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SKIP]")) == ()
+    assert rig.gate.feed(_text(hers, " 主播在谢礼物")) == ()
+    assert rig.skips == []
+    assert rig.gate.feed(_done(hers)) == ()
+    assert rig.skips == [Skip(hers, Ruling(SceneCategory.SKIP, "主播在谢礼物"), False)]
+
+
+async def test_a_full_note_does_not_wait_out_the_window() -> None:
+    rig = _Rig()
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SKIP] " + "字" * 20)) == ()
+    assert rig.skips == [Skip(hers, Ruling(SceneCategory.SKIP, "字" * 20), False)]
+    assert rig.gate.feed(_text(hers, "还有更多但装不下了")) == ()
+    assert len(rig.skips) == 1
 
 
 async def test_a_plain_head_releases_on_its_first_character() -> None:
@@ -101,19 +136,23 @@ async def test_a_plain_head_releases_on_its_first_character() -> None:
 async def test_character_by_character_text_decides_on_the_closing_bracket() -> None:
     rig = _Rig()
     hers = rig.start()
-    for ch in "[READING":
+    for ch in "[SKIP":
         assert rig.gate.feed(_text(hers, ch)) == ()
-    assert rig.gate.feed(_text(hers, "]")) == ()
-    assert rig.skips == [Skip(hers, Ruling(SceneCategory.READING, ""), False)]
+    assert rig.gate.feed(_text(hers, "]")) == (), "muted here"
+    assert rig.skips == [], "but the note has not been sent yet"
+    for ch in " 在念弹幕":
+        assert rig.gate.feed(_text(hers, ch)) == ()
+    await rig.settle()
+    assert rig.skips == [Skip(hers, Ruling(SceneCategory.SKIP, "在念弹幕"), False)]
 
 
 async def test_a_scene_the_policy_answers_releases_the_held_burst_in_order() -> None:
-    rig = _Rig(policy=TurnPolicy(speak=frozenset({SceneCategory.TO_ME, SceneCategory.GUEST})))
+    rig = _Rig(policy=TurnPolicy(speak=frozenset({SceneCategory.TO_ME, SceneCategory.SKIP})))
     hers = rig.start()
     a1, a2 = _audio(hers, 1), _audio(hers, 2)
     assert rig.gate.feed(a1) == ()
     assert rig.gate.feed(a2) == ()
-    marker = _text(hers, "[GUEST] 连麦的在问")
+    marker = _text(hers, "[SKIP] 连麦的在问")
     assert rig.gate.feed(marker) == (a1, a2, marker)
     assert rig.skips == []
 
@@ -130,8 +169,10 @@ async def test_audio_leading_text_is_released_by_the_timer_and_a_late_marker_flu
     assert rig.emitted == [a1, a2], "the timer released the held frames, in order"
     assert rig.gate.status()["timeouts"] == 1
     # The text arrives after all — and says she should not have spoken.
-    assert rig.gate.feed(_text(hers, "[SELF_TALK] 主播在嘀咕")) == ()
-    assert rig.skips == [Skip(hers, Ruling(SceneCategory.SELF_TALK, "主播在嘀咕"), True)]
+    assert rig.gate.feed(_text(hers, "[SKIP] 主播在嘀咕")) == ()
+    assert rig.skips == [
+        Skip(hers, Ruling(SceneCategory.SKIP, "主播在嘀咕"), True)
+    ], "a late marker cannot wait for its note: those frames are already playing"
     assert rig.gate.status()["late_markers"] == 1
     assert rig.gate.feed(_audio(hers, 3)) == (), "dropped from here on"
     # The views did hear the start of this one, so they get its end.
@@ -172,9 +213,9 @@ async def test_a_reply_that_ends_with_an_unreadable_head_still_plays() -> None:
 async def test_a_reply_that_ends_on_a_marker_is_still_skipped() -> None:
     rig = _Rig()
     hers = rig.start()
-    assert rig.gate.feed(_text(hers, "UNSURE")) == (), "bare tag, no separator yet"
+    assert rig.gate.feed(_text(hers, "SKIP")) == (), "bare tag, no separator yet"
     assert rig.gate.feed(_done(hers)) == ()
-    assert rig.skips == [Skip(hers, Ruling(SceneCategory.UNSURE, "", unbracketed=True), False)]
+    assert rig.skips == [Skip(hers, Ruling(SceneCategory.SKIP, "", unbracketed=True), False)]
 
 
 async def test_a_turn_cut_while_held_plays_nothing() -> None:
@@ -216,8 +257,8 @@ async def test_switching_to_always_releases_the_hold_but_keeps_the_safety_net() 
     # ...but an exact marker at the head still skips, and asks for a flush,
     # because those frames were never held.
     third = rig.start()
-    assert rig.gate.feed(_text(third, "[GUEST] 连麦")) == ()
-    assert rig.skips == [Skip(third, Ruling(SceneCategory.GUEST, "连麦"), True)]
+    assert rig.gate.feed(_text(third, "[SKIP] 连麦")) == ()
+    assert rig.skips == [Skip(third, Ruling(SceneCategory.SKIP, "连麦"), True)]
     assert rig.gate.feed(_done(third)) == (_done(third),), "its frames were flowing: end passes"
     rig.gate.set_mode(VoiceReplyMode.WHEN_ADDRESSED)
     fourth = rig.start()
@@ -227,7 +268,7 @@ async def test_switching_to_always_releases_the_hold_but_keeps_the_safety_net() 
 async def test_two_consecutive_turns_do_not_interfere() -> None:
     rig = _Rig()
     first = rig.start()
-    assert rig.gate.feed(_text(first, "[AUDIENCE] 讲故事")) == ()
+    assert rig.gate.feed(_text(first, "[SKIP] 讲故事")) == ()
     assert rig.gate.feed(_done(first)) == ()
     second = rig.start()
     plain = _text(second, "好的")
@@ -247,8 +288,9 @@ async def test_a_failing_skip_callback_still_drops_the_frames() -> None:
         rig.clock, policy=TurnPolicy(), mode=VoiceReplyMode.WHEN_ADDRESSED, on_skip=boom
     )
     hers = rig.start()
-    assert rig.gate.feed(_text(hers, "[AUDIENCE] 讲故事")) == ()
-    assert rig.gate.feed(_audio(hers)) == ()
+    assert rig.gate.feed(_text(hers, "[SKIP] 讲故事")) == ()
+    assert rig.gate.feed(_audio(hers)) == (), "muted regardless of who reports it"
+    await rig.settle()
     assert rig.gate.skipped(hers.handle_id)
 
 
@@ -257,7 +299,7 @@ async def test_a_marker_in_the_middle_is_prose_to_the_gate() -> None:
     hers = rig.start()
     first = _text(hers, "好的，")
     assert rig.gate.feed(first) == (first,)
-    mid = _text(hers, "[AUDIENCE] 这句已经在播了")
+    mid = _text(hers, "[SKIP] 这句已经在播了")
     assert rig.gate.feed(mid) == (mid,)
     assert rig.skips == []
 

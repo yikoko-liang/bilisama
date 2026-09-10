@@ -9,6 +9,7 @@ in test_distill.py; here it is pinned at the store level.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -720,13 +721,11 @@ def test_live_rule_files_pin_their_core_contract_lines() -> None:
 
 
 def test_the_scene_marker_contract_rides_the_addressing_switch() -> None:
-    """With the voice gate on, the voice rules teach every scene marker and
-    the 「listen first」 rule; off, not one tag — taught without the gate she
-    would read the marker out loud. DECLINED belongs to the phase-two probes
-    and is never part of the microphone contract."""
+    """With the voice gate on, the voice rules teach the tag; off, not once —
+    taught without the gate she would read it out loud."""
     from bilisama.config.schema import PersonaConfig
     from bilisama.persona.loader import live_voice_rules, template_variables
-    from bilisama.scene_markers import MARKERS, SceneCategory
+    from bilisama.scene_markers import MARKERS
 
     config_dir = Path(__file__).resolve().parent.parent.parent / "config"
     variables = template_variables(PersonaConfig())
@@ -734,9 +733,25 @@ def test_the_scene_marker_contract_rides_the_addressing_switch() -> None:
     on = live_voice_rules(config_dir, variables, addressing=True)
     assert on.startswith(off), "the base contract is untouched; the marker rules are appended"
     for marker in MARKERS:
-        expected = marker.category is not SceneCategory.DECLINED
-        assert (f"[{marker.tag}]" in on) is expected, marker.tag
+        assert f"[{marker.tag}]" in on, marker.tag
         assert f"[{marker.tag}]" not in off, marker.tag
-    assert "先分辨" in on and "最开头" in on
-    assert "接话时直接回应" in off
     assert "{{" not in on
+
+
+def test_the_contract_spells_the_tag_the_decoder_actually_knows() -> None:
+    """The examples in the prompt are typed by hand; the vocabulary is not.
+
+    A rename in scene_markers that misses the prose would leave her writing a
+    tag the decoder reads as prose, and the gate would pass every turn — the
+    exact failure the gate exists to prevent, arriving silently.
+    """
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_voice_rules, template_variables
+    from bilisama.scene_markers import SceneCategory, lookup, tag_for
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    on = live_voice_rules(config_dir, template_variables(PersonaConfig()), addressing=True)
+    tag = tag_for(SceneCategory.SKIP)
+    assert f"[{tag}]" in on
+    for word in re.findall(r"\[([A-Za-z_]+)\]", on):
+        assert lookup(word) is SceneCategory.SKIP, f"提示词里的 [{word}] 解码器不认识"

@@ -28,6 +28,7 @@ from bilisama.scene_markers import (
 )
 
 __all__ = [
+    "NOTE_MAX_CHARS",
     "HeadState",
     "MarkerHead",
     "Ruling",
@@ -36,13 +37,15 @@ __all__ = [
     "scene_note",
 ]
 
-# Longer than the longest tag with its brackets (``[SELF_TALK]``, 11) and no
-# longer: a head still undecided past this is prose that happens to start
-# with a bracket, and holding it any further only delays her.
+# Longer than the longest spelling we still recognise with its brackets — the
+# retired ``[SELF_TALK]``, 11, kept as an alias — and no longer: a head still
+# undecided past this is prose that happens to start with a bracket, and
+# holding it any further only delays her.
 _HEAD_MAX_CHARS = 12
 # What the note keeps: one line, this many characters. It is material for the
-# dialogue ring and the panel, not a transcript.
-_NOTE_MAX_CHARS = 20
+# dialogue ring and the panel, not a transcript. Public because the gate
+# stops waiting for more note once it has this much.
+NOTE_MAX_CHARS = 20
 # Leading characters the decoder looks past before reading the head.
 _LEAD = "﻿ \t\r\n　"
 # What may follow a bare (unbracketed) tag for it to count as one.
@@ -88,7 +91,7 @@ class Ruling:
         return f"{self.tag} · {self.note}" if self.note else self.tag
 
 
-def scene_note(text: str, *, limit: int = _NOTE_MAX_CHARS) -> str:
+def scene_note(text: str, *, limit: int = NOTE_MAX_CHARS) -> str:
     """Clean the words after a tag into a short note.
 
     First line only, whitespace folded, quotes and the punctuation that
@@ -103,15 +106,27 @@ def scene_note(text: str, *, limit: int = _NOTE_MAX_CHARS) -> str:
 
 
 class MarkerHead:
-    """Reads a reply's head as it streams and settles as early as it can."""
+    """Reads a reply's head as it streams and settles as early as it can.
 
-    __slots__ = ("_buf", "_max_chars", "_ruling", "_state")
+    The decision and the note settle at different times, on purpose. The
+    decision lands on the closing bracket, because that is when the gate must
+    mute the turn. The note is the words AFTER the bracket, and a provider
+    that streams character by character has not sent them yet — so `ruling`
+    is recomputed from the buffer on every read and its note grows until the
+    caller stops feeding. Freezing the note at decision time is what left
+    production with 298 empty notes out of 302 skips (2026-09-09).
+    """
+
+    __slots__ = ("_buf", "_category", "_max_chars", "_note_from", "_state", "_unbracketed")
 
     def __init__(self, *, max_chars: int = _HEAD_MAX_CHARS) -> None:
         self._buf = ""
         self._max_chars = max_chars
         self._state = HeadState.PENDING
-        self._ruling: Ruling | None = None
+        self._category: SceneCategory | None = None
+        # Where the note starts, as an index into the lead-stripped buffer.
+        self._note_from = 0
+        self._unbracketed = False
 
     @property
     def state(self) -> HeadState:
@@ -119,8 +134,14 @@ class MarkerHead:
 
     @property
     def ruling(self) -> Ruling | None:
-        """Valid once the state is MARKED; None otherwise."""
-        return self._ruling
+        """Valid once the state is MARKED; None otherwise.
+
+        Rebuilt per read so the note reflects everything fed so far.
+        """
+        if self._category is None:
+            return None
+        note = scene_note(self._buf.lstrip(_LEAD)[self._note_from :])
+        return Ruling(self._category, note, unbracketed=self._unbracketed)
 
     @property
     def text(self) -> str:
@@ -160,7 +181,8 @@ class MarkerHead:
         category = lookup(buf[1:close])
         if category is None:
             return HeadState.PLAIN
-        self._ruling = Ruling(category, scene_note(buf[close + 1 :]))
+        self._category = category
+        self._note_from = close + 1
         return HeadState.MARKED
 
     def _bare(self, buf: str, *, final: bool) -> HeadState:
@@ -175,7 +197,9 @@ class MarkerHead:
                     return HeadState.PENDING
                 if rest and rest[0] not in _BARE_FOLLOW:
                     return HeadState.PLAIN
-                self._ruling = Ruling(marker.category, scene_note(rest), unbracketed=True)
+                self._category = marker.category
+                self._note_from = len(tag)
+                self._unbracketed = True
                 return HeadState.MARKED
             if tag.startswith(buf):
                 return HeadState.PENDING
@@ -189,8 +213,6 @@ class TurnPolicy:
     speak: frozenset[SceneCategory] = frozenset({SceneCategory.TO_ME})
 
     def action(self, ruling: Ruling | None) -> TurnAction:
-        """A plain head is TO_ME; DECLINED never speaks whatever the table says."""
+        """A plain head is TO_ME — no marker is the whole speak signal."""
         category = SceneCategory.TO_ME if ruling is None else ruling.category
-        if category is SceneCategory.DECLINED:
-            return TurnAction.SKIP
         return TurnAction.SPEAK if category in self.speak else TurnAction.SKIP

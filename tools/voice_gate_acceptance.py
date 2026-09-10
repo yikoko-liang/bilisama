@@ -7,9 +7,7 @@ wires them — with the streamer's lines synthesised by macOS `say` and pushed
 through push_audio at real-time pace, and the gated view standing in for
 the speakers. For every line it records what she wrote at the head, what
 the gate did and whether any audio reached the speakers, then scores the
-run against each line's label: classification accuracy, lines meant for
-her that were skipped (over-skip), lines not for her that played
-(under-skip).
+run against one binary label: did the room need to hear her.
 
 Usage::
 
@@ -18,10 +16,24 @@ Usage::
     .venv/bin/python tools/voice_gate_acceptance.py --provider s2s      # server on :8765
     .venv/bin/python tools/voice_gate_acceptance.py --provider volcano
 
-Two scores. 该不该说判对 is what the room hears: she spoke exactly when the
-line was for her. 记号分类准确 is stricter: the category she reported matches
-the label. Exit status 0 when the first is at least 0.8 and at most one line
-meant for her was skipped — the bar in docs/mvp-validation-plan.md §11.
+One score, 该不该说判对, plus two error columns kept apart because they cost
+different things: 该接没接 (she stayed silent when spoken to) and
+不该接却接了 (she talked over the streamer). A turn with no output at all —
+cut, failed or empty — is a third column and enters neither rate.
+
+Two things this run cannot do, learned the hard way on 2026-09-09:
+
+It cannot compare two prompts across time. The endpoint's working point
+drifts: the same script's run-level failure rate moved from 31% to 100%
+inside an hour. A/B means interleaving the arms in one window, at least
+eight independent runs each, compared run by run — never one arm now and
+the other after lunch.
+
+It cannot stand in for real audio. `say` gives clean speech and this pushes
+2.5 s of DIGITAL ZERO after each line; a live stream is tab audio that never
+reaches zero. Five controlled runs built on that difference failed to
+reproduce a production symptom. Use --replay with a recorded uplink
+(dev-talk --record-uplink) for the fidelity half.
 """
 
 from __future__ import annotations
@@ -54,7 +66,6 @@ from bilisama.persona.prompt import assemble_scoped, static_prefix
 from bilisama.realtime import link
 from bilisama.realtime.providers import resolve_endpoint
 from bilisama.realtime.providers.factory import LinkRequest, build_link
-from bilisama.scene_markers import SceneCategory
 
 _REPO = Path(__file__).resolve().parents[1]
 _CONFIG = _REPO / "config"
@@ -71,56 +82,88 @@ _VOLCANO_GENERATIONS: dict[str, Literal["1.2.1.1", "2.2.0.0"]] = {
     "2.2.0.0": "2.2.0.0",
 }
 
-# The streamer's lines, with who they were for. Punctuation is kept out of
-# the spoken text: `say` pauses on it and the pause splits one line into two
-# turns (tests/integration/test_real_server.py's note). `accept` widens the
-# label where a human listener could reasonably hear it either way.
-_TO_ME = SceneCategory.TO_ME
+# The streamer's lines. Punctuation is kept out of the spoken text: `say`
+# pauses on it and the pause splits one line into two turns
+# (tests/integration/test_real_server.py's note).
+#
+# The label is BINARY — did the room need to hear her — because that is the
+# only thing the gate decides (TurnPolicy.speak is {TO_ME}) and the only
+# thing a listener can check. The scene she reports is printed, never scored:
+# telling AUDIENCE from READING costs the model attention and buys the
+# product nothing.
 
 
 @dataclass(frozen=True, slots=True)
 class Line:
+    """One scored line, and what boundary it is there to test.
+
+    setup lines are spoken first and left unscored: they exist to put the
+    conversation in the state the scored line needs — she has just said
+    something, or the streamer has just turned to someone else. Injecting
+    that state as history instead would test a session production never has.
+    """
+
     text: str
-    expected: SceneCategory
-    accept: frozenset[SceneCategory] = frozenset()
-
-    def ok(self, category: SceneCategory) -> bool:
-        return category is self.expected or category in self.accept
+    should_answer: bool
+    why: str
+    setup: tuple[str, ...] = ()
 
 
+# Weak-cue lines are quoted from the 2026-09-09 recording. The scripted set
+# that preceded this one scored 95%-100% while production sat at 26%-49%,
+# and the reason was here: every line meant for her said 豆腐, and every line
+# that was not carried 家人们 or 谢谢小明. Those are the easy half.
 LINES: tuple[Line, ...] = (
-    Line("各位观众朋友们大家好 欢迎来到直播间", SceneCategory.AUDIENCE),
-    Line("豆腐 你觉得今天的天气怎么样", _TO_ME),
-    Line("谢谢小明送的火箭 谢谢谢谢", SceneCategory.READING, frozenset({SceneCategory.AUDIENCE})),
-    Line("哎呀 这个怎么又卡住了", SceneCategory.SELF_TALK),
-    Line("豆腐你在吗 帮我看看弹幕里有什么问题", _TO_ME),
-    Line("今天人有点少啊 大家多多点赞关注", SceneCategory.AUDIENCE),
-    Line("老王 你那边听得到我说话吗 麦克风开了没", SceneCategory.GUEST),
-    Line("豆腐 你喜欢吃火锅还是烧烤", _TO_ME),
+    # --- 强线索：留几条当对照，好看出难易分差
+    Line("豆腐 你觉得今天的天气怎么样", True, "强线索正例：点名 + 直接提问"),
+    Line("各位观众朋友们大家好 欢迎来到直播间", False, "强线索反例：明确对观众"),
+    Line("谢谢小明送的火箭 谢谢谢谢", False, "强线索反例：谢礼物"),
+    Line("哎呀 这个怎么又卡住了", False, "强线索反例：典型自语"),
+    # --- 省略名字的正例：现在的验收集一条都没有
     Line(
-        "有人问我用的什么键盘 是机械键盘",
-        SceneCategory.READING,
-        frozenset({SceneCategory.AUDIENCE}),
+        "为什么",
+        True,
+        "接着她上一句追问，全程没点名",
+        setup=("豆腐 你喜欢什么样的故事",),
     ),
-    Line("等一下 我找找刚才那个文件放哪了", SceneCategory.SELF_TALK),
-    Line("豆腐 给大家讲个笑话吧", _TO_ME),
-    Line("感谢大家的陪伴 我们今天播到十点就下播", SceneCategory.AUDIENCE),
-    Line("感谢阿强的舰长 欢迎上舰", SceneCategory.READING, frozenset({SceneCategory.AUDIENCE})),
     Line(
-        "嗯 这里应该往左走还是往右走呢", SceneCategory.SELF_TALK, frozenset({SceneCategory.UNSURE})
+        "那你觉得哪个更好",
+        True,
+        "延续正在进行的对话，没点名",
+        setup=("豆腐 帮我在这两个方案里挑一个",),
     ),
-    Line("豆腐你说 我这个发型好不好看", _TO_ME),
-    Line("家人们 今天这个游戏我一定要通关", SceneCategory.AUDIENCE),
-    Line("小李你先别说 等我把这局打完", SceneCategory.GUEST),
+    Line("帮我盯着点弹幕 有人问问题就喊我", True, "直接交代事情，没点名"),
+    Line("给大家讲个笑话吧", True, "没点名，但只有她能执行；出现「大家」不等于略过"),
+    # --- 多轮转向
     Line(
-        "这位朋友说主播声音好听 谢谢夸奖",
-        SceneCategory.READING,
-        frozenset({SceneCategory.AUDIENCE}),
+        "你明天有空吗",
+        False,
+        "上一句已转向连麦的阿远，这句还是问他",
+        setup=("阿远 我们对一下明天的时间",),
     ),
-    Line("豆腐 我们等会儿玩什么游戏好", _TO_ME),
-    Line("大家把弹幕刷起来 让我看看有多少人在", SceneCategory.AUDIENCE),
-    Line("你觉得我刚才唱得怎么样 豆腐", _TO_ME),
-    Line("好了 那今天就先到这里 大家晚安", SceneCategory.AUDIENCE),
+    Line(
+        "豆腐 那你说说看",
+        True,
+        "跟别人说完之后点名转回她",
+        setup=("阿远 你那边什么时候方便",),
+    ),
+    # --- 引用后转交
+    Line("这条弹幕问你喜欢夏天还是冬天", False, "念出一个问题，不是转交"),
+    Line("这条弹幕问你喜欢夏天还是冬天 这题你自己答", True, "念完之后明确转交"),
+    Line("有人问主播用的什么键盘 我用的机械键盘", False, "念问题并自己答了"),
+    # --- 出现她的名字但不是在叫她
+    Line("大家觉得豆腐刚才说得怎么样", False, "提到她的名字，但在问观众"),
+    # --- 明确要求先听
+    Line("豆腐 先别接 我把话说完", False, "明确说给她听，但本轮要求安静"),
+    # --- 弱线索碎句：实盘失灵段的原话
+    Line("在这里", False, "真实录音里的碎句，几乎没有线索"),
+    Line("上去", False, "同上，两个字的自语"),
+    Line("他肯定上大嘴鸥", False, "游戏解说，说给观众或自己"),
+    Line("等没有了雨天 你看我怎么干他", False, "带光秃秃的「你」，但说的是对手"),
+    Line("这个大流还挺快呀", False, "游戏解说里的感叹"),
+    Line("锤大队友", False, "两三个字的操作嘀咕"),
+    # --- 判断不出交流对象
+    Line("你觉得呢", False, "没有上下文，判断不出在跟谁说，应当先听"),
 )
 
 
@@ -135,31 +178,36 @@ class Result:
     seconds: float = 0.0
 
     @property
-    def category(self) -> SceneCategory:
-        """What her head said, as the gate read it."""
-        if self.ruling is not None:
-            return self.ruling.category
-        return _TO_ME
+    def spoke(self) -> bool:
+        """Audio reached the speakers. The only thing the room can tell."""
+        return self.audio_frames > 0
 
     @property
-    def correct(self) -> bool:
-        """The category she reported matches the label (the stricter score)."""
-        return self.status != "no_reply" and self.line.ok(self.category)
+    def no_output(self) -> bool:
+        """Nothing was heard and the gate is not why.
+
+        A turn the provider cut, failed or ended empty. Counting these as
+        leaks is what made the ad-hoc harnesses read 81% worse than they
+        were, so they get their own column and stay out of both error rates.
+        """
+        return not self.spoke and not self.skipped
 
     @property
     def decided_right(self) -> bool:
-        """She spoke exactly when the line was for her — what the room hears."""
-        if self.status == "no_reply":
+        """She spoke exactly when the line needed her."""
+        if self.no_output:
             return False
-        return (self.audio_frames > 0) == (self.line.expected is _TO_ME)
+        return self.spoke == self.line.should_answer
 
     @property
     def over_skip(self) -> bool:
-        return self.line.expected is _TO_ME and self.skipped
+        """The line needed her and the gate held it back."""
+        return self.line.should_answer and self.skipped
 
     @property
     def under_skip(self) -> bool:
-        return self.line.expected is not _TO_ME and self.audio_frames > 0
+        """The line was not for her and the room heard her anyway."""
+        return not self.line.should_answer and self.spoke
 
 
 @dataclass(slots=True)
@@ -234,6 +282,26 @@ def _instructions(persona: PersonaStore, variables: dict[str, str]) -> str:
     return assemble_scoped(static_prefix(persona.anchors(variables)), rules)
 
 
+async def _setup_turn(speech: link.SpeechLink, books: _Books, pcm: bytes, silence: bytes) -> None:
+    """Speak a line and wait it out without scoring it.
+
+    The scored line needs the conversation in a particular state — she has
+    just spoken, or the streamer has just turned to someone else — and the
+    only faithful way to get there is to let the turn happen.
+    """
+    dones_before = len(books.dones)
+    deadline = time.monotonic() + _REPLY_TIMEOUT_S
+    await _push(speech, pcm)
+    await _push(speech, silence)
+    while time.monotonic() < deadline:
+        for done in books.dones[dones_before:]:
+            hid = done.handle.handle_id
+            if hid in books.skips or done.status is link.ReplyStatus.COMPLETED:
+                await asyncio.sleep(1.0)  # let the turn settle before the next
+                return
+        await asyncio.sleep(0.05)
+
+
 async def _one_line(
     speech: link.SpeechLink, books: _Books, line: Line, pcm: bytes, silence: bytes
 ) -> Result:
@@ -269,40 +337,56 @@ def _render_replay(books: _Books) -> str:
     markers here but not in production, the difference is no longer the audio.
     """
     rows: list[str] = []
-    replies = 0
-    marked = 0
-    skipped = 0
+    spoke = 0
+    silenced = 0
+    no_output = 0
     for kind, handle_id, text in books.timeline:
         if kind == "heard":
             rows.append(f"  主播说  {text}")
             continue
-        replies += 1
-        if text.startswith("["):
-            marked += 1
+        frames = books.audio.get(handle_id, 0)
         skip = books.skips.get(handle_id)
-        if skip is None:
-            verdict = "放行"
-        else:
-            skipped += 1
+        if skip is not None:
+            silenced += 1
             ruling = skip.ruling
             verdict = f"拦下 {ruling.category.value if ruling is not None else '残记号'}"
+        elif frames > 0:
+            # Audio, not a bracket, is the leak: a reply the provider cut or
+            # ended empty passes the gate and is still never heard.
+            spoke += 1
+            verdict = f"出声 {frames}帧"
+        else:
+            no_output += 1
+            verdict = "无输出"
         rows.append(f"  她 [{verdict}] {text[:70]}")
     rows.append("")
-    rows.append(f"她自起的回复 {replies} 条：开头带记号 {marked} 条，门拦下 {skipped} 条")
+    rows.append(
+        f"她自起的回复 {spoke + silenced + no_output} 条："
+        f"出声 {spoke} 条，门拦下 {silenced} 条，无输出 {no_output} 条"
+    )
     return "\n".join(rows)
 
 
 def _render(results: list[Result]) -> str:
-    rows = ["#  | 期望       | 她写的开头                     | 门     | 音频帧 | 判定"]
+    rows = ["#  | 该接吗 | 她写的开头                     | 结果   | 音频帧 | 判定 | 测的是什么"]
     for i, r in enumerate(results, 1):
-        gate = "拦下" if r.skipped else ("放行" if r.status != "no_reply" else "没回复")
-        verdict = "✓" if r.correct else ("说对了 记号不准" if r.decided_right else "✗")
-        if r.over_skip:
-            verdict += " 过度不接"
-        if r.under_skip:
-            verdict += " 漏拦"
-        cells = (f"{i:<2}", f"{r.line.expected.value:<10}", f"{r.head:<30}", f"{gate:<4}")
-        rows.append(" | ".join(cells) + f" | {r.audio_frames:>5} | {verdict}")
+        want = "要接" if r.line.should_answer else "别接"
+        if r.skipped:
+            got = "拦下"
+        elif r.spoke:
+            got = "出声"
+        else:
+            got = "无输出"
+        if r.no_output:
+            verdict = "—"
+        elif r.over_skip:
+            verdict = "✗ 该接没接"
+        elif r.under_skip:
+            verdict = "✗ 不该接却接了"
+        else:
+            verdict = "✓"
+        cells = (f"{i:<2}", f"{want:<6}", f"{r.head:<30}", f"{got:<4}")
+        rows.append(" | ".join(cells) + f" | {r.audio_frames:>5} | {verdict:<14} | {r.line.why}")
     return "\n".join(rows)
 
 
@@ -340,14 +424,16 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
     if provider == "volcano":
         detail += f"  音色：{settings.speech.volcano.speaker}"
     print(f"后端：{endpoint.provider.value}{detail}  地址：{built.url}")
-    audio: list[bytes] = []
+    audio: dict[str, bytes] = {}
     silence = b""
     recorded = b""
     if replay is None:
         print("合成台词…", end="", flush=True)
-        audio = [_say(line.text) for line in LINES]
+        wanted = {line.text for line in LINES} | {t for line in LINES for t in line.setup}
+        audio = {text: _say(text) for text in sorted(wanted)}
         silence = b"\x00" * int(16000 * _TAIL_S) * 2
-        print(f" {len(LINES)} 句")
+        setups = sum(len(line.setup) for line in LINES)
+        print(f" {len(LINES)} 句评分 + {setups} 句铺垫")
     else:
         recorded = _load_wav(replay)
         print(f"回放 {replay}：{len(recorded) / 32000:.0f} 秒，按实时速度推")
@@ -389,13 +475,14 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
             print(f"音频推完，再等 {_REPLAY_DRAIN_S:.0f} 秒收最后一轮…")
             await asyncio.sleep(_REPLAY_DRAIN_S)
         else:
-            for line, pcm in zip(LINES, audio, strict=True):
-                result = await _one_line(speech, books, line, pcm, silence)
+            for line in LINES:
+                for cue in line.setup:
+                    await _setup_turn(speech, books, audio[cue], silence)
+                result = await _one_line(speech, books, line, audio[line.text], silence)
                 results.append(result)
-                print(
-                    f"{len(results):>2}/{len(LINES)} {line.expected.value:<10} → "
-                    f"{'拦下' if result.skipped else result.status:<9} {result.head}"
-                )
+                want = "要接" if line.should_answer else "别接"
+                got = "拦下" if result.skipped else ("出声" if result.spoke else "无输出")
+                print(f"{len(results):>2}/{len(LINES)} {want} → {got:<4} {result.head}")
     finally:
         for task in tasks:
             task.cancel()
@@ -410,19 +497,29 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
 
     print()
     print(_render(results))
-    total = len(results)
-    decided = sum(r.decided_right for r in results)
-    correct = sum(r.correct for r in results)
-    over = sum(r.over_skip for r in results)
-    under = sum(r.under_skip for r in results)
-    no_reply = sum(r.status == "no_reply" for r in results)
+    scored = [r for r in results if not r.no_output]
+    total = len(scored)
+    if not total:
+        print("\n每一句都没有输出，这一轮不成立——先查链路，别读下面的数")
+        return 1
+    decided = sum(r.decided_right for r in scored)
+    over = sum(r.over_skip for r in scored)
+    under = sum(r.under_skip for r in scored)
+    dead = len(results) - total
+    hard = [r for r in scored if not r.line.should_answer and len(r.line.text) <= 8]
     print()
     print(
-        f"该不该说判对 {decided}/{total} = {decided / total:.0%}   过度不接 {over}   漏拦 {under}"
+        f"该不该说判对 {decided}/{total} = {decided / total:.0%}   "
+        f"该接没接 {over}   不该接却接了 {under}"
     )
-    print(f"记号分类准确 {correct}/{total} = {correct / total:.0%}   没回复 {no_reply}")
+    if hard:
+        hard_ok = sum(r.decided_right for r in hard)
+        print(
+            f"其中弱线索碎句 {hard_ok}/{len(hard)} = {hard_ok / len(hard):.0%}（实盘就栽在这一类）"
+        )
+    print(f"无输出 {dead} 句（被取消或空回复，不计入上面两个错误率）")
     print(f"门：{gate.status()}")
-    mean_s = sum(r.seconds for r in results) / total
+    mean_s = sum(r.seconds for r in results) / len(results)
     print(f"调度器判决 {len(scheduler.verdicts)} 条，平均每句 {mean_s:.1f} 秒")
     passed = decided / total >= 0.8 and over <= 1
     print("放行" if passed else "不放行")

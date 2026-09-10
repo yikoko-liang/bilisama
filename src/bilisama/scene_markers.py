@@ -1,19 +1,18 @@
-"""The scene markers she writes at the head of a microphone turn.
+"""The marker she writes at the head of a microphone turn.
 
 The microphone hears the whole room and the provider answers every VAD turn
-on its own. The one judgement only the model can make — who the streamer was
-talking to — is reported here: a half-width bracket tag at the very start of
-the reply, nothing before it, and a note of a few words after it. A turn
-that IS for her carries no marker at all. The audio is the provider's, so
-whatever she writes gets spoken; a marked turn is therefore one that never
-plays, and the absence of a marker is the whole "speak" signal.
+on its own. The one judgement only the model can make — is the streamer
+talking to ME — is reported here: ``[SKIP]`` at the very start of the reply,
+nothing before it, and a note of a few words after it saying what she heard
+happening. A turn that IS for her carries no marker at all. The audio is the
+provider's, so whatever she writes gets spoken; a marked turn is therefore
+one that never plays, and the absence of a marker is the whole "speak"
+signal.
 
-The tags are the English category names on purpose. They survive the s2s
-official pipeline's speakable-character filter (only half-width brackets and
-``\\w`` do; upstream ``LLM/utils.py:18-21``), they map onto SceneCategory with
-no translation table, and one that leaks into a speaker sounds like a glitch
-rather than a word. The Chinese labels are for the prompt that teaches the
-tags and for the panel that shows the rulings.
+The tag is English on purpose. It survives the s2s official pipeline's
+speakable-character filter (only half-width brackets and ``\\w`` do; upstream
+``LLM/utils.py:18-21``), and one that leaks into a speaker sounds like a
+glitch rather than a word. The Chinese label is for the panel.
 
 No dependencies: persona (the prompt) and director (the decoder and the
 gate) both import this, and persona must not reach into director.
@@ -37,20 +36,22 @@ __all__ = [
 
 
 class SceneCategory(StrEnum):
-    """Who the streamer was talking to, as she heard it.
+    """What she reported about a microphone turn.
 
-    TO_ME has no marker — it is what a plain head means. DECLINED is the odd
-    one out: not a scene at all, but her answer to a turn WE asked for (the
-    phase-two probes), meaning she found nothing worth saying.
+    Two values, because the gate makes one decision: play this turn or hold
+    it. TO_ME has no marker — it is what a plain head means.
+
+    It used to be five scenes (AUDIENCE, SELF_TALK, READING, GUEST, UNSURE)
+    plus DECLINED. They all mapped to the same action, production used one of
+    them for 91% of skips (275 of 302 on 2026-09-09), and the categories were
+    not even orthogonal — reading a danmaku aloud TO the audience is both
+    READING and AUDIENCE. Making her choose among them before speaking spent
+    attention on the judgement that measurement showed to be the weak one.
+    The scene now lives in the note, in her own words.
     """
 
     TO_ME = "to_me"
-    AUDIENCE = "audience"
-    SELF_TALK = "self_talk"
-    READING = "reading"
-    GUEST = "guest"
-    UNSURE = "unsure"
-    DECLINED = "declined"
+    SKIP = "skip"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,21 +64,22 @@ class Marker:
     meaning: str
 
 
-MARKERS: tuple[Marker, ...] = (
-    Marker("AUDIENCE", SceneCategory.AUDIENCE, "对观众", "主播在对观众讲话"),
-    Marker("SELF_TALK", SceneCategory.SELF_TALK, "自语", "主播在自言自语"),
-    Marker("READING", SceneCategory.READING, "念弹幕", "主播在念弹幕、念礼物或谢礼物"),
-    Marker("GUEST", SceneCategory.GUEST, "连麦", "主播在跟连麦的人或旁边的人说话"),
-    Marker("UNSURE", SceneCategory.UNSURE, "不确定", "听不出主播在跟谁说"),
-    Marker("DECLINED", SceneCategory.DECLINED, "不说", "被邀请开口，但没有值得说的"),
-)
+MARKERS: tuple[Marker, ...] = (Marker("SKIP", SceneCategory.SKIP, "先听", "这一轮不接话"),)
 
-# Spellings a model invents for "not for me". Folded to UNSURE rather than
-# taught, and only recognised inside brackets, where the intent is unambiguous.
+# Spellings that also mean "not for me". The five retired scene tags are here
+# rather than deleted: a session opened under the old contract may still be
+# running, a persona file may carry the old wording, and a model that invents
+# SELF_TALK on its own is telling us exactly what SKIP means. Recognised only
+# inside brackets, where the intent is unambiguous.
 ALIASES: dict[str, SceneCategory] = {
-    "略": SceneCategory.UNSURE,
-    "SKIP": SceneCategory.UNSURE,
-    "PASS": SceneCategory.UNSURE,
+    "AUDIENCE": SceneCategory.SKIP,
+    "SELF_TALK": SceneCategory.SKIP,
+    "READING": SceneCategory.SKIP,
+    "GUEST": SceneCategory.SKIP,
+    "UNSURE": SceneCategory.SKIP,
+    "DECLINED": SceneCategory.SKIP,
+    "略": SceneCategory.SKIP,
+    "PASS": SceneCategory.SKIP,
 }
 
 _BY_KEY: dict[str, SceneCategory] = {

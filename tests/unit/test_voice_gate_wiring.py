@@ -74,7 +74,8 @@ async def _wired(
                 clear_playback=skip.clear_playback,
             )
             if ruling is not None and ruling.note:
-                rig.notes.append(f"[主播{ruling.label}] {ruling.note}")
+                # Mirrors dev_talk.on_voice_skip; kept in step by hand.
+                rig.notes.append(f"[主播语音] {ruling.note}")
 
         gate = VoiceTurnGate(
             clock,
@@ -129,7 +130,7 @@ def _drain(scheduler: Scheduler) -> list[PlaybackClear]:
 
 
 async def test_a_turn_not_for_her_never_reaches_the_speakers() -> None:
-    script = Script(reply_text="[READING] 主播在念弹幕", delta_chunks=2, delta_interval_s=0.05)
+    script = Script(reply_text="[SKIP] 主播在念弹幕", delta_chunks=2, delta_interval_s=0.05)
     async with _wired(script) as rig:
         await rig.server.emit_implicit_reply()
         await _until(lambda: len(rig.scheduler.verdicts) == 1, what="门的判决")
@@ -137,10 +138,13 @@ async def test_a_turn_not_for_her_never_reaches_the_speakers() -> None:
         assert verdict.source == "voice"
         assert (verdict.outcome, verdict.phase) == (Outcome.SKIPPED, Phase.GENERATING)
         assert verdict.reason is SkipReason.VOICE_NOT_ADDRESSED
-        assert verdict.detail == "READING · 主播在念弹幕"
+        assert verdict.detail == "SKIP · 主播在念弹幕"
         await _until(lambda: not rig.floor.implicit_active, what="地板放开")
         await asyncio.sleep(0.1)  # let every late frame land in both views
-        assert rig.server.recorded.count("response.cancel") == 1
+        assert rig.server.recorded.count("response.cancel") == 0, (
+            "this reply ended while the gate was still collecting its note, so "
+            "there was nothing left to cancel — the mute had already landed"
+        )
         assert _audio_frames(rig.gated) == [], "nothing of the turn reached the speakers"
         assert not any(isinstance(e, link.ReplyTextDelta) for e in rig.gated)
         assert not any(isinstance(e, link.ReplyDone) for e in rig.gated), "held turn: no end"
@@ -148,7 +152,24 @@ async def test_a_turn_not_for_her_never_reaches_the_speakers() -> None:
         assert _audio_frames(rig.raw), "the raw view (the scheduler's) saw the audio"
         assert rig.scheduler.status()["implicit_active"] is False
         assert _drain(rig.scheduler) == [], "nothing played, nothing to flush"
-        assert rig.notes == ["[主播念弹幕] 主播在念弹幕"]
+        assert rig.notes == ["[主播语音] 主播在念弹幕"]
+
+
+async def test_a_reply_still_running_when_the_note_window_closes_is_cancelled() -> None:
+    """The other half of the note window: when she keeps talking, we cut her.
+
+    The two tests above end inside the window and need no cancel. A reply
+    that outlives it does — the mute stops the room hearing her, but the
+    provider is still generating and still holding the one response slot.
+    """
+    script = Script(reply_text="[SKIP] 主播在念弹幕", delta_chunks=40, delta_interval_s=0.05)
+    async with _wired(script) as rig:
+        await rig.server.emit_implicit_reply()
+        await _until(lambda: len(rig.scheduler.verdicts) == 1, what="门的判决")
+        await _until(
+            lambda: rig.server.recorded.count("response.cancel") == 1, what="窗口到期后的取消"
+        )
+        assert _audio_frames(rig.gated) == [], "muted from the bracket, cancel or no cancel"
 
 
 async def test_a_turn_for_her_reaches_the_speakers_whole() -> None:
@@ -166,16 +187,16 @@ async def test_a_turn_for_her_reaches_the_speakers_whole() -> None:
 async def test_the_dashscope_shape_decides_on_the_closing_bracket() -> None:
     # 14 characters over 8 chunks: the fake splits into one-character deltas,
     # so the decision has to land on the `]` and not before.
-    script = Script(reply_text="[AUDIENCE] 主播在讲故事", delta_chunks=8, delta_interval_s=0.01)
+    script = Script(reply_text="[SKIP] 主播在讲故事", delta_chunks=8, delta_interval_s=0.01)
     async with _wired(script, hosted=True) as rig:
         await rig.server.emit_implicit_reply()
         await _until(lambda: len(rig.scheduler.verdicts) == 1, what="门的判决")
         verdict = rig.scheduler.verdicts[0]
         assert verdict.reason is SkipReason.VOICE_NOT_ADDRESSED
-        assert verdict.detail.startswith("AUDIENCE")
+        assert verdict.detail.startswith("SKIP")
         await _until(lambda: not rig.floor.implicit_active, what="地板放开")
         await asyncio.sleep(0.1)
-        assert rig.server.recorded.count("response.cancel") == 1
+        assert rig.server.recorded.count("response.cancel") == 0, "ended inside the note window"
         assert _audio_frames(rig.gated) == []
         assert _audio_frames(
             rig.raw
@@ -183,7 +204,7 @@ async def test_the_dashscope_shape_decides_on_the_closing_bracket() -> None:
 
 
 async def test_audio_ahead_of_its_text_is_released_then_cut_on_the_late_marker() -> None:
-    script = Script(reply_text="[SELF_TALK] 嘀咕", delta_chunks=1, text_lag_s=0.5)
+    script = Script(reply_text="[SKIP] 嘀咕", delta_chunks=1, text_lag_s=0.5)
     async with _wired(script, hold_max_s=0.15) as rig:
         await rig.server.emit_implicit_reply()
         await _until(lambda: len(_audio_frames(rig.gated)) == 1, what="超时放行的音频")
@@ -192,7 +213,7 @@ async def test_audio_ahead_of_its_text_is_released_then_cut_on_the_late_marker()
         await _until(lambda: len(rig.scheduler.verdicts) == 1, what="迟到记号的判决")
         verdict = rig.scheduler.verdicts[0]
         assert verdict.reason is SkipReason.VOICE_NOT_ADDRESSED
-        assert verdict.detail == "SELF_TALK · 嘀咕"
+        assert verdict.detail == "SKIP · 嘀咕"
         assert rig.gate.status()["late_markers"] == 1
         assert _drain(rig.scheduler) == [PlaybackClear(reason="voice_not_addressed")]
         await _until(lambda: not rig.floor.implicit_active, what="地板放开")
