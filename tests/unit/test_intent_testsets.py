@@ -24,6 +24,23 @@ _ROOT = Path(__file__).resolve().parents[2]
 _TESTSETS = _ROOT / "config" / "testsets"
 _LABELS = {"TO_ME", "AUDIENCE", "SELF_TALK", "READING", "GUEST", "UNSURE", "DECLINED"}
 _SETUP_ROWS = {2, 7, 13, 18, 23, 28, 33, 37, 42, 50, 63, 68, 74, 83, 89}
+
+
+def test_anchor_answer_case_has_real_ordered_signals(intent_catalog: MockTestCatalog) -> None:
+    case = intent_catalog.case("hard-19")
+    assert not case.source_rows
+    assert not case.allow_proactive
+    voice, wait = case.steps
+    assert voice.kind == "voice" and wait.kind == "wait"
+    question, answer = voice.events_during
+    assert question.offset_s < answer.offset_s
+    assert question.event.kind is answer.event.kind is EventKind.DANMAKU
+    assert not question.event.viewer.is_anchor and answer.event.viewer.is_anchor
+    assert question.event.route == answer.event.route == "crowd"
+    assert question.event.viewer.name in answer.event.text
+    assert wait.observe_s >= 15
+
+
 _SOURCE_RANGES = (
     (2, 6),
     (7, 12),
@@ -268,10 +285,10 @@ def test_catalog_contains_two_intent_sets_with_the_requested_counts(
 ) -> None:
     assert [(item.id, len(item.cases)) for item in intent_catalog.sets] == [
         ("simple", 14),
-        ("hard", 18),
+        ("hard", 19),
     ]
     cases = [case for test_set in intent_catalog.sets for case in test_set.cases]
-    assert len({case.id for case in cases}) == 32
+    assert len({case.id for case in cases}) == 33
     assert all(case.steps for case in cases)
     assert all(not (case.events or case.bursts or case.actions) for case in cases)
 
@@ -328,6 +345,8 @@ def test_hard_platform_events_match_their_source_rows_and_preserve_identity(
 ) -> None:
     signals: list[tuple[int, MockEvent]] = []
     for case in intent_catalog.sets[1].cases:
+        if not case.source_rows:
+            continue
         for step in case.steps:
             if step.event is not None:
                 signals.append((step.source_row, step.event))
@@ -386,7 +405,7 @@ def test_hard_platform_events_match_their_source_rows_and_preserve_identity(
 def test_hard_set_preserves_all_workbook_groups_and_rows(
     intent_catalog: MockTestCatalog,
 ) -> None:
-    cases = intent_catalog.sets[1].cases
+    cases = [case for case in intent_catalog.sets[1].cases if case.source_rows]
     assert [case.id for case in cases] == [f"hard-{index:02}" for index in range(1, 19)]
     all_rows: list[int] = []
     for case, (start, end) in zip(cases, _SOURCE_RANGES, strict=True):
@@ -403,6 +422,8 @@ def test_hard_steps_trace_every_behavior_row_without_turning_setup_into_speech(
 ) -> None:
     observed_rows: set[int] = set()
     for case in intent_catalog.sets[1].cases:
+        if not case.source_rows:
+            continue
         for step in case.steps:
             rows = {step.source_row, *(item.source_row for item in step.events_during)}
             assert rows <= set(case.source_rows), (case.id, step.id, rows)
@@ -416,7 +437,9 @@ def test_hard_steps_trace_every_behavior_row_without_turning_setup_into_speech(
 def test_hard_set_has_complete_voice_event_and_wait_inputs(
     intent_catalog: MockTestCatalog,
 ) -> None:
-    steps = [step for case in intent_catalog.sets[1].cases for step in case.steps]
+    steps = [
+        step for case in intent_catalog.sets[1].cases if case.source_rows for step in case.steps
+    ]
 
     assert len(steps) == 86
     assert Counter(step.kind for step in steps) == {"voice": 56, "event": 22, "wait": 8}

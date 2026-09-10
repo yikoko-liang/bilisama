@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -18,6 +19,15 @@ from tests.fakes.bili import danmaku_event, entry_event, gift_event
 
 def _clock() -> FakeClock:
     return FakeClock(wall=datetime(2026, 8, 27, 12, 0, tzinfo=UTC))
+
+
+def test_anchor_danmaku_does_not_change_audience_activity() -> None:
+    pacer, _ = _pacer()
+    before = pacer.snapshot()
+    for index in range(40):
+        event = danmaku_event(f"主播回答 {index}")
+        pacer.note_event(replace(event, viewer=replace(event.viewer, is_anchor=True)))
+    assert pacer.snapshot() == before
 
 
 def _pacer(level: Chattiness = Chattiness.MEDIUM) -> tuple[EventPacer, FakeClock]:

@@ -182,7 +182,11 @@ class Assembly:
         """The one sink every source feeds. Memory always; speech maybe."""
         self._store.on_event(event)
         self._distiller.note_event()
-        if event.room_id > 0 and event.kind in _AUDIENCE_ACTIVITY_KINDS:
+        if (
+            event.room_id > 0
+            and event.kind in _AUDIENCE_ACTIVITY_KINDS
+            and not event.viewer.is_anchor
+        ):
             # A danmaku or SC also counts as answering a standing proactive
             # topic, so the unanswered counter resets on audience response,
             # not only on streamer speech.

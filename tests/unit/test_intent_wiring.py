@@ -264,7 +264,8 @@ async def test_each_catalog_platform_stimulus_reaches_assembly_memory_and_event_
         assert len(replay.events) == len(expected)
         assert len(replay.kit.store.recent_events()) == len(expected)
         assert replay.selector.status()["offered"] == sum(
-            event.kind in {EventKind.DANMAKU, EventKind.GIFT} for event in expected
+            event.kind in {EventKind.DANMAKU, EventKind.GIFT} and not event.viewer.is_anchor
+            for event in expected
         )
         assert replay.entries.status()["pending"] == sum(
             event.kind is EventKind.ENTRY and event.viewer.guard_level is GuardLevel.NONE
@@ -273,6 +274,7 @@ async def test_each_catalog_platform_stimulus_reaches_assembly_memory_and_event_
         for actual, spec in zip(replay.events, expected, strict=True):
             assert actual.kind is spec.kind
             assert actual.viewer.name == spec.viewer.name
+            assert actual.viewer.is_anchor is spec.viewer.is_anchor
             assert actual.viewer.guard_level is spec.viewer.guard_level
             assert actual.text == spec.text
             assert actual.room_id == 990000

@@ -99,7 +99,7 @@ class EventPacer:
 
     def note_event(self, event: LiveEvent) -> None:
         """Add one platform event. Console events and microphone turns stay out."""
-        if event.room_id <= 0:
+        if event.room_id <= 0 or event.viewer.is_anchor:
             return
         now = self._clock.monotonic()
         if event.kind is EventKind.DANMAKU:

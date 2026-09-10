@@ -57,6 +57,7 @@ class MockViewer(BaseModel):
     wealth_level: int = Field(default=0, ge=0)
     guard_level: GuardLevel = GuardLevel.NONE
     is_admin: bool = False
+    is_anchor: bool = False
     medal: MockMedal | None = None
 
 
@@ -506,6 +507,7 @@ class MockTestRunner:
             wealth_level=spec.viewer.wealth_level,
             guard_level=spec.viewer.guard_level,
             is_admin=spec.viewer.is_admin,
+            is_anchor=spec.viewer.is_anchor,
             medal=(Medal(**spec.viewer.medal.model_dump()) if spec.viewer.medal else None),
         )
         gift = None

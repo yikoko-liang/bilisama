@@ -434,6 +434,29 @@ async def test_source_discards_retired_run_events_before_a_later_run(rig: _Rig) 
     await source_task
 
 
+@pytest.mark.parametrize("is_anchor", [True, False])
+async def test_event_injection_preserves_anchor_identity(rig: _Rig, is_anchor: bool) -> None:
+    event = _event().model_copy(
+        update={"viewer": MockViewer(uid=7, name="测试用户", is_anchor=is_anchor), "route": "crowd"}
+    )
+    rig.configure(
+        [ScenarioStep(id="event", kind="event", event=event, expected="记录身份", observe_s=1)]
+    )
+    await rig.start()
+    delivered: list[LiveEvent] = []
+
+    async def sink(item: LiveEvent) -> None:
+        delivered.append(item)
+
+    task = asyncio.create_task(rig.source.start(sink))
+    await rig.clock.advance(0)
+    await rig.source.stop()
+    await task
+    assert len(delivered) == 1
+    assert delivered[0].viewer.is_anchor is is_anchor
+    assert delivered[0].room_id > 0
+
+
 async def test_published_observation_snapshots_do_not_mutate_after_receipts(rig: _Rig) -> None:
     await rig.start()
     previous = rig.states[-1]["observations"]

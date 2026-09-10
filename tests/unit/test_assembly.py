@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -474,6 +475,23 @@ async def test_anchor_danmaku_is_observed_remembered_and_shared_without_reply(
     assert "不需要单独回复" in history_items[0]
     assert kit.intents == [], "the anchor message must never enter reply selection"
     assert kit.assembly.status()["anchor_context_written"] == 1
+
+
+@pytest.mark.parametrize("is_anchor", [True, False])
+async def test_only_audience_danmaku_updates_proactive_activity(
+    tmp_path: Path, is_anchor: bool
+) -> None:
+    kit = build_assembly_kit(tmp_path)
+    assert kit.proactive is not None
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=9,
+        viewer=Viewer(uid=42, name="测试用户", is_anchor=is_anchor),
+        text="保存到本地。",
+    )
+    with patch.object(kit.proactive, "note_activity") as note:
+        await kit.assembly.on_event(event)
+    assert note.call_count == (0 if is_anchor else 1)
 
 
 async def test_pause_gate_keeps_memory_and_feed_but_silences_everything(tmp_path: Path) -> None:
