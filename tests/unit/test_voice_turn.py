@@ -7,6 +7,10 @@ scheduler's kill path has its own tests.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from bilisama.clock import FakeClock
 from bilisama.config.enums import VoiceReplyMode
 from bilisama.director.turn_protocol import Ruling, TurnPolicy
@@ -320,7 +324,69 @@ async def test_status_has_the_shape_the_health_card_reads() -> None:
         "holding": 0,
         "passed": 0,
         "skipped": 0,
+        "recent_turns": 0,
+        "recent_skipped": 0,
         "timeouts": 0,
         "late_markers": 0,
         "longest_hold_ms": 0,
     }
+
+
+def _logged(caplog: pytest.LogCaptureFixture, event: str) -> list[tuple[str, dict[str, object]]]:
+    """(level, fields) for every `event` record, in order."""
+    return [
+        (record.levelname.lower(), dict(getattr(record, "fields", {})))
+        for record in caplog.records
+        if record.getMessage() == event
+    ]
+
+
+async def test_every_decided_turn_leaves_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    """A session where she never writes a marker must not log silence.
+
+    voice_gate.skipped was the only line the gate wrote at info, so a backend
+    that answers every turn in plain prose produced no gate output at all —
+    which reads as "the gate is not wired" rather than "she gave it nothing
+    to hold". Both halves are info now, and the pair reconstructs the run.
+    """
+    caplog.set_level(logging.INFO, logger="bilisama.director.voice_turn")
+    rig = _Rig()
+    plain = rig.start()
+    passed = _text(plain, "在呢，怎么啦")
+    assert rig.gate.feed(passed) == (passed,)
+    marked = rig.start()
+    assert rig.gate.feed(_text(marked, "[SKIP] 主播在嘀咕")) == ()
+    await rig.settle()
+
+    lines = _logged(caplog, "voice_gate.passed")
+    assert [f["why"] for _, f in lines] == ["plain"]
+    assert all(level == "info" for level, _ in lines), "debug hides it from a real run"
+    assert len(_logged(caplog, "voice_gate.skipped")) == 1
+    for _, fields in lines:
+        assert "text" not in str(fields), "her prose does not belong in the log"
+
+
+async def test_the_health_card_shows_the_last_few_turns_not_just_the_total() -> None:
+    """A collapse has to be visible while it is happening.
+
+    The cumulative rate is dominated by however the session started: four good
+    minutes followed by twenty minutes of answering everything still reads
+    near 50%. The rolling window is what says "right now, nothing is being
+    held".
+    """
+    rig = _Rig()
+    for _ in range(20):  # a healthy stretch
+        hers = rig.start()
+        assert rig.gate.feed(_text(hers, "[SKIP] 不是对我说的")) == ()
+        await rig.settle()
+    assert rig.gate.status()["recent_skipped"] == 20
+    assert rig.gate.status()["recent_turns"] == 20
+
+    for _ in range(20):  # then it stops holding anything
+        hers = rig.start()
+        speaks = _text(hers, "好的呀")
+        assert rig.gate.feed(speaks) == (speaks,)
+    status = rig.gate.status()
+    assert status["skipped"] == 20, "the cumulative count still remembers the good stretch"
+    assert status["recent_skipped"] == 0, "but the window says it has stopped"
+    assert status["recent_turns"] == 20, "the window is full, not empty"

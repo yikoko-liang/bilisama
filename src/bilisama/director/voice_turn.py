@@ -58,6 +58,11 @@ _HOLD_MAX_S = 0.6
 _HOLD_CAP_FRAMES = 200
 # How many skipped handle ids the gate remembers for ui_feed's benefit.
 _SKIPPED_REMEMBERED = 64
+# How many decisions the health card's rolling rate covers. The cumulative
+# rate hides a collapse: a session that judged well for four minutes and then
+# stopped skipping entirely still reads 48% an hour later, and on 2026-09-09
+# the only way to see it happening was to slice the log by minute afterwards.
+_RECENT_WINDOW = 20
 # How long the gate keeps DECODING a turn it has already muted, to catch the
 # note the provider streams after the tag. Muting is not delayed by this —
 # the frames stop at the closing bracket — only the cancel is, and only until
@@ -122,6 +127,8 @@ class VoiceTurnGate:
         self._emit: Emit | None = None
         self._turns: dict[int, _Turn] = {}
         self._skipped_ids: deque[int] = deque(maxlen=_SKIPPED_REMEMBERED)
+        # One bool per decided turn, True for skipped. Only the tail matters.
+        self._recent: deque[bool] = deque(maxlen=_RECENT_WINDOW)
         self._tasks: set[asyncio.Task[None]] = set()
         self._passed = 0
         self._skipped = 0
@@ -169,6 +176,10 @@ class VoiceTurnGate:
             "timeouts": self._timeouts,
             "late_markers": self._late_markers,
             "longest_hold_ms": self._longest_hold_ms,
+            # The last few turns, so a collapse shows while it is happening
+            # rather than after someone slices the log by minute.
+            "recent_turns": len(self._recent),
+            "recent_skipped": sum(self._recent),
         }
 
     def close(self) -> None:
@@ -352,7 +363,15 @@ class VoiceTurnGate:
         held_ms = int((self._clock.monotonic() - turn.opened_at) * 1000)
         self._longest_hold_ms = max(self._longest_hold_ms, held_ms)
         self._passed += 1
-        log.debug(
+        self._recent.append(False)
+        # info, not debug: this is the other half of voice_gate.skipped, and
+        # without it a session where she never writes a marker logs NOTHING
+        # from the gate — which reads as "the gate is not wired" when what
+        # actually happened is "she never gave it anything to hold". That
+        # misreading cost real time on 2026-09-09. `why` carries the whole
+        # story (plain / speak / timeout / cap / end / mode); her prose does
+        # not appear here, only the decoder's verdict about it.
+        log.info(
             "voice_gate.passed",
             handle_id=turn.handle.handle_id,
             why=why,
@@ -410,6 +429,7 @@ class VoiceTurnGate:
         turn.muted = True
         turn.skipped = True
         self._skipped += 1
+        self._recent.append(True)
         self._skipped_ids.append(turn.handle.handle_id)
         if ruling is not None and ruling.unbracketed:
             log.info("voice_gate.marker_unbracketed", handle_id=turn.handle.handle_id)

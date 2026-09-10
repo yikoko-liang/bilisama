@@ -676,12 +676,22 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/tofu/pinned.
   备注早先几乎总是空的（实盘 302 次拦截 298 次是 0 字）：解析器读到 `]` 就把备注定稿，而 DashScope 是逐字流式，
   `]` 先到、备注后到。同日改了——**禁播和收备注分开**：识别到记号立刻禁播，再继续解码 20 字或 300 毫秒收备注，
   到点或回复自己结束才发判决。所以备注现在应该有字；再看到成片的空备注，先查是不是回复被别的东西提前砍了。
-- **健康卡 `voice_gate`**：`mode`、`holding`（此刻攒着的回复数）、`passed`、`skipped`、`timeouts`（文字没在
+- **她一个记号都不写的时候，日志长什么样**：记号只出现在 `voice_gate.skipped` 那一行的 `category` 和
+  `note_text` 里。她一次都不写 → 门一次都不拦 → **那一行一条都没有**，看起来像门没接上，其实是「她没给门
+  可判的东西」。这个误读 2026-09-09 害人绕过路，所以 `voice_gate.passed` 也抬到了 info：**每一轮都会留一行**，
+  `why` 说明是怎么放行的（`plain` 没写记号 / `speak` 写了但策略表放行 / `timeout` 文字太慢 / `cap` 攒满 /
+  `end` 回复结束才判 / `mode` 开关切了）。**满屏 `why=plain` 就是「她一个记号都没写」**，和门没接上是两回事。
+  她的原话不进日志，只记解码结果。
+- **健康卡 `voice_gate`**：`mode`、`holding`（此刻攒着的回复数）、`passed`、`skipped`、
+  **`recent_turns` / `recent_skipped`（最近 20 轮）**、`timeouts`（文字没在
   600 毫秒内到、先放行的次数）、`late_markers`（放行之后才看到记号、切断并冲扬声器的次数）、`longest_hold_ms`。
   DashScope 文字领先音频约 210 毫秒，s2s 整条回复的文字先于全部音频，这两家 `longest_hold_ms` 应该是 0；
   **火山是文字和音频同一刻到、音频还略先一点**，所以它攒几十毫秒是正常的（验收里 49 毫秒）。三家验收时
   `timeouts` 和 `late_markers` 都是 0，涨了先看是不是回复特别长或者网络抖了，别急着动常量。`late_markers`
   还有一条无害的来路：门关着（`always`）而她照样写了记号，那一次也计进去（`voice_turn.py:288-309`）。
+  **看塌没塌要看 `recent_*` 那一对，不要看累计值。** 累计被开场那段好成绩稀释：一场开头四分钟判得好、
+  之后二十分钟什么都接，累计仍然是 48%，`recent_skipped` 却已经是 0。2026-09-09 那次全靠事后按分钟切日志
+  才看出来，这一对就是为了不用再切。
 - **日志**（`runtime.log_level = "debug"`）：`voice_gate.held / passed / skipped / late_marker / marker_midway /
   marker_unbracketed / mode_changed`，调度器那边是 `scheduler.implicit_killed`。备注在 `note_text` 字段，
   日志按观众内容的规矩只记长度，字在面板判决那一行；上面说的空备注，日志记 0、面板也没字。
