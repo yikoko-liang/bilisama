@@ -132,6 +132,12 @@ class Fault(StrEnum):
     # direction, since a client that survives the permanent wedge also survives
     # the transient one.
     WEDGE_ON_INJECTION = "wedge_on_injection"
+    # A cancel that finds no reply in flight draws an error instead of silence.
+    # Upstream s2s stays silent (websocket_router.py:343-346), which is why this
+    # is a flag and not the default; DashScope errors, and production saw it on
+    # 3% of the gate's cancels before the note window and 20% after — the window
+    # gives the reply 300 ms more to finish first, so the race lands more often.
+    ERROR_ON_EMPTY_CANCEL = "error_on_empty_cancel"
     # Reply hangs forever, to exercise the client-side watchdog.
     STALL_RESPONSE = "stall_response"
     # conversation.item.create is accepted and never acknowledged — not deferred,
@@ -170,6 +176,12 @@ class Script:
     delta_chunks: int = 3
     # Gap between deltas, so a test can slip an interruption in mid-reply.
     delta_interval_s: float = 0.0
+    # Audio ahead of its own text by this much, per piece. No shipped provider
+    # has been seen to do this (plan §三: all three send text first); it exists
+    # to exercise the voice gate's timeout path, where the frames are released
+    # before the head can be read and a marker arriving afterwards has to
+    # flush the speakers. Audio replies only.
+    text_lag_s: float = 0.0
     audio_ms_per_delta: int = 40
     # How much audio the client must append after speech_stopped before the
     # speculative window closes. An audio clock, not a wall clock: upstream
@@ -776,6 +788,8 @@ class MockRealtimeServer:
         # it, and _finish_response flushes, so no item can be stranded.
         target = self._slot_holder()
         if target is None:
+            if self.script.has(Fault.ERROR_ON_EMPTY_CANCEL):
+                await self._error("invalid_request_error", "Conversation has no active response.")
             return
         await self._finish_response(target, status="cancelled", reason="client_cancelled")
 
@@ -820,17 +834,21 @@ class MockRealtimeServer:
                 # all-text done. GA (s2s) streams NOTHING per piece — its text
                 # arrives as one output_audio_transcript.done PER LLM CHUNK
                 # (handlers/response.py:362), sent right here.
+                audio_frame = {
+                    "response_id": rid,
+                    "delta": base64.b64encode(_pcm(self.script.audio_ms_per_delta)).decode(),
+                }
+                if self.script.text_lag_s > 0:
+                    await self.send(dia.ServerEvent.AUDIO_DELTA, **audio_frame)
+                    await asyncio.sleep(self.script.text_lag_s)
                 if self._is_hosted():
                     await self.send(dia.ServerEvent.TRANSCRIPT_DELTA, response_id=rid, delta=piece)
                 else:
                     await self.send(
                         dia.ServerEvent.TRANSCRIPT_DONE, response_id=rid, transcript=piece
                     )
-                await self.send(
-                    dia.ServerEvent.AUDIO_DELTA,
-                    response_id=rid,
-                    delta=base64.b64encode(_pcm(self.script.audio_ms_per_delta)).decode(),
-                )
+                if self.script.text_lag_s <= 0:
+                    await self.send(dia.ServerEvent.AUDIO_DELTA, **audio_frame)
             else:
                 await self.send(dia.ServerEvent.TEXT_DELTA, response_id=rid, delta=piece)
             if self.script.delta_interval_s:

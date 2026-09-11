@@ -326,11 +326,16 @@ async def test_implicit_reply_is_booked_from_its_first_frame() -> None:
             done = await _next_event(events, link.ReplyDone)
             assert isinstance(done, link.ReplyDone)
             assert done.status is link.ReplyStatus.COMPLETED
+            # Minted from a frame nobody asked for: the handle says so, which
+            # is what lets the voice gate tell her own turn from ours.
+            assert done.handle.implicit
             # The slot must be free again: a fresh request completes too.
-            await linkobj.request_reply(link.ReplySpec(instructions="接一句"))
+            ours = await linkobj.request_reply(link.ReplySpec(instructions="接一句"))
+            assert not ours.implicit
             done2 = await _next_event(events, link.ReplyDone)
             assert isinstance(done2, link.ReplyDone)
             assert done2.status is link.ReplyStatus.COMPLETED
+            assert done2.handle is ours
         finally:
             await linkobj.aclose()
 
@@ -365,7 +370,10 @@ async def test_hosted_implicit_created_books_the_slot() -> None:
             await server.release_pending_reply()
             first = await _next_event(events, link.ReplyDone)
             assert isinstance(first, link.ReplyDone)
-            await request
+            # Announced by created rather than by a first frame, still hers.
+            assert first.handle.implicit
+            ours = await request
+            assert not ours.implicit
             second = await _next_event(events, link.ReplyDone)
             assert isinstance(second, link.ReplyDone)
             assert second.status is link.ReplyStatus.COMPLETED
@@ -768,3 +776,94 @@ async def test_a_queued_request_says_how_long_it_waited() -> None:
     assert waited, "the second create queued behind the first and said nothing"
     assert waited[0]["purpose"] == "reply"
     assert waited[0]["waited_ms"] >= 0
+
+
+async def test_cancelling_one_handle_twice_sends_one_cancel() -> None:
+    """A bare response.cancel names no reply: it kills whoever holds the slot.
+    Two callers cancelling the same reply (the voice gate and the scheduler's
+    guard can both decide to) must therefore cost one frame, not two — the
+    second frame would land after the done and murder the next reply.
+
+    The two cancels are gathered rather than awaited in turn: the second must
+    short-circuit on the record's own bookkeeping, before any done frame from
+    the server could have settled the record and made the test trivially pass.
+    """
+    script = Script(delta_chunks=4, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            handle = await linkobj.request_reply(link.ReplySpec(instructions="讲个长故事"))
+            events = linkobj.events()
+            await _next_event(events, link.ReplyTextDelta)
+            await asyncio.gather(linkobj.cancel(handle), linkobj.cancel(handle))
+            done = await _next_event(events, link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.CANCELLED
+            assert server.recorded.count("response.cancel") == 1
+        finally:
+            await linkobj.aclose()
+
+
+async def test_a_cancel_that_found_nothing_is_not_the_streamer_s_problem() -> None:
+    """The one error the client swallows, and why it may.
+
+    The voice gate mutes a turn the moment its tag closes, then keeps decoding
+    for up to 300 ms to catch the note before it cancels. That window gives the
+    reply time to finish on its own, so the cancel often lands on a response
+    that is already over and DashScope answers `invalid_request_error`. Nothing
+    is wrong and nothing is actionable — the turn was silenced either way — but
+    it used to reach the streamer's chat as a line of red English, on 20% of
+    skips in production (3% before the window existed).
+
+    Narrow on purpose: only an error naming a missing response, and only while
+    a cancel we sent is still in flight. Anything else still comes up.
+    """
+    script = Script(delta_chunks=30, delta_interval_s=0.05)
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            handle = await linkobj.request_reply(link.ReplySpec(instructions="讲个长故事"))
+            await _next_event(events, link.ReplyTextDelta)
+            await linkobj.cancel(handle)
+            await asyncio.sleep(0.1)  # let the frame land before reading the log
+            assert server.recorded.count("response.cancel") == 1
+            # What DashScope answers when the reply beat the cancel there.
+            await server.send(
+                dia.ServerEvent.ERROR,
+                error={
+                    "type": "invalid_request_error",
+                    "message": "Conversation has no active response.",
+                },
+            )
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(_next_event(events, link.LinkError), timeout=0.6)
+        finally:
+            await linkobj.aclose()
+
+
+async def test_an_unprompted_invalid_request_still_reaches_the_streamer() -> None:
+    """The suppression is scoped to a cancel we just sent, not to the code.
+
+    Same error text, no cancel in flight: it must come up, or a real rejected
+    request would go missing for the same reason the benign one does.
+    """
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=Script()) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            await server.send(
+                dia.ServerEvent.ERROR,
+                error={
+                    "type": "invalid_request_error",
+                    "message": "Conversation has no active response.",
+                },
+            )
+            err = await asyncio.wait_for(_next_event(events, link.LinkError), timeout=2.0)
+            assert isinstance(err, link.LinkError)
+            assert err.code == "invalid_request_error"
+        finally:
+            await linkobj.aclose()

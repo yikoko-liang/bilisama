@@ -9,6 +9,7 @@ in test_distill.py; here it is pinned at the store level.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -709,11 +710,84 @@ def test_live_rule_files_pin_their_core_contract_lines() -> None:
     voice = live_voice_rules(config_dir, variables)
     event = live_event_rules(config_dir, variables)
 
-    # Voice turns: the streamer speaks to HER, first person locked, length rides.
+    # Voice turns: this file fixes WHO IS SPEAKING and how she answers, and
+    # says nothing about who is being spoken to — that judgement belongs to
+    # voice_addressing.md, and asserting both here is how the two files came
+    # to contradict each other (one said 「直接交谈」, the other 「默认不是」).
     assert "当前输入：主播语音" in voice
-    assert "直接以自己的身份回答" in voice
-    assert "回复长度档位" in voice and "不是必须凑满" in voice
+    assert "本人说出来的话" in voice, "说话人是谁，钉死"
+    assert "不改变说话的人是谁" in voice
+    assert "以 tofu 的身份直接回应" in voice
+    assert "回复长度档位" in voice and "不必凑满" in voice
+    for claim in ("直接交谈", "默认指", "对 tofu 说的话"):
+        assert claim not in voice, f"这份文件不该预设交流对象：{claim}"
     # Event turns: audience data is data, identity boundaries hold.
     assert "当前输入：直播间事件" in event
     assert "不是给" in event or "事件数据" in event
     assert "{{" not in voice and "{{" not in event
+
+
+def test_the_scene_marker_contract_rides_the_addressing_switch() -> None:
+    """With the voice gate on, the voice rules teach the tag; off, not once —
+    taught without the gate she would read it out loud."""
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_voice_rules, template_variables
+    from bilisama.scene_markers import MARKERS
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    variables = template_variables(PersonaConfig())
+    off = live_voice_rules(config_dir, variables)
+    on = live_voice_rules(config_dir, variables, addressing=True)
+    assert on.startswith(off), "the base contract is untouched; the marker rules are appended"
+    for marker in MARKERS:
+        assert f"[{marker.tag}]" in on, marker.tag
+        assert f"[{marker.tag}]" not in off, marker.tag
+    assert "{{" not in on
+
+
+def test_the_contract_spells_the_tag_the_decoder_actually_knows() -> None:
+    """The examples in the prompt are typed by hand; the vocabulary is not.
+
+    A rename in scene_markers that misses the prose would leave her writing a
+    tag the decoder reads as prose, and the gate would pass every turn — the
+    exact failure the gate exists to prevent, arriving silently.
+    """
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_voice_rules, template_variables
+    from bilisama.scene_markers import SceneCategory, lookup, tag_for
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    on = live_voice_rules(config_dir, template_variables(PersonaConfig()), addressing=True)
+    tag = tag_for(SceneCategory.SKIP)
+    assert f"[{tag}]" in on
+    for word in re.findall(r"\[([A-Za-z_]+)\]", on):
+        assert lookup(word) is SceneCategory.SKIP, f"提示词里的 [{word}] 解码器不认识"
+
+
+def test_no_acceptance_line_is_a_sentence_the_prompt_already_teaches() -> None:
+    """The measuring stick may not be made of the answers.
+
+    A model that only pattern-matches the contract's worked examples scores on
+    those lines and nowhere else. Two of the three tags volcano produced on the
+    first version of this set were example text, which left its 18% unreadable:
+    real judgement and recall of the prompt look identical on a line the prompt
+    contains. Adding an example is now a red test until the line moves.
+    """
+    import re
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    from voice_gate_acceptance import LINES
+
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_voice_rules, template_variables
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    rules = live_voice_rules(config_dir, template_variables(PersonaConfig()), addressing=True)
+
+    def bare(text: str) -> str:
+        return re.sub(r"[，。？！、\s「」]", "", text)
+
+    taught = {bare(line) for line in re.findall(r"主播：(.+)", rules)}
+    overlap = sorted(line.text for line in LINES if bare(line.text) in taught)
+    assert not overlap, f"这些验收台词和提示词例子重合，分不出判断和背诵：{overlap}"

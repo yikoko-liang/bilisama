@@ -35,6 +35,7 @@ SKIP_REASONS = {
     "RESULT_EXPIRED": "background.result_expired",
     "PANIC_MUTE": "policy.panic_mute",
     "OUTPUT_BLOCKED": "safety.output_blocked",
+    "VOICE_NOT_ADDRESSED": "voice.not_addressed",
 }
 
 

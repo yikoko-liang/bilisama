@@ -10,6 +10,9 @@ from typing import Any
 import pytest
 
 from bilisama.clock import FakeClock
+from bilisama.config.enums import VoiceReplyMode
+from bilisama.director.turn_protocol import TurnPolicy
+from bilisama.director.voice_turn import VoiceTurnGate
 from bilisama.ingest.events import EventKind, LiveEvent
 from bilisama.realtime import link
 from bilisama.ui.intent_test_runner import (
@@ -184,6 +187,36 @@ async def rig() -> AsyncIterator[_Rig]:
     yield value
     await value.runner.stop()
     await value.source.stop()
+
+
+@pytest.mark.parametrize("skip", [True, False])
+async def test_voice_gate_output_does_not_invent_audible_test_replies(
+    rig: _Rig, skip: bool
+) -> None:
+    await rig.start()
+    gate = VoiceTurnGate(
+        rig.clock,
+        policy=TurnPolicy(),
+        mode=VoiceReplyMode.WHEN_ADDRESSED,
+        on_skip=lambda _skip: None,
+    )
+    gate.attach(rig.runner.observe)
+    handle = link.ReplyHandle(implicit=True)
+    frames: list[link.LinkEvent] = [
+        link.ReplyStarted(handle),
+        link.ReplyTextDelta(handle, "[SKIP] 主播在讲解" if skip else "好，我来回答。"),
+        link.ReplyAudioDelta(handle, _PCM),
+        link.ReplyDone(handle, link.ReplyStatus.COMPLETED),
+    ]
+    try:
+        for frame in frames:
+            for released in gate.feed(frame):
+                rig.runner.observe(released)
+        row = rig.rows()[0]
+        assert row["audio_chunks"] == (0 if skip else 1)
+        assert bool(row["replies"]) is not skip
+    finally:
+        gate.close()
 
 
 @pytest.mark.parametrize(

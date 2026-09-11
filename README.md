@@ -64,7 +64,8 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/runbook.md](docs/runbook.md) | 操作手册：一键启动、起服务器、dev-talk、面板六页、直播 Mock、常见坑 |
 | [docs/architecture-status.md](docs/architecture-status.md) | 架构现状梳理（2026-09-03）：四个功能域逐模块实现到哪、接缝在哪、哪些字段有名无实；跟计划对着读 |
 | [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：四道门、测试卡、业务评分标准、历次回归记录 |
-| [docs/intent-classification.md](docs/intent-classification.md) | 互动场景验收：8种主播状态、3种参与方式，分别检查回复对象、应答选择与时机；未实现分类模块 |
+| [docs/intent-classification.md](docs/intent-classification.md) | 原始互动场景验收设计：8种主播状态、3种参与方式；当前二分类实现见 Planner 合并说明 |
+| [docs/planner-integration.md](docs/planner-integration.md) | Planner 合并说明：接话/先听二分类、播放拦截流程、完整语音意图 Prompt |
 | [docs/intent-test-console.md](docs/intent-test-console.md) | 当前测试页：14例简单意图、19组多轮场景（Excel原有18组及主播打字答复1组）；真实语音回放、事件注入和人工判定 |
 | [docs/intent-scenarios.md](docs/intent-scenarios.md) | 原始48条多轮互动测试设计；预期与当前实现风险分开，当前可运行版本见意图测试页文档 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |

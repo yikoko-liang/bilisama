@@ -255,6 +255,7 @@ async def test_a_reply_arrives_as_text_then_audio_then_done() -> None:
 
             got = await _collect(events, 5)
             assert isinstance(got[0], link.ReplyTextDelta)
+            assert not got[0].handle.implicit, "we asked for this one"
             audio = [e for e in got if isinstance(e, link.ReplyAudioDelta)]
             assert audio and audio[0].pcm == b"\x01\x02" * 240
             done = got[-1]
@@ -479,6 +480,7 @@ async def test_a_reply_the_model_started_on_its_own_still_gets_a_handle() -> Non
             await server.say("我自己开的口")
             got = await _collect(events, 8)
             assert isinstance(got[0], link.ReplyStarted)
+            assert got[0].handle.implicit, "minted for a turn nobody here requested"
             assert isinstance(got[-1], link.ReplyDone)
             assert got[-1].text == "我自己开的口"
         finally:

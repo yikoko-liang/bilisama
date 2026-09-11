@@ -54,6 +54,15 @@ __all__ = ["RealtimeClient", "ReplyRecord", "SessionRefused"]
 log = get_logger(__name__)
 
 _WATCHDOG_S = 25.0  # plan section 3.3 rule 2
+# How long after our own response.cancel an error naming a missing response is
+# read as that cancel's echo rather than as news. One round trip is tens of
+# milliseconds; this is loose enough to cover a slow one and far too tight to
+# swallow an unrelated rejection minutes later.
+_CANCEL_ECHO_S = 2.0
+# Wordings that mean "there was nothing to cancel". Provider text, so matched
+# as substrings, lower-cased. DashScope says the first; the others are here so
+# a sibling wording does not reopen the red line the first one used to draw.
+_CANCEL_MISS_HINTS = ("no active response", "no response to cancel", "not in response")
 
 
 class SessionRefused(ConnectionError):
@@ -93,6 +102,13 @@ class ReplyRecord:
     # then redundant (the beta dialect sends both) and must not double the text.
     saw_stream_text: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    # True once a response.cancel went out for this reply, by cancel() or the
+    # watchdog. A second cancel would hit whoever holds the slot by then — the
+    # bare frame names no reply — so one is all a record ever sends. Keyed here
+    # rather than on handle.stale: cancel() marks the handle stale on its first
+    # line and the watchdog before its own send, so a stale-based short-circuit
+    # would eat the one cancel that had to go.
+    cancel_sent: bool = False
     # Monotonic seconds at the moment this reply entered the books. Read only by
     # the log: "first token after 380 ms" and "done after 24 s" are the two
     # numbers a stall investigation starts from, and neither is recoverable
@@ -149,6 +165,10 @@ class RealtimeClient:
         # handle that the docstring's tombstone promise was supposed to stop.
         self._tombstones: deque[str] = deque(maxlen=64)
         self._tombstone_set: set[str] = set()
+        # When we last sent a response.cancel, so its own error echo can be
+        # told from an unrelated rejection. Starts far enough back that the
+        # first error of a session is never mistaken for one.
+        self._cancel_sent_at = float("-inf")
 
     # ------------------------------------------------------------ lifecycle
 
@@ -288,9 +308,25 @@ class RealtimeClient:
         handle.stale = True
         record = self._record_of(handle)
         # Settled records are popped from the books, so "gone" IS "ended".
-        if record is None or record.done.is_set():
+        if record is None or record.done.is_set() or record.cancel_sent:
             return
+        record.cancel_sent = True
+        self._cancel_sent_at = self._clock.monotonic()
         await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
+
+    def _is_stale_cancel_error(self, message: str) -> bool:
+        """Is this the server telling us our cancel found nothing to cancel?
+
+        Two conditions, both required. The wording has to name a missing
+        response — provider text, so matched loosely — and a cancel of ours
+        has to have gone out moments ago. Requiring the second is what keeps
+        a genuinely rejected request visible: the same sentence arriving
+        unprompted still reaches the streamer.
+        """
+        if self._clock.monotonic() - self._cancel_sent_at > _CANCEL_ECHO_S:
+            return False
+        lowered = message.lower()
+        return any(hint in lowered for hint in _CANCEL_MISS_HINTS)
 
     def _record_of(self, handle: link.ReplyHandle) -> ReplyRecord | None:
         for record in (*self._replies.values(), *self._awaiting_created):
@@ -356,8 +392,10 @@ class RealtimeClient:
             # dead socket must not eat the TIMED_OUT settlement (A9): the local
             # books free either way.
             record.handle.stale = True
-            with contextlib.suppress(ConnectionError, OSError, websockets.ConnectionClosed):
-                await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
+            if not record.cancel_sent:
+                record.cancel_sent = True
+                with contextlib.suppress(ConnectionError, OSError, websockets.ConnectionClosed):
+                    await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
             self._settle(record, link.ReplyStatus.TIMED_OUT)
         finally:
             for task in (done_task, sleep_task):
@@ -565,7 +603,17 @@ class RealtimeClient:
             emit(link.UserTranscriptDone(str(payload.get("transcript") or "")))
         elif kind is dia.ServerEvent.ERROR:
             error = payload.get("error") or {}
-            emit(link.LinkError(str(error.get("type") or ""), str(error.get("message") or "")))
+            code, message = str(error.get("type") or ""), str(error.get("message") or "")
+            if self._is_stale_cancel_error(message):
+                # Our own cancel, answered after its reply had already ended.
+                # Nothing was wrong and nothing is actionable — the turn was
+                # silenced by the gate either way — so it stays out of the
+                # streamer's chat. It also must not reach the settle below:
+                # this error rejects no create, and failing one would be a
+                # real reply lost to a benign race.
+                log.debug("link.cancel_found_nothing", error_text=message)
+                return
+            emit(link.LinkError(code, message))
             # A rejected create gets neither created nor done — without this,
             # the slot we cleared for it stays shut for the full 25 s watchdog
             # (C5). Rule 4's spirit: wrong books wedge US, so free them. On
@@ -615,7 +663,9 @@ class RealtimeClient:
         if self._awaiting_created:
             record = self._awaiting_created.pop(0)
         else:  # a created we never asked for — book it so its frames land somewhere
-            record = ReplyRecord(handle=link.ReplyHandle(), opened_at=self._clock.monotonic())
+            record = ReplyRecord(
+                handle=link.ReplyHandle(implicit=True), opened_at=self._clock.monotonic()
+            )
         record.rid = rid
         self._replies[rid] = record
         # `ours` separates our create from the streamer's own VAD turn, which is
@@ -640,7 +690,7 @@ class RealtimeClient:
             # First frame of a reply that never announced itself: the implicit
             # VAD turn (rule 4). It occupies the slot from its first frame.
             record = ReplyRecord(
-                handle=link.ReplyHandle(), rid=rid, opened_at=self._clock.monotonic()
+                handle=link.ReplyHandle(implicit=True), rid=rid, opened_at=self._clock.monotonic()
             )
             self._replies[rid] = record
             self._take_slot("implicit_frame")

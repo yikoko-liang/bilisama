@@ -27,12 +27,15 @@ that it is watching rather than left looking broken.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import struct
+import wave
 from array import array
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
 from bilisama.clock import Clock, SystemClock
@@ -729,6 +732,104 @@ def _correlate(left: list[int], right: list[int]) -> float:
 AudioSink = Callable[[bytes], Awaitable[None]]
 
 
+class UplinkRecorder:
+    """Write every uplink frame to a WAV, as the speech backend receives it.
+
+    The tap sits DOWNSTREAM of the noise gate and the enable gate on purpose.
+    A recording of the raw microphone would answer a question nobody asked;
+    what a diagnosis needs is the audio the model actually heard, so the same
+    bytes can be replayed into a scripted probe and the two runs compared.
+    That comparison is the whole reason this exists: a live session and a
+    probe can disagree while every other input to them is identical.
+
+    Frames arrive every 20 ms and are buffered for about a second before each
+    write, so the WAV header is patched once per second instead of fifty
+    times. A process killed mid-session therefore leaves a playable file that
+    is missing at most its last second.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        sample_rate: int = 16000,
+        flush_seconds: float = 1.0,
+        max_seconds: float = 7200.0,
+    ) -> None:
+        self._path = path
+        self._sample_rate = sample_rate
+        self._flush_bytes = int(sample_rate * flush_seconds) * 2
+        self._max_bytes = int(sample_rate * max_seconds) * 2
+        self._buffer = bytearray()
+        self._written = 0
+        self._writer: wave.Wave_write | None = None
+        self._stopped = False
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def seconds(self) -> float:
+        """Audio accepted so far, buffered tail included."""
+        return (self._written + len(self._buffer)) / (self._sample_rate * 2)
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    def feed(self, pcm: bytes) -> None:
+        """One uplink frame, byte for byte as it went to the backend."""
+        if self._stopped:
+            return
+        self._buffer.extend(pcm)
+        if len(self._buffer) >= self._flush_bytes:
+            self._flush()
+
+    def close(self) -> None:
+        """Flush the tail and finalise the header. Safe to call twice."""
+        if self._buffer and not self._stopped:
+            self._flush()
+        self._stopped = True
+        self._release()
+
+    def _flush(self) -> None:
+        chunk = bytes(self._buffer)
+        self._buffer.clear()
+        try:
+            if self._writer is None:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                # No context manager on purpose: the handle outlives this call
+                # by design — it is written to across a whole session and
+                # closed by close(), which every exit path reaches (teardown,
+                # write error, cap).
+                writer = wave.open(str(self._path), "wb")  # noqa: SIM115
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(self._sample_rate)
+                self._writer = writer
+                log.info("uplink_record.started", path=str(self._path))
+            self._writer.writeframes(chunk)
+        except OSError as exc:
+            # Losing the recording must never take the stream with it: this
+            # runs on the uplink path, one frame every 20 ms.
+            self._stopped = True
+            log.warning("uplink_record.failed", path=str(self._path), error_text=str(exc))
+            self._release()
+            return
+        self._written += len(chunk)
+        if self._written >= self._max_bytes:
+            self._stopped = True
+            log.warning("uplink_record.capped", path=str(self._path), seconds=round(self.seconds))
+            self._release()
+
+    def _release(self) -> None:
+        writer, self._writer = self._writer, None
+        if writer is not None:
+            with contextlib.suppress(OSError):
+                writer.close()
+
+
 class AudioInputSwitch:
     """Route exactly one uplink into the already-connected speech backend.
 
@@ -751,8 +852,15 @@ class AudioInputSwitch:
     same implementation.
     """
 
-    def __init__(self, sink: AudioSink, *, noise_sensitivity: int = 50) -> None:
+    def __init__(
+        self,
+        sink: AudioSink,
+        *,
+        noise_sensitivity: int = 50,
+        recorder: UplinkRecorder | None = None,
+    ) -> None:
         self._sink = sink
+        self._recorder = recorder
         self._browser_active = False
         self._test_active = False
         self._enabled = True
@@ -845,10 +953,16 @@ class AudioInputSwitch:
         # meter reads as a broken mic, not a closed switch.
         filtered = self._noise_filtered(pcm)
         if self._enabled or explicit_test:
-            await self._sink(filtered)
-            return
-        self.silenced_frames += 1
-        await self._sink(bytes(len(pcm)))
+            sent = filtered
+        else:
+            self.silenced_frames += 1
+            sent = bytes(len(pcm))
+        # Recorded here rather than at either push_ method: this is the exact
+        # byte string the backend receives, which is what a replay has to be
+        # able to reproduce.
+        if self._recorder is not None:
+            self._recorder.feed(sent)
+        await self._sink(sent)
 
     async def push_audio(self, pcm: bytes) -> None:
         """Microphone-compatible method used by the existing audio pumps."""
@@ -874,7 +988,7 @@ class AudioInputSwitch:
         await self._forward(pcm, explicit_test=True)
 
     def status(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "enabled": self._enabled,
             "paused": self._paused,
             "browser_active": self._browser_active,
@@ -889,3 +1003,7 @@ class AudioInputSwitch:
             "blocked_test_frames": self.blocked_test_frames,
             "silenced_frames": self.silenced_frames,
         }
+        if self._recorder is not None:
+            state["recorded_s"] = round(self._recorder.seconds, 1)
+            state["recording"] = not self._recorder.stopped
+        return state

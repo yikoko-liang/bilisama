@@ -888,3 +888,43 @@ input.cfg-edit:focus {
 .test-pass:disabled { opacity: 0.45; cursor: default; }
 .test-judge { flex-wrap: wrap; }
 .test-incomplete[hidden] { display: none; }
+
+/* 意图判断的状态条。两页共用：系统页回答「开没开」，聊天记录页回答「正在
+   拦住吗」。三种状态各有颜色，因为「开着但一条都没拦」和「关着」看起来一样
+   却完全是两回事——2026-09-09 排查时就是把后者读成了前者。 */
+.gate-strip {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+  padding: 9px 13px;
+  border: 1px solid var(--panel-edge);
+  border-left-width: 3px;
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--panel) 75%, transparent);
+  font-size: 12.5px;
+  color: var(--ink-dim);
+}
+
+.gate-strip b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.gate-strip .gate-detail {
+  margin-left: auto;
+}
+
+.gate-strip[data-state="working"] {
+  border-left-color: var(--c-ok);
+}
+
+.gate-strip[data-state="idle"] {
+  border-left-color: var(--c-warn);
+}
+
+.gate-strip[data-state="off"],
+.gate-strip[data-state="unknown"] {
+  border-left-color: var(--panel-edge);
+}

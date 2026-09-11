@@ -62,6 +62,19 @@ class Harness:
     _sock_port: int = 0
 
     hello_override: dict[str, Any] = field(default_factory=dict)
+    gate_health: dict[str, Any] = field(
+        default_factory=lambda: {
+            "mode": "when_addressed",
+            "holding": 0,
+            "passed": 30,
+            "skipped": 12,
+            "recent_turns": 20,
+            "recent_skipped": 5,
+            "timeouts": 0,
+            "late_markers": 0,
+            "longest_hold_ms": 0,
+        }
+    )
 
     def hello(self) -> dict[str, Any]:
         return {
@@ -111,6 +124,9 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
             "combos_suppressed": 4,
         },
     )
+    # The voice gate, so the strip on the system and chat pages has something
+    # to render. A test that wants another state edits harness.gate_health.
+    registry.register("voice_gate", lambda: (harness_ref[0].gate_health if harness_ref else {}))
     settings = harness_ref[0].settings if harness_ref else Settings()
     handlers = {event: recorder.handler(event) for event in ClientEvent}
     if harness_ref:
@@ -1750,3 +1766,57 @@ async def test_picking_a_voice_sends_the_config_edit(page: Page, harness: Harnes
         lambda d: (d.get("config") or {}).get("path") == "speech.dashscope.voice"
         and (d.get("config") or {}).get("value") == "longanlufeng",
     )
+
+
+# ------------------------------------------------------- the intent strip
+
+
+async def _gate_strip(page: Page, which: str) -> tuple[str, str]:
+    """(state, text) of one strip, once it has left its loading state."""
+    sel = f"#gate-strip-{which}"
+    await _wait(page, f"document.querySelector('{sel}').dataset.state !== 'unknown'")
+    state: str = await page.evaluate(f"document.querySelector('{sel}').dataset.state")
+    text: str = await page.locator(sel).inner_text()
+    return state, text
+
+
+async def test_the_intent_strip_answers_both_questions_on_both_pages(
+    page: Page, harness: Harness
+) -> None:
+    """Is the gate on, and is it doing anything — on the two pages a streamer reads.
+
+    Those are different questions and the panel could answer neither. The
+    cumulative skip count is dominated by however the session opened, and a
+    gate that never fires logs nothing at all, so 「开着但一条都没拦」 and
+    「关着」 looked identical. Both were misread during the 2026-09-09
+    investigation, twice.
+    """
+    await page.click("#corner")
+    for which in ("system", "chat"):
+        state, text = await _gate_strip(page, which)
+        assert state == "working", f"{which} 页状态不对：{state}"
+        assert "只接对我说的" in text, text
+        assert "最近 20 轮拦下 5 条" in text, text
+
+
+async def test_a_gate_that_holds_nothing_looks_different_from_a_gate_that_is_off(
+    page: Page, harness: Harness
+) -> None:
+    harness.gate_health = {**harness.gate_health, "recent_turns": 20, "recent_skipped": 0}
+    await page.click("#corner")
+    state, text = await _gate_strip(page, "chat")
+    assert state == "idle", "开着却一条都没拦，必须和正常态区分开"
+    assert "一条都没拦下" in text, text
+
+    harness.gate_health = {**harness.gate_health, "mode": "always"}
+    await _wait(page, "document.querySelector('#gate-strip-chat').dataset.state === 'off'")
+    _, off_text = await _gate_strip(page, "chat")
+    assert "每句都接" in off_text, off_text
+
+
+async def test_a_young_session_is_not_reported_as_collapsed(page: Page, harness: Harness) -> None:
+    """Three turns with no skip is a session that just started, not a failure."""
+    harness.gate_health = {**harness.gate_health, "recent_turns": 3, "recent_skipped": 0}
+    await page.click("#corner")
+    state, _ = await _gate_strip(page, "system")
+    assert state == "working", "窗口还没满就报警会天天狼来了"

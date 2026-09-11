@@ -18,6 +18,7 @@ import pytest
 
 from bilisama import dev_talk
 from bilisama.cli import main
+from bilisama.clock import SystemClock
 from bilisama.config.enums import ProviderName
 from bilisama.dev_talk import _Fanout, _parse_console_event
 from bilisama.ingest.events import EventKind
@@ -182,6 +183,71 @@ async def test_fanout_gives_every_consumer_every_event() -> None:
     )
     assert got_a == events
     assert got_b == events, "both consumers see the full stream — scheduler and playback"
+    await fan.aclose()
+
+
+async def test_fanout_gated_views_see_what_the_gate_lets_through() -> None:
+    """Two view families over one pump: events() is the raw stream, the
+    scheduler's; gated_events() is the speakers', and a turn the gate drops
+    never reaches it — not its audio, not its end."""
+    from bilisama.config.enums import VoiceReplyMode
+    from bilisama.director.turn_protocol import TurnPolicy
+    from bilisama.director.voice_turn import Skip, VoiceTurnGate
+
+    hers = link.ReplyHandle(implicit=True)
+    events: list[link.LinkEvent] = [
+        link.ReplyStarted(hers),
+        link.ReplyTextDelta(hers, "[AUDIENCE] 在聊天气"),
+        link.ReplyAudioDelta(hers, b"\x00\x01"),
+        link.ReplyDone(hers, link.ReplyStatus.CANCELLED),
+        link.SpeechStarted(audio_ms=0),
+    ]
+    fan = _Fanout(_StubLink(events))  # type: ignore[arg-type]
+    skips: list[Skip] = []
+    fan.set_gate(
+        VoiceTurnGate(
+            SystemClock(),
+            policy=TurnPolicy(),
+            mode=VoiceReplyMode.WHEN_ADDRESSED,
+            on_skip=skips.append,
+        )
+    )
+    raw, gated = fan.events(), fan.gated_events()
+    fan.start()
+
+    async def take(view: object, n: int) -> list[link.LinkEvent]:
+        out = []
+        async for event in view:  # type: ignore[attr-defined]
+            out.append(event)
+            if len(out) == n:
+                break
+        return out
+
+    got_raw, got_gated = await asyncio.wait_for(
+        asyncio.gather(take(raw, 5), take(gated, 2)), timeout=2.0
+    )
+    assert got_raw == events, "the raw view is untouched"
+    assert got_gated == [events[0], events[4]], "start passes, the rest of her turn does not"
+    assert len(skips) == 1 and skips[0].handle is hers
+    await fan.aclose()
+
+
+async def test_fanout_without_a_gate_feeds_both_views_alike() -> None:
+    hers = link.ReplyHandle(implicit=True)
+    events: list[link.LinkEvent] = [
+        link.ReplyStarted(hers),
+        link.ReplyTextDelta(hers, "[AUDIENCE] 没装门就照播"),
+        link.ReplyDone(hers, link.ReplyStatus.COMPLETED),
+    ]
+    fan = _Fanout(_StubLink(events))  # type: ignore[arg-type]
+    gated = fan.gated_events()
+    fan.start()
+    got = []
+    async for event in gated:
+        got.append(event)
+        if len(got) == 3:
+            break
+    assert got == events
     await fan.aclose()
 
 

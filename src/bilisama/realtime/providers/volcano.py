@@ -1095,7 +1095,7 @@ class VolcanoLink:
         if question and question in self._done:
             return None
         if self._active is None:
-            handle = link.ReplyHandle()
+            handle = link.ReplyHandle(implicit=True)
             self._take_slot(handle, reason="implicit")
             self._question = question
             self._events.put_nowait(link.ReplyStarted(handle))

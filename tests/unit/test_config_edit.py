@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from bilisama.config.enums import VoiceReplyMode
 from bilisama.config.schema import RuntimeConfig, Settings
 from bilisama.ui.config_edit import ConfigEditError, apply_config_edit, field_control
 
@@ -79,6 +80,15 @@ def test_literal_edit_applies() -> None:
 def test_literal_edit_rejects_with_choices_listed() -> None:
     with pytest.raises(ConfigEditError, match="debug / info / warning / error"):
         apply_config_edit(Settings(), "runtime.log_level", "verbose")
+
+
+def test_an_enum_edit_rejects_with_its_choices_listed() -> None:
+    with pytest.raises(ConfigEditError, match="always / when_addressed"):
+        apply_config_edit(Settings(), "interaction.voice_reply", "sometimes")
+    settings = Settings()
+    _, applied = apply_config_edit(settings, "interaction.voice_reply", "when_addressed")
+    assert applied == "when_addressed"
+    assert settings.interaction.voice_reply is VoiceReplyMode.WHEN_ADDRESSED
 
 
 def test_field_control_shapes() -> None:

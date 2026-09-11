@@ -50,7 +50,8 @@ from urllib.parse import parse_qsl
 import websockets
 
 from bilisama.config.derive import DerivedThresholds, effective_thresholds
-from bilisama.config.enums import Chattiness, ProviderName
+from bilisama.config.enums import Chattiness, ProviderName, VoiceReplyMode
+from bilisama.director.voice_turn import VoiceTurnGate
 from bilisama.event_pacing import EventPacingSnapshot
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
 from bilisama.obs.health import LinkHealth
@@ -1276,24 +1277,69 @@ class _Fanout:
         # Forwarded, not recomputed: this wrapper stands in for the link
         # everywhere the scheduler looks, so it has to answer the same.
         self.quiet_window_s = inner.quiet_window_s
+        # Two families of views. events() is the raw stream — the scheduler's,
+        # which closes the floor on ReplyStarted and must never be delayed.
+        # gated_events() is what the speakers read: the same stream once the
+        # voice gate has decided which of her own turns may play. Without a
+        # gate the two are identical.
         self._sinks: list[asyncio.Queue[link.LinkEvent]] = []
+        self._gated_sinks: list[asyncio.Queue[link.LinkEvent]] = []
+        self._gate: VoiceTurnGate | None = None
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._pump(), name="dev-talk:fanout")
 
+    def set_gate(self, gate: VoiceTurnGate) -> None:
+        """Route the gated views through the voice gate from now on.
+
+        Frames the gate releases on its own clock (a hold that timed out, a
+        live switch to always) land in the same views, in order, because
+        both this pump and the gate's timer run on the one loop.
+        """
+        gate.attach(self._emit_gated)
+        self._gate = gate
+
     async def _pump(self) -> None:
         async for event in self._inner.events():
-            for sink in list(self._sinks):
-                if sink.full():
-                    # A stalled or dead consumer must not grow memory forever
-                    # (C10): live streams stay live, oldest frames go.
-                    sink.get_nowait()
-                sink.put_nowait(event)
+            self._offer(self._sinks, event)
+            if self._gate is None:
+                self._emit_gated(event)
+                continue
+            try:
+                released = self._gate.feed(event)
+            except Exception as exc:
+                # The gate decides; it must not be able to silence her by
+                # dying. A frame it choked on goes through raw, once logged.
+                log.exception("dev_talk.voice_gate_failed", error_text=str(exc)[:200])
+                released = (event,)
+            for frame in released:
+                self._emit_gated(frame)
+
+    def _emit_gated(self, event: link.LinkEvent) -> None:
+        self._offer(self._gated_sinks, event)
+
+    @staticmethod
+    def _offer(sinks: list[asyncio.Queue[link.LinkEvent]], event: link.LinkEvent) -> None:
+        for sink in list(sinks):
+            if sink.full():
+                # A stalled or dead consumer must not grow memory forever
+                # (C10): live streams stay live, oldest frames go.
+                sink.get_nowait()
+            sink.put_nowait(event)
 
     def events(self) -> AsyncIterator[link.LinkEvent]:
+        """The raw stream: every frame, as the link sent it."""
+        return self._view(self._sinks)
+
+    def gated_events(self) -> AsyncIterator[link.LinkEvent]:
+        """What the speakers should play: the raw stream minus the turns the
+        voice gate dropped, with held frames released in order."""
+        return self._view(self._gated_sinks)
+
+    def _view(self, sinks: list[asyncio.Queue[link.LinkEvent]]) -> AsyncIterator[link.LinkEvent]:
         queue: asyncio.Queue[link.LinkEvent] = asyncio.Queue(maxsize=256)
-        self._sinks.append(queue)
+        sinks.append(queue)
 
         async def drain() -> AsyncIterator[link.LinkEvent]:
             try:
@@ -1301,8 +1347,8 @@ class _Fanout:
                     yield await queue.get()
             finally:
                 # A consumer that stops iterating unregisters its queue.
-                if queue in self._sinks:
-                    self._sinks.remove(queue)
+                if queue in sinks:
+                    sinks.remove(queue)
 
         return drain()
 
@@ -1315,6 +1361,8 @@ class _Fanout:
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
+        if self._gate is not None:
+            self._gate.close()
         await self._inner.aclose()
 
     async def suspend(self) -> None:
@@ -1576,12 +1624,14 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.director.floor import SpeakingFloor
     from bilisama.director.intent import Intent
     from bilisama.director.scheduler import Scheduler
+    from bilisama.director.turn_protocol import TurnPolicy
+    from bilisama.director.voice_turn import Skip
     from bilisama.ingest.sources import QueueSource
     from bilisama.memory.distill import Distiller
     from bilisama.memory.store import MemoryStore
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
-    from bilisama.obs.outcome import Outcome, OutcomeWindow, Verdict
+    from bilisama.obs.outcome import Outcome, OutcomeWindow, SkipReason, Verdict
     from bilisama.persona.loader import (
         PersonaStore,
         default_data_dir,
@@ -1772,10 +1822,16 @@ async def run_director(args: argparse.Namespace) -> int:
 
     persona = PersonaStore.from_config(settings.persona, config_dir=config_path.parent)
     variables = template_variables(settings.persona, reply_length=settings.interaction.reply_length)
+
+    def addressing_enabled() -> bool:
+        # Read through settings every time: the panel flips this live, and
+        # the prompt half must follow the switch wherever it is re-rendered.
+        return settings.interaction.voice_reply is VoiceReplyMode.WHEN_ADDRESSED
+
     # The two turn contracts (config/personas/live/). Loaded once here; a
     # missing file is a packaging error and refuses to start rather than
     # running a stream that cannot tell the streamer's voice from a danmaku.
-    voice_rules = live_voice_rules(config_path.parent, variables)
+    voice_rules = live_voice_rules(config_path.parent, variables, addressing=addressing_enabled())
     event_rules = live_event_rules(config_path.parent, variables)
 
     # Side-model resolution, most reliable first: explicit config wins, then
@@ -1847,7 +1903,7 @@ async def run_director(args: argparse.Namespace) -> int:
         )
     )
     from bilisama.realtime.providers.hosted import HostedLink
-    from bilisama.ui.audio import AudioInputSwitch
+    from bilisama.ui.audio import AudioInputSwitch, UplinkRecorder
 
     inner: link.SpeechLink = built.link
     hosted_link = inner if isinstance(inner, HostedLink) else None
@@ -1863,8 +1919,14 @@ async def run_director(args: argparse.Namespace) -> int:
     # Every uplink frame — page socket or local sounddevice — passes this one
     # switch: pause gate, input toggle (silence-substituted), noise gate, and
     # the live-mock source election all live here (ui/audio.py).
+    uplink_recorder: UplinkRecorder | None = None
+    if args.record_uplink is not None:
+        uplink_recorder = UplinkRecorder(args.record_uplink)
+        print(f"[录音] 上行音频写到 {args.record_uplink}（模型听到的那一路，退出时收尾）")
     audio_input = AudioInputSwitch(
-        speech.push_audio, noise_sensitivity=settings.audio.noise_sensitivity
+        speech.push_audio,
+        noise_sensitivity=settings.audio.noise_sensitivity,
+        recorder=uplink_recorder,
     )
 
     # The pause total-gate's state, shared by the panel handler and hello().
@@ -1931,6 +1993,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     "outcome": str(verdict.outcome),
                     "phase": str(verdict.phase),
                     "reason": str(verdict.reason) if verdict.reason else "",
+                    "detail": verdict.detail,
                 },
             )
 
@@ -1965,6 +2028,9 @@ async def run_director(args: argparse.Namespace) -> int:
         # One clean spoken line, two readers: the distiller's voice-exemplar
         # buffer and the proactive loop's dialogue material.
         spoken_sink=spoken_line,
+        # Her own microphone turns go the same way: what she said to the
+        # streamer used to reach no memory at all (plan, voice gate 5.3).
+        implicit_spoken_sink=spoken_line,
     )
 
     from bilisama.event_pacing import EventPacer
@@ -2076,6 +2142,33 @@ async def run_director(args: argparse.Namespace) -> int:
         if args.show_context:
             print("─" * 40 + f"\n{text}\n" + "─" * 40)
 
+    def on_voice_skip(skip: Skip) -> None:
+        ruling = skip.ruling
+        scheduler.skip_implicit(
+            skip.handle,
+            reason=SkipReason.VOICE_NOT_ADDRESSED,
+            detail=ruling.detail() if ruling is not None else "残记号",
+            clear_playback=skip.clear_playback,
+        )
+        if ruling is not None and ruling.note:
+            # What she heard the streamer doing. On the s2s product path this
+            # is the only trace of the streamer's own voice that exists above
+            # the link, so it goes where the streamer transcript would. The
+            # label used to lead this line; with one tag left it said 「先听」
+            # every time, which is about the gate rather than the streamer.
+            proactive.note_dialogue("streamer", f"[主播语音] {ruling.note}")
+
+    # Which of her own microphone turns may play (plan, voice gate). Decides
+    # in the fan-out's pump; the scheduler's kill path does the rest. Reads
+    # the switch once here — run_reload_hook flips it live.
+    voice_gate = VoiceTurnGate(
+        clock,
+        policy=TurnPolicy(),
+        mode=settings.interaction.voice_reply,
+        on_skip=on_voice_skip,
+    )
+    speech.set_gate(voice_gate)
+
     assembly = Assembly(
         store=store,
         distiller=distiller,
@@ -2142,7 +2235,9 @@ async def run_director(args: argparse.Namespace) -> int:
         variables = template_variables(
             settings.persona, reply_length=settings.interaction.reply_length
         )
-        voice_rules = live_voice_rules(config_path.parent, variables)
+        voice_rules = live_voice_rules(
+            config_path.parent, variables, addressing=addressing_enabled()
+        )
         event_rules = live_event_rules(config_path.parent, variables)
         assembly.replace_persona(
             persona,
@@ -2180,6 +2275,19 @@ async def run_director(args: argparse.Namespace) -> int:
             return True
         if path == "room.stream_intro":
             await assembly.refresh_context()
+            return True
+        if path == "interaction.voice_reply":
+            # Two halves, ordered so no window exists in which she is taught
+            # the markers while nothing catches them: closing, the gate goes
+            # first (an untaught turn carries no marker and simply plays);
+            # opening, the prompt is pushed first, then the gate lets go.
+            mode = settings.interaction.voice_reply
+            if mode is VoiceReplyMode.WHEN_ADDRESSED:
+                voice_gate.set_mode(mode)
+                await refresh_persona_settings()
+            else:
+                await refresh_persona_settings()
+                voice_gate.set_mode(mode)
             return True
         if path.startswith("persona.") or path == "interaction.reply_length":
             await refresh_persona_settings()
@@ -2311,6 +2419,7 @@ async def run_director(args: argparse.Namespace) -> int:
     # 「派了活但没接线」 shape again, so the stack test now pins this line.
     registry.register("distill", distiller.status)
     registry.register("scheduler", scheduler.status)
+    registry.register("voice_gate", voice_gate.status)
     # The two §4.12 asks for that nothing answered: is the provider connected,
     # and what happened to the last N attempts to speak. Connected already —
     # _connect_or_exit is above and exits on failure — and kept current from the
@@ -2470,7 +2579,9 @@ async def run_director(args: argparse.Namespace) -> int:
     )
 
     async def observe_test_link() -> None:
-        async for event in speech.events():
+        # Observe the playback view: raw audio includes turns muted by the
+        # voice gate and would falsely satisfy a test's reply_started gate.
+        async for event in speech.gated_events():
             source_event_id = ""
             if isinstance(
                 event,
@@ -3396,7 +3507,7 @@ async def run_director(args: argparse.Namespace) -> int:
             asyncio.create_task(
                 # stream_text off under the prompt: see _consume_events.
                 _consume_events(
-                    speech.events(),
+                    speech.gated_events(),
                     speaker,
                     None,
                     stream_text=not use_prompt,
@@ -3455,7 +3566,7 @@ async def run_director(args: argparse.Namespace) -> int:
                 the local speaker is already playing it in that case, and
                 sending it twice is how you get an echo of your own making.
                 """
-                async for ev in speech.events():
+                async for ev in speech.gated_events():
                     if isinstance(ev, link.ReplyAudioDelta):
                         if not ev.handle.stale:
                             # Only what actually goes out: a stale chunk is
@@ -3523,6 +3634,13 @@ async def run_director(args: argparse.Namespace) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # After the gather, so no pump can still be feeding it.
+        if uplink_recorder is not None:
+            uplink_recorder.close()
+            print(
+                f"[录音] {uplink_recorder.path} 收尾完成，共 {uplink_recorder.seconds:.0f} 秒",
+                file=sys.stderr,
+            )
         # The prompt died with its task; unpatch stdout before the shutdown
         # chain prints, and point logging back at stderr.
         console_patch.close()
@@ -3745,6 +3863,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wav", type=Path, default=None, help="不用麦克风，喂一段 16kHz 单声道 WAV"
+    )
+    parser.add_argument(
+        "--record-uplink",
+        type=Path,
+        default=None,
+        help="把送给语音后端的音频录成 16kHz 单声道 WAV（噪声门之后，即模型听到的），"
+        "用来回放排查；每小时约 115 MB，满 2 小时自动停",
     )
     parser.add_argument(
         "--mute-while-speaking",

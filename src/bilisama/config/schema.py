@@ -13,7 +13,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
-from bilisama.config.enums import Chattiness, GrowthMode, ProviderName
+from bilisama.config.enums import Chattiness, GrowthMode, ProviderName, VoiceReplyMode
 
 # The config shape this build reads. It lives here rather than in `migrate`
 # because both of that module's neighbours need it and neither may import it:
@@ -310,6 +310,13 @@ class InteractionConfig(BaseModel):
     # how OFTEN she speaks and how LONG she speaks are different worries.
     # Reuses the three-level enum; the token caps live in derive.py.
     reply_length: Chattiness = Field(Chattiness.LOW)
+    # Whether her own microphone turn always plays (every VAD turn, as
+    # before) or only when the streamer was talking to her, as she reports
+    # at the head of the turn and the voice gate (director/voice_turn.py)
+    # enforces. The prompt that teaches the markers rides this same switch
+    # (persona/loader.py live_voice_rules), so the two halves cannot split:
+    # taught without the gate she would read「AUDIENCE」to the audience.
+    voice_reply: VoiceReplyMode = Field(VoiceReplyMode.WHEN_ADDRESSED)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
     # Ledger #91. Off: the streamer's next word always lands, and a paid
     # thank-you that gets cut off is requeued. On: SC and high-tier gift

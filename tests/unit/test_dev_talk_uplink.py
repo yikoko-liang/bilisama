@@ -1007,6 +1007,9 @@ async def test_the_director_registers_every_health_probe(
         # health card never showed memory-distillation state.
         "distill",
         "scheduler",
+        # The voice gate's counters (held / passed / skipped / late markers):
+        # the first place to look when 「她怎么不接话了」.
+        "voice_gate",
         "loop",
         "selector",
         "link",

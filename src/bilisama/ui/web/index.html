@@ -118,6 +118,8 @@
       <section id="tab-system" class="tab-page active" role="tabpanel" aria-labelledby="tab-btn-system">
         <div class="page-heading"><h1>系统</h1><p>直播间、语音和互动策略都在这里调整，保存后立即生效。</p></div>
 
+        <div id="gate-strip-system" class="gate-strip" data-state="unknown" aria-live="polite"><span class="gate-title">意图判断</span><b class="gate-mode">读取中…</b><span class="gate-detail"></span></div>
+
         <article class="setting-card">
           <div class="setting-head"><div><h2>麦克风检测</h2><p>确认声音能进来，并过滤环境底噪。</p></div>
             <label class="check-line"><input id="audio-input-enabled" type="checkbox" checked> 打开语音输入</label>
@@ -199,6 +201,7 @@
 
       <section id="tab-chat" class="tab-page" role="tabpanel" aria-labelledby="tab-btn-chat">
         <div class="page-heading"><h1>聊天记录</h1><p>主播语音、直播事件和助手回复按时间排列。</p></div>
+        <div id="gate-strip-chat" class="gate-strip" data-state="unknown" aria-live="polite"><span class="gate-title">意图判断</span><b class="gate-mode">读取中…</b><span class="gate-detail"></span></div>
         <div id="timeline" class="timeline" aria-live="polite"><p class="empty">还没有对话</p></div>
       </section>
 

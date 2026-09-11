@@ -62,6 +62,9 @@ class SkipReason(StrEnum):
     """Nothing could be sent: the speech link was down when this came up."""
     PANIC_MUTE = "policy.panic_mute"
     OUTPUT_BLOCKED = "safety.output_blocked"
+    VOICE_NOT_ADDRESSED = "voice.not_addressed"
+    """The provider's own microphone turn was cut: the streamer was not
+    talking to her (the voice gate's ruling, director/voice_turn.py)."""
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat
     # The danmaku funnel's accounts (selector.py). LOW_VALUE and DUPLICATE
     # above serve the funnel too — one vocabulary, not a parallel one.
