@@ -762,3 +762,32 @@ def test_the_contract_spells_the_tag_the_decoder_actually_knows() -> None:
     assert f"[{tag}]" in on
     for word in re.findall(r"\[([A-Za-z_]+)\]", on):
         assert lookup(word) is SceneCategory.SKIP, f"提示词里的 [{word}] 解码器不认识"
+
+
+def test_no_acceptance_line_is_a_sentence_the_prompt_already_teaches() -> None:
+    """The measuring stick may not be made of the answers.
+
+    A model that only pattern-matches the contract's worked examples scores on
+    those lines and nowhere else. Two of the three tags volcano produced on the
+    first version of this set were example text, which left its 18% unreadable:
+    real judgement and recall of the prompt look identical on a line the prompt
+    contains. Adding an example is now a red test until the line moves.
+    """
+    import re
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    from voice_gate_acceptance import LINES
+
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_voice_rules, template_variables
+
+    config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    rules = live_voice_rules(config_dir, template_variables(PersonaConfig()), addressing=True)
+
+    def bare(text: str) -> str:
+        return re.sub(r"[，。？！、\s「」]", "", text)
+
+    taught = {bare(line) for line in re.findall(r"主播：(.+)", rules)}
+    overlap = sorted(line.text for line in LINES if bare(line.text) in taught)
+    assert not overlap, f"这些验收台词和提示词例子重合，分不出判断和背诵：{overlap}"

@@ -109,6 +109,12 @@ class Line:
     setup: tuple[str, ...] = ()
 
 
+# No line here may be a sentence the prompt's own examples use. A model that
+# only pattern-matches the examples scores on those and nowhere else, and two
+# of the three tags volcano wrote on the first version of this set were
+# example text — which made 18% unreadable as a capability. test_persona.py
+# holds the two apart.
+#
 # Weak-cue lines are quoted from the 2026-09-09 recording. The scripted set
 # that preceded this one scored 95%-100% while production sat at 26%-49%,
 # and the reason was here: every line meant for her said 豆腐, and every line
@@ -121,10 +127,10 @@ LINES: tuple[Line, ...] = (
     Line("哎呀 这个怎么又卡住了", False, "强线索反例：典型自语"),
     # --- 省略名字的正例：现在的验收集一条都没有
     Line(
-        "为什么",
+        "那你最受不了哪一种",
         True,
         "接着她上一句追问，全程没点名",
-        setup=("豆腐 你喜欢什么样的故事",),
+        setup=("豆腐 你平时喜欢什么样的观众",),
     ),
     Line(
         "那你觉得哪个更好",
@@ -132,14 +138,14 @@ LINES: tuple[Line, ...] = (
         "延续正在进行的对话，没点名",
         setup=("豆腐 帮我在这两个方案里挑一个",),
     ),
-    Line("帮我盯着点弹幕 有人问问题就喊我", True, "直接交代事情，没点名"),
+    Line("等下我去倒杯水 你先陪他们聊两句", True, "直接交代事情，没点名"),
     Line("给大家讲个笑话吧", True, "没点名，但只有她能执行；出现「大家」不等于略过"),
     # --- 多轮转向
     Line(
-        "你明天有空吗",
+        "那你那边几点能上线",
         False,
         "上一句已转向连麦的阿远，这句还是问他",
-        setup=("阿远 我们对一下明天的时间",),
+        setup=("阿远 我们对一下周末的安排",),
     ),
     Line(
         "豆腐 那你说说看",
@@ -148,13 +154,13 @@ LINES: tuple[Line, ...] = (
         setup=("阿远 你那边什么时候方便",),
     ),
     # --- 引用后转交
-    Line("这条弹幕问你喜欢夏天还是冬天", False, "念出一个问题，不是转交"),
-    Line("这条弹幕问你喜欢夏天还是冬天 这题你自己答", True, "念完之后明确转交"),
+    Line("弹幕在问咱们今天几点下播", False, "念出一个问题，不是转交"),
+    Line("弹幕在问咱们今天几点下播 这个你替我答", True, "念完之后明确转交"),
     Line("有人问主播用的什么键盘 我用的机械键盘", False, "念问题并自己答了"),
     # --- 出现她的名字但不是在叫她
-    Line("大家觉得豆腐刚才说得怎么样", False, "提到她的名字，但在问观众"),
+    Line("你们说豆腐这个反应是不是有点慢", False, "提到她的名字，但在问观众"),
     # --- 明确要求先听
-    Line("豆腐 先别接 我把话说完", False, "明确说给她听，但本轮要求安静"),
+    Line("豆腐 这段你别插话 让我讲完这个事", False, "明确说给她听，但本轮要求安静"),
     # --- 弱线索碎句：实盘失灵段的原话
     Line("在这里", False, "真实录音里的碎句，几乎没有线索"),
     Line("上去", False, "同上，两个字的自语"),
@@ -163,7 +169,7 @@ LINES: tuple[Line, ...] = (
     Line("这个大流还挺快呀", False, "游戏解说里的感叹"),
     Line("锤大队友", False, "两三个字的操作嘀咕"),
     # --- 判断不出交流对象
-    Line("你觉得呢", False, "没有上下文，判断不出在跟谁说，应当先听"),
+    Line("这样行不行啊", False, "没有上下文，判断不出在跟谁说，应当先听"),
 )
 
 
