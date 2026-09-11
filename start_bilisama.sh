@@ -17,10 +17,10 @@ ELECTRON="$PET_DIR/node_modules/.bin/electron"
 ELECTRON_RUNTIME="$PET_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 ENDPOINT_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bilisama/ui/endpoint.json"
 
-# Volcano SC2.0 is the shipped streamer path. Provider-specific defaults are
+# Qwen realtime is the shipped streamer path. Provider-specific defaults are
 # filled only after argument parsing, so overriding the provider never leaks a
 # Volcano model or speaker into DashScope or a local backend.
-PROVIDER="${BILISAMA_PROVIDER:-volcano}"
+PROVIDER="${BILISAMA_PROVIDER:-dashscope}"
 MODEL="${BILISAMA_REALTIME_MODEL:-}"
 VOICE="${BILISAMA_VOICE:-}"
 ROOM_ID="${BILISAMA_ROOM_ID:-}"
@@ -36,7 +36,7 @@ usage() {
 用法：./start_bilisama.sh [选项] [其余 dev-talk 参数]
 
 自己认的选项（也可用同名 BILISAMA_* 环境变量，选项优先）：
-  --provider <名字>       语音后端（默认 volcano；BILISAMA_PROVIDER）
+  --provider <名字>       语音后端（默认 dashscope；BILISAMA_PROVIDER）
   --model <模型名>        托管服务的模型（BILISAMA_REALTIME_MODEL）。火山默认
                           2.2.0.0；DashScope 默认 qwen-audio-3.0-realtime-flash
   --voice <音色>          火山默认 saturn_zh_female_keainvsheng_tob

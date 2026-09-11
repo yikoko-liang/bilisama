@@ -237,9 +237,11 @@ BILISAMA_S2S_CONFIG=config/s2s/official-pipe.local.json scripts/smoke_provider_b
 ./start_bilisama.sh
 ```
 
-默认使用豆包：`volcano` / `2.2.0.0` / `saturn_zh_female_keainvsheng_tob`。
-双击 `.command` 和直接执行 `bilisama dev-talk --director` 也使用这组默认配置；
-`avatar.expression_source` 配成兼容豆包的 `lexicon`，不向语音中插入会被念出的表情标签。
+启动脚本默认使用 Qwen：`dashscope` / `qwen-audio-3.0-realtime-flash`，音色保留 `longanlingxin`。
+双击 `.command` 也使用这组默认参数；裸 CLI 不带 provider 参数仍按 TOML 的豆包配置运行。
+`avatar.expression_source` 保留 `lexicon`，不向语音中插入会被念出的表情标签。
+等价命令：`.venv/bin/bilisama dev-talk --director --provider dashscope --model qwen-audio-3.0-realtime-flash`。
+测试台词合成仍使用 Seed TTS 2.0，不随助手的实时语音模型切换。
 
 它先检查 .venv、`path.sh` 凭据和桌面壳装没装，缺什么用中文明说；然后按名字探测
 MacBook 内置麦克风（蓝牙耳机的麦不会被误选成输入），最后以全装配档（`--director`）
@@ -248,7 +250,7 @@ endpoint.json 里的 pid 真活着、而且确实是一个 bilisama dev-talk 进
 参数它会明说「这次不生效，想换配置先退出正在跑的」。
 
 脚本自己只认五个选项（同名 `BILISAMA_*` 环境变量也行，选项优先）：
-`--provider`（默认 volcano）、`--model`（火山默认 `2.2.0.0`，DashScope 默认
+`--provider`（默认 dashscope）、`--model`（火山默认 `2.2.0.0`，DashScope 默认
 `qwen-audio-3.0-realtime-flash`）、`--voice`（火山默认
 `saturn_zh_female_keainvsheng_tob`）、`--room`（不给是沙箱模式）、`--input-device`
 （不给自动找内置麦）。模型与音色必须配对，配错会被启动自检拦下。**其余参数原样透传给 dev-talk**，

@@ -72,11 +72,11 @@ def _run_check(
     return completed.stdout
 
 
-def test_default_start_uses_volcano_sc2_and_the_cloned_voice(tmp_path: Path) -> None:
+def test_default_start_uses_qwen_realtime(tmp_path: Path) -> None:
     output = _run_check(tmp_path)
-    assert "后端 volcano" in output
-    assert "模型 2.2.0.0" in output
-    assert "音色 saturn_zh_female_keainvsheng_tob" in output
+    assert "后端 dashscope" in output
+    assert "模型 qwen-audio-3.0-realtime-flash" in output
+    assert "saturn_zh_female_keainvsheng_tob" not in output
 
 
 def test_dashscope_override_gets_only_dashscope_defaults(tmp_path: Path) -> None:
@@ -114,7 +114,7 @@ def test_local_provider_does_not_inherit_cloud_defaults(tmp_path: Path) -> None:
     assert "saturn_zh_female_keainvsheng_tob" not in output
 
 
-def test_direct_cli_config_defaults_to_the_same_doubao_model_and_voice(tmp_path: Path) -> None:
+def test_direct_cli_config_keeps_the_explicit_volcano_alternative(tmp_path: Path) -> None:
     assert cli.DEFAULT_CONFIG == REPO_ROOT / "config/bilisama.toml"
     settings = load(cli.DEFAULT_CONFIG, user_profiles_root=tmp_path / "profiles")
     assert settings.speech.provider is ProviderName.VOLCANO
@@ -123,11 +123,11 @@ def test_direct_cli_config_defaults_to_the_same_doubao_model_and_voice(tmp_path:
     assert settings.avatar.expression_source == "lexicon"
 
 
-def test_finder_entry_delegates_to_the_same_doubao_defaults(tmp_path: Path) -> None:
+def test_finder_entry_delegates_to_the_same_qwen_defaults(tmp_path: Path) -> None:
     output = _run_check(tmp_path, entry="start_bilisama.command")
-    assert "后端 volcano" in output
-    assert "模型 2.2.0.0" in output
-    assert "音色 saturn_zh_female_keainvsheng_tob" in output
+    assert "后端 dashscope" in output
+    assert "模型 qwen-audio-3.0-realtime-flash" in output
+    assert "saturn_zh_female_keainvsheng_tob" not in output
 
 
 def test_finder_entry_preserves_explicit_other_provider(tmp_path: Path) -> None:
