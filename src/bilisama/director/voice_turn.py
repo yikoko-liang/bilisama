@@ -63,6 +63,11 @@ _SKIPPED_REMEMBERED = 64
 # stopped skipping entirely still reads 48% an hour later, and on 2026-09-09
 # the only way to see it happening was to slice the log by minute afterwards.
 _RECENT_WINDOW = 20
+# What the providers send downstream, for turning frame counts into a duration
+# the log can be read in. Same number the page schedules against
+# (ui/web/js/audio.js:14) and the echo probe measures against
+# (ui/audio.py:443); plan section 3.1 fixes it for all three.
+_DOWNLINK_RATE = 24000
 # How long the gate keeps DECODING a turn it has already muted, to catch the
 # note the provider streams after the tag. Muting is not delayed by this —
 # the frames stop at the closing bracket — only the cancel is, and only until
@@ -101,6 +106,11 @@ class _Turn:
     timer: asyncio.Task[None] | None = None
     note_timer: asyncio.Task[None] | None = None
     midway_logged: bool = False
+    # Bytes of this turn's audio the gate has let downstream. Counted because
+    # released audio is SCHEDULED AHEAD in the page's queue and marking the
+    # handle stale cannot unschedule it — only a playback clear can. So this
+    # is what the audience could still hear after the turn dies.
+    audio_out_bytes: int = 0
 
 
 class VoiceTurnGate:
@@ -135,6 +145,8 @@ class VoiceTurnGate:
         self._timeouts = 0
         self._late_markers = 0
         self._longest_hold_ms = 0
+        self._cut_while_audible = 0
+        self._cut_audible_ms = 0
 
     # ------------------------------------------------------------ wiring
 
@@ -180,6 +192,11 @@ class VoiceTurnGate:
             # rather than after someone slices the log by minute.
             "recent_turns": len(self._recent),
             "recent_skipped": sum(self._recent),
+            # Turns the provider cut after the audience could already hear
+            # her, and how much of her they heard in total. Nonzero means she
+            # is talking over the streamer on the way down.
+            "cut_while_audible": self._cut_while_audible,
+            "cut_audible_ms": self._cut_audible_ms,
         }
 
     def close(self) -> None:
@@ -256,6 +273,7 @@ class VoiceTurnGate:
         if turn.skipped or turn.muted:
             return ()
         if not turn.holding:
+            turn.audio_out_bytes += len(event.pcm)
             return (event,)
         turn.frames.append(event)
         self._arm(turn)
@@ -268,6 +286,7 @@ class VoiceTurnGate:
         if turn is None:
             return (event,)
         self._disarm(turn)
+        self._note_cut_while_audible(turn, event.status)
         if turn.skipped:
             # Skipped while held: nothing of this turn reached the views, so
             # its end is nobody's business downstream either (the scheduler
@@ -354,12 +373,43 @@ class VoiceTurnGate:
             log.info("voice_gate.marker_midway", handle_id=turn.handle.handle_id)
         return (event,)
 
+    def _note_cut_while_audible(self, turn: _Turn, status: link.ReplyStatus) -> None:
+        """Record a turn that died after the audience could already hear it.
+
+        The provider cancels its own VAD turn the moment the streamer speaks
+        again, and on a continuously talking streamer that is nearly every
+        turn — 119 of 123 in one production session. Whatever audio it had
+        already handed us by then is scheduled ahead in the page's playback
+        queue, and marking the handle stale only stops the NEXT frame; it
+        cannot unschedule those. A playback clear can, and the implicit path
+        does not send one (scheduler.py:823) — the dispatched path does.
+
+        Whether that gap is audible was unanswerable: the log carried how many
+        CHARACTERS a cancelled turn produced, and text leads audio on all three
+        providers, so the count said nothing about sound. This is the missing
+        half. Silent when nothing got out, which is the case to expect.
+        """
+        if status is link.ReplyStatus.COMPLETED or not turn.audio_out_bytes:
+            return
+        audible_ms = round(turn.audio_out_bytes / (_DOWNLINK_RATE * 2) * 1000)
+        self._cut_while_audible += 1
+        self._cut_audible_ms += audible_ms
+        log.info(
+            "voice_gate.cut_while_audible",
+            handle_id=turn.handle.handle_id,
+            status=status.value,
+            audible_ms=audible_ms,
+        )
+
     def _release(self, turn: _Turn, *, why: str) -> tuple[link.LinkEvent, ...]:
         self._disarm(turn)
         frames = tuple(turn.frames)
         turn.frames.clear()
         turn.holding = False
         turn.released = True
+        turn.audio_out_bytes += sum(
+            len(f.pcm) for f in frames if isinstance(f, link.ReplyAudioDelta)
+        )
         held_ms = int((self._clock.monotonic() - turn.opened_at) * 1000)
         self._longest_hold_ms = max(self._longest_hold_ms, held_ms)
         self._passed += 1

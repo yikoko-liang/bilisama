@@ -326,6 +326,8 @@ async def test_status_has_the_shape_the_health_card_reads() -> None:
         "skipped": 0,
         "recent_turns": 0,
         "recent_skipped": 0,
+        "cut_while_audible": 0,
+        "cut_audible_ms": 0,
         "timeouts": 0,
         "late_markers": 0,
         "longest_hold_ms": 0,
@@ -390,3 +392,81 @@ async def test_the_health_card_shows_the_last_few_turns_not_just_the_total() -> 
     assert status["skipped"] == 20, "the cumulative count still remembers the good stretch"
     assert status["recent_skipped"] == 0, "but the window says it has stopped"
     assert status["recent_turns"] == 20, "the window is full, not empty"
+
+
+# ------------------------------------------- audio that escaped before a cut
+
+
+def _pcm_ms(ms: int) -> bytes:
+    """`ms` of 24 kHz mono s16, the rate all three providers send down."""
+    return b"\x00" * (24000 * 2 * ms // 1000)
+
+
+async def test_a_cut_turn_reports_how_much_of_her_the_audience_heard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The number that says whether barge-in is clean or merely fast.
+
+    The provider cancels its own turn the moment the streamer speaks again,
+    and audio it already handed us is scheduled ahead in the page's queue --
+    `stale` stops the next frame, it cannot unschedule those. The log used to
+    carry only how many CHARACTERS a cancelled turn produced, and text leads
+    audio on all three providers, so that count could not answer it.
+    """
+    caplog.set_level(logging.INFO, logger="bilisama.director.voice_turn")
+    rig = _Rig()
+    hers = rig.start()
+    plain = _text(hers, "在呢")
+    assert rig.gate.feed(plain) == (plain,), "released: nothing to hold on plain prose"
+    audio = link.ReplyAudioDelta(hers, _pcm_ms(240))
+    assert rig.gate.feed(audio) == (audio,)
+    rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED))
+
+    lines = _logged(caplog, "voice_gate.cut_while_audible")
+    assert len(lines) == 1, "a cut with audio already out has to say so"
+    assert lines[0][1]["audible_ms"] == 240
+    assert lines[0][1]["status"] == "cancelled"
+    assert rig.gate.status()["cut_while_audible"] == 1
+    assert rig.gate.status()["cut_audible_ms"] == 240
+
+
+async def test_a_cut_that_got_no_audio_out_stays_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two thirds of production's cancels never produced a character, let alone
+    a sample. Logging those would bury the ones that did."""
+    caplog.set_level(logging.INFO, logger="bilisama.director.voice_turn")
+    rig = _Rig()
+    hers = rig.start()
+    rig.gate.feed(_text(hers, "在"))  # released, but no audio followed
+    rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED))
+    assert _logged(caplog, "voice_gate.cut_while_audible") == []
+    assert rig.gate.status()["cut_while_audible"] == 0
+
+
+async def test_a_skipped_turn_never_counts_as_audible(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gate drops a skipped turn's audio, so none of it can reach a
+    speaker — counting it would invent an overlap that never happened."""
+    caplog.set_level(logging.INFO, logger="bilisama.director.voice_turn")
+    rig = _Rig()
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SKIP] 主播在嘀咕")) == ()
+    assert rig.gate.feed(link.ReplyAudioDelta(hers, _pcm_ms(500))) == ()
+    await rig.settle()
+    rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED))
+    assert _logged(caplog, "voice_gate.cut_while_audible") == []
+    assert rig.gate.status()["cut_audible_ms"] == 0
+
+
+async def test_audio_released_from_the_hold_counts_too() -> None:
+    """A held burst reaches the speakers all at once when the head decodes;
+    it is as audible as audio that flowed straight through."""
+    rig = _Rig()
+    hers = rig.start()
+    assert rig.gate.feed(link.ReplyAudioDelta(hers, _pcm_ms(100))) == (), "held"
+    released = rig.gate.feed(_text(hers, "在呢"))
+    assert len(released) == 2, "the burst goes out in arrival order"
+    rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED))
+    assert rig.gate.status()["cut_audible_ms"] == 100

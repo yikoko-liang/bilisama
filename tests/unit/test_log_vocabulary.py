@@ -165,6 +165,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "scheduler.task_failed",
         "scheduler.verdict",
         "voice_gate.cancel_failed",
+        "voice_gate.cut_while_audible",
         "voice_gate.held",
         "voice_gate.late_marker",
         "voice_gate.marker_midway",
