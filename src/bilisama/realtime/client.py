@@ -236,6 +236,21 @@ class RealtimeClient:
             await self._ws.close()
             self._ws = None
 
+    def discard_conversation(self) -> None:
+        """Drop local turn state only after the socket and its tasks stop."""
+        if not self._closing or self._ws is not None:
+            raise RuntimeError("清空会话前必须先关闭语音连接")
+        for record in (*self._replies.values(), *self._awaiting_created):
+            self._settle(record, link.ReplyStatus.CANCELLED)
+        self._replies.clear()
+        self._awaiting_created.clear()
+        self._slot_free.set()
+        self._tombstones.clear()
+        self._tombstone_set.clear()
+        self._cancel_sent_at = float("-inf")
+        while not self._events.empty():
+            self._events.get_nowait()
+
     def events(self) -> AsyncIterator[link.LinkEvent]:
         return self._drain()
 

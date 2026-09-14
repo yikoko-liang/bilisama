@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import TypedDict, cast
@@ -24,6 +25,27 @@ _ROOT = Path(__file__).resolve().parents[2]
 _TESTSETS = _ROOT / "config" / "testsets"
 _LABELS = {"TO_ME", "AUDIENCE", "SELF_TALK", "READING", "GUEST", "UNSURE", "DECLINED"}
 _SETUP_ROWS = {2, 7, 13, 18, 23, 28, 33, 37, 42, 50, 63, 68, 74, 83, 89}
+
+
+def test_testsets_use_the_current_assistant_name() -> None:
+    paths = [
+        *sorted(_TESTSETS.glob("*.json")),
+        _ROOT / "tests/fixtures/intent/intent_scenarios.json",
+    ]
+    for path in paths:
+        assert not re.search(r"mia|miya|米娅", path.read_text(encoding="utf-8"), re.I), path
+
+
+def test_hard_cases_have_distinct_factual_backgrounds_without_answer_keys() -> None:
+    cases = load_test_catalog(_TESTSETS, intent=True).sets[1].cases
+    assert len(cases) == 27
+    backgrounds = ["\n".join(case.context) for case in cases]
+    assert len(set(backgrounds)) == len(cases)
+    for case, background in zip(cases, backgrounds, strict=True):
+        assert len(case.context) >= 3, case.id
+        assert len(background) >= 80, case.id
+        assert not any(label in background for label in _LABELS), case.id
+        assert not any(expectation in background for expectation in case.expected), case.id
 
 
 def test_anchor_answer_case_has_real_ordered_signals(intent_catalog: MockTestCatalog) -> None:
@@ -107,7 +129,7 @@ def _step_payload() -> dict[str, object]:
     return {
         "id": "s1",
         "kind": "voice",
-        "text": "Mia，你帮我看看这个思路。",
+        "text": "豆腐，你帮我看看这个思路。",
         "expected": "主播说完后开口，回复主播。",
     }
 
@@ -175,7 +197,7 @@ def test_voice_can_keep_overlapping_event_and_expectation_separate() -> None:
         }
     )
 
-    assert step.text == "Mia，你帮我看看这个思路。"
+    assert step.text == "豆腐，你帮我看看这个思路。"
     assert step.expected_intent == "TO_ME"
     assert step.events_during[0].event.text == "这个工具离线也能用吗？"
     assert step.events_during[0].source_row == 8
@@ -285,10 +307,10 @@ def test_catalog_contains_two_intent_sets_with_the_requested_counts(
 ) -> None:
     assert [(item.id, len(item.cases)) for item in intent_catalog.sets] == [
         ("simple", 14),
-        ("hard", 19),
+        ("hard", 27),
     ]
     cases = [case for test_set in intent_catalog.sets for case in test_set.cases]
-    assert len({case.id for case in cases}) == 33
+    assert len({case.id for case in cases}) == 41
     assert all(case.steps for case in cases)
     assert all(not (case.events or case.bursts or case.actions) for case in cases)
 

@@ -155,6 +155,25 @@ async def test_context_carries_anchors_rules_and_memory(tmp_path: Path) -> None:
     assert "开播" in text, "the clock line"
 
 
+async def test_replay_context_excludes_persistent_history_and_previous_case(tmp_path: Path) -> None:
+    assembly, store, persona, _intents, _pushed, _clock = _assembly(tmp_path)
+    store.replace_facts("streamer", "", [("旧场景编译器", "")])
+    persona.write_growth("voice", ["旧口头禅"])
+    assembly._stream_intro = lambda: "旧直播简介"
+    assembly.set_replay_context("当前场景：本地书签工具")
+    for text in (assembly.build_context(), assembly.build_public_context()):
+        assert "本地书签工具" in text
+        assert "旧场景" not in text
+        assert "旧直播简介" not in text
+        assert "旧口头禅" not in text
+    assembly.set_replay_context("下一场景：角色一致性")
+    assert "本地书签工具" not in assembly.build_context()
+    assert "角色一致性" in assembly.build_context()
+    assembly.set_replay_context(None)
+    assert "旧场景编译器" in assembly.build_context()
+    assert "旧直播简介" in assembly.build_context()
+
+
 async def test_refresh_pushes_only_when_the_text_changed(tmp_path: Path) -> None:
     assembly, store, _persona, _intents, pushed, _clock = _assembly(tmp_path)
     assert await assembly.refresh_context() is True

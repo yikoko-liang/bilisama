@@ -22,7 +22,7 @@
         {
           "id": "s1",
           "kind": "voice",
-          "text": "Mia，你帮我解释一下什么是工具调用。",
+          "text": "豆腐，你帮我解释一下什么是工具调用。",
           "after": "delay",
           "delay_s": 0.5,
           "observe_s": 10,

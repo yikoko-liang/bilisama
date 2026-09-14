@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from bilisama.clock import Clock
     from bilisama.director.floor import SpeakingFloor
     from bilisama.event_pacing import EventPacer
+    from bilisama.ingest.events import LiveEvent
     from bilisama.memory.store import MemoryStore
 
 __all__ = ["ProactiveTopicLoop"]
@@ -94,6 +95,8 @@ class ProactiveTopicLoop:
         self._reply_base_instructions = reply_base_instructions or (lambda: "")
 
         self._candidate: str | None = None
+        self._replay_context: str | None = None
+        self._replay_events: deque[str] = deque(maxlen=20)
         self._fingerprint = ""
         self._last_activity = clock.monotonic()
         self._last_refresh = -wake_interval_s  # first refresh happens on tick one
@@ -112,6 +115,31 @@ class ProactiveTopicLoop:
         self._budget_blocked = False
 
     # ------------------------------------------------------------ inputs
+
+    async def reset_for_replay(self, context: str | None) -> None:
+        """Discard stale candidates and isolate side-model input per case."""
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            await asyncio.gather(self._refresh_task, return_exceptions=True)
+            self._refresh_task = None
+        self._replay_context = context
+        self._replay_events.clear()
+        self._dialogue.clear()
+        self._candidate = None
+        self._fingerprint = ""
+        self._submitted.clear()
+        self._unanswered_count = 0
+        self._awaiting_response = False
+        self._budget_blocked = False
+        self._last_activity = self._clock.monotonic()
+        self._last_refresh = self._last_activity - self._wake_interval_s
+
+    def note_replay_event(self, event: LiveEvent) -> None:
+        """Keep only events actually received after this case began."""
+        if self._replay_context is not None:
+            self._replay_events.append(
+                f"[{event.kind.value}] {event.viewer.name or '观众'}: {event.text}"
+            )
 
     def note_activity(self, *, responds_to_topic: bool = False) -> None:
         """Record one live-room event and, when applicable, a topic response."""
@@ -339,9 +367,13 @@ class ProactiveTopicLoop:
 
     async def _refresh(self) -> None:
         assert self._side is not None
-        events = self._store.recent_events(limit=20)
-        rows = self._store.facts("stream", str(self._store.stream_id))
-        summary = rows[-1].text if rows else ""
+        if self._replay_context is None:
+            events = self._store.recent_events(limit=20)
+            rows = self._store.facts("stream", str(self._store.stream_id))
+            summary = rows[-1].text if rows else ""
+        else:
+            events = list(self._replay_events)
+            summary = self._replay_context
         dialogue = [
             f"{'主播' if role == 'streamer' else self._assistant_label}：{text}"
             for role, text in self._dialogue

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from bilisama.clock import FakeClock
 from bilisama.config.derive import derive
 from bilisama.config.enums import Chattiness
 from bilisama.config.schema import SpeakSwitches
@@ -64,6 +65,82 @@ def test_production_test_voice_config_and_hooks_are_separate_from_assistant_outp
     assert _test_voice_wiring_problems(_run_director()) == []
 
 
+def test_production_case_start_resets_model_and_prompt_before_enabling_events() -> None:
+    tree = _run_director()
+    begin = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "begin_test"
+    )
+    source = ast.unparse(begin)
+    assert source.index("audio_input.set_test_active(True)") < source.index(
+        "speech.reset_conversation"
+    )
+    assert source.index("assembly.set_replay_context") < source.index("speech.reset_conversation")
+    assert source.index("speech.reset_conversation") < source.index(
+        "assembly.set_event_input_enabled(True)"
+    )
+    assert "proactive.reset_for_replay(intent_test_context)" in source
+    assert "selector.reset_for_replay()" in source
+    end = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "end_test"
+    )
+    cleanup = ast.unparse(end)
+    assert "speech.reset_conversation(assembly.build_context())" in cleanup
+    assert "pause_after_monitor_failure()" in cleanup
+    assert "not intent_test_resetting" in cleanup
+
+
+async def test_context_update_queued_before_reset_cannot_overwrite_new_case() -> None:
+    class ResettableLink(_ScriptedLink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.contexts: list[str] = []
+
+        async def reset_conversation(self, instructions: str) -> None:
+            self.contexts.append(instructions)
+
+        async def set_context(self, instructions: str) -> None:
+            self.contexts.append(instructions)
+
+    inner = ResettableLink()
+    speech = _Fanout(inner)
+    await speech._context_lock.acquire()
+    reset = asyncio.create_task(speech.reset_conversation("新用例背景"))
+    await asyncio.sleep(0)
+    stale = asyncio.create_task(speech.set_context("旧用例背景"))
+    await asyncio.sleep(0)
+    speech._context_lock.release()
+    try:
+        await asyncio.wait_for(asyncio.gather(reset, stale), timeout=1)
+        assert inner.contexts == ["新用例背景"]
+        await speech.set_context("新用例更新")
+        assert inner.contexts[-1] == "新用例更新"
+    finally:
+        await speech.aclose()
+
+
+async def test_unsupported_replay_reset_fails_without_stopping_the_link() -> None:
+    speech = _Fanout(_ScriptedLink())
+    with pytest.raises(RuntimeError, match="不支持清空"):
+        await speech.reset_conversation("本例背景")
+    assert speech._task is None
+
+
+async def test_replay_drain_finishes_history_writes_but_cancels_old_timers() -> None:
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    scheduler = Scheduler(speech, SpeakingFloor(clock), clock)
+    with pytest.raises(RuntimeError, match="暂停调度"):
+        await scheduler.drain_pending_io()
+    scheduler.panic_mute()
+    scheduler._spawn(
+        speech.add_context_item("上一例回答", role="assistant"), name="scheduler:write-history"
+    )
+    scheduler._spawn(clock.sleep(999), name="scheduler:playback-grace")
+    await asyncio.wait_for(scheduler.drain_pending_io(), timeout=1)
+    assert speech.history == [("上一例回答", "assistant")]
+    assert not scheduler._tasks
+
+
 @pytest.mark.parametrize(
     ("before", "after"),
     [
@@ -101,8 +178,7 @@ class _WiredReplay:
             voice_rules="当前语音来自主播。",
             event_rules="当前直播事件来自观众。",
         )
-        self.notes = ""
-        self.kit.assembly._stream_intro = lambda: "今天调试本地工具。\n" + self.notes
+        self.kit.assembly._stream_intro = lambda: "今天调试本地工具。"
         self.source = ScenarioSource("wired-replay")
         self.states: list[dict[str, object]] = []
         case = MockTestCase(
@@ -152,12 +228,12 @@ class _WiredReplay:
 
     async def begin(self, context: list[str]) -> None:
         self.source.accepted_run = int(str(self.runner.state()["run_id"]))
-        self.notes = "\n".join(context)
+        self.kit.assembly.set_replay_context("\n".join(context))
         await self.kit.assembly.refresh_context()
 
     async def end(self) -> None:
         self.source.accepted_run = None
-        self.notes = ""
+        self.kit.assembly.set_replay_context(None)
         await self.kit.assembly.refresh_context()
 
     async def start(self) -> None:
@@ -339,7 +415,7 @@ async def test_replay_notes_enter_both_shared_contexts_and_restore_on_stop(tmp_p
         event_context = replay.kit.assembly.build_event_context()
         for context in (voice_context, event_context):
             assert "这个工具只在本地使用" in context
-            assert "今天调试本地工具" in context
+            assert "今天调试本地工具" not in context
             assert "金标准只在测试页展示" not in context
             assert "TO_ME" not in context
         assert "当前语音来自主播" in voice_context
@@ -379,11 +455,11 @@ async def test_repeated_vip_case_gets_one_welcome_in_each_run(tmp_path: Path) ->
     replay = _WiredReplay(tmp_path, [_event_step(vip=True)])
     try:
         await replay.start()
-        await replay.kit.clock.advance(0.1)
+        await replay.kit.clock.advance(0.7)
         assert replay.runner.state()["status"] == "completed"
         assert len(replay.kit.intents) == 1
         await replay.start()
-        await replay.kit.clock.advance(0.1)
+        await replay.kit.clock.advance(0.7)
         assert replay.runner.state()["status"] == "completed"
         assert len(replay.kit.intents) == 2, "上一轮欢迎记录不应吞掉本轮的 VIP 进房"
         assert replay.events[0].viewer.name == replay.events[1].viewer.name == "小禾"
@@ -469,17 +545,20 @@ async def test_replay_reset_clears_deferred_candidates_and_allows_same_question_
     async def deliver(value: LiveEvent) -> None:
         delivered.append(value)
 
+    async def deliver_batch(values: tuple[LiveEvent, ...]) -> None:
+        delivered.extend(values)
+
     selector.offer(event)
     await kit.clock.advance(derive(Chattiness.HIGH).danmaku_window_s + 0.1)
-    await selector._advance(kit.clock.monotonic(), deliver)
+    await selector._advance(kit.clock.monotonic(), deliver, deliver_batch)
     assert selector.status()["deferred_count"] == 1
     selector.reset_for_replay()
     blocked = False
-    await selector._advance(kit.clock.monotonic(), deliver)
+    await selector._advance(kit.clock.monotonic(), deliver, deliver_batch)
     assert delivered == []
     selector.offer(event)
     await kit.clock.advance(derive(Chattiness.HIGH).danmaku_window_s + 0.1)
-    await selector._advance(kit.clock.monotonic(), deliver)
+    await selector._advance(kit.clock.monotonic(), deliver, deliver_batch)
     assert delivered == [event]
 
 

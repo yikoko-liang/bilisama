@@ -90,6 +90,10 @@ class MockEvent(BaseModel):
     gift: MockGift | None = None
     route: Literal["direct", "crowd"] = "direct"
     dedup_group: str = ""
+    reply_to_uid: int = Field(default=0, ge=0)
+    reply_to_name: str = ""
+    # Verified room owner for simulated platform metadata, not a name guess.
+    room_owner_uid: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_gift(self) -> MockEvent:
@@ -525,6 +529,13 @@ class MockTestRunner:
             ts_ms=int(self._clock.wall().timestamp() * 1000),
             recv_at=self._clock.monotonic(),
             raw={"mock_test": case.id},
+            reply_to_uid=spec.reply_to_uid,
+            reply_to_name=spec.reply_to_name,
+            reply_to_anchor=(
+                spec.reply_to_uid == spec.room_owner_uid
+                if spec.reply_to_uid and spec.room_owner_uid
+                else None
+            ),
         )
 
     @staticmethod

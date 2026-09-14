@@ -63,6 +63,7 @@ class SkipReason(StrEnum):
     PANIC_MUTE = "policy.panic_mute"
     OUTPUT_BLOCKED = "safety.output_blocked"
     VOICE_NOT_ADDRESSED = "voice.not_addressed"
+    MODEL_DECLINED = "event.model_declined"
     """The provider's own microphone turn was cut: the streamer was not
     talking to her (the voice gate's ruling, director/voice_turn.py)."""
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat

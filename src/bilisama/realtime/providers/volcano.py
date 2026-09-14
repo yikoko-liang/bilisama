@@ -539,6 +539,20 @@ class VolcanoLink:
         await asyncio.gather(*pending, return_exceptions=True)
         log.info("volcano.suspended", dialog_id=self._dialog_id)
 
+    async def reset_conversation(self, instructions: str) -> None:
+        """Start without dialog_id: pause/resume intentionally keeps history."""
+        await self.suspend()
+        self._dialog_id = ""
+        self._pending_item = ""
+        self._done.clear()
+        self._question = ""
+        self._audio_question = ""
+        self._context = instructions
+        self._swapped_context = None
+        while not self._events.empty():
+            self._events.get_nowait()
+        await self.resume()
+
     async def resume(self) -> None:
         """Reopen after suspend(). connect() rebuilds both session levels and
         _session_body carries the surviving dialog_id, so this is the same

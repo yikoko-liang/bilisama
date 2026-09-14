@@ -55,6 +55,8 @@ from typing import Any, Literal, Protocol, cast
 from bilisama.clock import Clock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent
+from bilisama.director.intents import event_context_line, wrap_events
+from bilisama.ingest.events import EventKind
 from bilisama.obs.logging import bind, get_logger
 from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
 from bilisama.realtime import link
@@ -188,6 +190,7 @@ class Scheduler:
         self._floor = floor
         self._clock = clock
         self._verdicts: list[Verdict] = []
+        self._model_skips: OrderedDict[int, tuple[str, bool]] = OrderedDict()
         self._verdict_sink = verdict_sink or self._verdicts.append
         self._quiet_after_speech_s = quiet_after_speech_s
         self._cooldown_s = cooldown_s
@@ -254,6 +257,23 @@ class Scheduler:
             # the history write missed; she just may repeat herself sooner.
             log.warning("scheduler.history_write_failed", error_text=str(exc)[:200])
 
+    async def _write_delivery_status(self, intent: Intent, status: str) -> None:
+        """Write factual delivery state, never a semantic handled-event guess."""
+        events = intent.events or ((intent.event,) if intent.event is not None else ())
+        if not events:
+            return
+        text = wrap_events(
+            [
+                f"回复状态记录：{status}。不是新事件，不要求立即回复。",
+                *(event_context_line(event) for event in events),
+            ]
+        )
+        try:
+            async with asyncio.timeout(5):
+                await self._speech.add_context_item(text)
+        except (OSError, RuntimeError, ValueError) as exc:
+            log.warning("scheduler.delivery_status_failed", error_text=str(exc)[:200])
+
     def submit(self, intent: Intent) -> None:
         """Queue an intent. Duplicates (same dedup_key while queued or active)
         are skipped with a verdict rather than silently dropped."""
@@ -318,6 +338,7 @@ class Scheduler:
                 queue_depth=len(self._heap),
                 has_item=intent.injection.item_text is not None,
                 requeue_on_interrupt=intent.requeue_on_interrupt,
+                events=intent.events,
             )
         self._maybe_preempt(intent)
         self._wake.set()
@@ -332,6 +353,27 @@ class Scheduler:
         if dedup_key in self._queued_keys:
             self._revoked.add(dedup_key)
             self._wake.set()
+
+    async def drain_pending_io(self) -> None:
+        """Finish owned writes/cancels before replacing the model session."""
+        if not self._panicked:
+            raise RuntimeError("清理测试会话前必须暂停调度")
+        while self._dispatching:
+            await asyncio.sleep(0.01)
+        self._settle_active(Outcome.CANCELLED, Phase.GENERATING, reason=SkipReason.PANIC_MUTE)
+        self._implicit = None
+        self._link_down = False
+        while self._tasks:
+            pending = tuple(self._tasks)
+            for task in pending:
+                if task.get_name() in ("scheduler:protect-cap", "scheduler:playback-grace"):
+                    task.cancel()
+            results = await asyncio.gather(*pending, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise RuntimeError("上一轮测试尚未清理完成，请重试") from result
 
     def panic_mute(self) -> None:
         """Kill everything, protected included — the one switch allowed to."""
@@ -387,6 +429,43 @@ class Scheduler:
         log.info("scheduler.panic_released", queued=len(self._heap))
         self._panicked = False
         self._wake.set()
+
+    def skip_reply(
+        self, handle: link.ReplyHandle, *, detail: str = "", clear_playback: bool = False
+    ) -> None:
+        """Apply the same model SKIP contract to voice and dispatched replies.
+
+        The fanout can decide before request_reply returns. Remember that
+        decision by handle, then settle it as soon as dispatch books the slot.
+        A model decline is terminal, never an interruption to requeue.
+        """
+        if handle.implicit:
+            self.skip_implicit(
+                handle,
+                reason=SkipReason.VOICE_NOT_ADDRESSED,
+                detail=detail,
+                clear_playback=clear_playback,
+            )
+            return
+        self._model_skips[handle.handle_id] = (detail, clear_playback)
+        while len(self._model_skips) > 64:
+            self._model_skips.popitem(last=False)
+        self._apply_model_skip(handle)
+
+    def _apply_model_skip(self, handle: link.ReplyHandle) -> bool:
+        active = self._active
+        decision = self._model_skips.get(handle.handle_id)
+        if active is None or active.handle is not handle or decision is None:
+            return False
+        detail, clear_playback = decision
+        if clear_playback and not active.cleared:
+            active.cleared = True
+            self.controls.put_nowait(PlaybackClear(reason="model_declined"))
+        self._spawn(self._speech.cancel(handle), name="scheduler:model-decline")
+        self._settle_active(
+            Outcome.SKIPPED, Phase.GENERATING, reason=SkipReason.MODEL_DECLINED, detail=detail
+        )
+        return True
 
     def skip_implicit(
         self,
@@ -755,6 +834,8 @@ class Scheduler:
         while len(self._reply_intents) > _REPLY_INTENTS_CAP:
             self._reply_intents.popitem(last=False)
         self._floor.on_reply_active(True)
+        if self._apply_model_skip(handle):
+            return
         if self._guard is not None:
             self._guard.reset()
 
@@ -874,6 +955,8 @@ class Scheduler:
             self.panic_mute()
 
     def _on_done(self, event: link.ReplyDone) -> None:
+        if self._apply_model_skip(event.handle):
+            return
         active = self._active
         if active is None or event.handle is not active.handle:
             return
@@ -1135,6 +1218,7 @@ class Scheduler:
         *,
         reason: SkipReason | None = None,
         requeue: bool = False,
+        detail: str = "",
     ) -> None:
         active = self._active
         if active is None:
@@ -1144,6 +1228,16 @@ class Scheduler:
         self._end_protection(active, via="settle")
         intent = active.intent
         self._free_key(intent)
+        if outcome is Outcome.CANCELLED:
+            self._spawn(
+                self._write_delivery_status(intent, "回复被打断，未完整播完"),
+                name="scheduler:delivery-status",
+            )
+        elif outcome is Outcome.SPOKEN:
+            self._spawn(
+                self._write_delivery_status(intent, "生成已完成，尚不能确认完整播完"),
+                name="scheduler:delivery-status",
+            )
         parking = not requeue and outcome is Outcome.SPOKEN and self._floor.queued_audio
         with bind(intent_id=intent.dedup_key or intent.source):
             # debug and deliberately overlapping scheduler.verdict: this is the
@@ -1189,6 +1283,7 @@ class Scheduler:
                 phase=phase,
                 reason=reason,
                 waited_s=self._waited_s(intent, active.started_at),
+                detail=detail,
                 spoken_ms=self._spoken_ms(active.started_at),
             )
         )
@@ -1230,6 +1325,23 @@ class Scheduler:
         for parked in self._parked:
             if played is None and not drained and now < parked.deadline:
                 still_waiting.append(parked)
+                continue
+            self._spawn(
+                self._write_delivery_status(
+                    parked.intent,
+                    "已完整播完" if heard else "未确认完整播完，不代表观众已听到完整回答",
+                ),
+                name="scheduler:delivery-status",
+            )
+            if (
+                not heard
+                and self._floor.streamer_speaking
+                and not self._panicked
+                and parked.intent.event is not None
+                and parked.intent.event.kind is EventKind.VIP_ENTER
+                and parked.intent.requeue_on_interrupt
+            ):
+                self._requeue(parked.intent, item_written=True)
                 continue
             self._emit(
                 Verdict(

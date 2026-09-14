@@ -138,6 +138,21 @@ def _medal(name: str, level: int, up_name: str, anchor_room_id: int) -> Medal | 
     return Medal(name=name, level=level, up_name=up_name, anchor_room_id=anchor_room_id)
 
 
+def _danmaku_reply_target(message: Any) -> tuple[int, str]:
+    """Read Web extra.reply_mid/reply_uname via the existing vendor parser."""
+    extra = getattr(message, "extra_dict", {})
+    if not isinstance(extra, dict):
+        log.debug("source.invalid_reply_metadata", reason="extra_not_object")
+        return 0, ""
+    uid = extra.get("reply_mid", 0)
+    if isinstance(uid, str) and uid.isascii() and uid.isdecimal() and len(uid) <= 20:
+        uid = int(uid)
+    if not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0:
+        uid = 0
+    name = extra.get("reply_uname", "")
+    return uid, name if isinstance(name, str) else ""
+
+
 def event_from_danmaku(message: Any, *, room_id: int, recv_at: float, generation: int) -> LiveEvent:
     """DANMU_MSG → DANMAKU. Timestamp is already milliseconds upstream."""
     viewer = Viewer(
@@ -153,6 +168,7 @@ def event_from_danmaku(message: Any, *, room_id: int, recv_at: float, generation
             message.medal_name, message.medal_level, message.runame, message.medal_room_id
         ),
     )
+    reply_uid, reply_name = _danmaku_reply_target(message)
     return LiveEvent(
         kind=EventKind.DANMAKU,
         room_id=room_id,
@@ -162,6 +178,8 @@ def event_from_danmaku(message: Any, *, room_id: int, recv_at: float, generation
         ts_ms=int(message.timestamp),
         recv_at=recv_at,
         session_generation=generation,
+        reply_to_uid=reply_uid,
+        reply_to_name=reply_name,
     )
 
 
@@ -669,6 +687,15 @@ class BilibiliEventSource:
     def offer(self, event: LiveEvent | None) -> None:
         if event is None:
             return
+        if event.kind is EventKind.DANMAKU:
+            event = dataclasses.replace(
+                event,
+                reply_to_anchor=(
+                    event.reply_to_uid == self._room_owner_uid
+                    if event.reply_to_uid > 0 and self._room_owner_uid > 0
+                    else None
+                ),
+            )
         if (
             event.kind is EventKind.DANMAKU
             and self._room_owner_uid > 0

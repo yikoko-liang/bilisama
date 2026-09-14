@@ -840,6 +840,7 @@ input.cfg-edit:focus {
 .test-card[data-judgment="fail"] { border-color: color-mix(in srgb, var(--c-err) 60%, var(--panel-edge)); }
 .test-card[data-judgment="pass"] { border-color: color-mix(in srgb, var(--c-ok) 60%, var(--panel-edge)); }
 .test-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.test-card-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .test-title { margin: 0; font-size: 13.5px; }
 .test-meta { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
 .test-tag { font-size: 11px; padding: 1px 6px; border-radius: 99px; background: color-mix(in srgb, var(--ink-faint) 22%, transparent); color: var(--ink-dim); }

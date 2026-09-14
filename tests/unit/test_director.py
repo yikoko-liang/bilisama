@@ -167,6 +167,20 @@ def test_speech_edge_promise_blocks_until_the_edge_or_expiry() -> None:
     assert not floor.is_blocked()
 
 
+def test_replay_reset_clears_previous_cases_timing_and_speech_gates() -> None:
+    floor = SpeakingFloor(FakeClock())
+    floor.on_speech_stopped(quiet_s=10)
+    floor.start_cooldown(60)
+    floor.expect_speech_edge(grace_s=5)
+    floor.on_reply_active(True)
+    floor.on_implicit(True)
+    floor.on_playback(True)
+    assert floor.is_blocked()
+    floor.reset_for_replay()
+    assert not floor.is_blocked()
+    assert floor.blocked_for() == 0
+
+
 def test_quiet_window_takes_the_branch_value_not_a_max() -> None:
     """Section 2.8's correction: the wait is the CURRENT turn's grace. A short
     branch must release sooner than the long one would."""
@@ -1111,7 +1125,9 @@ def test_paid_intents_requeue_without_disabling_barge_in() -> None:
     assert not intent.injection.reply.protected
     item = intent.injection.item_text or ""
     assert "[SC] 老板: 主播今天玩什么" in item
-    assert "30" not in item and "¥" not in item
+    # Opaque event references and UIDs may contain digits, but the SC body
+    # must not carry its price.
+    assert "30" not in item.split("[SC]", 1)[1] and "¥" not in item
 
 
 def test_feed_only_kinds_produce_no_intent() -> None:

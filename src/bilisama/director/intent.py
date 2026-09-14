@@ -70,3 +70,4 @@ class Intent:
     created_at: float = 0.0
     expires_at: float | None = None
     requeue_on_interrupt: bool = False
+    events: tuple[LiveEvent, ...] = ()

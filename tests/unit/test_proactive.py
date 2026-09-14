@@ -72,6 +72,46 @@ class FakeSide:
         return None
 
 
+async def test_replay_candidate_reads_only_this_case_and_clears_old_candidate() -> None:
+    class RecordingSide(FakeSide):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inputs: list[str] = []
+
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            self.inputs.append(user)
+            return "本轮候选话题"
+
+    side = RecordingSide()
+    async with _running(side=side) as (loop, _floor, _intents, _clock):
+        loop._store.replace_facts("stream", str(loop._store.stream_id), [("旧会话记忆", "")])
+        loop.note_dialogue("streamer", "旧主播语音")
+        loop._candidate = "旧候选"
+        await loop.reset_for_replay("本轮背景：本地工具")
+        assert not loop.status()["candidate_ready"]
+        loop.note_dialogue("streamer", "本轮口述")
+        loop.note_replay_event(
+            LiveEvent(
+                kind=EventKind.DANMAKU, viewer=Viewer(uid=8, name="阿强"), text="本轮观众问题"
+            )
+        )
+        await loop._refresh()
+        assert "本轮背景" in side.inputs[-1]
+        assert "本轮口述" in side.inputs[-1]
+        assert "本轮观众问题" in side.inputs[-1]
+        assert "旧会话记忆" not in side.inputs[-1]
+        assert "旧主播语音" not in side.inputs[-1]
+        await loop.reset_for_replay("下一例背景")
+        await loop._refresh()
+        assert "下一例背景" in side.inputs[-1]
+        assert "本轮口述" not in side.inputs[-1]
+        assert "本地工具" not in side.inputs[-1]
+        assert "本轮观众问题" not in side.inputs[-1]
+        await loop.reset_for_replay(None)
+        await loop._refresh()
+        assert "旧会话记忆" in side.inputs[-1]
+
+
 @asynccontextmanager
 async def _running(
     *,

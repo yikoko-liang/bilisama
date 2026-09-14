@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import pytest
+
 from bilisama.clock import FakeClock
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import HostedTurnConfig
@@ -62,6 +64,48 @@ async def test_a_link_without_turn_config_sends_no_bootstrap() -> None:
             assert server.recorded.count("session.update") == 0
         finally:
             await hosted.aclose()
+
+
+@pytest.mark.parametrize("hosted_provider", [True, False])
+async def test_fresh_conversation_drops_old_items_and_replays_only_new_instructions(
+    hosted_provider: bool,
+) -> None:
+    from bilisama.dev_talk import _Fanout
+    from bilisama.realtime.providers.s2s import S2SLink
+
+    caps = caps_mod.DASHSCOPE if hosted_provider else caps_mod.S2S
+    async with MockRealtimeServer(caps=caps, script=Script()) as server:
+        hosted = (
+            HostedLink(server.url, ProviderName.DASHSCOPE)
+            if hosted_provider
+            else S2SLink(server.url)
+        )
+        fanout = _Fanout(hosted)
+        fanout.events()
+        fanout.gated_events()
+        await hosted.connect()
+        fanout.start()
+        try:
+            await fanout.reset_conversation("上一例背景")
+            await hosted.add_context_item("上一例的回答", role="assistant")
+            await hosted.add_context_item("上一例的观众弹幕")
+            old_socket = hosted._client._ws
+            for queue in (*fanout._sinks, *fanout._gated_sinks):
+                queue.put_nowait(link.LinkDown("旧连接错误"))
+            await fanout.reset_conversation("本例背景")
+            assert hosted._client._ws is not old_socket
+            assert all(queue.empty() for queue in (*fanout._sinks, *fanout._gated_sinks))
+            for _ in range(50):
+                frames = [e for e in server.recorded.events if e.get("type") == "session.update"]
+                if frames and frames[-1]["session"].get("instructions") == "本例背景":
+                    break
+                await asyncio.sleep(0.01)
+            assert frames[-1]["session"]["instructions"] == "本例背景"
+            assert server.recorded.count("conversation.item.create") == 2
+            assert not hosted._client._awaiting_created
+            assert hosted._client._slot_free.is_set()
+        finally:
+            await fanout.aclose()
 
 
 async def test_headers_reach_the_transport() -> None:

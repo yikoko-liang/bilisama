@@ -194,6 +194,11 @@ class LiveEvent:
     # connection an event came in on.
     session_generation: int = 0
     raw: dict[str, Any] | None = None
+    # Explicit platform reply target, never inferred from a typed @name.
+    reply_to_uid: int = 0
+    reply_to_name: str = ""
+    # None means the target or room owner's UID is unknown, not "a viewer".
+    reply_to_anchor: bool | None = None
 
     @property
     def is_anonymous(self) -> bool:

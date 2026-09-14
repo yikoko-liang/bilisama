@@ -79,10 +79,11 @@ class ScenarioHooks:
     playback_busy: Callable[[], bool]
     response_busy: Callable[[], bool]
     monitor_audio: Callable[[bytes], None] = lambda _pcm: None
+    pending_events: Callable[[], bool] = lambda: False
 
 
 class IntentTestRunner(MockTestRunner):
-    """Run one case in the existing session; expectations never go upstream."""
+    """Run a case after its session hook; expectations never go upstream."""
 
     def __init__(
         self,
@@ -98,6 +99,7 @@ class IntentTestRunner(MockTestRunner):
         self._unattributed: dict[str, Any] = self._empty_receipts()
         self._unmatched_asr: list[str] = []
         self._handles: dict[int, tuple[link.ReplyHandle, dict[str, Any]]] = {}
+        self._model_skips: set[int] = set()
         self._pcm: deque[bytes] = deque()
         self._pump_task: asyncio.Task[None] | None = None
         self._listening = False
@@ -138,6 +140,7 @@ class IntentTestRunner(MockTestRunner):
         self._unattributed = self._empty_receipts()
         self._unmatched_asr = []
         self._handles = {}
+        self._model_skips.clear()
         self._fault = ""
         self._late_frames = 0
         self._epoch = self._clock.monotonic()
@@ -181,6 +184,17 @@ class IntentTestRunner(MockTestRunner):
             classification_available=False,
             audio_late_frames=self._late_frames,
         )
+
+    def note_model_skip(self, handle: link.ReplyHandle) -> None:
+        """Muted turns have no gated Done frame; close their test receipt."""
+        if not self._listening:
+            return
+        self._model_skips.add(handle.handle_id)
+        owned = self._handles.get(handle.handle_id)
+        if owned is not None:
+            for detail in owned[1]["reply_details"]:
+                if detail["handle_id"] == handle.handle_id:
+                    detail.update(done=True, status="skipped")
 
     def observe(self, event: link.LinkEvent, *, source_event_id: str = "") -> None:
         """Receive a fan-out copy, without consuming the scheduler's stream."""
@@ -237,6 +251,9 @@ class IntentTestRunner(MockTestRunner):
             self._bind_event_origin(key, source_event_id)
         row = self._handles[key][1]
         detail = next(r for r in row["reply_details"] if r["handle_id"] == key)
+        if key in self._model_skips:
+            detail.update(done=True, status="skipped")
+            return
         if isinstance(event, link.ReplyTextDelta):
             detail["text"] = (detail["text"] + event.text)[:8000]
         elif isinstance(event, link.ReplyAudioDelta) and event.pcm and not event.handle.stale:
@@ -301,6 +318,7 @@ class IntentTestRunner(MockTestRunner):
                     raise ValueError(f"{step.id} 的事件偏移超出真实语音时长")
             self._hooks.check_ready()
             acquired = True
+            self._progress(case, run_id, "preparing", "正在清空历史会话并加载本例背景")
             await asyncio.wait_for(self._hooks.begin(case.context), timeout=20)
             self._epoch = self._clock.monotonic()
             self._listening = True
@@ -388,6 +406,7 @@ class IntentTestRunner(MockTestRunner):
     async def _finish_receipts(self) -> None:
         """Do not cut final playback or reject a transcript merely for arriving late."""
         deadline = self._clock.monotonic() + 30
+        idle_since: float | None = None
         while True:
             self._check()
             missing_asr = any(r["kind"] == "voice" and not r["asr"] for r in self._observations)
@@ -395,9 +414,15 @@ class IntentTestRunner(MockTestRunner):
                 self._hooks.response_busy()
                 or self._hooks.playback_busy()
                 or bool(self.unfinished_handles)
+                or self._hooks.pending_events()
             )
             if not busy and not missing_asr:
-                return
+                if idle_since is None:
+                    idle_since = self._clock.monotonic()
+                if self._clock.monotonic() - idle_since >= 0.5:
+                    return
+            else:
+                idle_since = None
             if self._clock.monotonic() >= deadline:
                 if missing_asr:
                     raise ScenarioIncomplete(

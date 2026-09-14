@@ -128,6 +128,9 @@ def live_event_payload(event: LiveEvent) -> dict[str, Any]:
         "guard_level": viewer.guard_level.value,
         "is_admin": viewer.is_admin,
         "is_anchor": viewer.is_anchor,
+        "reply_to_uid": event.reply_to_uid,
+        "reply_to_name": event.reply_to_name,
+        "reply_to_anchor": event.reply_to_anchor,
         "medal": (
             {
                 "name": medal.name,

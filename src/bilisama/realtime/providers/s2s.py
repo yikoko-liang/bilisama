@@ -141,6 +141,13 @@ class S2SLink:
         await self._client.aclose()
         log.info("s2s.suspended")
 
+    async def reset_conversation(self, instructions: str) -> None:
+        """Create a fresh server conversation with only current instructions."""
+        await self.suspend()
+        self._client.discard_conversation()
+        self._context = instructions
+        await self.resume()
+
     async def resume(self) -> None:
         """connect() replays context and any owed barge-in re-arm."""
         await self.connect()

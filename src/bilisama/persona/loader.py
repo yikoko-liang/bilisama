@@ -71,7 +71,8 @@ def default_data_dir(persona_id: str) -> Path:
 
 _REPLY_LENGTH_INSTRUCTIONS: dict[Chattiness, str] = {
     Chattiness.LOW: (
-        "短档：只说一个短句，通常不超过 20 个汉字；只保留最直接的反应或结论，不解释、不铺垫。"
+        "短档：只说一个短句，通常不超过 20 个汉字；优先保留答案或必要的转交，不铺垫。"
+        "弹幕转述要压缩，不能挤掉实际回答；必要时可略超字数，不要只重复问题。"
     ),
     Chattiness.MEDIUM: "中档：通常说一到两句，先回应重点，再补一条必要说明或接话点。",
     Chattiness.HIGH: (

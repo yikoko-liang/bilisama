@@ -65,11 +65,23 @@ def _done(
     return link.ReplyDone(handle, status)
 
 
-async def test_frames_that_are_not_her_own_turn_pass_untouched() -> None:
+async def test_event_skip_is_muted_even_when_voice_is_always_on() -> None:
+    rig = _Rig(mode=VoiceReplyMode.ALWAYS)
+    ours = rig.start(implicit=False)
+    assert rig.gate.feed(_audio(ours)) == ()
+    assert rig.gate.feed(_text(ours, "[SKIP] 主播已经回答")) == ()
+    assert rig.gate.feed(_done(ours)) == ()
+    assert len(rig.skips) == 1
+    assert rig.skips[0].handle is ours
+    assert rig.gate.status()["event_skipped"] == 1
+    assert rig.gate.status()["skipped"] == 0
+
+
+async def test_plain_event_and_non_reply_frames_pass_untouched() -> None:
     rig = _Rig()
     ours = rig.start(implicit=False)
     for event in (
-        _text(ours, "[SKIP] 我们派发的回复不进门"),
+        _text(ours, "目前只保存在本地"),
         _audio(ours),
         link.SpeechStarted(),
         link.UserTranscriptDone("主播说的"),
@@ -324,6 +336,8 @@ async def test_status_has_the_shape_the_health_card_reads() -> None:
         "holding": 0,
         "passed": 0,
         "skipped": 0,
+        "event_passed": 0,
+        "event_skipped": 0,
         "recent_turns": 0,
         "recent_skipped": 0,
         "timeouts": 0,

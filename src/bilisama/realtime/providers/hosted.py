@@ -224,6 +224,13 @@ class HostedLink:
         await self._client.aclose()
         log.info("hosted.suspended", provider=self._provider.value)
 
+    async def reset_conversation(self, instructions: str) -> None:
+        """Create a fresh server conversation; never replay previous turns."""
+        await self.suspend()
+        self._client.discard_conversation()
+        self._context = instructions
+        await self.resume()
+
     async def resume(self) -> None:
         """Reopen and replay. connect() already re-runs the bootstrap and the
         stored context, and re-arms rotation — a resumed session behaves like

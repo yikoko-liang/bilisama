@@ -1365,6 +1365,22 @@ async def test_suspend_parks_the_link_and_resume_carries_the_dialogue_back() -> 
             await volcano.aclose()
 
 
+async def test_fresh_conversation_does_not_resume_old_dialogue() -> None:
+    async with MockVolcanoServer() as server:
+        volcano, _events = await _linked(server)
+        try:
+            volcano._done.append("上一例问题编号")
+            volcano._pending_item = "上一例未发出的弹幕"
+            await volcano.reset_conversation("本例背景")
+            await server.wait_ready()
+            assert server.resumed_with == []
+            assert volcano._context == "本例背景"
+            assert not volcano._done
+            assert not volcano._pending_item
+        finally:
+            await volcano.aclose()
+
+
 async def test_uplink_during_suspend_is_dropped_at_the_counter_not_raised() -> None:
     """The microphone pump keeps pushing while paused; those frames must die
     quietly at the session gate instead of raising into the pump's retry."""

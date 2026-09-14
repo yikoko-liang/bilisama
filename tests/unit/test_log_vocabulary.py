@@ -27,6 +27,9 @@ _LOGGERS = frozenset({"log", "logger", "_log"})
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
+        "assembly.event_observation_failed",
+        "scheduler.delivery_status_failed",
+        "source.invalid_reply_metadata",
         "assembly.context_push_failed",
         "assembly.context_pushed",
         "assembly.anchor_context_write_failed",
@@ -176,11 +179,10 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "scoring.danmaku_scored",
         "selector.advance_failed",
         "selector.breaker_open",
-        "selector.deferred_released",
+        "selector.batch_delivered",
         "selector.skip_sink_failed",
         "selector.skipped",
         "selector.window_opened",
-        "selector.window_won",
         "side.call_failed",
         "side.call_finished",
         "side.call_started",

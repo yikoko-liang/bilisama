@@ -1281,6 +1281,37 @@ async def test_reply_reference_names_the_danmaku_it_answers(page: Page, harness:
 
 
 @pytest.mark.ui_browser
+async def test_batch_reference_lists_candidates_without_claiming_all_were_answered(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='chat']")
+    harness.hub.broadcast(
+        ServerEvent.EVENT_FEED,
+        {
+            "kind": "reply",
+            "status": "completed",
+            "source": "danmaku",
+            "text": "本地更方便控制数据，云端则省去显卡投入。",
+            "reference": {
+                "kind": "danmaku",
+                "events": [
+                    {"name": "小松", "text": "本地更保护隐私"},
+                    {"name": "小月", "text": "云端不用买显卡"},
+                ],
+            },
+        },
+    )
+    await _wait(page, "document.querySelector('#timeline .reply-reference') !== null")
+    reference = await page.locator("#timeline .reply-reference").text_content()
+    assert reference is not None
+    assert "候选弹幕" in reference
+    assert "小松：本地更保护隐私" in reference
+    assert "小月：云端不用买显卡" in reference
+
+
+@pytest.mark.ui_browser
 async def test_assistant_page_switches_after_a_confirm(page: Page, harness: Harness) -> None:
     await _wait(page, "document.title.includes('豆腐')")
     await page.click("#corner")

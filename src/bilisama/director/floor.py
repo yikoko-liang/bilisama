@@ -116,6 +116,13 @@ class SpeakingFloor:
         self.turn_pending = False
         self.queued_audio = False
 
+    def reset_for_replay(self) -> None:
+        """Start a case without the previous turn's timing gates."""
+        self.on_link_lost()
+        self._quiet_until = 0.0
+        self._cooldown_until = 0.0
+        self._speech_edge_until = 0.0
+
     def on_playback(self, queued: bool) -> None:
         # Edge-guarded twice over: both producers already report on the edge
         # (ui/audio.py:299-314, PlaybackTally counting 0↔1; and dev_talk's

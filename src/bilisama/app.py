@@ -24,8 +24,10 @@ from bilisama.config.schema import InteractionConfig
 from bilisama.director.intents import (
     anchor_danmaku_context_item,
     burst_welcome_intent,
+    danmaku_batch_intent,
     entry_welcome_intent,
     intent_for,
+    observed_events_context_item,
 )
 from bilisama.ingest.bilibili.safety import DedupRing
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
@@ -33,6 +35,7 @@ from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
 from bilisama.memory.context import memory_segments
 from bilisama.obs.logging import get_logger
+from bilisama.obs.outcome import Outcome, Phase, Verdict
 from bilisama.persona.prompt import DynamicContext, assemble, assemble_scoped, static_prefix
 
 if TYPE_CHECKING:
@@ -146,6 +149,7 @@ class Assembly:
         self._voice_rules = voice_rules
         self._event_rules = event_rules
         self._stream_intro = stream_intro or (lambda: "")
+        self._replay_context: str | None = None
         self._per_reply_scope = per_reply_scope
         self._gift_battery_high = gift_battery_high
         self._gift_battery_medium = gift_battery_medium
@@ -160,6 +164,8 @@ class Assembly:
         # lives for one stream, so it needs no reset hook; bounded because a
         # marathon mega-room stream must not grow it forever.
         self._vip_greeted: OrderedDict[str, None] = OrderedDict()
+        self._vip_pending: dict[str, str] = {}
+        self._pending_observations: OrderedDict[str, LiveEvent] = OrderedDict()
         # Replay shield for the direct lane (SC / guard / VIP and selector
         # winners): blivedm's inner reconnect re-delivers recent packets, and
         # the paid kinds never pass the selector's 0.35s ring. 30s covers the
@@ -182,6 +188,7 @@ class Assembly:
         """The one sink every source feeds. Memory always; speech maybe."""
         self._store.on_event(event)
         self._distiller.note_event()
+        self._proactive.note_replay_event(event)
         if (
             event.room_id > 0
             and event.kind in _AUDIENCE_ACTIVITY_KINDS
@@ -207,8 +214,13 @@ class Assembly:
         if event.kind is EventKind.DANMAKU and event.viewer.is_anchor:
             # The streamer typing in their own room: shared context, never a
             # reply. Ahead of the speak switches — this is observation.
-            await self._write_anchor_context(event)
+            if self._event_input_enabled:
+                await self._write_anchor_context(event)
             return
+        if self._event_input_enabled and event.kind in _AUDIENCE_ACTIVITY_KINDS:
+            self._pending_observations[event.dedup_key] = event.redacted()
+            while len(self._pending_observations) > 32:
+                self._pending_observations.popitem(last=False)
         if event.kind is EventKind.DANMAKU and self._entries is not None:
             # An arrival who speaks earns the reply path; a welcome on top
             # would greet them twice. Ahead of the speak check on purpose —
@@ -244,11 +256,11 @@ class Assembly:
             group = "naval" if event.viewer.guard_level is not GuardLevel.NONE else "ranking"
             if not self._entry_group_enabled(group):
                 return
-            if event.viewer.identity in self._vip_greeted:
+            if (
+                event.viewer.identity in self._vip_greeted
+                or event.viewer.identity in self._vip_pending.values()
+            ):
                 return
-            self._vip_greeted[event.viewer.identity] = None
-            if len(self._vip_greeted) > 4096:
-                self._vip_greeted.popitem(last=False)
         if self._selector is not None and event.kind in SELECTOR_KINDS and event.room_id:
             # The funnel lane: danmaku compete for one window slot, gifts
             # aggregate. Winners re-enter through deliver_selected. Events
@@ -296,13 +308,65 @@ class Assembly:
             )
         )
 
+    async def deliver_danmaku_batch(self, events: tuple[LiveEvent, ...]) -> None:
+        """Charge one pacing token and submit one model turn for the batch."""
+        if not events or not self._event_input_enabled or not self._speak_enabled("danmaku"):
+            return
+        if self._event_pacer is not None and not self._event_pacer.try_consume("danmaku"):
+            raise RuntimeError("弹幕预算暂不可用，保留批次等待")
+        self._submit(
+            danmaku_batch_intent(
+                tuple(event.redacted() for event in events),
+                now=self._clock.monotonic(),
+                max_tokens=self._max_tokens,
+                base_instructions=self.build_event_context() or None,
+            )
+        )
+        self.intents_submitted += 1
+
+    async def flush_event_observations(self) -> None:
+        """Coalesce observation writes without blocking platform intake."""
+        if (
+            not self._event_input_enabled
+            or not self._pending_observations
+            or self._observe_context_item is None
+        ):
+            return
+        pending = tuple(self._pending_observations.items())
+        async with asyncio.timeout(5):
+            await self._observe_context_item(
+                observed_events_context_item(tuple(e for _, e in pending))
+            )
+        for key, event in pending:
+            if self._pending_observations.get(key) is event:
+                self._pending_observations.pop(key)
+
+    async def _observation_ticker(self) -> None:
+        while True:
+            await self._clock.sleep(0.5)
+            try:
+                await self.flush_event_observations()
+            except (OSError, RuntimeError, ValueError) as exc:
+                log.warning("assembly.event_observation_failed", error_text=str(exc)[:200])
+
+    def note_verdict(self, verdict: Verdict) -> None:
+        """A queued welcome is not yet a completed welcome."""
+        identity = self._vip_pending.pop(verdict.intent_id, None)
+        if identity is None:
+            return
+        if verdict.outcome is Outcome.SPOKEN and verdict.phase is Phase.PLAYED:
+            self._vip_greeted[identity] = None
+            while len(self._vip_greeted) > 4096:
+                self._vip_greeted.popitem(last=False)
+
     async def _write_anchor_context(self, event: LiveEvent) -> None:
         if self._observe_context_item is None:
             return
         try:
-            await self._observe_context_item(anchor_danmaku_context_item(event.redacted()))
+            async with asyncio.timeout(5):
+                await self._observe_context_item(anchor_danmaku_context_item(event.redacted()))
             self.anchor_context_written += 1
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             # Losing one context line must not take the emit path down; the
             # danmaku is already in memory either way.
             log.warning("assembly.anchor_context_write_failed", error_text=str(exc)[:200])
@@ -312,6 +376,8 @@ class Assembly:
         the panel; nothing reaches the selector, the coalescer or the
         scheduler until it is back on."""
         self._event_input_enabled = enabled
+        if not enabled:
+            self._pending_observations.clear()
 
     def _submit_event(self, event: LiveEvent) -> None:
         # Re-checked here because selector winners arrive up to a window
@@ -334,7 +400,15 @@ class Assembly:
         )
         if intent is not None:
             self.intents_submitted += 1
-            self._submit(intent)
+            if event.kind is EventKind.VIP_ENTER:
+                self._vip_pending[intent.dedup_key] = event.viewer.identity
+            submitted = False
+            try:
+                self._submit(intent)
+                submitted = True
+            finally:
+                if not submitted:
+                    self._vip_pending.pop(intent.dedup_key, None)
         # Marked only once the delivery is through. Marking on the ATTEMPT meant
         # a raise from _submit left the key burned: the selector's retry (its
         # deliver-then-commit contract exists for exactly that) came back to a
@@ -359,11 +433,22 @@ class Assembly:
 
     # ------------------------------------------------------------ context
 
+    def set_replay_context(self, context: str | None) -> None:
+        """Scope replay prompts without deleting the user's persistent memory."""
+        self._replay_context = context
+        self._last_pushed = ""
+        self._vip_greeted.clear()
+        self._vip_pending.clear()
+        self._pending_observations.clear()
+        self._direct_ring = DedupRing(window_s=30.0, capacity=2048)
+
     def build_public_context(self) -> str:
         """The source-neutral half: persona prefix plus the shared dynamic
         tail. Growth injects on ON only — collect grows files silently, off
         contributes nothing at all. Voice and event turns both read exactly
         this material; only the input-rules block differs."""
+        if self._replay_context is not None:
+            return assemble(self._prefix, DynamicContext(stream_intro=self._replay_context))
         segments = memory_segments(
             self._store, self._clock, clock_granularity_min=self._clock_granularity_min
         )
@@ -456,11 +541,17 @@ class Assembly:
             refresh_s=self._refresh_s,
         )
         ticker = asyncio.create_task(self._context_ticker(), name="assembly:context")
-        tasks = [ticker]
+        tasks = [
+            ticker,
+            asyncio.create_task(self._observation_ticker(), name="assembly:observations"),
+        ]
         if self._selector is not None:
             tasks.append(
                 asyncio.create_task(
-                    self._selector.run(self.deliver_selected), name="assembly:selector"
+                    self._selector.run(
+                        self.deliver_selected, deliver_batch=self.deliver_danmaku_batch
+                    ),
+                    name="assembly:selector",
                 )
             )
         if self._entries is not None:

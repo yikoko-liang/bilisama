@@ -41,7 +41,6 @@ import threading
 import traceback
 import wave
 import zlib
-from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -1286,6 +1285,8 @@ class _Fanout:
         self._gated_sinks: list[asyncio.Queue[link.LinkEvent]] = []
         self._gate: VoiceTurnGate | None = None
         self._task: asyncio.Task[None] | None = None
+        self._context_lock = asyncio.Lock()
+        self._context_generation = 0
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._pump(), name="dev-talk:fanout")
@@ -1373,14 +1374,40 @@ class _Fanout:
     async def resume(self) -> None:
         await self._inner.resume()
 
+    async def reset_conversation(self, instructions: str) -> None:
+        """Fence old provider frames before opening an isolated test session."""
+        reset = getattr(self._inner, "reset_conversation", None)
+        if not callable(reset):
+            raise RuntimeError("当前语音服务不支持清空测试会话，测试未启动")
+        async with self._context_lock:
+            self._context_generation += 1
+            if self._task is not None:
+                self._task.cancel()
+                await asyncio.gather(self._task, return_exceptions=True)
+            if self._gate is not None:
+                self._gate.close()
+            for queue in (*self._sinks, *self._gated_sinks):
+                while not queue.empty():
+                    queue.get_nowait()
+            try:
+                await reset(instructions)
+            finally:
+                self.start()
+
     async def set_context(self, instructions: str) -> None:
-        await self._inner.set_context(instructions)
+        generation = self._context_generation
+        async with self._context_lock:
+            if generation == self._context_generation:
+                await self._inner.set_context(instructions)
 
     async def push_audio(self, pcm: bytes) -> None:
         await self._inner.push_audio(pcm)
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
-        await self._inner.add_context_item(text, role=role)
+        generation = self._context_generation
+        async with self._context_lock:
+            if generation == self._context_generation:
+                await self._inner.add_context_item(text, role=role)
 
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
         return await self._inner.request_reply(spec)
@@ -1631,7 +1658,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.memory.store import MemoryStore
     from bilisama.obs.health import HealthRegistry
     from bilisama.obs.loop_lag import LoopLagMonitor
-    from bilisama.obs.outcome import Outcome, OutcomeWindow, SkipReason, Verdict
+    from bilisama.obs.outcome import Outcome, OutcomeWindow, Verdict
     from bilisama.persona.loader import (
         PersonaStore,
         default_data_dir,
@@ -1934,6 +1961,7 @@ async def run_director(args: argparse.Namespace) -> int:
     intent_test_active = False
     intent_test_allow_proactive = False
     intent_test_context = ""
+    intent_test_resetting = False
     # Which panic the PAUSE triggered, so resume releases only its own: a
     # streamer who hit 紧急叫停 first keeps her red button held through a
     # pause/resume cycle.
@@ -1980,6 +2008,7 @@ async def run_director(args: argparse.Namespace) -> int:
 
     def verdict_sink(verdict: Verdict) -> None:
         outcomes.note(verdict)
+        assembly.note_verdict(verdict)
         if verdict.outcome is not Outcome.SPOKEN:
             print(f"[调度] {verdict.source} → {verdict}")
         if hub is not None:
@@ -1997,21 +2026,9 @@ async def run_director(args: argparse.Namespace) -> int:
                 },
             )
 
-    # The last few lines actually said on air — streamer transcript and her
-    # own completed replies — so the selector's zero-model relevance check can
-    # hard-accept an audience line that picks up the current conversation.
-    # 300s freshness at read time, one normalised line each, capped at 8.
-    recent_dialogue: deque[tuple[float, str]] = deque(maxlen=8)
-
-    def note_recent_line(text: str) -> None:
-        line = " ".join(text.split())[:240]
-        if line:
-            recent_dialogue.append((clock.monotonic(), line))
-
     def spoken_line(text: str) -> None:
         distiller.note_assistant_line(text)
         proactive.note_dialogue("assistant", text)
-        note_recent_line(text)
 
     scheduler = Scheduler(
         speech,
@@ -2046,26 +2063,9 @@ async def run_director(args: argparse.Namespace) -> int:
             event_pacer.snapshot(),
         )
 
-    def selector_context_lines() -> tuple[str, ...]:
-        # What the stream is about plus what was just said on air, for the
-        # relevance hard-accept.
-        now = clock.monotonic()
-        recent = tuple(line for stamp, line in recent_dialogue if now - stamp <= 300.0)
-        return tuple(line for line in (settings.room.stream_intro, *recent) if line.strip())
-
-    def selector_mention_terms() -> tuple[str, ...]:
-        cfg = settings.persona
-        return tuple(
-            term
-            for term in (cfg.display_name.strip(), cfg.id.strip(), cfg.streamer_name.strip())
-            if term
-        )
-
     selector = DanmakuSelector(
         clock,
         thresholds=live_thresholds,
-        context_lines=selector_context_lines,
-        mention_terms=selector_mention_terms,
         # Window winners wait out the streamer, an empty bucket AND the pause
         # switch: no intent exists while blocked, so no TTL burns during a
         # monologue, and a pause defers the winner instead of discarding it
@@ -2131,10 +2131,8 @@ async def run_director(args: argparse.Namespace) -> int:
     )
 
     def on_streamer_transcript(text: str) -> None:
-        # Two readers of one transcript line: topic material for the proactive
-        # loop, relevance material for the danmaku selector.
+        # The native realtime conversation already carries this host turn.
         proactive.note_dialogue("streamer", text)
-        note_recent_line(text)
 
     async def push_context(text: str) -> None:
         await speech.set_context(text)
@@ -2144,13 +2142,14 @@ async def run_director(args: argparse.Namespace) -> int:
 
     def on_voice_skip(skip: Skip) -> None:
         ruling = skip.ruling
-        scheduler.skip_implicit(
+        if intent_test_active:
+            test_runner.note_model_skip(skip.handle)
+        scheduler.skip_reply(
             skip.handle,
-            reason=SkipReason.VOICE_NOT_ADDRESSED,
             detail=ruling.detail() if ruling is not None else "残记号",
             clear_playback=skip.clear_playback,
         )
-        if ruling is not None and ruling.note:
+        if skip.handle.implicit and ruling is not None and ruling.note:
             # What she heard the streamer doing. On the s2s product path this
             # is the only trace of the streamer's own voice that exists above
             # the link, so it goes where the streamer transcript would. The
@@ -2194,9 +2193,7 @@ async def run_director(args: argparse.Namespace) -> int:
         event_observer=publish_room_event,
         voice_rules=voice_rules,
         event_rules=event_rules,
-        stream_intro=lambda: "\n\n".join(
-            line for line in (settings.room.stream_intro, intent_test_context) if line
-        ),
+        stream_intro=lambda: settings.room.stream_intro,
         per_reply_scope=profile_for(provider).caps.per_reply_base_instructions,
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
@@ -2508,28 +2505,48 @@ async def run_director(args: argparse.Namespace) -> int:
 
     async def begin_test(context: list[str]) -> None:
         nonlocal intent_test_active, intent_test_allow_proactive, intent_test_context
+        nonlocal intent_test_resetting
         intent_test_active = True
         case = test_catalog.case(str(test_runner.state()["case_id"]))
-        intent_test_allow_proactive = case.allow_proactive
+        intent_test_allow_proactive = False
         tests_source.accepted_run = int(str(test_runner.state()["run_id"]))
         audio_input.set_test_active(True)
+        intent_test_resetting = True
+        scheduler.panic_mute()
+        assembly.set_event_input_enabled(False)
         selector.reset_for_replay()
         entries.reset_for_replay()
         event_pacer.reset_for_replay()
-        proactive.note_activity()
         intent_test_context = "\n".join(context)
+        assembly.set_replay_context(intent_test_context)
+        await proactive.reset_for_replay(intent_test_context)
+        # Runner cleanup also runs when preparation fails or is stopped.
+        # Its end hook restores a fresh normal session or keeps input paused.
+        await scheduler.drain_pending_io()
+        await speech.reset_conversation(assembly.build_context())
+        floor.reset_for_replay()
+        await proactive.reset_for_replay(intent_test_context)
         await assembly.refresh_context()
+        intent_test_allow_proactive = case.allow_proactive
+        event_pacer.reset_for_replay()
+        proactive.note_activity()
+        assembly.set_event_input_enabled(True)
+        scheduler.release_panic()
+        intent_test_resetting = False
 
     async def end_test() -> None:
         nonlocal intent_test_active, intent_test_allow_proactive, intent_test_context
+        nonlocal intent_test_resetting
         # The lease was acquired only in an idle, disconnected room. No real
         # live event can enter while it is held, so this drain owns test work.
         tests_source.accepted_run = None
         intent_test_context = ""
+        intent_test_allow_proactive = False
         assembly.set_event_input_enabled(False)
         selector.reset_for_replay()
         entries.reset_for_replay()
-        was_panicked = bool(scheduler.status()["panicked"])
+        was_panicked = bool(scheduler.status()["panicked"]) and not intent_test_resetting
+        intent_test_resetting = False
         scheduler.panic_mute()
         try:
             try:
@@ -2539,16 +2556,27 @@ async def run_director(args: argparse.Namespace) -> int:
                     for handle in test_runner.unfinished_handles:
                         await asyncio.wait_for(speech.cancel(handle), timeout=3)
             finally:
+                drained = False
                 try:
                     speaker.flush()
                     if broker is not None:
                         broker.flush()
-                    # Let the scheduler's own cancellation tasks settle.
-                    await asyncio.sleep(0)
+                    await scheduler.drain_pending_io()
+                    drained = True
                 finally:
-                    # A refused cancel must not skip restoration of the
-                    # shared model context. Preserve the original exception.
-                    await assembly.refresh_context()
+                    if not drained:
+                        pause_after_monitor_failure()
+                    assembly.set_replay_context(None)
+                    await proactive.reset_for_replay(None)
+                    restored = False
+                    try:
+                        await speech.reset_conversation(assembly.build_context())
+                        floor.reset_for_replay()
+                        await assembly.refresh_context()
+                        restored = True
+                    finally:
+                        if not restored:
+                            pause_after_monitor_failure()
         finally:
             event_pacer.reset_for_replay()
             proactive.note_activity()
@@ -2573,6 +2601,13 @@ async def run_director(args: argparse.Namespace) -> int:
             playback_busy=lambda: _audio_busy(speaker, tally),
             response_busy=lambda: bool(
                 floor.implicit_active or floor.turn_pending or scheduler.status()["dispatching"]
+            ),
+            pending_events=lambda: bool(
+                scheduler.status()["queued"]
+                or scheduler.status()["active_source"]
+                or selector.status()["window_open"]
+                or selector.status()["deferred_count"]
+                or entries.status()["pending"]
             ),
             monitor_audio=monitor_test_voice,
         ),
@@ -3600,6 +3635,11 @@ async def run_director(args: argparse.Namespace) -> int:
                                 if intent.event is not None
                                 else {"kind": intent.source}
                             )
+                            if intent.events:
+                                reference = {
+                                    "kind": "danmaku",
+                                    "events": [live_event_payload(item) for item in intent.events],
+                                }
                             # priority rides along so the page can decide
                             # bubble-worthiness from the scheduler's own tier
                             # instead of re-deriving it from source names —

@@ -169,7 +169,7 @@
         {
           "source_row": 5,
           "source_round": 3,
-          "source_text": "主播语音：原来是我把点击和请求都排掉了，Mia你帮我想一下其他检查点。",
+          "source_text": "主播语音：原来是我把点击和请求都排掉了，豆腐你帮我想一下其他检查点。",
           "source_expected_short": "开口",
           "source_expected_detail": "在主播本句实际说完后开口，回复主播问题；从旁听切换成被明确委托的排障伙伴。"
         },
@@ -351,7 +351,7 @@
         {
           "source_row": 17,
           "source_round": 4,
-          "source_text": "助手实际回答糯米后，主播语音：对，现在只存本地。好了，Mia，你帮我回顾一下刚才那个重复任务怎么复现的？",
+          "source_text": "助手实际回答糯米后，主播语音：对，现在只存本地。好了，豆腐，你帮我回顾一下刚才那个重复任务怎么复现的？",
           "source_expected_short": "开口",
           "source_expected_detail": "不再重复回答糯米；等主播说完后切回主播的复现回顾请求。"
         }
@@ -395,7 +395,7 @@
       ],
       "source_setup": {
         "source_row": 18,
-        "text": "模拟主播解释工具调用；第三步插话必须发生在Mia实际音频仍播放时。若已说完，重跑第二步至取得真实重叠，不将未形成重叠计为通过或失败。"
+        "text": "模拟主播解释工具调用；第三步插话必须发生在豆腐实际音频仍播放时。若已说完，重跑第二步至取得真实重叠，不将未形成重叠计为通过或失败。"
       },
       "source_notes": [
         {
@@ -413,7 +413,7 @@
         {
           "source_row": 18,
           "source_round": 0,
-          "source_text": "模拟主播解释工具调用；第三步插话必须发生在Mia实际音频仍播放时。若已说完，重跑第二步至取得真实重叠，不将未形成重叠计为通过或失败。",
+          "source_text": "模拟主播解释工具调用；第三步插话必须发生在豆腐实际音频仍播放时。若已说完，重跑第二步至取得真实重叠，不将未形成重叠计为通过或失败。",
           "source_expected_short": null,
           "source_expected_detail": null
         },
@@ -427,14 +427,14 @@
         {
           "source_row": 20,
           "source_round": 2,
-          "source_text": "主播语音：Mia，你来复述一遍，工具调用是怎么实现的",
+          "source_text": "主播语音：豆腐，你来复述一遍，工具调用是怎么实现的",
           "source_expected_short": "开口",
           "source_expected_detail": "主播实际说完后开口，输出给观众；输入请求来自主播，但解释的听众是刚来的观众。"
         },
         {
           "source_row": 21,
           "source_round": 3,
-          "source_text": "Mia实际仍在解释时，主播语音：先停一下，这里我补充一下",
+          "source_text": "豆腐实际仍在解释时，主播语音：先停一下，这里我补充一下",
           "source_expected_short": "静默",
           "source_expected_detail": "停止当前输出并把话权交回主播；不坚持说完，也不在后台排队续讲。"
         },
@@ -514,19 +514,19 @@
           "source_round": 2,
           "source_text": "观众弹幕，阿圆：@主播 你上次是不是连首页也被它重写了？",
           "source_expected_short": "(可选)开口",
-          "source_expected_detail": "不把观众点名当成呼叫Mia，可以不开口让主播本人回复，也可以作为第三者锐评下"
+          "source_expected_detail": "不把观众点名当成呼叫豆腐，可以不开口让主播本人回复，也可以作为第三者锐评下"
         },
         {
           "source_row": 26,
           "source_round": 3,
           "source_text": "主播语音：大家自己用的时候，更怕它不动手，还是更怕它改太多？",
           "source_expected_short": "静默",
-          "source_expected_detail": "保持静默让观众参与；这是向观众收集体验，不要求Mia马上给结论。"
+          "source_expected_detail": "保持静默让观众参与；这是向观众收集体验，不要求豆腐马上给结论。"
         },
         {
           "source_row": 27,
           "source_round": 4,
-          "source_text": "主播听完观众讨论后语音：Mia，你更受不了哪一种？",
+          "source_text": "主播听完观众讨论后语音：豆腐，你更受不了哪一种？",
           "source_expected_short": "开口",
           "source_expected_detail": "主播说完后回主播，也让全场听见；此时从房间参与者的克制转为直接表达。"
         }
@@ -670,12 +670,12 @@
           "source_round": 1,
           "source_text": "主播语音：我个人觉得B更好点，至少第一次打开不用找半天按钮，大家觉得呢？",
           "source_expected_short": "静默",
-          "source_expected_detail": "不开口，先让主播收集观众意见；不能把陈述句自动变成给Mia的题目。"
+          "source_expected_detail": "不开口，先让主播收集观众意见；不能把陈述句自动变成给豆腐的题目。"
         },
         {
           "source_row": 35,
           "source_round": 2,
-          "source_text": "主播语音：你呢，Mia，按我刚说的这个取舍，你会选哪个？",
+          "source_text": "主播语音：你呢，豆腐，按我刚说的这个取舍，你会选哪个？",
           "source_expected_short": "开口",
           "source_expected_detail": "主播实际说完后回复主播；表达自己观点的同时也总结弹幕观点"
         },
@@ -717,7 +717,7 @@
           "source_round": 1,
           "source_text": "主播：我倒觉得动态漫不一定要完全像真人，风格成立就行。完整说完后留出对话空隙。",
           "source_expected_short": "(可选)开口",
-          "source_expected_detail": "可以作为房间参与者面向主播或全房短接观点，也允许沉默；无需必须听到Miya才获得参与资格。"
+          "source_expected_detail": "可以作为房间参与者面向主播或全房短接观点，也允许沉默；无需必须听到豆腐才获得参与资格。"
         },
         {
           "source_row": 39,
@@ -904,9 +904,9 @@
         {
           "source_row": 54,
           "source_round": 4,
-          "source_text": "主播语音：Mia，你来锐评一下",
+          "source_text": "主播语音：豆腐，你来锐评一下",
           "source_expected_short": "开口",
-          "source_expected_detail": "明确对象已经变成Mia，自然回应，加入同个话题的讨论"
+          "source_expected_detail": "明确对象已经变成豆腐，自然回应，加入同个话题的讨论"
         },
         {
           "source_row": 55,
@@ -1047,14 +1047,14 @@
         {
           "source_row": 66,
           "source_round": 3,
-          "source_text": "小灯已被实际感谢后，平台礼物：晚风送出鼓鼓掌×1。Mia尚未为晚风开口，主播先语音：谢谢晚风的鼓鼓掌。",
+          "source_text": "小灯已被实际感谢后，平台礼物：晚风送出鼓鼓掌×1。豆腐尚未为晚风开口，主播先语音：谢谢晚风的鼓鼓掌。",
           "source_expected_short": "(可选)开口",
           "source_expected_detail": "取消还没播放的晚风答谢，可以在主播谢完后再补一份，也可以保持沉默"
         },
         {
           "source_row": 67,
           "source_round": 4,
-          "source_text": "主播语音：Mia，回到刚才那个错误，我试到哪了？",
+          "source_text": "主播语音：豆腐，回到刚才那个错误，我试到哪了？",
           "source_expected_short": "开口",
           "source_expected_detail": "在主播说完后回主播；不要仍被已取消的晚风答谢占着输出。"
         }
@@ -1201,7 +1201,7 @@
         {
           "source_row": 75,
           "source_round": 1,
-          "source_text": "主播语音：它开始生成了，我先盯一下输出，Mia你先别说话。",
+          "source_text": "主播语音：它开始生成了，我先盯一下输出，豆腐你先别说话。",
           "source_expected_short": "静默",
           "source_expected_detail": "保持静默，不用等待模型这件事自动授权自己暖场。"
         },
@@ -1215,7 +1215,7 @@
         {
           "source_row": 77,
           "source_round": 3,
-          "source_text": "主播语音：Mia，它跑得有点慢，你先给新来的观众说下任务的上下文",
+          "source_text": "主播语音：豆腐，它跑得有点慢，你先给新来的观众说下任务的上下文",
           "source_expected_short": "开口",
           "source_expected_detail": "主播说完后面向新观众回应；暂缓已经被新的明确委托覆盖，不应仍拒绝开口。"
         }
@@ -1272,7 +1272,7 @@
         {
           "source_row": 82,
           "source_round": 5,
-          "source_text": "主播语音：Mia，我离开的时候大家都问了你什么？",
+          "source_text": "主播语音：豆腐，我离开的时候大家都问了你什么？",
           "source_expected_short": "开口",
           "source_expected_detail": "等主播说完后回主播；区分已实际回答的小满问题和仍待处理事项，不重新向小满回答一遍。"
         }
@@ -1422,7 +1422,7 @@
         {
           "source_row": 91,
           "source_round": 2,
-          "source_text": "主播：mia, 你觉这两版对比怎么样？哪一版好一些",
+          "source_text": "主播：豆腐, 你觉这两版对比怎么样？哪一版好一些",
           "source_expected_short": "开口",
           "source_expected_detail": "告诉主播自己看不到的事实，不胡编乱造"
         }

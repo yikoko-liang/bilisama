@@ -132,6 +132,8 @@ class VoiceTurnGate:
         self._tasks: set[asyncio.Task[None]] = set()
         self._passed = 0
         self._skipped = 0
+        self._event_passed = 0
+        self._event_skipped = 0
         self._timeouts = 0
         self._late_markers = 0
         self._longest_hold_ms = 0
@@ -160,7 +162,7 @@ class VoiceTurnGate:
         self._mode = mode
         if mode is VoiceReplyMode.ALWAYS:
             for turn in list(self._turns.values()):
-                if turn.holding:
+                if turn.holding and turn.handle.implicit:
                     self._emit_all(self._release(turn, why="mode"))
 
     def skipped(self, handle_id: int) -> bool:
@@ -173,6 +175,8 @@ class VoiceTurnGate:
             "holding": self._holding_count(),
             "passed": self._passed,
             "skipped": self._skipped,
+            "event_passed": self._event_passed,
+            "event_skipped": self._event_skipped,
             "timeouts": self._timeouts,
             "late_markers": self._late_markers,
             "longest_hold_ms": self._longest_hold_ms,
@@ -183,9 +187,7 @@ class VoiceTurnGate:
         }
 
     def close(self) -> None:
-        for turn in self._turns.values():
-            self._disarm(turn)
-        self._turns.clear()
+        self._drop_all()
 
     # ------------------------------------------------------------ the gate
 
@@ -211,9 +213,7 @@ class VoiceTurnGate:
 
     def _on_started(self, event: link.ReplyStarted) -> tuple[link.LinkEvent, ...]:
         handle = event.handle
-        if not handle.implicit:
-            return (event,)
-        holding = self._mode is VoiceReplyMode.WHEN_ADDRESSED
+        holding = not handle.implicit or self._mode is VoiceReplyMode.WHEN_ADDRESSED
         self._turns[handle.handle_id] = _Turn(
             handle=handle,
             head=self._decoder_factory(),
@@ -362,8 +362,11 @@ class VoiceTurnGate:
         turn.released = True
         held_ms = int((self._clock.monotonic() - turn.opened_at) * 1000)
         self._longest_hold_ms = max(self._longest_hold_ms, held_ms)
-        self._passed += 1
-        self._recent.append(False)
+        if turn.handle.implicit:
+            self._passed += 1
+            self._recent.append(False)
+        else:
+            self._event_passed += 1
         # info, not debug: this is the other half of voice_gate.skipped, and
         # without it a session where she never writes a marker logs NOTHING
         # from the gate — which reads as "the gate is not wired" when what
@@ -428,8 +431,11 @@ class VoiceTurnGate:
         turn.holding = False
         turn.muted = True
         turn.skipped = True
-        self._skipped += 1
-        self._recent.append(True)
+        if turn.handle.implicit:
+            self._skipped += 1
+            self._recent.append(True)
+        else:
+            self._event_skipped += 1
         self._skipped_ids.append(turn.handle.handle_id)
         if ruling is not None and ruling.unbracketed:
             log.info("voice_gate.marker_unbracketed", handle_id=turn.handle.handle_id)

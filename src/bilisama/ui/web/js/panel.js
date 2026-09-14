@@ -627,10 +627,13 @@ export function createPanel({ send }) {
       const reference = data.reference;
       if (reference && data.source && data.source !== "voice") {
         // 「这句在接谁」——听录音的人对得上，看面板的人也对得上。
-        const label = SOURCE_ZH[data.source] ?? data.source;
+        const label = Array.isArray(reference.events) ? "候选弹幕" : (SOURCE_ZH[data.source] ?? data.source);
         let refText = reference.text
           ? `${reference.name ?? "?"}：${reference.text}`
           : (reference.name ?? label);
+        if (Array.isArray(reference.events)) {
+          refText = reference.events.map(item => `${item.name ?? "?"}：${item.text ?? ""}`).join("；");
+        }
         // The amount explains the queue-jump; the model never hears it, the
         // operator should. Gifts speak batteries (the panel unit), money ¥.
         const amount = amountBits(reference);
@@ -1240,7 +1243,7 @@ export function createPanel({ send }) {
     if (state.status === "incomplete") return `执行未完成：${state.text || "请检查逐轮记录后重试"}`;
     if (state.status === "stopped") return "已停止，本轮未完成";
     if (["failed", "error"].includes(state.status)) return state.text || "运行失败";
-    if (state.status === "preparing") return "正在准备测试音频…";
+    if (state.status === "preparing") return state.text || "正在准备测试音频和独立会话…";
     if (state.status === "event") {
       return `已注入 ${state.index ?? 0}/${state.total ?? 0}：${state.text ?? ""}`;
     }
@@ -1395,6 +1398,7 @@ export function createPanel({ send }) {
       const run = card.querySelector(".test-run");
       run.disabled = running;
       run.textContent = selected && running ? "运行中…" : card.dataset.execution === "voice" ? "自动运行" : "运行";
+      card.querySelector(".test-case-stop").disabled = !(selected && running);
       const status = card.querySelector(".test-status");
       status.textContent = testStatusText(state);
       renderTestObservations(card.querySelector(".test-observations"), state);
@@ -1484,7 +1488,18 @@ export function createPanel({ send }) {
           applyTestState();
         }
       });
-      head.appendChild(run);
+      const actions = el("div", "test-card-actions");
+      actions.appendChild(run);
+      const stop = el("button", "test-stop test-case-stop", "停止");
+      stop.type = "button";
+      stop.disabled = true;
+      stop.title = "停止本用例的语音、事件注入和未完成回复";
+      stop.addEventListener("click", () => {
+        if (!isTestRunning() || testState.case_id !== item.id) return;
+        send("test.stop", {});
+      });
+      actions.appendChild(stop);
+      head.appendChild(actions);
       card.appendChild(head);
 
       card.appendChild(el("h5", "test-label", item.steps?.length ? "执行说明" : "你要做"));

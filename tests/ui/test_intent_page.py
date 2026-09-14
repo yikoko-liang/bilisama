@@ -40,7 +40,7 @@ def _case(case_id: str) -> dict[str, Any]:
             {
                 "id": "voice-1",
                 "kind": "voice",
-                "text": "Mia，你更喜欢哪个？",
+                "text": "豆腐，你更喜欢哪个？",
                 "after": "delay",
                 "delay_s": 0,
                 "timeout_s": 10,
@@ -129,7 +129,7 @@ async def _wait_call(harness: Harness, event: ClientEvent) -> dict[str, Any]:
 def _observation(*, status: str = "observed") -> dict[str, Any]:
     return {
         "step_id": "voice-1",
-        "asr": ["Mia，你更喜欢哪个？"],
+        "asr": ["豆腐，你更喜欢哪个？"],
         "replies": ["我喜欢第二个。"],
         "audio_chunks": 4,
         "expected_intent": "TO_ME",
@@ -185,11 +185,44 @@ async def test_preparing_locks_other_runs_and_stop_uses_existing_protocol(
     assert await page.locator("[data-case-id='simple-2'] .test-run").is_disabled()
     await _state(page, harness, case_id="simple-1", run_id="run-a", status="preparing")
     assert "准备测试音频" in (await page.locator(".test-status").first.inner_text())
+    assert await page.locator("[data-case-id='simple-1'] .test-case-stop").is_enabled()
+    assert await page.locator("[data-case-id='simple-2'] .test-case-stop").is_disabled()
+    await _state(
+        page,
+        harness,
+        case_id="simple-1",
+        run_id="run-a",
+        status="preparing",
+        text="正在清空历史会话并加载本例背景",
+    )
+    await page.wait_for_function(
+        "document.querySelector('.test-status')?.textContent.includes('清空历史会话')"
+    )
+    assert await page.locator("[data-case-id='simple-2'] .test-run").is_disabled()
     await page.click("#test-stop")
     assert await _wait_call(harness, ClientEvent.TEST_STOP) == {}
     await _state(page, harness, case_id="simple-1", run_id="run-a", status="stopped")
     assert await page.locator("[data-case-id='simple-2'] .test-run").is_enabled()
     assert await page.locator("[data-case-id='simple-1'] .test-pass").is_hidden()
+
+
+async def test_each_case_has_stop_and_only_current_case_can_stop(
+    intent_page: Page, harness: Harness
+) -> None:
+    page = intent_page
+    current = page.locator("[data-case-id='simple-1']")
+    other = page.locator("[data-case-id='simple-2']")
+    assert await current.get_by_role("button", name="停止", exact=True).is_disabled()
+    assert await other.get_by_role("button", name="停止", exact=True).is_disabled()
+    await _state(page, harness, case_id="simple-1", run_id="run-a", status="running")
+    assert await current.get_by_role("button", name="停止", exact=True).is_enabled()
+    assert await other.get_by_role("button", name="停止", exact=True).is_disabled()
+    await current.get_by_role("button", name="停止", exact=True).click()
+    assert await _wait_call(harness, ClientEvent.TEST_STOP) == {}
+    await _state(page, harness, case_id="simple-1", run_id="run-a", status="stopped")
+    assert await current.get_by_role("button", name="停止", exact=True).is_disabled()
+    await page.get_by_role("tab", name="困难多轮测试").click()
+    assert await page.locator(".test-card").count() == await page.locator(".test-case-stop").count()
 
 
 async def test_completed_is_not_a_pass_and_judgment_is_scoped_to_run(
@@ -209,7 +242,7 @@ async def test_completed_is_not_a_pass_and_judgment_is_scoped_to_run(
     assert "执行完成，待人工判定" in (await card.locator(".test-status").inner_text())
     assert await card.get_attribute("data-judgment") is None
     observed = await card.locator(".test-observations").inner_text()
-    assert all(text in observed for text in ("Mia，你更喜欢哪个？", "我喜欢第二个。", "4"))
+    assert all(text in observed for text in ("豆腐，你更喜欢哪个？", "我喜欢第二个。", "4"))
     assert "实际分类：当前后端未提供" in observed
     await card.locator(".test-pass").click()
     assert await card.get_attribute("data-judgment") == "pass"

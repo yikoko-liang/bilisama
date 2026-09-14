@@ -270,6 +270,7 @@ async def test_completed_execution_waits_for_late_asr_and_never_claims_pass(rig:
     assert rig.runner.active, "ASR may arrive after ReplyDone and the voice window"
     rig.asr()
     await rig.clock.advance(0.2)
+    await rig.clock.advance(0.6)
     state = rig.runner.state()
     assert state["status"] == "completed" and not rig.lease
     assert state["classification_available"] is False
@@ -339,6 +340,7 @@ async def test_embedded_event_occurs_inside_one_frame_voice_not_after_it(rig: _R
     row = rig.rows()[0]
     assert row["events"][0]["at_s"] < row["voice_end_s"]
     assert row["events"][0]["source_row"] == 2
+    await rig.clock.advance(0.6)
     assert rig.runner.state()["status"] == "completed"
 
 
@@ -362,6 +364,7 @@ async def test_voice_waits_for_final_push_not_just_empty_queue(rig: _Rig) -> Non
     assert "voice_end_s" not in rig.rows()[0] and rig.runner.active
     release.set()
     await rig.clock.advance(0.2)
+    await rig.clock.advance(0.6)
     assert rig.runner.state()["status"] == "completed"
 
 
@@ -374,6 +377,30 @@ async def test_pcm_failure_is_visible_and_releases_lease(rig: _Rig) -> None:
     await rig.clock.advance(0.2)
     assert rig.runner.state()["status"] == "failed"
     assert "发送" in str(rig.runner.state()["text"])
+    assert not rig.lease and rig.ends == 1
+
+
+async def test_case_audio_waits_for_fresh_session_and_reports_reset_failure(rig: _Rig) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def reset() -> None:
+        entered.set()
+        await release.wait()
+        raise RuntimeError("清空会话失败")
+
+    rig.on_begin = reset
+    await rig.start()
+    await rig.clock.advance(0.2)
+    assert entered.is_set()
+    assert rig.frames == []
+    assert rig.monitored == []
+    assert rig.runner.state()["status"] == "preparing"
+    assert "清空历史" in str(rig.runner.state()["text"])
+    release.set()
+    await rig.clock.advance(0.2)
+    assert rig.runner.state()["status"] == "failed"
+    assert rig.frames == [] and rig.monitored == []
     assert not rig.lease and rig.ends == 1
 
 
@@ -432,6 +459,7 @@ async def test_reply_finished_waits_for_done_and_empty_real_output(rig: _Rig) ->
     assert len(rig.rows()) == 1
     rig.responding = False
     await rig.clock.advance(0.1)
+    await rig.clock.advance(0.6)
     assert len(rig.rows()) == 2 and rig.runner.state()["status"] == "completed"
 
 
@@ -812,6 +840,7 @@ async def test_monitor_mirrors_each_voice_frame_once_without_silence_or_reinject
     assert b"".join(frame for _at, frame in rig.monitored) == _PCM
     assert len(rig.frames) > len(rig.monitored), "silence still maintains the model audio clock"
     assert [item for item in rig.frames if any(item[1])] == rig.monitored
+    await rig.clock.advance(0.6)
     assert rig.runner.state()["status"] == "completed"
 
 

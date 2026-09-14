@@ -216,18 +216,14 @@ async def _finish(task: asyncio.Task[None]) -> None:
         await task
 
 
-async def test_one_window_one_winner_and_losers_are_accounted() -> None:
+async def test_one_window_preserves_all_candidates_under_capacity() -> None:
     selector, clock, delivered, task = await _selector()
     try:
-        selector.offer(_dm("主播这局到底怎么打", uid=1))
-        selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # higher score
-        selector.offer(_dm("666", uid=3))  # below the bar
+        for uid, text in enumerate(("主播这局到底怎么打", "为什么不先做饰品", "666"), 1):
+            selector.offer(_dm(text, uid=uid))
         await clock.advance(2.5)
-        assert [e.viewer.uid for e in delivered] == [2]
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict)
-        assert skips["selection.lost_window"] == 1
-        assert skips["selection.low_information"] == 1
+        assert [e.viewer.uid for e in delivered] == [1, 2, 3]
+        assert selector.status()["skips"] == {}
     finally:
         await _finish(task)
 
@@ -243,64 +239,51 @@ async def test_answered_viewer_can_win_again_without_a_uid_cooldown() -> None:
         selector.offer(_dm("那这个参数为什么是零", uid=1))  # same viewer, better message
         selector.offer(_dm("什么时候开新档", uid=2))
         await clock.advance(2.5)
-        assert [e.viewer.uid for e in delivered] == [1, 1]
+        assert [e.viewer.uid for e in delivered] == [1, 1, 2]
         skips = selector.status()["skips"]
         assert isinstance(skips, dict) and "selection.uid_cooldown" not in skips
     finally:
         await _finish(task)
 
 
-async def test_empty_window_is_a_counter_not_a_mystery() -> None:
-    selector, clock, delivered, task = await _selector()
+async def test_plain_statement_reaches_model_regardless_of_old_score_bar() -> None:
+    selector, clock, delivered, task = await _selector(score=0.99)
     try:
-        # A plain statement: real content (passes the text signal) but under
-        # the score bar — it opens the window and cannot fill it.
         selector.offer(_dm("这波操作还行", uid=1))
         await clock.advance(2.5)
-        assert delivered == []
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.window_empty"] == 1
+        assert [e.text for e in delivered] == ["这波操作还行"]
+        assert not selector.status()["window_open"]
     finally:
         await _finish(task)
 
 
-async def test_low_information_does_not_open_an_empty_window() -> None:
+async def test_low_information_is_for_model_to_judge() -> None:
     selector, clock, delivered, task = await _selector()
     try:
         selector.offer(_dm("666", uid=1))
         await clock.advance(2.5)
-        assert delivered == []
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.low_information"] == 1
-        assert selector.status()["window_open"] is False
-        assert "selection.window_empty" not in skips
+        assert [e.text for e in delivered] == ["666"]
+        assert selector.status()["skips"] == {}
     finally:
         await _finish(task)
 
 
-async def test_streamer_speech_defers_window_winners_then_releases_only_the_best() -> None:
+async def test_streamer_speech_holds_candidates_then_releases_together() -> None:
     speaking = True
     selector, clock, delivered, task = await _selector(
-        window_s=1,
-        delivery_blocked=lambda: speaking,
+        window_s=1, delivery_blocked=lambda: speaking
     )
     try:
         selector.offer(_dm("这个参数为什么是零", uid=1))
         await clock.advance(1.5)
-        selector.offer(_dm("能不能解释一下这里的竞态", uid=2, medal_level=20))
+        selector.offer(_dm("能不能解释一下这里的竞态", uid=2))
         await clock.advance(1.5)
-
         assert delivered == []
         assert selector.status()["deferred_count"] == 2
-        assert selector.status()["delivered"] == 0
-
         speaking = False
         await clock.advance(0.5)
-
-        assert [event.viewer.uid for event in delivered] == [2]
+        assert [e.viewer.uid for e in delivered] == [1, 2]
         assert selector.status()["deferred_count"] == 0
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.lost_deferred"] == 1
     finally:
         await _finish(task)
 
@@ -397,7 +380,7 @@ async def test_hard_accept_bypasses_score_bar_but_still_uses_the_window() -> Non
         assert delivered == []
         await clock.advance(2.5)
         assert [event.text for event in delivered] == ["没声音了"]
-        assert selector.status()["passes"] == {"rule": 1}
+        assert selector.status()["passes"] == {"model": 1}
     finally:
         await _finish(task)
 
@@ -414,16 +397,14 @@ async def test_context_related_text_bypasses_score_bar() -> None:
         await _finish(task)
 
 
-async def test_same_content_from_different_viewers_is_accounted_as_repeated_content() -> None:
-    selector, clock, delivered, task = await _selector(score=0.1)
+async def test_same_content_from_different_viewers_reaches_model_together() -> None:
+    selector, clock, delivered, task = await _selector()
     try:
-        selector.offer(_dm("这个模型的推理速度挺快", uid=1, event_id="dm:one"))
-        selector.offer(_dm("这个模型的推理速度挺快", uid=2, event_id="dm:two"))
+        selector.offer(_dm("这个模型的推理速度挺快", uid=1, event_id="one"))
+        selector.offer(_dm("这个模型的推理速度挺快", uid=2, event_id="two"))
         await clock.advance(2.5)
-        assert len(delivered) == 1
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict)
-        assert skips["selection.repeated_content"] == 1
+        assert [e.viewer.uid for e in delivered] == [1, 2]
+        assert selector.status()["skips"] == {}
     finally:
         await _finish(task)
 
@@ -481,47 +462,33 @@ async def test_three_delivery_failures_latch_the_breaker_for_the_run() -> None:
 # ------------------------------------------------------------ per-event skips (#49)
 
 
-async def test_every_funnel_drop_hands_out_the_event_it_dropped() -> None:
-    """Ledger item 49: the funnel kept only a tally per reason, so the panel
-    could say "12 条低分" and never which twelve. "为什么没回我" is the most
-    frequent question a viewer asks, and it is about ONE danmaku."""
+async def test_capacity_drop_hands_out_the_exact_event() -> None:
     records: list[tuple[LiveEvent | None, SkipReason]] = []
     selector, clock, delivered, task = await _selector(on_skip=lambda e, r: records.append((e, r)))
     try:
-        selector.offer(_dm("主播这局到底怎么打", uid=1))
-        selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # higher score
-        selector.offer(_dm("666", uid=3))  # low information, rejected pre-window
+        events = [_dm("需要看看", uid=uid) for uid in range(10)]
+        for event in events:
+            selector.offer(event)
         await clock.advance(2.5)
-        assert [e.viewer.uid for e in delivered] == [2]
-        assert [(e.viewer.uid, r) for e, r in records if e is not None] == [
-            (1, SkipReason.LOST_WINDOW),
-            (3, SkipReason.LOW_INFORMATION),
-        ]
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict)
-        assert sum(skips.values()) == len(records), "逐条终局和聚合计数必须对得上"
+        assert delivered == events[2:]
+        assert records == [(events[0], SkipReason.QUEUE_FULL), (events[1], SkipReason.QUEUE_FULL)]
     finally:
         await _finish(task)
 
 
-async def test_an_empty_window_reports_the_reason_with_no_event() -> None:
-    """Boundary: window_empty is the one account that belongs to a window
-    rather than to any single danmaku, so it hands out None."""
+async def test_idle_does_not_manufacture_empty_windows() -> None:
     records: list[tuple[LiveEvent | None, SkipReason]] = []
-    selector, clock, _delivered, task = await _selector(on_skip=lambda e, r: records.append((e, r)))
+    selector, clock, delivered, task = await _selector(on_skip=lambda e, r: records.append((e, r)))
     try:
-        selector.offer(_dm("这波操作还行", uid=1))  # opens the window, fails the bar
-        await clock.advance(2.5)
-        assert (None, SkipReason.WINDOW_EMPTY) in records
-        assert [r for _e, r in records] == [SkipReason.LOW_VALUE, SkipReason.WINDOW_EMPTY]
+        await clock.advance(5)
+        assert delivered == []
+        assert records == []
+        assert not selector.status()["window_open"]
     finally:
         await _finish(task)
 
 
 async def test_a_broken_skip_sink_never_takes_the_funnel_down_with_it() -> None:
-    """Error path: the sink is a panel broadcast, so it can fail on a torn-down
-    websocket. The funnel is on the emit path — a raise here would travel all
-    the way back into on_event and cost the room its danmaku."""
     calls = 0
 
     def exploding(event: LiveEvent | None, reason: SkipReason) -> None:
@@ -531,27 +498,25 @@ async def test_a_broken_skip_sink_never_takes_the_funnel_down_with_it() -> None:
 
     selector, clock, delivered, task = await _selector(on_skip=exploding)
     try:
-        selector.offer(_dm("666", uid=1))  # low information: the first sink call
-        selector.offer(_dm("主播这个怎么设置的", uid=2))  # must still win the window
+        event = _dm("这里怎么设置", uid=1)
+        selector.offer(event)
+        selector.offer(event)
         await clock.advance(2.5)
-        assert [e.viewer.uid for e in delivered] == [2], "水槽炸了，漏斗照常出货"
-        assert calls >= 1
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.low_information"] == 1, "账还是记下了"
+        assert delivered == [event]
+        assert calls == 1
     finally:
         await _finish(task)
 
 
-async def test_no_sink_configured_is_still_a_working_funnel() -> None:
-    """Boundary: the sink is optional — nothing is wired in the replay and
-    unit paths, and the counters have to keep working without it."""
+async def test_no_sink_configured_still_accounts_transport_duplicates() -> None:
     selector, clock, delivered, task = await _selector()
     try:
-        selector.offer(_dm("666", uid=1))
+        event = _dm("666", uid=1)
+        selector.offer(event)
+        selector.offer(event)
         await clock.advance(2.5)
-        assert delivered == []
-        skips = selector.status()["skips"]
-        assert isinstance(skips, dict) and skips["selection.low_information"] == 1
+        assert delivered == [event]
+        assert selector.status()["skips"] == {SkipReason.DUPLICATE.value: 1}
     finally:
         await _finish(task)
 
@@ -587,7 +552,9 @@ async def test_super_chat_bypasses_the_funnel_entirely(tmp_path: Path) -> None:
 async def test_event_flood_one_danmaku_intent_per_window_paid_immediate(tmp_path: Path) -> None:
     """The B4 acceptance, against the real fixture and a real Assembly."""
     assembly, selector, intents, clock = _assembly(tmp_path, chattiness=Chattiness.HIGH)
-    loop = asyncio.create_task(selector.run(assembly.deliver_selected))
+    loop = asyncio.create_task(
+        selector.run(assembly.deliver_selected, deliver_batch=assembly.deliver_danmaku_batch)
+    )
     await asyncio.sleep(0)
     try:
         sc_done = False
@@ -631,65 +598,37 @@ async def test_event_flood_one_danmaku_intent_per_window_paid_immediate(tmp_path
 # ------------------------------------------------------------ what the log says
 
 
-async def test_window_winner_is_logged_with_its_score_and_no_danmaku_body() -> None:
-    """The one info line this layer owes the panel: who won a window, at what
-    score, against what bar. The scheduler's verdict says what happened to the
-    winner afterwards — never that it beat anyone.
-
-    The body must not ride along. `text` is a folded field name on purpose
-    (obs/logging.py's _VIEWER_CONTENT); renaming it to something like `body`
-    would walk the audience's words into the log file and past the panel.
-    """
+async def test_batch_log_has_count_without_viewer_content() -> None:
     body = "主播这局到底怎么打"
     with _json_log() as stream:
-        selector, clock, delivered, task = await _selector(window_s=2, score=0.35)
+        selector, clock, delivered, task = await _selector()
         try:
-            selector.offer(_dm(body, uid=1, medal_level=20))
+            selector.offer(_dm(body, uid=1))
             await clock.advance(2.5)
         finally:
             await _finish(task)
-
-    assert [event.viewer.uid for event in delivered] == [1]
-    won = _lines(stream, "selector.window_won")
-    assert len(won) == 1, "one window, one decision line"
-    assert won[0]["level"] == "info"
-    assert won[0]["score"] >= won[0]["score_bar"]
-    assert won[0]["identity"] == "uid:1"
-    assert won[0]["text"] == f"<{len(body)} chars>"
-    assert body not in stream.getvalue(), "the danmaku body never reaches the log"
+    assert len(delivered) == 1
+    lines = _lines(stream, "selector.batch_delivered")
+    assert len(lines) == 1
+    assert lines[0]["count"] == 1
+    assert body not in stream.getvalue()
 
 
-async def test_every_funnel_drop_leaves_a_debug_line_carrying_its_reason(
+async def test_transport_drop_leaves_a_debug_line_with_its_reason(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The skip sink answers "为什么没回我" while someone is watching the panel.
-
-    This is the same account for the session nobody watched: one line per drop,
-    at debug, with the SkipReason the tally uses.
-    """
     caplog.set_level(logging.DEBUG)
-    selector, clock, delivered, task = await _selector(window_s=2, score=0.35)
+    selector, clock, delivered, task = await _selector()
     try:
-        selector.offer(_dm("主播这局到底怎么打", uid=1))
-        selector.offer(_dm("为什么不先做饰品", uid=2, medal_level=20))  # dethrones uid 1
-        selector.offer(_dm("666", uid=3))  # low information, pre-window reject
-        await clock.advance(2.5)
-        selector.offer(_dm("这波操作还行", uid=3))  # opens a window it cannot fill
+        event = _dm("需要看看", uid=1)
+        selector.offer(event)
+        selector.offer(event)
         await clock.advance(2.5)
     finally:
         await _finish(task)
-
     reasons = [fields["reason"] for fields in _fields(caplog, "selector.skipped")]
-    assert reasons == [
-        SkipReason.LOST_WINDOW.value,
-        SkipReason.LOW_INFORMATION.value,
-        SkipReason.LOW_VALUE.value,
-        SkipReason.WINDOW_EMPTY.value,
-    ]
-    dropped = _fields(caplog, "selector.skipped")
-    assert dropped[0]["identity"] == "uid:1", "the dethroned incumbent, not the newcomer"
-    assert dropped[-1]["identity"] == "", "an empty window belongs to no one"
-    assert [event.viewer.uid for event in delivered] == [2]
+    assert reasons == [SkipReason.DUPLICATE.value]
+    assert delivered == [event]
 
 
 async def test_the_score_the_window_used_is_the_score_the_log_shows(
