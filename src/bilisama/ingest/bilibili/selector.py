@@ -29,6 +29,7 @@ _BATCH_CAPACITY = 8
 _DEFERRED_CAPACITY = 32
 Deliver = Callable[[LiveEvent], Awaitable[None]]
 BatchDeliver = Callable[[tuple[LiveEvent, ...]], Awaitable[None]]
+GiftBatchDeliver = Callable[[LiveEvent, tuple[LiveEvent, ...]], Awaitable[None]]
 SkipSink = Callable[[LiveEvent | None, SkipReason], None]
 
 
@@ -73,6 +74,17 @@ class DanmakuSelector:
         self._window_opened = None
         self._window_rules = None
 
+    def discard_events(self, keys: set[str]) -> None:
+        """Remove only exact pending event identities decided by the caller."""
+        if not keys:
+            return
+        self._pending[:] = [event for event in self._pending if event.dedup_key not in keys]
+        self._deferred[:] = [event for event in self._deferred if event.dedup_key not in keys]
+        self._combos.discard_events(keys)
+        if not self._pending:
+            self._window_opened = None
+            self._window_rules = None
+
     def offer(self, event: LiveEvent) -> None:
         """Admit by event identity, not content, length or addressee."""
         now = self._clock.monotonic()
@@ -95,7 +107,13 @@ class DanmakuSelector:
         if len(self._pending) > _BATCH_CAPACITY:
             self._skip(SkipReason.QUEUE_FULL, self._pending.pop(0))
 
-    async def run(self, deliver: Deliver, *, deliver_batch: BatchDeliver | None = None) -> None:
+    async def run(
+        self,
+        deliver: Deliver,
+        *,
+        deliver_batch: BatchDeliver | None = None,
+        deliver_gift_batch: GiftBatchDeliver | None = None,
+    ) -> None:
         """Settle gift combos and deliver a single candidate batch per window."""
 
         async def fallback(events: tuple[LiveEvent, ...]) -> None:
@@ -110,17 +128,28 @@ class DanmakuSelector:
             if self._breaker.is_open:
                 continue
             try:
-                await self._advance(self._clock.monotonic(), deliver, batch_sink)
+                await self._advance(
+                    self._clock.monotonic(), deliver, batch_sink, deliver_gift_batch
+                )
             except (OSError, RuntimeError, ValueError) as exc:
                 if self._breaker.record_failure(self._clock.monotonic(), str(exc)[:200]):
                     log.error("selector.breaker_open", error_text=str(exc)[:200])
                 else:
                     log.warning("selector.advance_failed", error_text=str(exc)[:200])
 
-    async def _advance(self, now: float, deliver: Deliver, batch_sink: BatchDeliver) -> None:
+    async def _advance(
+        self,
+        now: float,
+        deliver: Deliver,
+        batch_sink: BatchDeliver,
+        gift_batch_sink: GiftBatchDeliver | None = None,
+    ) -> None:
         while (due := self._combos.peek_due(now)) is not None:
             combo_id, aggregate = due
-            await deliver(aggregate)
+            if gift_batch_sink is None:
+                await deliver(aggregate)
+            else:
+                await gift_batch_sink(aggregate, self._combos.contributions(combo_id))
             self._combos.commit(combo_id, now)
             self._delivered += 1
             await self._clock.sleep(0)
@@ -177,6 +206,8 @@ class DanmakuSelector:
             "breaker_open": self._breaker.is_open,
             "breaker_reason": self._breaker.reason,
             "combos_suppressed": self._combos.suppressed_events,
+            "combos_compacted_events": self._combos.compacted_events,
+            "combos_unresolved_discards": self._combos.unresolved_discards,
         }
 
 
@@ -270,6 +301,14 @@ class EntryCoalescer:
     def note_danmaku(self, identity: str) -> None:
         if self._pending.pop(identity, None) is not None:
             self._cancelled_by_danmaku += 1
+        if not self._pending:
+            self._window_opened = None
+
+    def discard_events(self, keys: set[str]) -> None:
+        """Withdraw matching arrivals without resetting presence deduplication."""
+        for identity, event in tuple(self._pending.items()):
+            if event.dedup_key in keys:
+                self._pending.pop(identity)
         if not self._pending:
             self._window_opened = None
 

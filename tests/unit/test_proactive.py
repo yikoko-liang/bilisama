@@ -342,6 +342,80 @@ async def test_recent_events_feed_the_candidate_material(kind: EventKind) -> Non
     assert side.users and "键盘怎么样" in side.users[0]
 
 
+async def test_spoken_topic_does_not_feed_the_same_danmaku_to_the_next_candidate() -> None:
+    """A proactive opening must consume the event material it just used."""
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        event_id="old-question",
+        viewer=Viewer(uid=1, name="阿强"),
+        text="旧问题不该再次成为主动话题",
+    )
+    store.on_event(event)
+
+    class RecordingSide(FakeSide):
+        def __init__(self) -> None:
+            super().__init__(topic="聊聊旧问题")
+            self.users: list[str] = []
+
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            self.users.append(user)
+            return await super().complete(system=system, user=user, max_tokens=max_tokens)
+
+    side = RecordingSide()
+    loop = ProactiveTopicLoop(
+        side,
+        store,
+        SpeakingFloor(clock),
+        clock,
+        submit=lambda _intent: None,
+        prompt="想一个话题",
+        idle_threshold_s=99.0,
+    )
+    loop.note_event(event)
+    await loop._refresh()
+    loop._speak(clock.monotonic())
+    await loop._refresh()
+
+    assert len(side.users) == 2
+    assert "旧问题不该再次成为主动话题" not in side.users[-1]
+    assert "旧问题不该再次成为主动话题" not in loop._opportunities.material()
+    assert "旧问题不该再次成为主动话题" in store.recent_events()[0]
+    store.close()
+
+
+async def test_rejected_proactive_submit_keeps_event_material_available() -> None:
+    clock = FakeClock()
+    store = MemoryStore(":memory:", clock)
+    store.begin_stream()
+    event = LiveEvent(
+        kind=EventKind.DANMAKU,
+        room_id=1,
+        event_id="rejected-question",
+        viewer=Viewer(uid=1, name="阿强"),
+        text="提交失败后仍可再次选题",
+    )
+    store.on_event(event)
+    loop = ProactiveTopicLoop(
+        FakeSide(),
+        store,
+        SpeakingFloor(clock),
+        clock,
+        submit=lambda _intent: False,
+        prompt="想一个话题",
+        idle_threshold_s=99.0,
+    )
+    loop.note_event(event)
+    await loop._refresh()
+    loop._speak(clock.monotonic())
+
+    assert "提交失败后仍可再次选题" in loop._opportunities.material()
+    store.close()
+
+
 # ------------------------------------------------------------ pacer-driven rework
 
 

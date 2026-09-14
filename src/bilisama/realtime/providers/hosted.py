@@ -102,6 +102,10 @@ class HostedLink:
         self._voice = voice
         self.quiet_window_s = quiet_window_s
         self._context = ""
+        # None leaves legacy session payloads untouched. An explicit empty
+        # tuple clears tools, and remains explicit on later reconnects.
+        self._tools: tuple[link.ToolSpec, ...] | None = None
+        self._tool_results: dict[tuple[str, str], None] = {}
         self._clock: Clock = clock or SystemClock()
         cap_min = profile.session_cap_min if session_cap_min is None else session_cap_min
         self._session_cap_s = max(0.0, (cap_min - rotate_margin_min) * 60.0)
@@ -145,6 +149,7 @@ class HostedLink:
         twice is free, and losing either half is not.
         """
         self._uplink.reset()
+        self._tool_results.clear()
         frame = self._bootstrap_frame()
         if frame is not None:
             await self._client.send_command(frame)
@@ -199,6 +204,8 @@ class HostedLink:
                 session["output_audio_format"] = "pcm16"
         if self._voice:
             session["voice"] = self._voice
+        if self._tools is not None:
+            session["tools"] = self._tool_declarations()
         if not session:
             return None
         if self._codec.needs_session_type:
@@ -269,6 +276,66 @@ class HostedLink:
         await self._client.send_command(
             self._codec.session_patch(instructions=instructions, text_only=False)
         )
+
+    def _tool_declarations(self) -> list[dict[str, Any]]:
+        return [
+            self._codec.tool_spec(tool.name, tool.description, tool.parameters)
+            for tool in self._tools or ()
+        ]
+
+    async def configure_tools(self, tools: tuple[link.ToolSpec, ...]) -> None:
+        """Persist opt-in declarations without enabling tools on other models."""
+        names = [tool.name for tool in tools]
+        if any(not name.strip() for name in names) or len(names) != len(set(names)):
+            raise ValueError("工具名称不能为空或重复")
+        self._tools = tools
+        if not self._client.session_id:
+            return
+        session: dict[str, Any] = {"tools": self._tool_declarations()}
+        if self._codec.needs_session_type:
+            session["type"] = "realtime"
+        await self._client.send_command(
+            {"type": dia.ClientEvent.SESSION_UPDATE.value, "session": session}
+        )
+
+    def _tool_call_current(self, call: link.ToolCall) -> bool:
+        return (
+            bool(call.session_id)
+            and call.session_id == self._client.session_id
+            and not call.handle.stale
+            and bool(call.call_id)
+            and any(tool.name == call.name for tool in self._tools or ())
+        )
+
+    async def submit_tool_result(self, call: link.ToolCall, output: str) -> None:
+        """Acknowledge a current call once; never request another inference.
+
+        Called by an external consumer, not inside the socket receive loop:
+        send_command waits for response.done, which that loop must still read.
+        """
+        key = (call.session_id, call.call_id)
+        if not self._tool_call_current(call) or key in self._tool_results:
+            return
+        self._tool_results[key] = None
+        completed = False
+        try:
+            await self._client.send_command(
+                {
+                    "type": dia.ClientEvent.ITEM_CREATE.value,
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call.call_id,
+                        "output": output,
+                    },
+                },
+                is_current=lambda: self._tool_call_current(call),
+            )
+            completed = True
+        finally:
+            if not completed:
+                self._tool_results.pop(key, None)
+        while len(self._tool_results) > 256:
+            self._tool_results.pop(next(iter(self._tool_results)))
 
     async def push_audio(self, pcm: bytes) -> None:
         converted = self._uplink.feed(pcm)

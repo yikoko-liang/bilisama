@@ -18,7 +18,7 @@ from bilisama.obs.logging import get_logger
 log = get_logger(__name__)
 
 TestStatusSink = Callable[[dict[str, object]], None]
-TestRevokeSink = Callable[[str], None]
+TestRevokeSink = Callable[[str], object]
 
 _EVENT_LABEL = {
     EventKind.DANMAKU: "弹幕",

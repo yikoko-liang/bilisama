@@ -32,6 +32,7 @@ __all__ = [
     "anchor_danmaku_context_item",
     "burst_welcome_intent",
     "entry_welcome_intent",
+    "gift_combo_intent",
     "intent_for",
     "neutralize_tags",
     "wrap_events",
@@ -100,9 +101,19 @@ _GUARD_TIER_ZH = {"captain": "舰长", "admiral": "提督", "governor": "总督"
 
 EVENT_DECISION_RULES = (
     "先结合共享的近期主播语音、主播打字、观众事件和你的回复判断本次是否值得开口。"
-    "记录和候选可能描述同一次互动，不能当作又发生一次。主播只念问题不代表已经回答；"
-    "主播已经回答、感谢或欢迎时，不再独立重复播报；若有新的有用补充，可以自然接一句。"
-    "主播感谢后可以轻量附和，不限制自然互动，但不要再次完整答谢同一礼物。"
+    "结合事件语义、昵称、UID、时间和行为确认主播处理的是哪条记录；"
+    "不能仅凭话题相近认定已回复，同一用户的不同问题或不同时间的事件不能一并算作完成。"
+    "记录和候选可能描述同一次互动，不能当作又发生一次。主播只念问题、叫昵称或准备回答不等于答完；"
+    "只跳过实际回答已覆盖的问题，批次中未回答的内容仍可回应。"
+    "主播已经回答、感谢或欢迎时，不再独立重复播报；有新的有用补充可以自然接一句，"
+    "也可以知道主播已处理后轻量附和，但不要重新完整答谢、欢迎或声称又发生一次。"
+    "对进房、上舰和礼物事件，主播当前正在讲话、解释、回复其他内容，或已有语音正在生成/播放，"
+    "只表示当前播放时机需要等待，不表示这条事件已经处理；不能因此输出[SKIP]，也不能把它改成延迟重排。"
+    "尚未有可靠证据表明主播完成了这一次具体欢迎或答谢时，仍生成本次事件的回复，等待当前语音回合结束后按事件优先级播放。"
+    "这三类事件只有在共享处理记录明确标记该条具体事件已由主播完成欢迎/答谢时才可以[SKIP]；"
+    "读到昵称、提到背景、准备回答、正在生成、被打断或只说了一半都不算完成。"
+    "需要主播确认不等于不回复：面向主播的有效弹幕仍要开口，先交代观众昵称和问题，"
+    "再把问题自然交给主播；只有互聊、已处理且无补充、无价值或仍需静默时才输出[SKIP]。"
     "主播要求先安静时，结合后续对话判断是否已经允许恢复；事件不会自动解除静默要求。"
     "不值得回应、观众互聊无需参与、已处理且没有补充或仍需静默时，"
     "只输出[SKIP]及十字以内原因；否则直接输出口语正文，不加分类或判断过程。"
@@ -209,21 +220,29 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
         return (
             "先结合近期对话判断弹幕是在对主播、对你、整个直播间还是其他观众说话。"
             "平台@目标UID与主播一致时，按正常面向主播的弹幕判断，不因@而忽略；"
-            "@其他观众时，由你结合连续弹幕判断是否值得参与，纯观众互聊默认先听；"
+            "平台@目标UID明确是其他观众时，除非这条内容同时明确邀请主播、你或全场参与，默认输出[SKIP]，"
+            "不要替被@的观众回答；连续弹幕如果只是观众之间问答、接梗、打招呼或互相评价，也输出[SKIP]。"
+            "只有内容明确转向主播、你或全场，或需要你整理共同观点时才参与；"
             "没有可靠UID时不能凭同名断定身份，没有@也可能是观众互聊。"
-            "简短交代观众的问题，再直接回答；转述不能作为完整回复。"
-            "必须提供新增的判断、解释或建议；短档优先压缩转述，保留实际答案。"
+            "单条弹幕先自然交代观众昵称和具体问题，让只听音频的人知道在回复谁；"
+            "不机械套用同一格式。再直接回答；转述不能作为完整回复。"
+            "必须提供实际答案、判断或必要的转交；短档压缩措辞，保留实际答案，"
+            "也不能省掉观众的问题，必要时用两个短句。"
             "多人刷同一句或同一诉求时只回应共同内容，不点名具体观众；"
             "本次有多条弹幕时，由你合并同题、比较不同观点，不逐条复读，保留分歧。"
             "再用你自己的判断和知识先给出有用回答，不要默认让主播回答。"
-            "确实无法回答且需要主播掌握的信息或本人决定时，自然转交主播；"
+            "确实无法回答且需要主播掌握的信息或本人决定时，仍要先交代观众昵称和问题，再把问题交给主播，"
+            "用自然转交主播的说法；"
+            "不能因为需要主播确认就输出[SKIP]，也不能把转交当成不回复；"
             "部分能答时先答已知部分，再请主播补充未知部分，不编造，不把所有问题都推给主播；"
             "主播已经回答的，不再转交一次；无法看画面或操作时，说明限制并请对方描述或操作。"
             "不要反复强调自己是伴播，也不要说「我可不敢」「这得问主播」之类推卸责任的话。"
         )
     if event.kind is EventKind.SUPER_CHAT:
         return (
-            "先自然感谢这位观众的支持，再认真回应正文；正文有明确问题时，回答问题比反复感谢更重要。"
+            "区分支持与正文问题：主播只感谢支持不等于正文问题已答完。"
+            "未被答谢时先自然感谢；已经谢过可以知情附和，不重复整段答谢，再回应尚未覆盖的正文。"
+            "正文有明确问题时，回答问题比反复感谢更重要，部分回答不等于整条SC完成。"
             "客观内容直接回答；涉及主播个人经历、决定、承诺或立场时，由主播本人确认。"
             "正文较长时抓住最核心的问题，不逐句朗读；没有正文时简短感谢，不虚构观众的意思。"
             "严禁说出、换算、暗示或比较 SC 金额。"
@@ -246,7 +265,10 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
                 "不夸张拔高，不称呼对方为老板，直呼观众昵称即可"
             )
         return (
-            f"{intensity}；连击礼物作为一组回应，不对每一击重复答谢；"
+            f"尚未答谢时按此分档回应：{intensity}；"
+            "主播已谢过同一次礼物时可以知情附和，不重新完整答谢，不说成又送来一份；"
+            "主播正在说话或已有回复在播时不要因此跳过，先生成这次礼物的回复，等语音回合结束后再播；"
+            "连击礼物作为一组回应，不对每一击重复答谢；"
             "严禁说出或暗示礼物的金额、电池数或价格。"
         )
     if event.kind is EventKind.GUARD_BUY:
@@ -257,7 +279,11 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
             "总督": "点名欢迎，给出最高一档的惊喜、重视感和入场仪式感，热烈但不要谄媚",
         }.get(tier, "点名欢迎，并给出比普通进房更有仪式感的回应")
         return (
-            f"欢迎对方成为{tier}；{detail}；可以结合昵称、当前直播主题或以后常来自然接一句；"
+            f"尚未被接待时欢迎对方成为{tier}；{detail}；"
+            "主播已经欢迎过这次上舰时可以知情附和，不再按新上舰完整播报；"
+            "主播正在说话或已有回复在播只影响播放时机，不代表这次上舰已处理；未确认主播已欢迎时仍生成本次回复，"
+            "等当前语音回合结束后按事件优先级播放，不输出[SKIP]；"
+            "可以结合昵称、当前直播主题或以后常来自然接一句；"
             "不背诵会员权益，不替主播承诺回报；严禁说出或暗示金额。"
         )
     if event.kind is EventKind.VIP_ENTER:
@@ -274,13 +300,18 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
                 "表达对本房粉丝牌支持的重视，但不要假装是熟人"
             )
         return (
-            f"{emotion}；欢迎时不一定说明直播间正在做什么，只在对方确实需要接上话题时，才自然带一句"
-            "# 直播简介或# 本场进展；如果最近已经在共享历史里介绍过直播内容，本次省略内容介绍。"
+            f"{emotion}；尚未接待时先点名欢迎，再简短同步近期相关话题或直播背景，"
+            "不能只接上文而漏掉欢迎。从# 直播简介或# 本场进展选最相关的一点；"
+            "如果最近刚介绍过同样内容或没有可靠背景，本次省略内容介绍，不强行凑话。"
             "对照共享历史中最近三次进房回复，不要连续使用相同开头或固定句式，要变换句子结构；不要套用"
             "「欢迎某某，咱们正聊着……」模板；可以直接叫昵称、先说来啦或轻量招呼，"
             "不必每次都使用欢迎二字；"
             "只有可靠上下文确认来过或有共同经历时，才表达想念或说欢迎回来；"
             "没有可靠依据时不要假装认识，也不要提消费记录或公开粉丝牌等级。"
+            "主播正在讲话、解释或处理别的事件只影响播放时机，不是这次进房已完成；未有明确的主播欢迎证据时仍生成本次欢迎，"
+            "等当前语音回合结束后按事件优先级播放，不输出[SKIP]。"
+            "被打断后恢复的是原来那次进房的欢迎，结合已经说出的部分自然接续，不说成又进房；"
+            "主播已经完成接待时可以知情附和，不重复完整欢迎。"
         )
     return "挑最值得回应的内容，用角色口吻回应；回复长度遵循当前人设中的长度档位。"
 
@@ -381,6 +412,64 @@ def intent_for(
     return intent
 
 
+def gift_combo_item_text(events: tuple[LiveEvent, ...]) -> str:
+    """Expose raw member identities and the limits of compacted prefix facts."""
+    lines: list[str] = []
+    for event in events:
+        lines.append(event_context_line(event))
+        if event.event_id.startswith("gift-combo-prefix:") and event.text:
+            lines.append("[合计说明] " + neutralize_tags(event.text))
+    return wrap_events(lines)
+
+
+def gift_combo_intent(
+    aggregate: LiveEvent,
+    events: tuple[LiveEvent, ...],
+    *,
+    now: float,
+    max_tokens: int = 120,
+    base_instructions: str | None = None,
+    gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
+    gift_battery_medium: int = _TIER_DEFAULTS.gift_battery_medium,
+    protect_ms: int = 4000,
+    protect_paid: bool = False,
+) -> Intent:
+    """Tier the display aggregate while targeting only its contributing facts."""
+    if (
+        aggregate.kind is not EventKind.GIFT
+        or aggregate.gift is None
+        or not events
+        or any(event.kind is not EventKind.GIFT or event.gift is None for event in events)
+    ):
+        raise ValueError("礼物聚合必须包含有效的礼物合计和非空成员")
+    if not aggregate.event_id or any(event.dedup_key == aggregate.dedup_key for event in events):
+        raise ValueError("礼物合计必须使用独立编号，不能借用原始礼物记录编号")
+    aggregate = aggregate.redacted()
+    members = tuple(event.redacted() for event in events)
+    base = intent_for(
+        aggregate,
+        now=now,
+        max_tokens=max_tokens,
+        base_instructions=base_instructions,
+        gift_battery_high=gift_battery_high,
+        gift_battery_medium=gift_battery_medium,
+        protect_ms=protect_ms,
+        protect_paid=protect_paid,
+    )
+    assert base is not None
+    assert base.injection.reply.instructions is not None
+    reply = dataclasses.replace(
+        base.injection.reply,
+        instructions=base.injection.reply.instructions.removesuffix(_candidate_focus((aggregate,)))
+        + _candidate_focus(members),
+    )
+    return dataclasses.replace(
+        base,
+        injection=Injection(reply=reply, item_text=gift_combo_item_text(members)),
+        events=members,
+    )
+
+
 def danmaku_batch_intent(
     events: tuple[LiveEvent, ...],
     *,
@@ -479,6 +568,8 @@ def entry_welcome_intent(
             "「欢迎某某，咱们正聊着……」模板；可以直接叫昵称、先说来啦或轻量招呼，"
             "不必每次都使用欢迎二字；"
             "一句话，不要假装认识，不公开 UID 或内部身份字段。"
+            "主播当前正在讲话或已有回复在播只影响播放时机；没有明确的主播欢迎证据时不要输出[SKIP]，"
+            "生成本次欢迎后等待当前语音回合结束。"
         )
     else:
         instruction = (
@@ -487,6 +578,8 @@ def entry_welcome_intent(
             "如果最近已经在共享历史里介绍过直播内容，优先只做简短欢迎。"
             "对照共享历史中最近三次进房回复，不要连续使用相同开头或固定句式，要变换句子结构；"
             "用不点名的集体招呼，不要播报、暗示或猜测人数，不要逐个念名单。"
+            "主播当前正在讲话或已有回复在播只影响播放时机；没有明确的主播欢迎证据时不要输出[SKIP]，"
+            "生成本次欢迎后等待当前语音回合结束。"
         )
     identities = ",".join(event.viewer.identity for event in events)
     intent = Intent(
@@ -505,6 +598,7 @@ def entry_welcome_intent(
         dedup_key=f"entry:coalesced:{int(now * 10)}:{identities}",
         created_at=now,
         expires_at=now + _DANMAKU_TTL_S,
+        events=tuple(event.redacted() for event in events),
     )
     _log_built(intent, now=now)
     return intent

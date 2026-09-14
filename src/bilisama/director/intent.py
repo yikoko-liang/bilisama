@@ -27,6 +27,9 @@ class Priority(IntEnum):
     comparisons have a ceiling."""
 
     STREAMER = 100
+    # A streamer explicitly asked for this spoken summary. It is scheduled
+    # asynchronously, but remains just below the streamer's own implicit turn.
+    DANMAKU_SUMMARY = 90
     SUPERCHAT = 80
     BIG_GIFT = 70
     GUARD_BUY = 65

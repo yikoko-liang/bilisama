@@ -50,6 +50,12 @@ import websockets
 
 from bilisama.config.derive import DerivedThresholds, effective_thresholds
 from bilisama.config.enums import Chattiness, ProviderName, VoiceReplyMode
+from bilisama.director.interaction_reports import InteractionReports
+from bilisama.director.interaction_state import (
+    InteractionReport,
+    InteractionState,
+    report_tool_spec,
+)
 from bilisama.director.voice_turn import VoiceTurnGate
 from bilisama.event_pacing import EventPacingSnapshot
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
@@ -1284,6 +1290,7 @@ class _Fanout:
         self._sinks: list[asyncio.Queue[link.LinkEvent]] = []
         self._gated_sinks: list[asyncio.Queue[link.LinkEvent]] = []
         self._gate: VoiceTurnGate | None = None
+        self._reports: InteractionReports | None = None
         self._task: asyncio.Task[None] | None = None
         self._context_lock = asyncio.Lock()
         self._context_generation = 0
@@ -1301,8 +1308,13 @@ class _Fanout:
         gate.attach(self._emit_gated)
         self._gate = gate
 
+    def set_reports(self, reports: InteractionReports) -> None:
+        self._reports = reports
+
     async def _pump(self) -> None:
         async for event in self._inner.events():
+            if self._reports is not None:
+                self._reports.observe(event)
             self._offer(self._sinks, event)
             if self._gate is None:
                 self._emit_gated(event)
@@ -1364,11 +1376,15 @@ class _Fanout:
             await asyncio.gather(self._task, return_exceptions=True)
         if self._gate is not None:
             self._gate.close()
+        if self._reports is not None:
+            await self._reports.aclose()
         await self._inner.aclose()
 
     async def suspend(self) -> None:
         # The pump stays up: the adapter's events() queue never terminates
         # across a suspend, so every view upstairs just goes quiet with it.
+        if self._reports is not None:
+            await self._reports.reset()
         await self._inner.suspend()
 
     async def resume(self) -> None:
@@ -1386,6 +1402,8 @@ class _Fanout:
                 await asyncio.gather(self._task, return_exceptions=True)
             if self._gate is not None:
                 self._gate.close()
+            if self._reports is not None:
+                await self._reports.reset()
             for queue in (*self._sinks, *self._gated_sinks):
                 while not queue.empty():
                     queue.get_nowait()
@@ -1934,6 +1952,18 @@ async def run_director(args: argparse.Namespace) -> int:
 
     inner: link.SpeechLink = built.link
     hosted_link = inner if isinstance(inner, HostedLink) else None
+    # Capability is verified for this model only. Other providers keep their
+    # original text/audio path and never receive an unsupported tool schema.
+    reporting_link = (
+        inner
+        if provider is ProviderName.DASHSCOPE
+        and endpoint.model == "qwen-audio-3.0-realtime-flash"
+        and isinstance(inner, link.ToolReportingLink)
+        else None
+    )
+    interaction_state = InteractionState(clock) if reporting_link is not None else None
+    if reporting_link is not None:
+        await reporting_link.configure_tools((report_tool_spec(),))
     connect_url: str = built.url
     # After the build, not before it: only here is connect_url the address that
     # will actually be dialed, model and all. Printed earlier the line could
@@ -2009,6 +2039,7 @@ async def run_director(args: argparse.Namespace) -> int:
     def verdict_sink(verdict: Verdict) -> None:
         outcomes.note(verdict)
         assembly.note_verdict(verdict)
+        proactive.note_verdict(verdict)
         if verdict.outcome is not Outcome.SPOKEN:
             print(f"[调度] {verdict.source} → {verdict}")
         if hub is not None:
@@ -2030,6 +2061,40 @@ async def run_director(args: argparse.Namespace) -> int:
         distiller.note_assistant_line(text)
         proactive.note_dialogue("assistant", text)
 
+    last_host_transcript = ""
+
+    def on_interrupted(intent: Intent | None, handle: link.ReplyHandle, text: str) -> None:
+        from bilisama.director.intents import _event_ref, event_context_line
+
+        if runtime_paused or intent_test_resetting:
+            return
+        if interaction_state is not None and interaction_state.silenced:
+            return
+        if intent is None:
+            proactive.note_interrupted(
+                f"voice:{handle.handle_id}",
+                "voice",
+                last_host_transcript or "主播与助手的近期语音对话",
+                text,
+            )
+            return
+        events = intent.events or ((intent.event,) if intent.event is not None else ())
+        remaining = tuple(
+            event
+            for event in events
+            if interaction_state is None or not interaction_state.is_handled(event)
+        )
+        if events and not remaining:
+            return
+        background = "\n".join(event_context_line(event) for event in remaining)
+        proactive.note_interrupted(
+            intent.dedup_key,
+            intent.source,
+            background or intent.injection.item_text or "近期尚未完成的互动",
+            text,
+            event_refs=tuple(_event_ref(event) for event in remaining),
+        )
+
     scheduler = Scheduler(
         speech,
         floor,
@@ -2048,6 +2113,8 @@ async def run_director(args: argparse.Namespace) -> int:
         # Her own microphone turns go the same way: what she said to the
         # streamer used to reach no memory at all (plan, voice gate 5.3).
         implicit_spoken_sink=spoken_line,
+        interaction_state=interaction_state,
+        on_interrupted=on_interrupted,
     )
 
     from bilisama.event_pacing import EventPacer
@@ -2071,7 +2138,10 @@ async def run_director(args: argparse.Namespace) -> int:
         # monologue, and a pause defers the winner instead of discarding it
         # in a delivery no-op that would still book selector counters.
         delivery_blocked=lambda: (
-            runtime_paused or floor.streamer_speaking or not event_pacer.can_consume("danmaku")
+            runtime_paused
+            or floor.streamer_speaking
+            or (interaction_state is not None and interaction_state.silenced)
+            or not event_pacer.can_consume("danmaku")
         ),
     )
 
@@ -2096,13 +2166,15 @@ async def run_director(args: argparse.Namespace) -> int:
         if hub is not None:
             hub.broadcast(ServerEvent.EVENT_FEED, live_event_payload(event))
 
-    def proactive_submit(intent: Intent) -> None:
+    def proactive_submit(intent: Intent) -> bool:
         # Read the switch at submit time, not at wiring time: panel.set flips
         # it mid-stream, and ui_meta already promises Reload.LIVE for it.
         if settings.interaction.speak.proactive and (
             not intent_test_active or intent_test_allow_proactive
         ):
             scheduler.submit(intent)
+            return True
+        return False
 
     proactive = ProactiveTopicLoop(
         side,
@@ -2128,10 +2200,14 @@ async def run_director(args: argparse.Namespace) -> int:
         # Late-bound on purpose: `assembly` is built a page below, and the
         # loop only calls this once it is running.
         reply_base_instructions=lambda: assembly.build_public_context(),
+        collection_window_s=float(settings.interaction.proactive.collection_window_s),
+        revoke=scheduler.revoke,
     )
 
     def on_streamer_transcript(text: str) -> None:
         # The native realtime conversation already carries this host turn.
+        nonlocal last_host_transcript
+        last_host_transcript = text[-1000:]
         proactive.note_dialogue("streamer", text)
 
     async def push_context(text: str) -> None:
@@ -2148,6 +2224,7 @@ async def run_director(args: argparse.Namespace) -> int:
             skip.handle,
             detail=ruling.detail() if ruling is not None else "残记号",
             clear_playback=skip.clear_playback,
+            preserve_generation=interaction_state is not None,
         )
         if skip.handle.implicit and ruling is not None and ruling.note:
             # What she heard the streamer doing. On the s2s product path this
@@ -2186,6 +2263,7 @@ async def run_director(args: argparse.Namespace) -> int:
         selector=selector,
         entries=entries,
         event_pacer=event_pacer,
+        interaction_state=interaction_state,
         entry_group_enabled=lambda group: bool(
             getattr(settings.interaction.entry_welcome, group, False)
         ),
@@ -2198,6 +2276,40 @@ async def run_director(args: argparse.Namespace) -> int:
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
     )
+
+    interaction_reports: InteractionReports | None = None
+    if reporting_link is not None:
+
+        def apply_interaction_report(report: InteractionReport, started_at: float | None) -> None:
+            assembly.apply_interaction_report(report, voice_started_at=started_at)
+            scheduler.refresh_interactions()
+
+        async def refresh_report_context() -> None:
+            await assembly.refresh_context()
+
+        def interaction_notice(text: str) -> None:
+            print(f"[互动联动] {text}")
+            if hub is not None:
+                hub.broadcast(
+                    ServerEvent.EVENT_FEED,
+                    {
+                        "kind": "verdict",
+                        "source": "interaction",
+                        "outcome": "notice",
+                        "phase": "report",
+                        "reason": "interaction.report_invalid",
+                        "detail": text,
+                    },
+                )
+
+        interaction_reports = InteractionReports(
+            reporting_link,
+            clock,
+            apply=apply_interaction_report,
+            refresh_context=refresh_report_context,
+            notice=interaction_notice,
+        )
+        speech.set_reports(interaction_reports)
 
     # ------------------------------------------------------------ panel edits
     # The write channel the control centre uses: validate -> apply in memory
@@ -2221,6 +2333,7 @@ async def run_director(args: argparse.Namespace) -> int:
             max_per_hour=settings.interaction.proactive.max_per_hour,
             wake_interval_s=float(settings.interaction.proactive.wake_interval_s),
             max_tokens=live.max_output_tokens,
+            collection_window_s=float(settings.interaction.proactive.collection_window_s),
         )
         # The pacer's bucket owns ordinary rate; the scheduler cooldown stays 0.
         scheduler.set_cooldown(0.0)
@@ -2417,6 +2530,8 @@ async def run_director(args: argparse.Namespace) -> int:
     registry.register("distill", distiller.status)
     registry.register("scheduler", scheduler.status)
     registry.register("voice_gate", voice_gate.status)
+    if interaction_reports is not None:
+        registry.register("interaction_linkage", interaction_reports.status)
     # The two §4.12 asks for that nothing answered: is the provider connected,
     # and what happened to the last N attempts to speak. Connected already —
     # _connect_or_exit is above and exits on failure — and kept current from the

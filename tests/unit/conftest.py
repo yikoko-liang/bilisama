@@ -20,6 +20,7 @@ from bilisama.clock import FakeClock
 from bilisama.config.schema import GrowthSwitches, InteractionConfig, SpeakSwitches
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Intent
+from bilisama.director.interaction_state import InteractionState
 from bilisama.event_pacing import EventPacer
 from bilisama.ingest.bilibili.selector import DanmakuSelector, EntryCoalescer, PresenceWelcomer
 from bilisama.ingest.events import LiveEvent
@@ -68,6 +69,7 @@ def build_assembly_kit(
     presence: PresenceWelcomer | None = None,
     entries: EntryCoalescer | None = None,
     event_pacer: EventPacer | None = None,
+    interaction_state: InteractionState | None = None,
     entry_group_enabled: Callable[[str], bool] | None = None,
     event_observer: Callable[[LiveEvent], None] | None = None,
     observe_context_item: Callable[[str], Awaitable[None]] | None = None,
@@ -115,6 +117,7 @@ def build_assembly_kit(
         presence=presence,
         entries=entries,
         event_pacer=event_pacer,
+        interaction_state=interaction_state,
         entry_group_enabled=entry_group_enabled,
         event_observer=event_observer,
         observe_context_item=observe_context_item,

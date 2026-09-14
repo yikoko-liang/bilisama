@@ -49,13 +49,14 @@ import heapq
 import itertools
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, cast
 
 from bilisama.clock import Clock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.intent import Injection, Intent
 from bilisama.director.intents import event_context_line, wrap_events
+from bilisama.director.interaction_state import InteractionState
 from bilisama.ingest.events import EventKind
 from bilisama.obs.logging import bind, get_logger
 from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
@@ -127,6 +128,8 @@ class _Active:
     # sentence the room already hears mid-word is worse than any priority
     # gap. The streamer's own barge-in and panic are separate hard paths.
     output_started: bool = False
+    text: str = ""
+    host_interrupted: bool = False
 
 
 @dataclass(slots=True)
@@ -138,6 +141,8 @@ class _Parked:
     """
 
     intent: Intent
+    handle: link.ReplyHandle
+    text: str
     started_at: float
     deadline: float
 
@@ -157,6 +162,9 @@ class _Implicit:
     started_at: float
     killed: bool = False
     cleared: bool = False
+    cancel_sent: bool = False
+    text: str = ""
+    host_interrupted: bool = False
 
 
 @dataclass(slots=True)
@@ -185,6 +193,8 @@ class Scheduler:
         on_hit: Literal["drop_sentence", "mute_all"] = "drop_sentence",
         spoken_sink: Callable[[str], None] | None = None,
         implicit_spoken_sink: Callable[[str], None] | None = None,
+        interaction_state: InteractionState | None = None,
+        on_interrupted: Callable[[Intent | None, link.ReplyHandle, str], None] | None = None,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -204,6 +214,15 @@ class Scheduler:
         # Separate from spoken_sink so an entry point can wire one and not
         # the other; dev-talk wires both to the same line.
         self._implicit_spoken_sink = implicit_spoken_sink
+        self._interaction_state = interaction_state
+        self._interaction_errors: set[str] = set()
+        self._interaction_inflight: Intent | None = None
+        self._on_interrupted = on_interrupted
+        self._interrupted_handles: OrderedDict[int, None] = OrderedDict()
+        self._pending_interruptions: OrderedDict[
+            int, tuple[Intent | None, link.ReplyHandle, str, float]
+        ] = OrderedDict()
+        self._implicit_playback: _Implicit | None = None
         self._implicit: _Implicit | None = None
         self._heap: list[_Entry] = []
         self._seq = itertools.count()
@@ -234,6 +253,93 @@ class Scheduler:
         self._reply_intents: OrderedDict[int, Intent] = OrderedDict()
 
     # ------------------------------------------------------------ intake
+
+    def refresh_interactions(self) -> None:
+        """Refresh waiting work only; later typed answers never kill live audio."""
+        retained: list[_Entry] = []
+        for entry in self._heap:
+            if entry.intent.dedup_key in self._revoked:
+                self._drop_queued(entry.intent, SkipReason.REVOKED, outcome=Outcome.EXPIRED)
+                continue
+            intent = self._filter_interactions(entry.intent)
+            if intent is not None:
+                retained.append(_Entry(entry.sort_key, intent))
+        self._heap = retained
+        heapq.heapify(self._heap)
+        self._sync_interaction_retention()
+        self._wake.set()
+
+    def _sync_interaction_retention(self) -> None:
+        """Protect state only while a real queued/in-flight task references it."""
+        if self._interaction_state is None:
+            return
+        intents = [entry.intent for entry in self._heap]
+        intents.extend(parked.intent for parked in self._parked)
+        if self._active is not None:
+            intents.append(self._active.intent)
+        if self._interaction_inflight is not None:
+            intents.append(self._interaction_inflight)
+        self._interaction_state.retain_events(
+            event
+            for intent in intents
+            for event in (intent.events or ((intent.event,) if intent.event is not None else ()))
+        )
+
+    def _filter_interactions(
+        self, intent: Intent, *, owns_key: bool = True, phase: Phase = Phase.QUEUED
+    ) -> Intent | None:
+        state = self._interaction_state
+        if state is None:
+            return intent
+        key = intent.dedup_key or intent.source
+        try:
+            filtered = state.filter_intent(intent)
+        except ValueError as exc:
+            # A malformed mixed batch stays held rather than speaking handled
+            # members or losing its unanswered ones. Other work can proceed.
+            if key not in self._interaction_errors:
+                log.warning("scheduler.interaction_filter_failed", error_text=str(exc)[:200])
+            self._interaction_errors.add(key)
+            return intent
+        self._interaction_errors.discard(key)
+        if filtered is intent:
+            return intent
+        if owns_key:
+            self._free_key(intent)
+        self._emit(
+            Verdict(
+                intent_id=key,
+                source=intent.source,
+                outcome=Outcome.SKIPPED,
+                phase=phase,
+                reason=SkipReason.HOST_HANDLED,
+                detail="主播已处理" if filtered is None else "已答部分移除，未答项保留",
+                waited_s=self._waited_s(intent, self._clock.monotonic()),
+            )
+        )
+        if filtered is not None and filtered.dedup_key:
+            if filtered.dedup_key in self._queued_keys:
+                self._emit(
+                    Verdict(
+                        intent_id=filtered.dedup_key,
+                        source=filtered.source,
+                        outcome=Outcome.SKIPPED,
+                        phase=phase,
+                        reason=SkipReason.DUPLICATE,
+                    )
+                )
+                return None
+            if owns_key:
+                self._queued_keys.add(filtered.dedup_key)
+        return filtered
+
+    def _interaction_gate(self, intent: Intent) -> SkipReason | None:
+        if (intent.dedup_key or intent.source) in self._interaction_errors:
+            return SkipReason.HOST_HANDLING
+        state = self._interaction_state
+        if state is None or not state.blocks(intent):
+            return None
+        return SkipReason.INTERACTION_SILENCE if state.silenced else SkipReason.HOST_HANDLING
 
     def reply_intent(self, handle_id: int) -> Intent | None:
         """The intent behind one reply handle, for the UI's reference blocks.
@@ -323,7 +429,12 @@ class Scheduler:
                 )
             )
             return
+        filtered = self._filter_interactions(intent, owns_key=False, phase=Phase.SELECTED)
+        if filtered is None:
+            return
+        intent = filtered
         heapq.heappush(self._heap, _Entry((-int(intent.priority), next(self._seq)), intent))
+        self._sync_interaction_retention()
         if intent.dedup_key:
             self._queued_keys.add(intent.dedup_key)
         with bind(intent_id=intent.dedup_key or intent.source):
@@ -343,16 +454,20 @@ class Scheduler:
         self._maybe_preempt(intent)
         self._wake.set()
 
-    def revoke(self, dedup_key: str) -> None:
+    def revoke(self, dedup_key: str) -> bool:
         """Withdraw a queued intent — the super-chat-delete path.
 
         Only queued work is pulled: an answer already being spoken finishes,
         because cutting a thank-you mid-sentence sounds worse on stream than
         thanking a withdrawn SC.
         """
-        if dedup_key in self._queued_keys:
-            self._revoked.add(dedup_key)
-            self._wake.set()
+        if not dedup_key or dedup_key in self._revoked:
+            return False
+        if not any(entry.intent.dedup_key == dedup_key for entry in self._heap):
+            return False
+        self._revoked.add(dedup_key)
+        self._wake.set()
+        return True
 
     async def drain_pending_io(self) -> None:
         """Finish owned writes/cancels before replacing the model session."""
@@ -362,6 +477,9 @@ class Scheduler:
             await asyncio.sleep(0.01)
         self._settle_active(Outcome.CANCELLED, Phase.GENERATING, reason=SkipReason.PANIC_MUTE)
         self._implicit = None
+        self._implicit_playback = None
+        self._pending_interruptions.clear()
+        self._interrupted_handles.clear()
         self._link_down = False
         while self._tasks:
             pending = tuple(self._tasks)
@@ -369,6 +487,9 @@ class Scheduler:
                 if task.get_name() in ("scheduler:protect-cap", "scheduler:playback-grace"):
                     task.cancel()
             results = await asyncio.gather(*pending, return_exceptions=True)
+            # gather() can return synchronously for already-finished tasks,
+            # before their discard callbacks run. Do not spin on that set.
+            self._tasks.difference_update(task for task in pending if task.done())
             for result in results:
                 if isinstance(result, BaseException) and not isinstance(
                     result, asyncio.CancelledError
@@ -391,6 +512,10 @@ class Scheduler:
             implicit_active=self._implicit is not None,
         )
         self._panicked = True
+        if not self._dispatching:
+            self._interaction_inflight = None
+        self._pending_interruptions.clear()
+        self._implicit_playback = None
         self.controls.put_nowait(PlaybackClear(reason="panic_mute"))
         # The clear above takes the parked replies' audio with it, so no
         # receipt is coming: write what we know rather than wait for it.
@@ -431,7 +556,12 @@ class Scheduler:
         self._wake.set()
 
     def skip_reply(
-        self, handle: link.ReplyHandle, *, detail: str = "", clear_playback: bool = False
+        self,
+        handle: link.ReplyHandle,
+        *,
+        detail: str = "",
+        clear_playback: bool = False,
+        preserve_generation: bool = False,
     ) -> None:
         """Apply the same model SKIP contract to voice and dispatched replies.
 
@@ -445,6 +575,7 @@ class Scheduler:
                 reason=SkipReason.VOICE_NOT_ADDRESSED,
                 detail=detail,
                 clear_playback=clear_playback,
+                preserve_generation=preserve_generation,
             )
             return
         self._model_skips[handle.handle_id] = (detail, clear_playback)
@@ -476,6 +607,7 @@ class Scheduler:
         clear_playback: bool = False,
         outcome: Outcome = Outcome.SKIPPED,
         phase: Phase = Phase.GENERATING,
+        preserve_generation: bool = False,
     ) -> None:
         """Kill the provider's own VAD turn — the one path that does.
 
@@ -500,6 +632,8 @@ class Scheduler:
                 of a held turn ever reached a speaker.
             outcome, phase: The verdict's pair. The gate's default reads
                 skipped@generating; the guard and panic write their own.
+            preserve_generation: Audio is already gated; let this same reply
+                finish its nonspoken state report. Panic still cancels it.
         """
         implicit = self._implicit
         if implicit is None or implicit.handle is not handle:
@@ -515,12 +649,17 @@ class Scheduler:
             implicit = _Implicit(handle=handle, started_at=self._clock.monotonic())
             self._implicit = implicit
         if implicit.killed:
+            if not preserve_generation and not implicit.cancel_sent and not handle.stale:
+                implicit.cancel_sent = True
+                self._spawn(self._speech.cancel(handle), name="scheduler:implicit-cancel")
             return
         implicit.killed = True
         if clear_playback and not implicit.cleared:
             implicit.cleared = True
             self.controls.put_nowait(PlaybackClear(reason=_clear_reason(reason)))
-        self._spawn(self._speech.cancel(handle), name="scheduler:implicit-cancel")
+        if not preserve_generation:
+            implicit.cancel_sent = True
+            self._spawn(self._speech.cancel(handle), name="scheduler:implicit-cancel")
         spoken_ms = self._spoken_ms(implicit.started_at)
         intent_id = f"voice:{handle.handle_id}"
         with bind(intent_id=intent_id):
@@ -635,6 +774,10 @@ class Scheduler:
         nothing here can stall — or take down — the stream's only consumer.
         """
         if isinstance(event, link.SpeechStarted):
+            if not self._floor.queued_audio:
+                # A prior drained receipt belongs to the finished utterance,
+                # not to this later speech edge. Do not recover it again.
+                self._flush_played(played=True)
             self._floor.on_speech_started()
             self._barge_in()
         elif isinstance(event, link.SpeechStopped):
@@ -652,7 +795,9 @@ class Scheduler:
         elif isinstance(event, link.ReplyTextDelta):
             self._on_delta(event)
         elif isinstance(event, link.ReplyDone):
-            if self._active is None or event.handle is not self._active.handle:
+            if (self._active is None or event.handle is not self._active.handle) and (
+                self._implicit is None or self._implicit.handle is event.handle
+            ):
                 self._floor.on_implicit(False)
             if event.handle.implicit:
                 self._close_implicit(event)
@@ -664,6 +809,8 @@ class Scheduler:
             # for a link that may be gone for good just produces stale
             # replies later.
             self._link_down = True
+            self._pending_interruptions.clear()
+            self._implicit_playback = None
             self._floor.on_link_lost()
             self._drain_queue(SkipReason.LINK_DOWN)
         elif isinstance(event, link.LinkUp):
@@ -695,38 +842,50 @@ class Scheduler:
             return None
         if self._link_down:
             return None
-        while self._heap:
-            entry = self._heap[0]
-            intent = entry.intent
-            if intent.dedup_key and intent.dedup_key in self._revoked:
-                heapq.heappop(self._heap)
-                self._revoked.discard(intent.dedup_key)
-                self._drop_queued(intent, SkipReason.REVOKED, outcome=Outcome.EXPIRED)
-                continue
-            if self._expired(intent):
-                heapq.heappop(self._heap)
-                # Name the gate that ate the runway. Every expiry used to read
-                # background.result_expired — a lane that does not exist yet —
-                # so the panel answered "the background result went stale" for
-                # a danmaku that simply waited out the streamer (ledger #35).
+        held: list[_Entry] = []
+        try:
+            while self._heap:
+                entry = heapq.heappop(self._heap)
+                intent = entry.intent
+                if intent.dedup_key and intent.dedup_key in self._revoked:
+                    self._revoked.discard(intent.dedup_key)
+                    self._drop_queued(intent, SkipReason.REVOKED, outcome=Outcome.EXPIRED)
+                    continue
+                filtered = self._filter_interactions(intent)
+                if filtered is None:
+                    continue
+                intent = filtered
+                entry = _Entry(entry.sort_key, intent)
+                if self._expired(intent):
+                    gate = self._interaction_gate(intent) or self._floor.blocking_reason()
+                    self._drop_queued(
+                        intent,
+                        gate,
+                        outcome=Outcome.EXPIRED,
+                        phase=Phase.GATED if gate is not None else Phase.QUEUED,
+                    )
+                    continue
                 gate = self._floor.blocking_reason()
-                self._drop_queued(
-                    intent,
-                    gate,
-                    outcome=Outcome.EXPIRED,
-                    phase=Phase.GATED if gate is not None else Phase.QUEUED,
-                )
-                continue
-            gate = self._floor.blocking_reason()
-            if gate is not None:
-                self._note_gate(gate, intent)
-                return None
-            heapq.heappop(self._heap)
-            # The floor opened and this intent is on its way; the next close is
-            # news again. `scheduler.dispatched` carries the open edge, so
-            # there is nothing to write here.
-            self._gate_logged = None
-            return intent
+                if gate is not None:
+                    held.append(entry)
+                    self._note_gate(gate, intent)
+                    return None
+                interaction_gate = self._interaction_gate(intent)
+                if interaction_gate is not None:
+                    held.append(entry)
+                    self._note_gate(interaction_gate, intent)
+                    continue
+                self._gate_logged = None
+                self._interaction_inflight = intent
+                return intent
+        finally:
+            # Processing one event must not hold unrelated, ready work behind
+            # it; retain each blocked entry's original priority and age.
+            for entry in held:
+                heapq.heappush(self._heap, entry)
+            self._sync_interaction_retention()
+        if held:
+            return None
         # Nothing waiting means nothing is being held back — whatever gate was
         # reported has stopped costing anyone their turn.
         self._gate_logged = None
@@ -762,15 +921,33 @@ class Scheduler:
         )
 
     async def _dispatch(self, intent: Intent) -> None:
+        """Keep event state alive throughout both provider writes."""
+        self._interaction_inflight = intent
+        self._sync_interaction_retention()
+        try:
+            await self._dispatch_intent(intent)
+        finally:
+            self._interaction_inflight = None
+            self._sync_interaction_retention()
+
+    async def _dispatch_intent(self, intent: Intent) -> None:
         """Send one intent to the provider, honouring everything that fired
         while the sends were in flight (A1) and turning a failed send into a
         verdict instead of a dead scheduler (A8)."""
+        ready = self._prepare_interaction_dispatch(intent, item_written=False)
+        if ready is None:
+            return
+        intent = ready
         self._dispatching = True
         wrote_item = False
         try:
             if intent.injection.item_text is not None:
                 await self._speech.add_context_item(intent.injection.item_text)
                 wrote_item = True
+            ready = self._prepare_interaction_dispatch(intent, item_written=wrote_item)
+            if ready is None:
+                return
+            intent = ready
             handle = await self._speech.request_reply(intent.injection.reply)
         except Exception as exc:
             log.warning(
@@ -866,6 +1043,7 @@ class Scheduler:
             active.cleared = True
             self.controls.put_nowait(PlaybackClear(reason="barge_in"))
             self._spawn(self._speech.cancel(handle), name="scheduler:barge-cancel")
+            self._record_interruption(intent, handle, active.text, confirmed=True)
             if intent.requeue_on_interrupt:
                 self._settle_active(Outcome.CANCELLED, Phase.DISPATCHED, requeue=True)
             else:
@@ -875,6 +1053,19 @@ class Scheduler:
             top = self._heap[0].intent
             if int(top.priority) > int(intent.priority):
                 self._maybe_preempt(top)
+
+    def _prepare_interaction_dispatch(self, intent: Intent, *, item_written: bool) -> Intent | None:
+        """Recheck only before generation; later typed context is not a cancel."""
+        filtered = self._filter_interactions(intent)
+        if filtered is None:
+            return None
+        gate = self._interaction_gate(filtered)
+        if gate is None:
+            return filtered
+        self._note_gate(gate, filtered)
+        self._free_key(filtered)
+        self._requeue(filtered, item_written=item_written)
+        return None
 
     # ------------------------------------------------------------ events
 
@@ -901,11 +1092,24 @@ class Scheduler:
         if implicit is None or implicit.handle is not event.handle:
             return
         self._implicit = None
+        if event.text:
+            implicit.text = event.text[:4000]
+        if not implicit.killed and event.status is link.ReplyStatus.CANCELLED:
+            self._record_interruption(
+                None,
+                event.handle,
+                implicit.text,
+                confirmed=implicit.host_interrupted or self._floor.streamer_speaking,
+            )
         if implicit.killed or event.status is not link.ReplyStatus.COMPLETED:
             # Killed turns already have their verdict; a turn the provider
             # itself cut (the streamer spoke over her) gets none — the panel
             # shows the barge-in, and there is no intent to account for.
             return
+        if implicit.host_interrupted:
+            return
+        if self._floor.queued_audio:
+            self._implicit_playback = implicit
         if self._implicit_spoken_sink is not None and event.text:
             self._implicit_spoken_sink(event.text)
 
@@ -932,6 +1136,9 @@ class Scheduler:
 
     def _on_delta(self, event: link.ReplyTextDelta) -> None:
         if event.handle.implicit:
+            implicit = self._implicit
+            if implicit is not None and implicit.handle is event.handle and not implicit.killed:
+                implicit.text = (implicit.text + event.text)[:4000]
             self._guard_implicit(event)
             return
         active = self._active
@@ -939,6 +1146,7 @@ class Scheduler:
             return
         if event.text:
             active.output_started = True
+            active.text = (active.text + event.text)[:4000]
         if self._guard is None:
             return
         word = self._guard.hit(event.text)
@@ -960,6 +1168,8 @@ class Scheduler:
         active = self._active
         if active is None or event.handle is not active.handle:
             return
+        if event.text:
+            active.text = event.text[:4000]
         if event.status is link.ReplyStatus.COMPLETED:
             if self._spoken_sink is not None and event.text:
                 self._spoken_sink(event.text)
@@ -994,6 +1204,12 @@ class Scheduler:
                 )
                 active.cleared = True
             reason = SkipReason.PANIC_MUTE if self._panicked else None
+            self._record_interruption(
+                active.intent,
+                active.handle,
+                active.text,
+                confirmed=active.host_interrupted or self._floor.streamer_speaking,
+            )
             if active.intent.requeue_on_interrupt and not self._panicked:
                 self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, requeue=True)
             else:
@@ -1028,6 +1244,22 @@ class Scheduler:
         client's watchdog suppresses the same one (client.py:294-295) — costs
         one task, not the event loop.
         """
+        pending = tuple(self._pending_interruptions.values())
+        self._pending_interruptions.clear()
+        for intent, handle, text, deadline in pending:
+            if self._clock.monotonic() <= deadline:
+                self._record_interruption(intent, handle, text, confirmed=True)
+        implicit = self._implicit
+        if implicit is not None and not implicit.killed:
+            implicit.host_interrupted = True
+            self._record_interruption(None, implicit.handle, implicit.text, confirmed=True)
+        playback = self._implicit_playback
+        self._implicit_playback = None
+        if playback is not None and self._floor.queued_audio:
+            self._record_interruption(None, playback.handle, playback.text, confirmed=True)
+        # A new speech edge is conclusive even if the audio-drained receipt
+        # arrives after the streamer has stopped talking again.
+        self._flush_played(played=False)
         active = self._active
         if active is None:
             return
@@ -1049,9 +1281,46 @@ class Scheduler:
                 )
             return
         self._note_barge(active, where="speech_started")
+        active.host_interrupted = True
+        self._record_interruption(active.intent, active.handle, active.text, confirmed=True)
         active.cleared = True
         self.controls.put_nowait(PlaybackClear(reason="barge_in"))
         self._spawn(self._speech.cancel(active.handle), name="scheduler:barge-cancel")
+
+    def _record_interruption(
+        self,
+        intent: Intent | None,
+        handle: link.ReplyHandle,
+        text: str,
+        *,
+        confirmed: bool,
+    ) -> None:
+        """Only a genuine speech edge may offer non-requeued work for recovery."""
+        state = self._interaction_state
+        if self._on_interrupted is None or self._panicked or (state is not None and state.silenced):
+            return
+        if intent is not None:
+            if intent.requeue_on_interrupt:
+                return
+            events = intent.events or ((intent.event,) if intent.event is not None else ())
+            if state is not None and events and all(state.is_handled(event) for event in events):
+                return
+        if handle.handle_id in self._interrupted_handles:
+            return
+        if not confirmed:
+            self._pending_interruptions[handle.handle_id] = (
+                intent,
+                handle,
+                text,
+                self._clock.monotonic() + _SPEECH_EDGE_GRACE_S,
+            )
+            while len(self._pending_interruptions) > _REPLY_INTENTS_CAP:
+                self._pending_interruptions.popitem(last=False)
+            return
+        self._interrupted_handles[handle.handle_id] = None
+        while len(self._interrupted_handles) > _REPLY_INTENTS_CAP:
+            self._interrupted_handles.popitem(last=False)
+        self._on_interrupted(intent, handle, text)
 
     def _note_barge(self, active: _Active, *, where: str) -> None:
         """Name the reply the streamer just talked over.
@@ -1127,7 +1396,7 @@ class Scheduler:
 
     def _maybe_preempt(self, incoming: Intent) -> None:
         active = self._active
-        if active is None:
+        if active is None or self._interaction_gate(incoming) is not None:
             return
         if active.output_started:
             # The room already hears this sentence: live events queue behind
@@ -1170,6 +1439,7 @@ class Scheduler:
         while self._heap:
             entry = heapq.heappop(self._heap)
             self._drop_queued(entry.intent, reason)
+        self._sync_interaction_retention()
 
     def _requeue(
         self, intent: Intent, *, item_written: bool, deadline: float | None = None
@@ -1197,16 +1467,10 @@ class Scheduler:
         if item_written and injection.item_text is not None:
             injection = Injection(reply=injection.reply)
         self.submit(
-            Intent(
-                source=intent.source,
-                priority=intent.priority,
+            replace(
+                intent,
                 injection=injection,
-                trusted=intent.trusted,
-                event=intent.event,
-                dedup_key=intent.dedup_key,
-                created_at=intent.created_at,
                 expires_at=intent.expires_at if deadline is None else deadline,
-                requeue_on_interrupt=intent.requeue_on_interrupt,
             )
         )
         self._wake.set()
@@ -1266,6 +1530,7 @@ class Scheduler:
             # history line is already written — carrying it again would say
             # the same paid message arrived twice.
             self._requeue(intent, item_written=True)
+            self._sync_interaction_retention()
             return
         if parking:
             # The model stopped producing tokens; the audience has not heard it
@@ -1273,6 +1538,7 @@ class Scheduler:
             # spoken@played — the 106-second playback backlog is what taught us
             # the two are different facts.
             self._park_for_playback(active)
+            self._sync_interaction_retention()
             self._wake.set()
             return
         self._emit(
@@ -1287,12 +1553,15 @@ class Scheduler:
                 spoken_ms=self._spoken_ms(active.started_at),
             )
         )
+        self._sync_interaction_retention()
         self._wake.set()
 
     def _park_for_playback(self, active: _Active) -> None:
         self._parked.append(
             _Parked(
                 intent=active.intent,
+                handle=active.handle,
+                text=active.text,
                 started_at=active.started_at,
                 deadline=self._clock.monotonic() + _PLAYBACK_RECEIPT_GRACE_S,
             )
@@ -1314,6 +1583,8 @@ class Scheduler:
         floor: audio gone and nobody talking over it means the audience heard
         the whole thing.
         """
+        if played is False or not self._floor.queued_audio:
+            self._implicit_playback = None
         if not self._parked:
             return
         now = self._clock.monotonic()
@@ -1343,6 +1614,8 @@ class Scheduler:
             ):
                 self._requeue(parked.intent, item_written=True)
                 continue
+            if not heard and self._floor.streamer_speaking:
+                self._record_interruption(parked.intent, parked.handle, parked.text, confirmed=True)
             self._emit(
                 Verdict(
                     intent_id=parked.intent.dedup_key or parked.intent.source,
@@ -1354,6 +1627,7 @@ class Scheduler:
                 )
             )
         self._parked = still_waiting
+        self._sync_interaction_retention()
 
     def _waited_s(self, intent: Intent, until: float) -> float:
         """How long this intent waited for its turn, 0 when nobody said when it
@@ -1389,6 +1663,7 @@ class Scheduler:
         )
 
     def _free_key(self, intent: Intent) -> None:
+        self._interaction_errors.discard(intent.dedup_key or intent.source)
         if intent.dedup_key:
             self._queued_keys.discard(intent.dedup_key)
             # A revoke that raced the active reply (the "let it finish" case)

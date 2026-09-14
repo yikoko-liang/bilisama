@@ -501,7 +501,7 @@ class BilibiliEventSource:
         *,
         sessdata: str = "",
         queue_size: int = _QUEUE_SIZE,
-        on_sc_delete: Callable[[str], None] | None = None,
+        on_sc_delete: Callable[[str], object] | None = None,
     ) -> None:
         self.name = "bilibili"
         self._room_id_arg = room_id

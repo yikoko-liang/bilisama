@@ -41,16 +41,18 @@ Plan section 2.8 calls this out — a waiting window would tax every event
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from bilisama.ingest.events import LiveEvent, cny_from_gold
+from bilisama.ingest.events import EventKind, LiveEvent, cny_from_gold
 from bilisama.obs.logging import get_logger
 
 __all__ = [
     "CircuitBreaker",
     "DedupRing",
     "GiftComboAggregator",
+    "aggregate_gift_events",
 ]
 
 log = get_logger(__name__)
@@ -61,6 +63,7 @@ BREAKER_THRESHOLD = 3
 BREAKER_WINDOW_S = 60.0
 COMBO_IDLE_S = 1.0
 COMBO_SUPPRESS_S = 600.0
+COMBO_MEMBER_CAPACITY = 256
 
 
 class DedupRing:
@@ -184,6 +187,41 @@ class CircuitBreaker:
         self._failures.clear()
 
 
+def aggregate_gift_events(events: tuple[LiveEvent, ...]) -> LiveEvent:
+    """Build a derived view without reusing a raw contribution's identity."""
+    if not events or any(
+        event.kind is not EventKind.GIFT or event.gift is None for event in events
+    ):
+        raise ValueError("礼物合计必须包含非空的礼物贡献记录")
+    last = events[-1]
+    gift = last.gift
+    assert gift is not None
+    if any(
+        event.viewer.identity != last.viewer.identity
+        or event.gift is None
+        or event.gift.gift_id != gift.gift_id
+        or event.gift.coin_type != gift.coin_type
+        for event in events
+    ):
+        raise ValueError("礼物合计不能混合不同观众、礼物或计价类型")
+    gifts = [event.gift for event in events if event.gift is not None]
+    merged = dataclasses.replace(
+        gift,
+        num=sum(item.num for item in gifts),
+        total_coin=sum(item.total_coin for item in gifts),
+        aggregated_count=sum(item.aggregated_count for item in gifts),
+    )
+    identity = hashlib.sha256("\n".join(event.dedup_key for event in events).encode()).hexdigest()[
+        :24
+    ]
+    return dataclasses.replace(
+        last.redacted(),
+        gift=merged,
+        event_id=f"gift-combo:{identity}",
+        value_cny=cny_from_gold(merged.total_coin) if merged.coin_type == "gold" else 0.0,
+    )
+
+
 @dataclass
 class _Combo:
     first: LiveEvent
@@ -192,6 +230,11 @@ class _Combo:
     total_coin: int
     hits: int
     last_add: float
+    members: deque[tuple[LiveEvent, float]] = field(default_factory=deque)
+    # Compacted hits remain in the totals under a separate derived identity. Only
+    # the newest prefix boundary is needed to restore freshness when every
+    # retained hit is withdrawn. Older contributions cannot be guessed apart.
+    prefix_last: tuple[LiveEvent, float] | None = None
 
 
 class GiftComboAggregator:
@@ -213,6 +256,10 @@ class GiftComboAggregator:
 
     Combos still pending when the process exits are dropped; memory recorded
     every hit at emit time, so the loss is one thank-you, not the money.
+
+    Only the latest 256 hits retain individual withdrawal records. Older hits
+    stay in a compacted prefix with unchanged totals; requests targeting that
+    lost detail are reported as unresolved, never guessed or called successful.
     """
 
     def __init__(self, idle_s: float = COMBO_IDLE_S, suppress_s: float = COMBO_SUPPRESS_S) -> None:
@@ -223,6 +270,8 @@ class GiftComboAggregator:
         # walks the front instead of scanning the whole map on every add.
         self._settled_at: OrderedDict[str, float] = OrderedDict()
         self._suppressed_events = 0
+        self._compacted_events = 0
+        self._unresolved_discards = 0
 
     @property
     def suppressed_events(self) -> int:
@@ -231,6 +280,18 @@ class GiftComboAggregator:
     @property
     def pending_count(self) -> int:
         return len(self._pending)
+
+    @property
+    def retained_hit_count(self) -> int:
+        return sum(len(combo.members) for combo in self._pending.values())
+
+    @property
+    def compacted_events(self) -> int:
+        return self._compacted_events
+
+    @property
+    def unresolved_discards(self) -> int:
+        return self._unresolved_discards
 
     def add(self, event: LiveEvent, now: float) -> None:
         if event.gift is None:
@@ -255,6 +316,7 @@ class GiftComboAggregator:
                 total_coin=event.gift.total_coin,
                 hits=1,
                 last_add=now,
+                members=deque([(event.redacted(), now)]),
             )
             return
         combo.last = event
@@ -262,13 +324,96 @@ class GiftComboAggregator:
         combo.total_coin += event.gift.total_coin
         combo.hits += 1
         combo.last_add = now
+        combo.members.append((event.redacted(), now))
+        if len(combo.members) > COMBO_MEMBER_CAPACITY:
+            combo.prefix_last = combo.members.popleft()
+            self._compacted_events += 1
+            if self._compacted_events == 1 or self._compacted_events % COMBO_MEMBER_CAPACITY == 0:
+                log.warning(
+                    "safety.combo_hits_compacted",
+                    retained_per_combo=COMBO_MEMBER_CAPACITY,
+                    compacted_total=self._compacted_events,
+                )
+
+    def discard_events(self, keys: set[str]) -> None:
+        """Subtract exact retained hits, keeping newer gifts and combo timing."""
+        if not keys:
+            return
+        removed_keys: set[str] = set()
+        has_prefix = any(combo.prefix_last is not None for combo in self._pending.values())
+        for combo_id, combo in tuple(self._pending.items()):
+            removed = [event for event, _ in combo.members if event.dedup_key in keys]
+            if not removed:
+                continue
+            removed_keys.update(event.dedup_key for event in removed)
+            combo.members = deque(
+                (event, stamp) for event, stamp in combo.members if event.dedup_key not in keys
+            )
+            for event in removed:
+                assert event.gift is not None
+                combo.num -= event.gift.num
+                combo.total_coin -= event.gift.total_coin
+                combo.hits -= 1
+            if combo.hits == 0:
+                # No suppression tombstone: a genuinely new gift in the same
+                # combo must remain eligible after only earlier hits were handled.
+                self._pending.pop(combo_id)
+                continue
+            if combo.prefix_last is None:
+                combo.first = combo.members[0][0]
+            if combo.members:
+                combo.last, combo.last_add = combo.members[-1]
+            else:
+                assert combo.prefix_last is not None
+                combo.last, combo.last_add = combo.prefix_last
+        unresolved = {key for key in keys - removed_keys if key.startswith(f"{EventKind.GIFT}:")}
+        if has_prefix and unresolved:
+            self._unresolved_discards += len(unresolved)
+            log.warning(
+                "safety.combo_discard_unresolved",
+                requested_count=len(unresolved),
+                unresolved_total=self._unresolved_discards,
+                reason="not_in_retained_hits",
+            )
 
     def peek_due(self, now: float) -> tuple[str, LiveEvent] | None:
         """The oldest settled aggregate, left in place until commit()."""
         for combo_id, combo in self._pending.items():
             if now - combo.last_add >= self._idle_s:
-                return combo_id, self._aggregate(combo)
+                return combo_id, aggregate_gift_events(self.contributions(combo_id))
         return None
+
+    def contributions(self, combo_id: str) -> tuple[LiveEvent, ...]:
+        """Exact retained hits, plus an explicitly incomplete compacted prefix."""
+        combo = self._pending[combo_id]
+        members = tuple(event for event, _ in combo.members)
+        if combo.prefix_last is None:
+            return members
+        boundary, _ = combo.prefix_last
+        gift = boundary.gift
+        assert gift is not None
+        kept_gifts = [event.gift for event in members if event.gift is not None]
+        prefix_gift = dataclasses.replace(
+            gift,
+            num=combo.num - sum(item.num for item in kept_gifts),
+            total_coin=combo.total_coin - sum(item.total_coin for item in kept_gifts),
+            aggregated_count=combo.hits - len(members),
+        )
+        mark = (
+            f"{combo.first.dedup_key}:{boundary.dedup_key}:"
+            f"{prefix_gift.num}:{prefix_gift.total_coin}"
+        )
+        identity = hashlib.sha256(mark.encode()).hexdigest()[:24]
+        prefix = dataclasses.replace(
+            boundary.redacted(),
+            gift=prefix_gift,
+            event_id=f"gift-combo-prefix:{identity}",
+            value_cny=(
+                cny_from_gold(prefix_gift.total_coin) if prefix_gift.coin_type == "gold" else 0.0
+            ),
+            text="压缩前缀合计，逐笔明细已不完整；不能确认某一笔已答谢就撤销整个合计。",
+        )
+        return (prefix, *members)
 
     def commit(self, combo_id: str, now: float) -> None:
         """Delivery succeeded: drop the combo and arm its suppress window."""
@@ -289,26 +434,6 @@ class GiftComboAggregator:
             value_cny=(
                 round(cny_from_gold(combo.total_coin), 3) if gift.coin_type == "gold" else 0.0
             ),
-        )
-
-    def _aggregate(self, combo: _Combo) -> LiveEvent:
-        gift = combo.last.gift
-        assert gift is not None  # add() enforced it
-        merged = dataclasses.replace(
-            gift, num=combo.num, total_coin=combo.total_coin, aggregated_count=combo.hits
-        )
-        # One division over the summed coins, not fifty accumulated ones —
-        # 50 x 0.1 in floats is 4.999999999999998 and the ranking thresholds
-        # downstream compare against round numbers.
-        value = cny_from_gold(combo.total_coin) if merged.coin_type == "gold" else 0.0
-        # Identity of the FIRST hit (id, platform timestamp) so the dedup key
-        # stays stable however long the combo ran; freshness of the last.
-        return dataclasses.replace(
-            combo.last,
-            gift=merged,
-            value_cny=value,
-            event_id=combo.first.event_id,
-            ts_ms=combo.first.ts_ms,
         )
 
     def _purge_settled(self, now: float) -> None:

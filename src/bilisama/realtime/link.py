@@ -13,10 +13,11 @@ may do it differently, and L3 cannot tell.
 from __future__ import annotations
 
 import itertools
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol, cast, runtime_checkable
 
 __all__ = [
     "LinkDown",
@@ -34,6 +35,8 @@ __all__ = [
     "SpeechStarted",
     "SpeechStopped",
     "ToolCall",
+    "ToolReportingLink",
+    "ToolSpec",
     "UserTranscriptDelta",
     "UserTranscriptDone",
 ]
@@ -73,6 +76,9 @@ class ReplyHandle:
     handle_id: int = field(default_factory=lambda: next(_handle_ids))
     stale: bool = False
     implicit: bool = False
+    # The local SpeechStarted sequence when an announced reply was bound.
+    # None means the provider adapter could not establish that association.
+    input_generation: int | None = None
 
 
 class ReplyStatus(StrEnum):
@@ -127,6 +133,41 @@ class ToolCall:
     call_id: str
     name: str
     arguments: str
+    # Minted by the transport, not the model. Empty means unbound: a result
+    # cannot be written back safely without knowing its originating session.
+    session_id: str = ""
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ToolSpec:
+    """An immutable tool declaration; returned schemas are detached copies."""
+
+    name: str
+    description: str
+    _parameters_json: str = field(repr=False)
+
+    def __init__(self, name: str, description: str, parameters: Mapping[str, Any]) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "_parameters_json", json.dumps(dict(parameters)))
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return cast(dict[str, Any], json.loads(self._parameters_json))
+
+
+@runtime_checkable
+class ToolReportingLink(Protocol):
+    """Optional non-spoken reporting, enabled only after model verification.
+
+    This interface does not certify that a provider/model supports tools.
+    Product wiring must make that decision explicitly. Results only complete
+    a call in shared history; they must never initiate another model request.
+    """
+
+    async def configure_tools(self, tools: tuple[ToolSpec, ...]) -> None: ...
+
+    async def submit_tool_result(self, call: ToolCall, output: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

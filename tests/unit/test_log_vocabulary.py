@@ -27,6 +27,13 @@ _LOGGERS = frozenset({"log", "logger", "_log"})
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
+        "interaction.report_invalid",
+        "interaction.report_applied",
+        "interaction.ack_failed",
+        "interaction.context_failed",
+        "scheduler.interaction_filter_failed",
+        "safety.combo_discard_unresolved",
+        "safety.combo_hits_compacted",
         "assembly.event_observation_failed",
         "scheduler.delivery_status_failed",
         "source.invalid_reply_metadata",

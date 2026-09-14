@@ -2349,7 +2349,10 @@
                   "name": "主播",
                   "is_anchor": true
                 },
-                "text": "@小松 不会，文件只保存在本地，不上传云端。"
+                "text": "@小松 不会，文件只保存在本地，不上传云端。",
+                "reply_to_uid": 91001,
+                "reply_to_name": "小松",
+                "room_owner_uid": 91002
               }
             }
           ]

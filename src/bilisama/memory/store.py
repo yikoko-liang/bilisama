@@ -18,6 +18,7 @@ retention window; viewer rows never are.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -337,10 +338,16 @@ class MemoryStore:
             gift_value_cny=row["gift_value_cny"],
         )
 
-    def recent_events(self, *, limit: int = 30) -> list[str]:
+    def recent_events(self, *, limit: int = 30, exclude_lines: Collection[str] = ()) -> list[str]:
         """The newest event lines of this stream, oldest first — distiller and
-        proactive-loop input."""
+        proactive-loop input.
+
+        ``exclude_lines`` is a presentation-layer filter for consumers that
+        have already acted on a recent event. The event rows stay in memory so
+        distillation and audit history remain complete.
+        """
         self._flush_pending()
+        excluded = frozenset(exclude_lines)
         rows = self._db.execute(
             """
             SELECT kind, uname, text, value_cny FROM event
@@ -353,9 +360,11 @@ class MemoryStore:
         for row in reversed(rows):
             name = row["uname"] or "观众"
             if row["text"]:
-                lines.append(f"[{row['kind']}] {name}: {row['text']}")
+                line = f"[{row['kind']}] {name}: {row['text']}"
             else:
-                lines.append(f"[{row['kind']}] {name}")
+                line = f"[{row['kind']}] {name}"
+            if line not in excluded:
+                lines.append(line)
         return lines
 
     def prune_events(self, *, retain_days: int) -> int:

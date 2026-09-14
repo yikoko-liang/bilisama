@@ -500,6 +500,76 @@ hanako 她还是自称豆腐；要连名字一起换，去高级页改 `persona.
 语音和事件都沿用正文 / `[SKIP]` 输出，事件静默原因显示为 `event.model_declined`，不把它记成打断重排。
 静默持续范围由模型判断，没有新增关键词强制闭麦。实时模型是否判断准确仍需逐轮人工验收。
 
+#### 语音与事件联动回归（2026-09-14）
+
+本轮已完成本地生产接线，组件和结构检查通过不等于正在运行的旧服务已经加载新代码，
+也不等于真实模型判断全部正确。函数报告只对已实测的 DashScope `qwen-audio-3.0-realtime-flash` 启用。
+最新验收矩阵、证据记录方式和已知模型反例见 [语音与事件联动验收](voice-event-linkage-acceptance.md)，
+实现进度见 [联动计划](voice-event-linkage-plan.md)。直播 Mock 入口和现有语音回放保留。
+
+这次保留原语音正文／`[SKIP]` 输出；只有后台状态需要变化时，才在同一次 Realtime 生成中独立报告。
+普通问答、自语先听、讲解中沉默且无新变化时，无须空事件列表或 `keep`，没有函数调用也不报警。
+具体事件确已处理或处理进度变化、首次进入／解除持续静默、观点征集启动／取消／完成时必须报告。
+后台持续静默只由有效报告更新，不能凭正文、`[SKIP]` 或新事件自行解除。
+没有增加判定模型调用，也不因确认函数结果自动生成第二次回答。
+主播晚到的文字仍进入流水、记忆、蒸馏和共享上下文，但不因此中断正在生成或播放的回复。
+
+主播说「帮我看下弹幕」「整理一下弹幕」时，语音回合通过独立的
+`danmaku_summary.action=start` 报告一次委托。系统把语音回合开始时刻作为上界，立即从此前收到且尚未处理的
+最新弹幕候选中建立一次 `danmaku_summary` 意图；它按 90 档排在主播语音之后、SC 之前，因为产物是给主播听的
+语音回复。模型需要从候选里选出最近仍在热议的一个话题再总结，
+而不是逐条复述。语音期间或之后才到的弹幕不混入总结，也不会因为这项委托再次重复普通回复。
+验证时先注入多条围绕同一主题的弹幕和一条孤立弹幕，再说出委托，检查模型输入包含候选但口播只围绕热议主题；随后注入的新弹幕不应再次触发这次总结。
+下一次正常生成读取文字再判断事件状态；不要把当前这句未停播直接记作违背本轮规则。
+
+征集窗口配置在 `config/bilisama.toml`，不是弹幕批量等待时间：
+
+```toml
+[interaction.proactive]
+collection_window_s = 120
+```
+
+默认 120 秒，范围 5～1800 秒。计时起点应是主播开始征集的语音，不能用后台报告晚到的时刻。
+字段已登记为可热更新的“观点征集时长”，修改只影响之后的新征集，不重置当前征集的截止时间。
+到期总结不要求房间先冷场，但仍等待主播让出话权和静默解除；窗口结束后等待超过 300 秒就过期。
+主播已经在当前语音回合要求并得到提前总结时，应取消原自动总结，不能再播第二份。
+测试时仍要显式启用对应场景的主动能力，不能在 `allow_proactive=false` 的用例里等待主动总结。
+普通冷场话题继续使用原来的动态空闲条件与预算，这个字段不改变它们。
+
+只跑不请求真实模型的组件回归：
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_voice_event_prompt_contract.py tests/unit/test_interaction_tools_transport.py tests/unit/test_interaction_reports.py tests/unit/test_interaction_state.py tests/unit/test_interaction_scheduler.py tests/unit/test_interaction_assembly.py tests/unit/test_interaction_production_wiring.py tests/unit/test_proactive_opportunities.py tests/unit/test_proactive.py -q
+```
+
+这些测试有模拟后台结果和假时钟，只能证明指定结果到来后的程序行为，不能证明模型会判断正确。
+下一步按验收文档逐例运行真实语音与事件；每例都记录模型原正文、独立报告、
+事件编号、生成次数、调度结果和实际播放回执。先记录本轮是否需要后台变化；
+无需变化时没有报告是正常情况，必需变化却漏报、格式无效与语义误判分别记，不能混成“没声音”。
+运行状态中的 `without_report` 只是无调用数量，不是失败数量。程序不能据此判断本轮应不应该报告；
+是否缺了必需更新，要结合测试场景、实际输入和状态变化检查。
+旧探测使用过“每轮必须报告”的词稿和评分；原始产物保留，新口径按“无需报告／必须报告”分组校准。
+没有授权或新增第二个判定模型，本轮按上述调用条件修正。
+本轮已运行 `scripts/gate.sh`：2439 项单元测试、20 项集成测试和 82 项浏览器测试通过；JavaScript 检查因未安装 `node_modules/.bin/eslint` 跳过。没有重启用户服务。
+
+#### 导出当前公开 Prompt
+
+[公开 Prompt 快照](current-interaction-prompts.md) 从仓库自带豆腐人设、语音与事件模板、
+生产事件构建函数、主动话题和独立函数报告生成，不读取本机私人记忆、人设成长或密钥。
+回复长度保留 `{{replyLength}}`，同时列出三个档位的真实文案；不会把当前的短档写成所有档位。
+语音“输出”块保留源文件原文，后台报告单独列出，不混入口播规则。
+
+```bash
+.venv/bin/python tools/export_interaction_prompts.py
+.venv/bin/python tools/export_interaction_prompts.py --check
+.venv/bin/python -m pytest tests/unit/test_export_interaction_prompts.py -q
+```
+
+第一条重新生成文档，第二条只检查是否与源码一致，不写文件；源码变化后检查会失败，
+需要再次导出。可以用 `--output /绝对路径/prompts.md` 指定文档位置。
+五项导出测试检查原文保留、动态变量、私人数据隔离、快照过期检查，以及礼物聚合的成员身份和
+压缩前缀说明；不检验模型的语义准确率。礼物聚合沿用三档正文，只单独导出事实输入与候选成员范围。
+
 ### 高级页
 
 原来的通用配置页降级到这里：全量字段、能热改的亮着，灰行带「重启生效 / 重连生效 /

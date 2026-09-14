@@ -39,6 +39,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 import websockets
 
@@ -150,6 +151,8 @@ class RealtimeClient:
         self._closing = False
         self._reconnect_task: asyncio.Task[None] | None = None
         self._ws: Any = None
+        self._session_id = ""
+        self._input_generation = 0
         self._events: asyncio.Queue[link.LinkEvent] = asyncio.Queue()
         self._recv_task: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -210,6 +213,8 @@ class RealtimeClient:
                 code=str(error.get("type") or first.get("type") or "unknown"),
                 detail=str(error.get("message") or ""),
             )
+        self._session_id = uuid4().hex
+        self._input_generation = 0
         if self._recv_task is not None and not self._recv_task.done():
             # Whatever this socket replaces must stop being read. An orphaned
             # recv task keeps dispatching a dead session's frames into the
@@ -222,6 +227,7 @@ class RealtimeClient:
 
     async def aclose(self) -> None:
         self._closing = True
+        self._session_id = ""
         # The reconnect loop waits with the rest: cancelling without awaiting
         # left a ladder still climbing after aclose returned, which at process
         # exit is a socket nobody owns.
@@ -254,6 +260,11 @@ class RealtimeClient:
     def events(self) -> AsyncIterator[link.LinkEvent]:
         return self._drain()
 
+    @property
+    def session_id(self) -> str:
+        """The current socket's opaque identity, empty while disconnected."""
+        return self._session_id
+
     async def _drain(self) -> AsyncIterator[link.LinkEvent]:
         while True:
             yield await self._events.get()
@@ -270,10 +281,16 @@ class RealtimeClient:
             }
         )
 
-    async def send_command(self, frame: dict[str, Any]) -> None:
+    async def send_command(
+        self, frame: dict[str, Any], *, is_current: Callable[[], bool] | None = None
+    ) -> None:
         """Send a control frame after the current reply, if any, has finished."""
         async with self._command_lock:
             await self._wait_for_slot("command")
+            # A queued tool result can outlive a cancel or reconnection. Check
+            # after the wait, immediately before choosing the target socket.
+            if is_current is not None and not is_current():
+                return
             await self._send_raw(frame)
 
     async def request_reply(self, frame: dict[str, Any]) -> link.ReplyHandle:
@@ -288,6 +305,7 @@ class RealtimeClient:
         )
         async with self._command_lock:
             await self._wait_for_slot("reply")
+            record.handle.input_generation = self._input_generation
             self._take_slot("request")
             self._awaiting_created.append(record)
             try:
@@ -451,6 +469,7 @@ class RealtimeClient:
         The books are cleared BEFORE anyone hears about it, so a consumer that
         reacts to LinkDown by draining its queue is looking at a settled world.
         """
+        self._session_id = ""
         for record in (*self._replies.values(), *self._awaiting_created):
             record.handle.stale = True
             self._settle(record, link.ReplyStatus.FAILED)
@@ -558,6 +577,7 @@ class RealtimeClient:
     async def _dispatch(self, kind: dia.ServerEvent, payload: dict[str, Any] | Any) -> None:
         emit = self._events.put_nowait
         if kind is dia.ServerEvent.SPEECH_STARTED:
+            self._input_generation += 1
             emit(link.SpeechStarted(audio_ms=payload.get("audio_start_ms")))
         elif kind is dia.ServerEvent.SPEECH_STOPPED:
             emit(link.SpeechStopped(audio_ms=payload.get("audio_end_ms")))
@@ -591,6 +611,7 @@ class RealtimeClient:
                         call_id=str(payload.get("call_id") or ""),
                         name=str(payload.get("name") or ""),
                         arguments=str(payload.get("arguments") or ""),
+                        session_id=self._session_id,
                     )
                 )
         elif kind is dia.ServerEvent.TRANSCRIPT_DONE:
@@ -679,7 +700,8 @@ class RealtimeClient:
             record = self._awaiting_created.pop(0)
         else:  # a created we never asked for — book it so its frames land somewhere
             record = ReplyRecord(
-                handle=link.ReplyHandle(implicit=True), opened_at=self._clock.monotonic()
+                handle=link.ReplyHandle(implicit=True, input_generation=self._input_generation),
+                opened_at=self._clock.monotonic(),
             )
         record.rid = rid
         self._replies[rid] = record
@@ -704,6 +726,8 @@ class RealtimeClient:
         if record is None:
             # First frame of a reply that never announced itself: the implicit
             # VAD turn (rule 4). It occupies the slot from its first frame.
+            # No created boundary means a late first frame cannot establish
+            # which observed speech generation originated this response.
             record = ReplyRecord(
                 handle=link.ReplyHandle(implicit=True), rid=rid, opened_at=self._clock.monotonic()
             )

@@ -120,7 +120,8 @@ def test_fifty_hit_combo_becomes_one_event_with_the_right_totals() -> None:
     assert event.gift.total_coin == 5000
     assert event.gift.aggregated_count == 50
     assert event.value_cny == 5.0
-    assert event.event_id == "gift:t0", "keeps the first hit's identity"
+    assert event.event_id.startswith("gift-combo:"), "a derived total is not the first raw hit"
+    assert event.event_id != "gift:t0"
 
 
 def test_settled_combo_is_suppressed_for_the_window_then_free_again() -> None:

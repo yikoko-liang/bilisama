@@ -397,6 +397,15 @@ UI_META: dict[str, FieldMeta] = {
         group="互动",
         order=14,
     ),
+    "interaction.proactive.collection_window_s": FieldMeta(
+        label="观点征集时长",
+        hint="主播征集观点后收集弹幕的时间；只影响新征集，到期仍等待话权，不改变普通弹幕回复频率",
+        unit="s",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="互动",
+        order=15,
+    ),
     "memory.db_path": FieldMeta(
         label="记忆库位置",
         hint="auto = 用户数据目录",

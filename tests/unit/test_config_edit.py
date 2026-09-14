@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from bilisama.config._ui import Reload
 from bilisama.config.enums import VoiceReplyMode
 from bilisama.config.schema import RuntimeConfig, Settings
 from bilisama.ui.config_edit import ConfigEditError, apply_config_edit, field_control
@@ -101,3 +102,20 @@ def test_field_control_shapes() -> None:
     assert port["kind"] == "number"
     assert (port["min"], port["max"]) == (0.0, 65535.0)
     assert field_control(Settings.model_fields["active_profile"])["kind"] == "text"
+
+
+def test_opinion_collection_window_is_a_real_live_config_field() -> None:
+    settings = Settings()
+    meta, applied = apply_config_edit(settings, "interaction.proactive.collection_window_s", 45)
+    assert meta.reload is Reload.LIVE
+    assert meta.label == "观点征集时长"
+    assert applied == 45
+    assert settings.interaction.proactive.collection_window_s == 45
+
+
+@pytest.mark.parametrize("value", [0, 4, 1801])
+def test_opinion_collection_window_rejects_out_of_bounds(value: int) -> None:
+    settings = Settings()
+    with pytest.raises(ConfigEditError):
+        apply_config_edit(settings, "interaction.proactive.collection_window_s", value)
+    assert settings.interaction.proactive.collection_window_s == 120

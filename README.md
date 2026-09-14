@@ -66,7 +66,10 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：四道门、测试卡、业务评分标准、历次回归记录 |
 | [docs/intent-classification.md](docs/intent-classification.md) | 原始互动场景验收设计：8种主播状态、3种参与方式；当前二分类实现见 Planner 合并说明 |
 | [docs/planner-integration.md](docs/planner-integration.md) | Planner 合并说明：接话/先听二分类、播放拦截流程、完整语音意图 Prompt |
-| [docs/intent-test-console.md](docs/intent-test-console.md) | 当前测试页：14例简单意图、19组多轮场景（Excel原有18组及主播打字答复1组）；真实语音回放、事件注入和人工判定 |
+| [docs/voice-event-linkage-plan.md](docs/voice-event-linkage-plan.md) | 主播语音与直播事件联动计划：逐条需求、状态管理、主动契机及待执行验收矩阵 |
+| [docs/voice-event-linkage-acceptance.md](docs/voice-event-linkage-acceptance.md) | 本轮联动验收：区分无需报告和必需状态报告，检查具体事件、静默、120秒征集与中断续接；程序证据与真实效果分开 |
+| [docs/current-interaction-prompts.md](docs/current-interaction-prompts.md) | 当前公开 Prompt 快照：豆腐人设、动态回复长度、完整语音规则、各类事件、主动话题及按后台状态变化调用的独立报告；不包含本机私人记忆 |
+| [docs/intent-test-console.md](docs/intent-test-console.md) | 当前测试页：简单意图与困难多轮场景；真实语音回放、事件注入和人工判定，新增联动检查见本轮验收文档 |
 | [docs/intent-scenarios.md](docs/intent-scenarios.md) | 原始48条多轮互动测试设计；预期与当前实现风险分开，当前可运行版本见意图测试页文档 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |

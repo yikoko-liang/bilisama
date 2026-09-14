@@ -10,6 +10,7 @@ the intent existed. The scheduler's verdict is the other end of it
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import pytest
@@ -167,6 +168,8 @@ def test_danmaku_reply_identifies_question_and_requires_a_real_answer() -> None:
     assert "保留实际答案" in rules
     assert "正常面向主播" in rules
     assert "自然转交主播" in rules
+    assert "不能因为需要主播确认就输出[SKIP]" in rules
+    assert "先交代观众昵称和问题，再把问题交给主播" in rules
 
 
 def test_danmaku_instruction_answers_with_its_own_judgment() -> None:
@@ -175,6 +178,22 @@ def test_danmaku_instruction_answers_with_its_own_judgment() -> None:
     rules = intent.injection.reply.instructions or ""
     assert "不要默认让主播回答" in rules
     assert "这得问主播" in rules, "the banned phrasing is named, not implied"
+
+
+def test_danmaku_instruction_filters_viewer_to_viewer_replies() -> None:
+    event = _danmaku("你这个按钮是不是越修越歪？")
+    event = dataclasses.replace(
+        event,
+        reply_to_uid=99,
+        reply_to_name="白团",
+        reply_to_anchor=False,
+    )
+    intent = intent_for(event, now=0.0)
+    assert intent is not None
+    rules = intent.injection.reply.instructions or ""
+    assert "@其他观众" in (intent.injection.item_text or "")
+    assert "默认输出[SKIP]" in rules
+    assert "不要替被@的观众回答" in rules
 
 
 def test_amounts_never_enter_any_paid_prompt() -> None:

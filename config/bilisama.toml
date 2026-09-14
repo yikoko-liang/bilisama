@@ -149,6 +149,7 @@ ranking = true                          # 本房 5 级以上粉丝牌（按名�
 [interaction.proactive]                 # 主动话题（L1）。开口时机由冷场阈值（话痨度派生）决定
 max_per_hour = 12
 wake_interval_s = 30                    # 后台思考节奏，不是开口节奏
+collection_window_s = 120               # 主播征集观点后的弹幕收集时长，到期等待话权再总结
 
 [memory]
 db_path = "auto"

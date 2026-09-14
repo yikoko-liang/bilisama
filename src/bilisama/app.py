@@ -26,10 +26,12 @@ from bilisama.director.intents import (
     burst_welcome_intent,
     danmaku_batch_intent,
     entry_welcome_intent,
+    gift_combo_intent,
     intent_for,
     observed_events_context_item,
 )
-from bilisama.ingest.bilibili.safety import DedupRing
+from bilisama.director.interaction_state import REPORT_RULES
+from bilisama.ingest.bilibili.safety import DedupRing, aggregate_gift_events
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
 from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
     from bilisama.clock import Clock
     from bilisama.config.schema import GrowthSwitches
     from bilisama.director.intent import Intent
+    from bilisama.director.interaction_state import InteractionReport, InteractionState
     from bilisama.event_pacing import EventPacer
     from bilisama.ingest.bilibili.selector import (
         DanmakuSelector,
@@ -101,6 +104,7 @@ class Assembly:
         presence: PresenceWelcomer | None = None,
         entries: EntryCoalescer | None = None,
         event_pacer: EventPacer | None = None,
+        interaction_state: InteractionState | None = None,
         entry_group_enabled: Callable[[str], bool] | None = None,
         event_observer: Callable[[LiveEvent], None] | None = None,
         observe_context_item: Callable[[str], Awaitable[None]] | None = None,
@@ -137,6 +141,7 @@ class Assembly:
         self._presence = presence
         self._entries = entries
         self._event_pacer = event_pacer
+        self._interaction_state = interaction_state
         # None means every group is welcome — the shipped default. The
         # callable reads [interaction.entry_welcome] live, so a panel flip
         # applies to the next arrival without a rebuild.
@@ -189,6 +194,10 @@ class Assembly:
         self._store.on_event(event)
         self._distiller.note_event()
         self._proactive.note_replay_event(event)
+        self._proactive.note_event(event)
+        # The feed and memory keep the platform event above; the shared
+        # ledger uses the same canonical kind that the reply lane will use.
+        observed = self._observe_interaction_event(event)
         if (
             event.room_id > 0
             and event.kind in _AUDIENCE_ACTIVITY_KINDS
@@ -213,12 +222,14 @@ class Assembly:
                 log.warning("assembly.event_observer_failed", error_text=str(exc)[:200])
         if event.kind is EventKind.DANMAKU and event.viewer.is_anchor:
             # The streamer typing in their own room: shared context, never a
-            # reply. Ahead of the speak switches — this is observation.
+            # reply. An explicit platform reply target also closes the matching
+            # audience item, but never cancels a reply that is already active.
+            self._mark_anchor_reply(event)
             if self._event_input_enabled:
                 await self._write_anchor_context(event)
             return
         if self._event_input_enabled and event.kind in _AUDIENCE_ACTIVITY_KINDS:
-            self._pending_observations[event.dedup_key] = event.redacted()
+            self._pending_observations[observed.dedup_key] = observed.redacted()
             while len(self._pending_observations) > 32:
                 self._pending_observations.popitem(last=False)
         if event.kind is EventKind.DANMAKU and self._entries is not None:
@@ -228,8 +239,9 @@ class Assembly:
             self._entries.note_danmaku(event.viewer.identity)
         if not self._event_input_enabled:
             return
-        if event.kind is EventKind.ENTRY:
-            event = self._promote_entry(event)
+        event = observed
+        if self._interaction_state is not None and self._interaction_state.is_handled(event):
+            return
         if not self._speak_enabled(event.kind.value):
             return
         if event.kind is EventKind.ENTRY:
@@ -284,17 +296,34 @@ class Assembly:
         """
         if not self._event_input_enabled:
             return
+        event = self._observe_interaction_event(event)
+        if self._interaction_state is not None and self._interaction_state.is_handled(event):
+            return
         if self._event_pacer is not None and not self._event_pacer.try_consume(
             "danmaku" if event.kind is EventKind.DANMAKU else "gift"
         ):
             return
         self._submit_event(event)
 
+    async def deliver_gift_batch(self, aggregate: LiveEvent, events: tuple[LiveEvent, ...]) -> None:
+        """Keep combo contributions identifiable after they enter the scheduler."""
+        if not self._event_input_enabled or not self._speak_enabled(EventKind.GIFT.value):
+            return
+        events = self._unhandled_events(events)
+        if not events:
+            return
+        if self._event_pacer is not None and not self._event_pacer.try_consume("gift"):
+            return
+        self._submit_event(aggregate, gift_members=events)
+
     async def deliver_entries(self, events: tuple[LiveEvent, ...]) -> None:
         """Coalesced arrivals from the EntryCoalescer become one welcome."""
         if not events or not self._speak_enabled(EventKind.ENTRY.value):
             return
         if not self._event_input_enabled:
+            return
+        events = self._unhandled_events(events)
+        if not events:
             return
         if self._event_pacer is not None and not self._event_pacer.try_consume("entry"):
             return
@@ -312,8 +341,17 @@ class Assembly:
         """Charge one pacing token and submit one model turn for the batch."""
         if not events or not self._event_input_enabled or not self._speak_enabled("danmaku"):
             return
+        events = self._unhandled_events(events)
+        if not events:
+            return
         if self._event_pacer is not None and not self._event_pacer.try_consume("danmaku"):
             raise RuntimeError("弹幕预算暂不可用，保留批次等待")
+        summary = self._proactive.danmaku_summary_intent(
+            tuple(event.redacted() for event in events), now=self._clock.monotonic()
+        )
+        if summary is not None:
+            self._submit_danmaku_summary(summary)
+            return
         self._submit(
             danmaku_batch_intent(
                 tuple(event.redacted() for event in events),
@@ -323,6 +361,72 @@ class Assembly:
             )
         )
         self.intents_submitted += 1
+
+    def _observe_interaction_event(self, event: LiveEvent) -> LiveEvent:
+        """Keep report IDs aligned with the event kind used for scheduling."""
+        if event.kind is EventKind.ENTRY:
+            event = self._promote_entry(event)
+        if self._interaction_state is not None and event.kind in _AUDIENCE_ACTIVITY_KINDS:
+            self._interaction_state.observe(event)
+        return event
+
+    def _mark_anchor_reply(self, event: LiveEvent) -> None:
+        """Close one explicitly targeted audience item without touching audio."""
+        if self._interaction_state is None:
+            return
+        handled = self._interaction_state.mark_anchor_reply(event)
+        if not handled:
+            return
+        keys = self._interaction_state.keys_for_refs(handled)
+        if self._selector is not None:
+            self._selector.discard_events(keys)
+        if self._entries is not None:
+            self._entries.discard_events(keys)
+        self._proactive.discard_events(handled)
+
+    def _unhandled_events(self, events: tuple[LiveEvent, ...]) -> tuple[LiveEvent, ...]:
+        observed = tuple(self._observe_interaction_event(event) for event in events)
+        if self._interaction_state is None:
+            return observed
+        return tuple(event for event in observed if not self._interaction_state.is_handled(event))
+
+    def apply_interaction_report(
+        self, report: InteractionReport, *, voice_started_at: float | None = None
+    ) -> set[str]:
+        """Apply one non-spoken report without starting another model turn."""
+        if self._interaction_state is None:
+            return set()
+        handled = self._interaction_state.apply(report)
+        if handled:
+            keys = self._interaction_state.keys_for_refs(handled)
+            if self._selector is not None:
+                self._selector.discard_events(keys)
+            if self._entries is not None:
+                self._entries.discard_events(keys)
+            self._proactive.discard_events(handled)
+        self._proactive.set_silenced(self._interaction_state.silenced)
+        if report.danmaku_summary.action == "start":
+            # The report arrives in the same Realtime response as the
+            # streamer turn. Use that turn's start as the upper bound so the
+            # summary contains the backlog the streamer asked to inspect,
+            # not messages that arrived while she was speaking.
+            boundary = voice_started_at if voice_started_at is not None else self._clock.monotonic()
+            self._proactive.request_danmaku_summary(before_at=boundary)
+            summary = self._proactive.danmaku_summary_intent(now=self._clock.monotonic())
+            if summary is None:
+                # A request with no eligible backlog has nothing to deliver;
+                # do not leave it armed for a later, unrelated danmaku.
+                self._proactive.cancel_danmaku_summary()
+            else:
+                self._submit_danmaku_summary(summary)
+        elif report.danmaku_summary.action == "cancel":
+            self._proactive.cancel_danmaku_summary()
+        if report.discussion.action == "start":
+            self._proactive.collect_opinions(report.discussion.topic, started_at=voice_started_at)
+        elif report.discussion.action in ("finish", "cancel"):
+            # "finish" means this voice turn already supplied the summary.
+            self._proactive.cancel_collection()
+        return handled
 
     async def flush_event_observations(self) -> None:
         """Coalesce observation writes without blocking platform intake."""
@@ -379,25 +483,57 @@ class Assembly:
         if not enabled:
             self._pending_observations.clear()
 
-    def _submit_event(self, event: LiveEvent) -> None:
+    def _submit_event(self, event: LiveEvent, *, gift_members: tuple[LiveEvent, ...] = ()) -> None:
         # Re-checked here because selector winners arrive up to a window
         # later: a switch flipped mid-window must silence the delivery too.
         if not self._speak_enabled(event.kind.value):
             return
+        if gift_members:
+            # The aggregate is only a presentation/tiering view; observing it
+            # as a raw event would change what a previously supplied ref means.
+            gift_members = self._unhandled_events(gift_members)
+            if not gift_members:
+                return
+            event = aggregate_gift_events(gift_members)
+        else:
+            event = self._observe_interaction_event(event)
+            if self._interaction_state is not None and self._interaction_state.is_handled(event):
+                return
         now = self._clock.monotonic()
         if event.dedup_key and self._direct_ring.contains(event.dedup_key, now):
             self.events_deduped += 1
             return
-        intent = intent_for(
-            event.redacted(),
-            now=now,
-            max_tokens=self._max_tokens,
-            protect_ms=self._protect_ms,
-            gift_battery_high=self._gift_battery_high,
-            gift_battery_medium=self._gift_battery_medium,
-            base_instructions=self.build_event_context() or None,
-            protect_paid=self._protect_paid,
-        )
+        if event.kind is EventKind.DANMAKU:
+            summary = self._proactive.danmaku_summary_intent((event.redacted(),), now=now)
+            if summary is not None:
+                self._submit_danmaku_summary(summary)
+                if event.dedup_key:
+                    self._direct_ring.mark(event.dedup_key, now)
+                return
+        intent: Intent | None
+        if gift_members:
+            intent = gift_combo_intent(
+                event,
+                gift_members,
+                now=now,
+                max_tokens=self._max_tokens,
+                protect_ms=self._protect_ms,
+                gift_battery_high=self._gift_battery_high,
+                gift_battery_medium=self._gift_battery_medium,
+                base_instructions=self.build_event_context() or None,
+                protect_paid=self._protect_paid,
+            )
+        else:
+            intent = intent_for(
+                event.redacted(),
+                now=now,
+                max_tokens=self._max_tokens,
+                protect_ms=self._protect_ms,
+                gift_battery_high=self._gift_battery_high,
+                gift_battery_medium=self._gift_battery_medium,
+                base_instructions=self.build_event_context() or None,
+                protect_paid=self._protect_paid,
+            )
         if intent is not None:
             self.intents_submitted += 1
             if event.kind is EventKind.VIP_ENTER:
@@ -416,6 +552,16 @@ class Assembly:
         # the books recorded it as delivered.
         if event.dedup_key:
             self._direct_ring.mark(event.dedup_key, now)
+
+    def _submit_danmaku_summary(self, summary: Intent) -> None:
+        """Deliver one explicit backlog summary and consume its input batch."""
+        keys = {event.dedup_key for event in summary.events if event.dedup_key}
+        if self._selector is not None:
+            self._selector.discard_events(keys)
+        self._submit(summary)
+        self._proactive.mark_danmaku_summary_used(keys)
+        self._proactive.complete_danmaku_summary(summary.dedup_key)
+        self.intents_submitted += 1
 
     def _promote_entry(self, event: LiveEvent) -> LiveEvent:
         """ENTRY → VIP_ENTER for current guards and high local-medal wearers.
@@ -441,14 +587,20 @@ class Assembly:
         self._vip_pending.clear()
         self._pending_observations.clear()
         self._direct_ring = DedupRing(window_s=30.0, capacity=2048)
+        if self._interaction_state is not None:
+            self._interaction_state.reset()
+            self._proactive.set_silenced(False)
 
-    def build_public_context(self) -> str:
+    def build_public_context(self, *, include_report_rules: bool = True) -> str:
         """The source-neutral half: persona prefix plus the shared dynamic
         tail. Growth injects on ON only — collect grows files silently, off
         contributes nothing at all. Voice and event turns both read exactly
         this material; only the input-rules block differs."""
         if self._replay_context is not None:
-            return assemble(self._prefix, DynamicContext(stream_intro=self._replay_context))
+            return self._with_interaction_context(
+                assemble(self._prefix, DynamicContext(stream_intro=self._replay_context)),
+                include_report_rules=include_report_rules,
+            )
         segments = memory_segments(
             self._store, self._clock, clock_granularity_min=self._clock_granularity_min
         )
@@ -470,7 +622,27 @@ class Assembly:
             regulars=segments.regulars,
             clock_line=segments.clock_line,
         )
-        return assemble(self._prefix, ctx)
+        return self._with_interaction_context(
+            assemble(self._prefix, ctx), include_report_rules=include_report_rules
+        )
+
+    def _with_interaction_context(self, public_context: str, *, include_report_rules: bool) -> str:
+        if self._interaction_state is None:
+            return public_context
+        return assemble_scoped(
+            public_context,
+            "\n\n".join(
+                (self._interaction_state.context(), REPORT_RULES if include_report_rules else "")
+            ).strip(),
+        )
+
+    def _with_turn_rules(self, rules: str) -> str:
+        context = assemble_scoped(self.build_public_context(include_report_rules=False), rules)
+        if self._interaction_state is not None:
+            # Keep the message-format block intact; the independent reporting
+            # contract follows it rather than competing with its final "end".
+            context = assemble_scoped(context, REPORT_RULES)
+        return context
 
     def build_context(self) -> str:
         """What the SESSION carries — the implicit microphone turn's rules.
@@ -479,7 +651,7 @@ class Assembly:
         its own VAD turn, and that input is always the streamer's voice, so
         the voice contract rides here.
         """
-        return assemble_scoped(self.build_public_context(), self._voice_rules)
+        return self._with_turn_rules(self._voice_rules)
 
     def build_event_context(self) -> str:
         """What one event reply carries as its scoped base, or "" when the
@@ -487,7 +659,7 @@ class Assembly:
         instructions still travel, only the full event contract stays home."""
         if not self._per_reply_scope or not self._event_rules:
             return ""
-        return assemble_scoped(self.build_public_context(), self._event_rules)
+        return self._with_turn_rules(self._event_rules)
 
     async def refresh_context(self) -> bool:
         """Push the instructions when they changed. Returns whether it pushed."""
@@ -549,7 +721,9 @@ class Assembly:
             tasks.append(
                 asyncio.create_task(
                     self._selector.run(
-                        self.deliver_selected, deliver_batch=self.deliver_danmaku_batch
+                        self.deliver_selected,
+                        deliver_batch=self.deliver_danmaku_batch,
+                        deliver_gift_batch=self.deliver_gift_batch,
                     ),
                     name="assembly:selector",
                 )
