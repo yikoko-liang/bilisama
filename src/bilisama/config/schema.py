@@ -315,7 +315,7 @@ class InteractionConfig(BaseModel):
     # at the head of the turn and the voice gate (director/voice_turn.py)
     # enforces. The prompt that teaches the markers rides this same switch
     # (persona/loader.py live_voice_rules), so the two halves cannot split:
-    # taught without the gate she would read「AUDIENCE」to the audience.
+    # taught without the gate she would read「SKIP」to the audience.
     voice_reply: VoiceReplyMode = Field(VoiceReplyMode.WHEN_ADDRESSED)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
     # Ledger #91. Off: the streamer's next word always lands, and a paid
