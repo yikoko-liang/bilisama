@@ -1288,3 +1288,60 @@ def test_the_assistant_switch_changes_the_persona_and_never_the_name() -> None:
     assert (
         'apply_runtime_edit("persona.display_name"' not in select_block
     ), "切人设不许顺手动名字——名字是独立的一层"
+
+
+# ------------------------------------------------ what the audience heard
+
+
+def _lines(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, object]]:
+    return [
+        dict(getattr(record, "fields", {}))
+        for record in caplog.records
+        if record.getMessage() == event
+    ]
+
+
+def test_a_stop_that_cut_her_mid_word_reports_how_long_she_was_heard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The page counts this; the server used to drop it on the floor.
+
+    It cannot be counted server-side: what the server hands a speaker is not
+    what an ear got, because the scheduled playback queue sits between them and
+    the stop being reported is what empties it. An earlier attempt measured at
+    the voice gate and reported 2000 ms for a turn the audience may well have
+    heard nothing of.
+    """
+    caplog.set_level(logging.INFO, logger="bilisama.dev_talk")
+    assert dev_talk.note_playback_cut({"played_ms": 1480}) == 1480
+    assert _lines(caplog, "playback.cut_while_audible") == [{"audible_ms": 1480}]
+
+
+def test_a_stop_that_beat_the_first_sample_says_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The expected case, and the reason it must stay silent.
+
+    A barge-in stop that lands inside the page's 50 ms start cushion costs the
+    audience nothing. Logging those would bury the cuts that did cost
+    something under a line per barge-in, and on a talking streamer that is
+    nearly every turn.
+    """
+    caplog.set_level(logging.INFO, logger="bilisama.dev_talk")
+    assert dev_talk.note_playback_cut({"played_ms": 0}) == 0
+    assert dev_talk.note_playback_cut({}) == 0, "a page that sent no number"
+    assert dev_talk.note_playback_cut({"played_ms": None}) == 0
+    assert dev_talk.note_playback_cut({"played_ms": "1480"}) == 0, "text is not a duration"
+    assert dev_talk.note_playback_cut({"played_ms": True}) == 0, "a bool is not milliseconds"
+    assert dev_talk.note_playback_cut({"played_ms": -5}) == 0, "a clock that went backwards"
+    assert _lines(caplog, "playback.cut_while_audible") == []
+
+
+def test_a_fractional_reading_is_rounded_not_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The page rounds already, but its number crosses a JSON boundary — a
+    float that arrives as 41.6 is still 42 ms the audience heard."""
+    caplog.set_level(logging.INFO, logger="bilisama.dev_talk")
+    assert dev_talk.note_playback_cut({"played_ms": 41.6}) == 42
+    assert _lines(caplog, "playback.cut_while_audible") == [{"audible_ms": 42}]

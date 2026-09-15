@@ -1501,6 +1501,31 @@ class _Busy(Protocol):
     def busy(self) -> bool: ...
 
 
+def note_playback_cut(data: dict[str, Any]) -> int:
+    """Log how much of her the audience heard before a stop cut her off.
+
+    The page has been sending this all along (ui/web/js/audio.js:216) into an
+    argument nobody read. It has to come from the page: the server can only
+    count what it HANDED to a speaker, and between there and an ear sits the
+    scheduled playback queue that this very stop is emptying. Measuring
+    upstream of the stop answers a different question, and reads as if she had
+    been audible when she had not — which is the mistake this replaces.
+
+    Zero is the expected answer: a barge-in stop arriving inside the page's
+    50 ms start cushion (audio.js:243) costs the audience nothing, and silence
+    is not worth a line. Nonzero means she talked over the streamer that long.
+
+    Returns:
+        The milliseconds logged, or 0 when there was nothing to report.
+    """
+    heard = data.get("played_ms")
+    if not isinstance(heard, int | float) or isinstance(heard, bool) or heard <= 0:
+        return 0
+    audible_ms = round(heard)
+    log.info("playback.cut_while_audible", audible_ms=audible_ms)
+    return audible_ms
+
+
 def _audio_busy(speaker: _Busy, page: _Busy) -> bool:
     """Whether sound is being made, wherever it is coming out.
 
@@ -2661,8 +2686,9 @@ async def run_director(args: argparse.Namespace) -> int:
             async def on_playback_ended(_data: dict[str, Any]) -> None:
                 tally.ended()
 
-            async def on_playback_cancelled(_data: dict[str, Any]) -> None:
+            async def on_playback_cancelled(data: dict[str, Any]) -> None:
                 tally.cancelled()
+                note_playback_cut(data)
 
             # <data home>/bilisama/skins — user-imported packs, shadowing the
             # packaged ones. The static mount and the picker's listing must
