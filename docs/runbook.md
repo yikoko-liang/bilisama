@@ -187,6 +187,21 @@ SC 版本（`2.2.0.0`）不看 `bot_name`——名字从 `character_manifest` �
 静默丢弃。弹幕和 SC 进来让她用自己的话回一句，是这个产品的主循环，新协议撑不起来。
 详见欠账 #79。
 
+**2026-09-16 重探（模型 `1.2.6.1`，五轮真端点，脚本 `/tmp/duplex_probe{1..5}.py` 可复跑）**——阻塞点原样成立，
+但几条 8 月的记录要改：
+- 单条 user `conversation.item.create` 仍然静默丢弃（连 ack 都没有）；成对 user/assistant 能存进去（要 `input_text`，
+  能 `retrieve` 回来），**但她下一轮不认**（问「我叫什么」答「你还没告诉我」）。注入后发 `input_audio_buffer.commit`
+  强制判停也不生成。`response.create` 不是回错误，是**服务端直接掐断连接**。
+- **`session.update` 中途改 `instructions` 生效**（改前答「豆腐」、改后答「小明」）——比 SC2.0 强，门的合同可以重推、不用换会话。
+- **`speech_text_buffer.replacement` 念出去的话她自己记得**（问「你刚才说了什么」能复述）。所以「侧路模型写、duplex 念」
+  这条路不需要往历史里塞问答对。
+- **主播开口不会掐断她的语音回复**（她把整段说完才回应打断），和旧协议一样得靠我们发 `response.cancel`；
+  `response.cancel` 立刻 ack，但已生成的音频照流完（31 帧），要靠 `stale` 丢帧。
+- ASR 转写 `delta` 是**累积式**的（「你」「你叫」「你叫什么」…），`completed` 里 `transcript` 为空——最终文本取最后一条 delta。
+- 音色走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表；探针用 `jupiter` 的 `zh_female_vv_jupiter_bigtts` 也通了。
+- 握手是**客户端先发** `session.create`，`RealtimeClient` 是先收服务端的 `session.created`（`client.py:181`），复用不了；
+  加上没有 `response.create`，接的话是一个新的 `DuplexLink`，`request_reply` 换成侧路模型代笔 + TTS。**接不接是产品取舍。**
+
 ## 起本地语音服务器（原装三段管线：识别 → 对话 → 合成）
 
 ```bash
