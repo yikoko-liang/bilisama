@@ -47,7 +47,12 @@ class _Rig:
 
     def start(self, *, implicit: bool = True) -> link.ReplyHandle:
         handle = link.ReplyHandle(implicit=implicit)
-        assert self.gate.feed(link.ReplyStarted(handle)) == (link.ReplyStarted(handle),)
+        started = link.ReplyStarted(handle)
+        # Held with the frames under when_addressed (it goes out with the
+        # burst, or not at all); straight through for a dispatched reply or
+        # under always, where nothing is held.
+        held = implicit and self.gate.mode is VoiceReplyMode.WHEN_ADDRESSED
+        assert self.gate.feed(started) == (() if held else (started,))
         return handle
 
 
@@ -130,7 +135,7 @@ async def test_a_plain_head_releases_on_its_first_character() -> None:
     rig = _Rig()
     hers = rig.start()
     first = _text(hers, "好")
-    assert rig.gate.feed(first) == (first,)
+    assert rig.gate.feed(first) == (link.ReplyStarted(hers), first)
     later = _text(hers, "的，我看到了")
     assert rig.gate.feed(later) == (later,), "released turns flow straight through"
     assert rig.skips == []
@@ -157,7 +162,7 @@ async def test_a_scene_the_policy_answers_releases_the_held_burst_in_order() -> 
     assert rig.gate.feed(a1) == ()
     assert rig.gate.feed(a2) == ()
     marker = _text(hers, "[SKIP] 连麦的在问")
-    assert rig.gate.feed(marker) == (a1, a2, marker)
+    assert rig.gate.feed(marker) == (link.ReplyStarted(hers), a1, a2, marker)
     assert rig.skips == []
 
 
@@ -170,7 +175,11 @@ async def test_audio_leading_text_is_released_by_the_timer_and_a_late_marker_flu
     await rig.clock.advance(0.59)
     assert rig.emitted == [], "not yet"
     await rig.clock.advance(0.01)
-    assert rig.emitted == [a1, a2], "the timer released the held frames, in order"
+    assert rig.emitted == [
+        link.ReplyStarted(hers),
+        a1,
+        a2,
+    ], "the timer released the held frames, in order"
     assert rig.gate.status()["timeouts"] == 1
     # The text arrives after all — and says she should not have spoken.
     assert rig.gate.feed(_text(hers, "[SKIP] 主播在嘀咕")) == ()
@@ -190,8 +199,9 @@ async def test_a_full_buffer_is_released_rather_than_grown() -> None:
     hers = rig.start()
     frames = [_audio(hers, n) for n in range(3)]
     assert rig.gate.feed(frames[0]) == ()
-    assert rig.gate.feed(frames[1]) == ()
-    assert rig.gate.feed(frames[2]) == tuple(frames)
+    # The held start takes one slot of the cap, so it fills one frame sooner.
+    assert rig.gate.feed(frames[1]) == (link.ReplyStarted(hers), frames[0], frames[1])
+    assert rig.gate.feed(frames[2]) == (frames[2],), "released turns flow straight through"
     assert rig.gate.feed(_audio(hers, 9)) == (_audio(hers, 9),)
 
 
@@ -209,7 +219,7 @@ async def test_a_reply_that_ends_with_an_unreadable_head_still_plays() -> None:
     hers = rig.start()
     a1 = _audio(hers, 1)
     assert rig.gate.feed(a1) == ()
-    assert rig.gate.feed(_done(hers)) == (a1, _done(hers))
+    assert rig.gate.feed(_done(hers)) == (link.ReplyStarted(hers), a1, _done(hers))
     assert rig.skips == []
     assert not rig.gate.skipped(hers.handle_id)
 
@@ -250,13 +260,13 @@ async def test_switching_to_always_releases_the_hold_but_keeps_the_safety_net() 
     a1 = _audio(hers, 1)
     assert rig.gate.feed(a1) == ()
     rig.gate.set_mode(VoiceReplyMode.ALWAYS)
-    assert rig.emitted == [a1]
+    assert rig.emitted == [link.ReplyStarted(hers), a1]
     assert rig.gate.mode is VoiceReplyMode.ALWAYS
     assert rig.gate.feed(_done(hers)) == (_done(hers),)
     # A new turn under ALWAYS flows straight through...
     again = rig.start()
     plain = _text(again, "好的")
-    assert rig.gate.feed(plain) == (plain,)
+    assert rig.gate.feed(plain) == (plain,), "under always nothing is held, so nothing leads"
     assert rig.gate.feed(_done(again)) == (_done(again),)
     # ...but an exact marker at the head still skips, and asks for a flush,
     # because those frames were never held.
@@ -276,7 +286,7 @@ async def test_two_consecutive_turns_do_not_interfere() -> None:
     assert rig.gate.feed(_done(first)) == ()
     second = rig.start()
     plain = _text(second, "好的")
-    assert rig.gate.feed(plain) == (plain,)
+    assert rig.gate.feed(plain) == (link.ReplyStarted(second), plain)
     assert rig.gate.feed(_done(second)) == (_done(second),)
     assert len(rig.skips) == 1
     assert rig.gate.skipped(first.handle_id) and not rig.gate.skipped(second.handle_id)
@@ -302,7 +312,7 @@ async def test_a_marker_in_the_middle_is_prose_to_the_gate() -> None:
     rig = _Rig()
     hers = rig.start()
     first = _text(hers, "好的，")
-    assert rig.gate.feed(first) == (first,)
+    assert rig.gate.feed(first) == (link.ReplyStarted(hers), first)
     mid = _text(hers, "[SKIP] 这句已经在播了")
     assert rig.gate.feed(mid) == (mid,)
     assert rig.skips == []
@@ -353,7 +363,7 @@ async def test_every_decided_turn_leaves_one_line(caplog: pytest.LogCaptureFixtu
     rig = _Rig()
     plain = rig.start()
     passed = _text(plain, "在呢，怎么啦")
-    assert rig.gate.feed(passed) == (passed,)
+    assert rig.gate.feed(passed) == (link.ReplyStarted(plain), passed)
     marked = rig.start()
     assert rig.gate.feed(_text(marked, "[SKIP] 主播在嘀咕")) == ()
     await rig.settle()
@@ -385,8 +395,87 @@ async def test_the_health_card_shows_the_last_few_turns_not_just_the_total() -> 
     for _ in range(20):  # then it stops holding anything
         hers = rig.start()
         speaks = _text(hers, "好的呀")
-        assert rig.gate.feed(speaks) == (speaks,)
+        assert rig.gate.feed(speaks) == (link.ReplyStarted(hers), speaks)
     status = rig.gate.status()
     assert status["skipped"] == 20, "the cumulative count still remembers the good stretch"
     assert status["recent_skipped"] == 0, "but the window says it has stopped"
     assert status["recent_turns"] == 20, "the window is full, not empty"
+
+
+# ------------------------------------------------ the audit of 2026-09-16
+
+
+async def test_close_disarms_the_note_timer_too() -> None:
+    """A note window still running at teardown used to wake up and send a
+    verdict into a scheduler and a link that were already gone."""
+    rig = _Rig()
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SKIP] 主播在嘀咕")) == (), "muted, note window armed"
+    rig.gate.close()
+    await rig.clock.advance(0.31)  # past the note window
+    assert rig.skips == [], "a closed gate reports nothing, not even a late verdict"
+
+
+async def test_always_mode_turns_are_tallied_when_they_complete() -> None:
+    """Under `always` a turn is never held, so nothing on the release path
+    counted it — and the panel's 「共 N 条」 stood at zero all session."""
+    rig = _Rig(mode=VoiceReplyMode.ALWAYS)
+    hers = rig.start()
+    said = _text(hers, "在呢")
+    assert rig.gate.feed(said) == (said,)
+    rig.gate.feed(_done(hers))
+    status = rig.gate.status()
+    assert status["passed"] == 1
+    assert status["recent_turns"] == 1 and status["recent_skipped"] == 0
+
+
+async def test_switching_mode_starts_a_fresh_window() -> None:
+    """The window describes the current mode's decisions. Carried over, a
+    stretch of `always` followed by a switch back reported a full window
+    with zero skips — read by the panel as a collapse before one new turn."""
+    rig = _Rig()
+    for _ in range(20):
+        hers = rig.start()
+        assert rig.gate.feed(_text(hers, "[SKIP] 不是对我说的")) == ()
+        await rig.settle()
+    assert rig.gate.status()["recent_skipped"] == 20
+    rig.gate.set_mode(VoiceReplyMode.ALWAYS)
+    assert rig.gate.status()["recent_turns"] == 0
+    rig.gate.set_mode(VoiceReplyMode.WHEN_ADDRESSED)
+    assert rig.gate.status()["recent_turns"] == 0, "no turn has been judged in this mode yet"
+
+
+async def test_a_skipped_turn_shows_nothing_downstream_not_even_its_start() -> None:
+    """What the gate withholds, it withholds whole. The start used to pass on
+    the theory that a view keyed 「she is speaking」 on it; none does, and a
+    start with no end is the one shape that wedges such an indicator."""
+    rig = _Rig()
+    hers = link.ReplyHandle(implicit=True)
+    assert rig.gate.feed(link.ReplyStarted(hers)) == (), "held with the rest"
+    assert rig.gate.feed(_text(hers, "[SKIP] 主播在念弹幕")) == ()
+    await rig.settle()
+    assert rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED)) == ()
+    assert rig.emitted == [], "nothing of the turn reached the views"
+
+
+async def test_a_released_turn_leads_with_its_start() -> None:
+    """The held start goes out first in the burst, so the order downstream
+    is the order the provider sent."""
+    rig = _Rig()
+    hers = link.ReplyHandle(implicit=True)
+    assert rig.gate.feed(link.ReplyStarted(hers)) == ()
+    burst = rig.gate.feed(_text(hers, "在呢"))
+    assert [type(e).__name__ for e in burst] == ["ReplyStarted", "ReplyTextDelta"]
+
+
+async def test_a_held_turn_that_is_cut_still_leaves_an_info_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """「每一轮都会留一行」 is the runbook's promise, and a turn cut while
+    still held was the one case that broke it: it logged at debug."""
+    caplog.set_level(logging.INFO, logger="bilisama.director.voice_turn")
+    rig = _Rig()
+    hers = rig.start()
+    rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED))
+    lines = _logged(caplog, "voice_gate.passed")
+    assert [(lvl, f["why"]) for lvl, f in lines] == [("info", "ended_cancelled")]

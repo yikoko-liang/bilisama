@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -776,3 +777,33 @@ async def test_paid_protection_flips_live_through_configure_interaction(tmp_path
     kit.assembly.configure_interaction(protect_paid=False)
     await kit.assembly.on_event(superchat("sc:3"))
     assert kit.intents[-1].injection.reply.protected is False, "关掉也要立刻生效"
+
+
+# ---------------------------------------- the gate's note in the scheduler's lines
+
+
+def test_the_gates_note_folds_in_the_scheduler_log_lines(caplog: pytest.LogCaptureFixture) -> None:
+    """voice_gate.skipped folded the note to a length, and the same note then
+    landed verbatim on scheduler.implicit_killed and scheduler.verdict — both
+    wrote it under `detail`, which sits on the diagnostic whitelist because
+    every OTHER caller writes it from code. Hers is the exception: it is what
+    she wrote about the streamer, and it can quote the audience."""
+    from bilisama.director.scheduler import _detail_fields
+    from bilisama.obs.logging import _JsonFormatter, get_logger
+    from bilisama.obs.outcome import SkipReason
+
+    note = "SKIP · 观众说主播你今天好丑"
+    assert _detail_fields(SkipReason.VOICE_NOT_ADDRESSED, note) == {"detail_text": note}
+    assert _detail_fields(SkipReason.PANIC_MUTE, "紧急叫停") == {"detail": "紧急叫停"}
+    assert _detail_fields(None, "x") == {"detail": "x"}
+
+    caplog.set_level(logging.INFO, logger="bilisama.director.scheduler")
+    log = get_logger("bilisama.director.scheduler")
+    log.info("scheduler.verdict", **_detail_fields(SkipReason.VOICE_NOT_ADDRESSED, note))
+    log.info("scheduler.verdict", **_detail_fields(SkipReason.PANIC_MUTE, "紧急叫停"))
+    fmt = _JsonFormatter(log_viewer_content=False)
+    out = [
+        json.loads(fmt.format(r)) for r in caplog.records if r.getMessage() == "scheduler.verdict"
+    ]
+    assert out[0]["detail_text"] == f"<{len(note)} chars>", "her note is a length on disk"
+    assert out[1]["detail"] == "紧急叫停", "code-authored reasons still read as words"

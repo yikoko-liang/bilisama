@@ -148,7 +148,10 @@ async def test_a_turn_not_for_her_never_reaches_the_speakers() -> None:
         assert _audio_frames(rig.gated) == [], "nothing of the turn reached the speakers"
         assert not any(isinstance(e, link.ReplyTextDelta) for e in rig.gated)
         assert not any(isinstance(e, link.ReplyDone) for e in rig.gated), "held turn: no end"
-        assert any(isinstance(e, link.ReplyStarted) for e in rig.gated), "the start passes"
+        assert not any(isinstance(e, link.ReplyStarted) for e in rig.gated), (
+            "held turn: no start either — what the gate withholds, it withholds whole. "
+            "A start with no end was the one shape that could wedge a speaking indicator."
+        )
         assert _audio_frames(rig.raw), "the raw view (the scheduler's) saw the audio"
         assert rig.scheduler.status()["implicit_active"] is False
         assert _drain(rig.scheduler) == [], "nothing played, nothing to flush"

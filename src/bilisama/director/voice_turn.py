@@ -101,6 +101,10 @@ class _Turn:
     timer: asyncio.Task[None] | None = None
     note_timer: asyncio.Task[None] | None = None
     midway_logged: bool = False
+    # Whether this turn has been tallied (passed or skipped). A turn that was
+    # never held — ALWAYS mode — reaches its done without passing through
+    # _release, and used to be counted by nobody.
+    counted: bool = False
 
 
 class VoiceTurnGate:
@@ -158,6 +162,11 @@ class VoiceTurnGate:
             return
         log.info("voice_gate.mode_changed", mode=mode.value, holding=self._holding_count())
         self._mode = mode
+        # The window describes the CURRENT mode's decisions. Carrying it over
+        # meant that switching back to when_addressed after a stretch of
+        # always showed the old twenty turns — a full window with zero skips,
+        # which the panel reads as a collapse before a single new turn ran.
+        self._recent.clear()
         if mode is VoiceReplyMode.ALWAYS:
             for turn in list(self._turns.values()):
                 if turn.holding:
@@ -225,8 +234,13 @@ class VoiceTurnGate:
         )
         if holding:
             log.debug("voice_gate.held", handle_id=handle.handle_id)
-        # The start itself passes: it carries no content, and the views
-        # downstream key their "she is speaking" state on it.
+            # The start is held with the rest. It used to pass on the theory
+            # that a downstream view keyed "she is speaking" on it; no gated
+            # consumer does (the scheduler and the floor read the raw view),
+            # and letting it through gave a skipped turn a start with no end —
+            # exactly the shape that would wedge any indicator built on it.
+            self._turns[handle.handle_id].frames.append(event)
+            return ()
         return (event,)
 
     def _on_text(self, event: link.ReplyTextDelta) -> tuple[link.LinkEvent, ...]:
@@ -282,11 +296,19 @@ class VoiceTurnGate:
             self._settle(turn, clear_playback=False)
             return (event,) if turn.released else ()
         if not turn.holding:
+            if not turn.counted and event.status is link.ReplyStatus.COMPLETED:
+                # ALWAYS mode: never held, never released, so nothing above
+                # tallied it. It played, which is what `passed` counts.
+                turn.counted = True
+                self._passed += 1
+                self._recent.append(False)
             return (event,)
         if event.status is not link.ReplyStatus.COMPLETED:
             # Cut, failed or timed out while held: the head never plays.
+            # info like the other outcomes — "every turn leaves one line" is
+            # the promise the runbook makes, and this was the one that broke it.
             turn.frames.clear()
-            log.debug(
+            log.info(
                 "voice_gate.passed",
                 handle_id=turn.handle.handle_id,
                 why="ended_" + event.status.value,
@@ -360,6 +382,7 @@ class VoiceTurnGate:
         turn.frames.clear()
         turn.holding = False
         turn.released = True
+        turn.counted = True
         held_ms = int((self._clock.monotonic() - turn.opened_at) * 1000)
         self._longest_hold_ms = max(self._longest_hold_ms, held_ms)
         self._passed += 1
@@ -428,6 +451,7 @@ class VoiceTurnGate:
         turn.holding = False
         turn.muted = True
         turn.skipped = True
+        turn.counted = True
         self._skipped += 1
         self._recent.append(True)
         self._skipped_ids.append(turn.handle.handle_id)
@@ -477,6 +501,12 @@ class VoiceTurnGate:
         if turn.timer is not None:
             turn.timer.cancel()
             turn.timer = None
+        # Both timers, not one: close() used to disarm only the hold timer,
+        # and a note window still running at teardown woke up to send a
+        # verdict into a scheduler and a link that were already gone.
+        if turn.note_timer is not None:
+            turn.note_timer.cancel()
+            turn.note_timer = None
 
     async def _expire(self, turn: _Turn) -> None:
         await self._clock.sleep(self._hold_max_s)

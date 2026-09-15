@@ -394,6 +394,11 @@ class RealtimeClient:
             record.handle.stale = True
             if not record.cancel_sent:
                 record.cancel_sent = True
+                # Stamped like cancel()'s send: this cancel can miss too (the
+                # done was merely late, not lost), and its echo must not reach
+                # the streamer as red text or settle the next pending create
+                # as FAILED — which is what an unstamped one did.
+                self._cancel_sent_at = self._clock.monotonic()
                 with contextlib.suppress(ConnectionError, OSError, websockets.ConnectionClosed):
                     await self._send_raw({"type": dia.ClientEvent.RESPONSE_CANCEL.value})
             self._settle(record, link.ReplyStatus.TIMED_OUT)

@@ -29,6 +29,7 @@ from bilisama.config.enums import ProviderName
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
+from bilisama.realtime.client import RealtimeClient
 from bilisama.realtime.providers.hosted import HostedLink
 from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes.mock_realtime import Fault, MockRealtimeServer, Script
@@ -867,3 +868,36 @@ async def test_an_unprompted_invalid_request_still_reaches_the_streamer() -> Non
             assert err.code == "invalid_request_error"
         finally:
             await linkobj.aclose()
+
+
+async def test_the_watchdogs_own_cancel_echo_is_swallowed_too() -> None:
+    """17757ed stamped cancel()'s send so its miss-echo stays out of the chat.
+    The watchdog sends the same frame from its own path and did not stamp it,
+    so a reply whose done was merely late — not lost — still drew the red
+    line, and worse: the echo landed while the NEXT create was awaiting its
+    created, and the generic error branch settled that one as FAILED.
+    """
+    script = Script(faults={Fault.STALL_RESPONSE})
+    async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
+        client = RealtimeClient(server.url, caps=caps_mod.S2S, codec=dia.GA, watchdog_s=0.3)
+        await client.connect()
+        try:
+            events = client.events()
+            await client.request_reply(
+                dia.GA.response_create(out_of_band=False, text_only=True, instructions="说一句")
+            )
+            done = await _next_event(events, link.ReplyDone)
+            assert isinstance(done, link.ReplyDone)
+            assert done.status is link.ReplyStatus.TIMED_OUT, "the watchdog gave up on it"
+            # What DashScope answers when that cancel found the reply already over.
+            await server.send(
+                dia.ServerEvent.ERROR,
+                error={
+                    "type": "invalid_request_error",
+                    "message": "Conversation has no active response.",
+                },
+            )
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(_next_event(events, link.LinkError), timeout=0.6)
+        finally:
+            await client.aclose()

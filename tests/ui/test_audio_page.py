@@ -431,10 +431,17 @@ async def test_a_barge_in_on_the_audio_socket_stops_the_sound(
     would go back to carrying on for a beat after the text stopped.
     """
     await _ready(audio_page, harness)
-    harness.broker.play(b"\x00\x00" * 48000)  # two seconds
+    harness.broker.play(b"\x00\x00" * 96000)  # four seconds, one buffer
     await _until(
         lambda: harness.count(ClientEvent.PLAYBACK_STARTED) >= 1, what="音频没开始播就谈不上打断"
     )
+    # Let a slice of that ONE buffer play before the cut. played_ms used to
+    # credit only buffers whose onended had fired, so a cut anywhere inside
+    # the first buffer reported 0 — and the number the runbook says to read
+    # as "did she talk over the streamer" answered no every time. A full
+    # second, because the context's resume() after autoplay parking is
+    # asynchronous and ate most of a shorter wait once.
+    await asyncio.sleep(1.0)
     harness.broker.flush()
     await _until(
         lambda: harness.count(ClientEvent.PLAYBACK_CANCELLED) >= 1,
@@ -442,7 +449,9 @@ async def test_a_barge_in_on_the_audio_socket_stops_the_sound(
     )
     heard = harness.payloads(ClientEvent.PLAYBACK_CANCELLED)[0]
     assert "played_ms" in heard, heard
-    assert 0 <= float(heard["played_ms"]) < 2000, f"打断了却报出整段的时长：{heard}"
+    played = float(heard["played_ms"])
+    assert played < 4000, f"打断了却报出整段的时长：{heard}"
+    assert played >= 300, f"播了约一秒才切，却报成没听到：{heard}"
 
 
 async def test_nothing_reports_ended_for_what_the_barge_in_cut_off(

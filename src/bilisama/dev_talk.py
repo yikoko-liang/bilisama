@@ -1116,6 +1116,11 @@ async def _consume_events(
     transcribes: bool | None = None
     awaiting = False
     held: list[str] = []
+    # Whether anything of hers came back in the current turn. A turn the gate
+    # held and killed produces no ReplyDone on this (gated) view, so the id
+    # opened for the streamer's speech never closed and the NEXT turn's lines
+    # — and its turn_done — all landed under it.
+    replied = False
     # One correlation id per turn (plan §4.12). `bind` had no caller anywhere in
     # src until this one, so turn_id reached zero log lines and the log could be
     # grouped by event name and by nothing else. Held open across iterations
@@ -1132,9 +1137,10 @@ async def _consume_events(
         turn.enter_context(bind(turn_id=turn_id))
 
     def close_turn(status: str) -> None:
-        nonlocal turn_id
+        nonlocal turn_id, replied
         if not turn_id:
             return
+        replied = False
         # Inside the binding, so the one line that summarises a turn carries the
         # id that ties the rest of it together.
         log.info("dev_talk.turn_done", status=status, reply_chars=sum(len(s) for s in said))
@@ -1183,6 +1189,7 @@ async def _consume_events(
                 release()
             elif isinstance(event, link.ReplyTextDelta):
                 open_turn()  # a proactive reply starts a turn with no speech before it
+                replied = True
                 said.append(event.text)
                 if stream_text:
                     say(event.text, end="")
@@ -1195,6 +1202,7 @@ async def _consume_events(
                     # buffered, and this is what arrives after it.
                     continue
                 open_turn()
+                replied = True
                 collected.append(event.pcm)
                 if speaker is not None and (output_enabled is None or output_enabled()):
                     speaker.play(event.pcm)
@@ -1204,6 +1212,12 @@ async def _consume_events(
                 # A new turn starting settles the last one either way: whatever it
                 # was holding belongs on screen now, transcript or no transcript.
                 release()
+                if turn_id and not replied:
+                    # The streamer spoke again and nothing of hers came back:
+                    # the gate held that turn and killed it, and a killed
+                    # turn's done never reaches this view. Close it here or
+                    # its id swallows the turn that is starting.
+                    close_turn("no_reply")
                 open_turn()
                 if speaker is not None:
                     speaker.flush()  # the local half of playback.clear

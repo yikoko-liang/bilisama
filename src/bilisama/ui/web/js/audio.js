@@ -201,8 +201,17 @@ export function createAudio({ onOwner }) {
   }
 
   function stopEverything() {
-    const heard = Math.round(playedMs);
-    live.forEach((source) => {
+    // Buffers that finished were credited by their onended. The one playing
+    // right now was not, and it is exactly the one a barge-in cuts — so a cut
+    // anywhere inside the first buffer used to report "nothing heard". Credit
+    // the part of it that already left the speaker.
+    const now = context ? context.currentTime : 0;
+    let partialS = 0;
+    live.forEach(({ start, duration }) => {
+      if (start < now) partialS += Math.min(now, start + duration) - start;
+    });
+    const heard = Math.round(playedMs + partialS * 1000);
+    live.forEach(({ source }) => {
       source.onended = null; // no ended receipts for what nobody heard
       try {
         source.stop();
@@ -243,13 +252,13 @@ export function createAudio({ onOwner }) {
     const start = Math.max(nextStart, context.currentTime + 0.05);
     source.start(start);
     nextStart = start + buffer.duration;
-    live.push(source);
+    live.push({ source, start, duration: buffer.duration });
     // Per SEGMENT, both of them. One reply plays as many buffers, and the
     // instant between two of them is not the end of speaking — reading it as
     // one is how the backlog comes back (ledger #41).
     report("playback.started");
     source.onended = () => {
-      live = live.filter((other) => other !== source);
+      live = live.filter((entry) => entry.source !== source);
       playedMs += buffer.duration * 1000;
       report("playback.ended");
     };

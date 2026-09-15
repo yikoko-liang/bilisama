@@ -14,6 +14,8 @@ transcript that never arrives can never arrive late.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import logging
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -120,3 +122,47 @@ def test_a_provider_that_never_transcribes_is_made_to_wait_exactly_once(
     asyncio.run(_consume_events(feed(), None, None, stream_text=False))
     assert "第一轮的回复。" not in seen[0], "第一轮没等，转写迟到的 provider 第一轮就还是反的"
     assert "第二轮的回复。" in seen[1], "问过一次已经知道它不转写，不该再等第二次"
+
+
+# ------------------------------------------------ the audit of 2026-09-16
+
+
+def _done_for(handle: link.ReplyHandle, status: link.ReplyStatus) -> link.ReplyDone:
+    kw: dict[str, object] = {"handle": handle, "status": status}
+    for f in dataclasses.fields(link.ReplyDone):
+        if f.name not in kw and f.default is dataclasses.MISSING:
+            kw[f.name] = ""
+    return link.ReplyDone(**kw)  # type: ignore[arg-type]
+
+
+def test_a_turn_the_gate_killed_closes_when_the_streamer_speaks_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One correlation id per turn, as the docstring promises.
+
+    A turn the gate held and killed produces no ReplyDone on this (gated)
+    view, and the id was only ever closed on ReplyDone — so the id opened for
+    the streamer's speech stayed bound, the next open_turn was a no-op, and
+    the following turn's lines and its turn_done all landed under the dead
+    id. In production that is every skipped turn.
+    """
+    caplog.set_level(logging.INFO, logger="bilisama.dev_talk")
+    hers = link.ReplyHandle(implicit=True)
+    events: list[link.LinkEvent] = [
+        link.SpeechStarted(),
+        link.UserTranscriptDone("在这里"),  # the gate skipped her reply: nothing of it arrives
+        link.SpeechStarted(),
+        link.UserTranscriptDone("豆腐 你在吗"),
+        link.ReplyTextDelta(hers, "在呢"),
+        _done_for(hers, link.ReplyStatus.COMPLETED),
+    ]
+    asyncio.run(_consume_events(_feed(events), None, None, stream_text=False))
+    dones = [
+        dict(getattr(r, "fields", {}))
+        for r in caplog.records
+        if r.getMessage() == "dev_talk.turn_done"
+    ]
+    assert [d.get("status") for d in dones] == ["no_reply", "completed"], (
+        "the killed turn must close on its own — otherwise its id swallows the next one: "
+        f"{dones}"
+    )

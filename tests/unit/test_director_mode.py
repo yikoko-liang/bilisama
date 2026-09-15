@@ -224,10 +224,13 @@ async def test_fanout_gated_views_see_what_the_gate_lets_through() -> None:
         return out
 
     got_raw, got_gated = await asyncio.wait_for(
-        asyncio.gather(take(raw, 5), take(gated, 2)), timeout=2.0
+        asyncio.gather(take(raw, 5), take(gated, 1)), timeout=2.0
     )
     assert got_raw == events, "the raw view is untouched"
-    assert got_gated == [events[0], events[4]], "start passes, the rest of her turn does not"
+    assert got_gated == [events[4]], (
+        "nothing of a held-and-skipped turn reaches the gated view, its start included — "
+        "only the streamer's next speech does"
+    )
     assert len(skips) == 1 and skips[0].handle is hers
     await fan.aclose()
 

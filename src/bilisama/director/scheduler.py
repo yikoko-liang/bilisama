@@ -47,7 +47,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
@@ -167,6 +167,23 @@ class _Entry:
         return self.sort_key < other.sort_key
 
 
+def _detail_fields(reason: SkipReason | None, detail: str) -> dict[str, str]:
+    """The verdict's detail, under a name the log formatter treats correctly.
+
+    `detail` sits on the formatter's diagnostic whitelist because every other
+    caller writes it from code. The voice gate's is different: it carries the
+    note SHE wrote about what the streamer was doing, and that can quote the
+    audience — so for that one reason it travels under a name that folds to
+    a length, the same rule voice_gate.skipped already applies to note_text.
+    The panel still gets the words through the Verdict itself; only the log
+    line does not. Verified against _JsonFormatter: the note used to appear
+    verbatim on two lines per skip regardless of log_viewer_content.
+    """
+    if reason is SkipReason.VOICE_NOT_ADDRESSED:
+        return {"detail_text": detail}
+    return {"detail": detail}
+
+
 class Scheduler:
     """Single consumer of the link's events, single writer of the reply slot."""
 
@@ -202,6 +219,11 @@ class Scheduler:
         # the other; dev-talk wires both to the same line.
         self._implicit_spoken_sink = implicit_spoken_sink
         self._implicit: _Implicit | None = None
+        # Handle ids of implicit turns whose done has been processed. skip_implicit
+        # used handle.stale as "already over", but only a NON-completed settle marks
+        # a handle stale — a turn that finished normally is never stale, so a late
+        # skip for it booked a fresh killed record and implicit_active stuck True.
+        self._closed_implicit_ids: deque[int] = deque(maxlen=64)
         self._heap: list[_Entry] = []
         self._seq = itertools.count()
         # Dedup keys live from submit until SETTLE, not until dispatch: the
@@ -426,6 +448,11 @@ class Scheduler:
         if implicit is None or implicit.handle is not handle:
             if not handle.implicit or handle.stale:
                 return
+            if handle.handle_id in self._closed_implicit_ids:
+                # Its done already came and went. Nothing to kill, and booking
+                # it again would report a turn as live that the panel has
+                # already seen end.
+                return
             # The gate decides inside the fan-out's pump, and the pump can
             # read a turn's ReplyStarted and its first delta out of one queue
             # without yielding — so the kill can land here before this task
@@ -448,9 +475,9 @@ class Scheduler:
             log.info(
                 "scheduler.implicit_killed",
                 reason=str(reason),
-                detail=detail,
                 spoken_ms=spoken_ms,
                 cleared=implicit.cleared,
+                **_detail_fields(reason, detail),
             )
         self._emit(
             Verdict(
@@ -488,7 +515,7 @@ class Scheduler:
                 reason=str(verdict.reason) if verdict.reason else "",
                 waited_s=round(verdict.waited_s, 2),
                 spoken_ms=verdict.spoken_ms,
-                detail=verdict.detail,
+                **_detail_fields(verdict.reason, verdict.detail),
             )
         self._verdict_sink(verdict)
 
@@ -820,6 +847,7 @@ class Scheduler:
         if implicit is None or implicit.handle is not event.handle:
             return
         self._implicit = None
+        self._closed_implicit_ids.append(event.handle.handle_id)
         if implicit.killed or event.status is not link.ReplyStatus.COMPLETED:
             # Killed turns already have their verdict; a turn the provider
             # itself cut (the streamer spoke over her) gets none — the panel

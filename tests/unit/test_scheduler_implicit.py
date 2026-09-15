@@ -305,3 +305,54 @@ async def test_the_streamer_speaking_over_her_is_the_providers_cut_not_ours() ->
         assert server.recorded.count("response.cancel") == 0
         assert scheduler.verdicts == [], "the provider's own cut is not a verdict"
         assert _drain(scheduler) == []
+
+
+# ------------------------------------------------ the audit of 2026-09-16
+
+
+class _StubLink:
+    """Just enough SpeechLink for skip_implicit's one send."""
+
+    def __init__(self) -> None:
+        self.cancels: list[link.ReplyHandle] = []
+
+    async def cancel(self, handle: link.ReplyHandle) -> None:
+        self.cancels.append(handle)
+
+
+def _done_for(handle: link.ReplyHandle, status: link.ReplyStatus) -> link.ReplyDone:
+    import dataclasses
+
+    kw: dict[str, object] = {"handle": handle, "status": status}
+    for f in dataclasses.fields(link.ReplyDone):
+        if f.name not in kw and f.default is dataclasses.MISSING:
+            kw[f.name] = ""
+    return link.ReplyDone(**kw)  # type: ignore[arg-type]
+
+
+async def test_a_skip_that_arrives_after_the_turn_completed_is_ignored() -> None:
+    """skip_implicit read handle.stale as 「already over」, but only a
+    NON-completed settle marks a handle stale. A turn that finished normally
+    is never stale, so a late skip for it booked a fresh killed record:
+    implicit_active stuck True, the panel showed her speaking, and panic
+    would have walked the kill path again for a turn that was long over.
+    """
+    from bilisama.clock import FakeClock
+    from bilisama.director.floor import SpeakingFloor
+    from bilisama.director.scheduler import Scheduler
+    from bilisama.obs.outcome import SkipReason
+
+    clock = FakeClock()
+    stub = _StubLink()
+    sched = Scheduler(stub, SpeakingFloor(clock), clock)  # type: ignore[arg-type]
+    hers = link.ReplyHandle(implicit=True)
+    sched._open_implicit(hers)
+    assert sched.status()["implicit_active"] is True
+    sched._close_implicit(_done_for(hers, link.ReplyStatus.COMPLETED))
+    assert sched.status()["implicit_active"] is False
+    assert not hers.stale, "a completed handle is never stale — that was the whole trap"
+
+    sched.skip_implicit(hers, reason=SkipReason.VOICE_NOT_ADDRESSED, detail="")
+    await asyncio.sleep(0)
+    assert sched.status()["implicit_active"] is False, "its done already came; nothing to re-book"
+    assert stub.cancels == [], "and nothing to kill"
