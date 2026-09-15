@@ -22,11 +22,16 @@ Qwen3-TTS — from config/s2s/official-pipe.local.json):
   contract in the session: 「[AUDIENCE] 主播在跟观众打招呼。」 and
   「[AUDIENCE] 主播在和观众聊天气话题。」.
 - DashScope: first transcript delta 4 ms after response.created, first audio
-  delta 213 ms after — text leads by ~210 ms; the whole 3.8 s marker reply
-  streams in 0.84 s, so a cancel sent at the first text lands on a reply
-  that is already complete (status completed, nothing to roll back).
+  delta 213 ms after — text leads by ~210 ms. The cancel in that probe was
+  sent AFTER the whole line plus 3 s of silence had been pushed, so by
+  construction it landed on a reply that had already completed; that says
+  nothing about what a mid-reply cancel does to audio on this endpoint,
+  which no probe in this file measures. Its text_lead_ms is measured from
+  the start of the push, not from response.created, and cancel_to_done_ms
+  is read after a 5 s settle, so it is ≈5000 by design.
 - Volcano O2.0: text and audio arrive in the same tick, audio marginally
-  first; the marker reply completes before ClientInterrupt lands; asked for
+  first. Same caveat: ClientInterrupt was sent after the reply had finished,
+  so "completes before the interrupt lands" is the probe's timing. Asked for
   her last line afterwards she repeats the marker line — it is in the dialog.
 - DashScope takes input_audio_transcription {model: gummy-realtime-v1} and
   streams the streamer's words as conversation.item.input_audio_transcription

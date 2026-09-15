@@ -107,6 +107,12 @@ class Line:
     should_answer: bool
     why: str
     setup: tuple[str, ...] = ()
+    # Quoted from a real recording of the class production was failing on.
+    # This is the bucket the acceptance reports separately, and it is a TAG,
+    # not a length: the bucket used to be `len(text) <= 8`, which swept in
+    # two lines that were never recording fragments, missed one that was,
+    # and silently changed size when the set was decontaminated (7 → 6).
+    weak_cue: bool = False
 
 
 # No line here may be a sentence the prompt's own examples use. A model that
@@ -162,12 +168,12 @@ LINES: tuple[Line, ...] = (
     # --- 明确要求先听
     Line("豆腐 这段你别插话 让我讲完这个事", False, "明确说给她听，但本轮要求安静"),
     # --- 弱线索碎句：实盘失灵段的原话
-    Line("在这里", False, "真实录音里的碎句，几乎没有线索"),
-    Line("上去", False, "同上，两个字的自语"),
-    Line("他肯定上大嘴鸥", False, "游戏解说，说给观众或自己"),
-    Line("等没有了雨天 你看我怎么干他", False, "带光秃秃的「你」，但说的是对手"),
-    Line("这个大流还挺快呀", False, "游戏解说里的感叹"),
-    Line("锤大队友", False, "两三个字的操作嘀咕"),
+    Line("在这里", False, "真实录音里的碎句，几乎没有线索", weak_cue=True),
+    Line("上去", False, "同上，两个字的自语", weak_cue=True),
+    Line("他肯定上大嘴鸥", False, "游戏解说，说给观众或自己", weak_cue=True),
+    Line("等没有了雨天 你看我怎么干他", False, "带光秃秃的「你」，但说的是对手", weak_cue=True),
+    Line("这个大流还挺快呀", False, "游戏解说里的感叹", weak_cue=True),
+    Line("锤大队友", False, "两三个字的操作嘀咕", weak_cue=True),
     # --- 判断不出交流对象
     Line("这样行不行啊", False, "没有上下文，判断不出在跟谁说，应当先听"),
 )
@@ -512,7 +518,7 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
     over = sum(r.over_skip for r in scored)
     under = sum(r.under_skip for r in scored)
     dead = len(results) - total
-    hard = [r for r in scored if not r.line.should_answer and len(r.line.text) <= 8]
+    hard = [r for r in scored if r.line.weak_cue]
     print()
     print(
         f"该不该说判对 {decided}/{total} = {decided / total:.0%}   "

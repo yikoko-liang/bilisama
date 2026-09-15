@@ -779,15 +779,30 @@ def test_no_acceptance_line_is_a_sentence_the_prompt_already_teaches() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
     from voice_gate_acceptance import LINES
 
-    from bilisama.config.schema import PersonaConfig
+    from bilisama.config.loader import load
     from bilisama.persona.loader import live_voice_rules, template_variables
 
     config_dir = Path(__file__).resolve().parent.parent.parent / "config"
-    rules = live_voice_rules(config_dir, template_variables(PersonaConfig()), addressing=True)
+    # The SHIPPED persona, not PersonaConfig()'s default. The default renders
+    # {{agentName}} as "tofu" while the tool, dev-talk and the streamer all
+    # say 「豆腐」, and five of the contract's twelve examples carry the name —
+    # rendered with the wrong one, none of those five could ever match,
+    # including the two volcano recited to earn this test its existence.
+    settings = load(config_dir / "bilisama.toml")
+    variables = template_variables(settings.persona, reply_length=settings.interaction.reply_length)
+    rules = live_voice_rules(config_dir, variables, addressing=True)
 
     def bare(text: str) -> str:
         return re.sub(r"[，。？！、\s「」]", "", text)
 
     taught = {bare(line) for line in re.findall(r"主播：(.+)", rules)}
-    overlap = sorted(line.text for line in LINES if bare(line.text) in taught)
+    # Canary: a named example from the contract must be visible to this
+    # check, or the render is not the one the model sees and the test is
+    # blind to exactly the lines it exists for.
+    assert (
+        bare("豆腐，你觉得这个配色好看吗？") in taught
+    ), "合同渲染出来的名字不是「豆腐」，这条检查看不见带名字的例子"
+    # Setup lines are spoken too; a recited setup primes the scored line.
+    spoken = [line.text for line in LINES] + [s for line in LINES for s in line.setup]
+    overlap = sorted(text for text in spoken if bare(text) in taught)
     assert not overlap, f"这些验收台词和提示词例子重合，分不出判断和背诵：{overlap}"
