@@ -21,7 +21,7 @@ credential_ref = "env:BILI_SESSDATA"       # 登录态 cookie 的引用；没设
 stream_intro = ""                           # 本场直播在做什么，一两句话；会进提示词，也参与弹幕相关性判断
 
 [speech]
-provider = "s2s"                        # s2s | dashscope | volcano | openai_ga
+provider = "s2s"                        # s2s | dashscope | volcano | volcano_duplex | openai_ga
 
 [speech.s2s]
 endpoint = "ws://127.0.0.1:8765/v1/realtime"
@@ -73,6 +73,23 @@ model = "1.2.1.1"
 # 问她是谁她答「豆包」（2026-08-28 真端点复现）。官方四个音色见 docs/runbook.md。
 speaker = "zh_female_vv_jupiter_bigtts"
 end_smooth_window_ms = 1500             # 停多久算一句说完了。这条路上唯一的判停旋钮
+
+# 火山的另一条协议（Seeduplex 3.0 全双工）。和上面那段共用一个账号、一个 API Key，
+# 但音色表、模型号、地址都不一样，所以分开写。用法见 docs/runbook.md。
+[speech.volcano_duplex]
+endpoint = ""
+api_key_ref = "volcano_api_key"         # 和上面那套同一个 key
+model = "1.2.6.1"                       # 这条协议目前只有这一个版本
+voice = "zh_female_vv_uranus_bigtts"    # uranus 表，和上面那套的音色不通用
+# 弹幕由谁来回。这条协议起不了自己的轮次（只有主播的麦克风能起一轮），所以要选：
+#   ghostwriter = 侧路模型写词、她照着念。弹幕一到一秒上下就回，但那是另一个模型的文风。
+#                 走这条必须配好 [speech.side]，没配的话启动时就会退出。
+#   tool        = 她跟主播说话时自己把没回的弹幕捎带答了。是她本人的话，不用侧路模型，
+#                 但要等主播下次开口——冷场时那条弹幕就一直等着。
+# 改这一项要重启进程：工具声明必须在建会话那一刻就带上，重连换不掉。
+event_replies = "ghostwriter"
+speed = 0                               # -50 约慢一半，100 约两倍速
+loudness = 0
 
 [speech.side]                           # 主动话题、记忆蒸馏、事实抽取都用它，挑便宜的
 base_url = ""

@@ -615,7 +615,11 @@ UI_META: dict[str, FieldMeta] = {
         ),
         provider_scoped="volcano_duplex",
         audience=Audience.STREAMER,
-        reload=Reload.RECONNECT,
+        # RESTART, not RECONNECT: the tool has to be declared on the session
+        # from session.create, and the link reads the choice when it is built.
+        # Reconnecting would come back with the old answer, so promising
+        # 「重连后生效」 would be a lie the panel tells cheerfully.
+        reload=Reload.RESTART,
         group="火山全双工",
         order=5,
     ),
