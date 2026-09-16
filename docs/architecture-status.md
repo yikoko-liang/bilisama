@@ -666,7 +666,7 @@ import」。
   用法和完整探针表见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。两层测试：
   `tests/unit/test_duplex_link.py` 对着假服务端钉 adapter（`tests/fakes/mock_duplex.py`
   照真端点的规矩拒收奇数上下文、协议外的事件名和不合形状的 FC 回传），
-  `tests/integration/test_duplex_contract.py`（`-m provider_a`，18 个用例，真端点约六分半）
+  `tests/integration/test_duplex_contract.py`（`-m provider_a`，19 个用例，真端点约七分钟）
   钉**端点本身**的行为——那一天的教训是无效证据活得很久，而且藏在没人能复跑的终端回滚里。
 - **火山 SC2.0 把思维链标记漏进文字通道（2026-09-09 新开）**：回复开头形如
   `<eocot>确实，地龙这血量顶不住啊。`。`MarkerHead` 见到 `<` 即判 `plain`，所以只要有这个前缀，

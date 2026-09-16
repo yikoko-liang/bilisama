@@ -116,6 +116,8 @@ class _Session:
         # Frame kinds in arrival order, audio deltas folded out — the order is
         # the whole point of one of the tests below.
         self.order: list[str] = []
+        self.asr: list[str] = []
+        self.asr_final: str | None = None
 
     async def send(self, frame: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(frame))
@@ -142,6 +144,10 @@ class _Session:
                 texts.append(str(frame.get("delta") or ""))
             elif kind == "response.output_audio.started":
                 self.tts_types.append(str(frame.get("tts_type") or ""))
+            elif kind == "conversation.item.input_audio_transcription.delta":
+                self.asr.append(str(frame.get("delta") or ""))
+            elif kind == "conversation.item.input_audio_transcription.completed":
+                self.asr_final = str(frame.get("transcript") or "")
             elif kind == "response.output_audio.delta":
                 self.audio.extend(base64.b64decode(str(frame.get("delta") or "")))
             elif kind == "response.function_call_arguments.done":
@@ -484,3 +490,37 @@ async def test_her_words_start_before_the_frame_that_announces_the_turn(
         ), "这一轮音频帧先到，那这条测试就白写了——重跑几次确认端点改了行为"
         ahead = sum(1 for kind in s.order[:announced] if kind == "response.output_text.delta")
         assert ahead >= 1, f"音频帧之前只有 {ahead} 个文本块"
+
+
+async def test_the_streamers_words_only_exist_in_the_last_delta(tmp_path: Path) -> None:
+    """Two endpoint facts the adapter has to rebuild the transcript from.
+
+    The deltas are CUMULATIVE — 「你」「你叫」「你叫什么」 — and `completed`
+    carries an empty `transcript`. So the last delta is the only copy of what
+    the streamer said, and it is what `UserTranscriptDone` is built from. The
+    chat page, the console and `on_transcript` all key on that event, so if
+    this rebuild is wrong the streamer's whole half of the conversation goes
+    missing while hers keeps arriving.
+    """
+    said = "今天打算打几把游戏"
+    async for s in _open(tmp_path):
+        await s.speak(said)
+        await s.collect(10)
+        assert len(s.asr) >= 2, f"转写块太少，没法判断累积与否：{s.asr}"
+        # Cumulative, but the tail flaps — 「…游戏」「…游戏？」「…游戏」 in one
+        # run, the transcriber revising its punctuation. So the invariant is
+        # not "each grows on the last" but "each is a prefix of the last",
+        # which is what makes the final delta the whole sentence.
+        final = s.asr[-1]
+        for i, block in enumerate(s.asr):
+            assert final.startswith(block), (
+                f"第 {i} 块 {block!r} 不是最后一块 {final!r} 的前缀——"
+                "adapter 是靠这个重建整句的，这条变了就得改"
+            )
+        assert s.asr_final == "", (
+            f"completed 里居然带了 transcript={s.asr_final!r}——"
+            "那就可以直接用它，不必再从最后一块 delta 重建"
+        )
+        assert any(
+            word in s.asr[-1] for word in ("游戏", "几把", "今天")
+        ), f"最后一块 delta 应该是整句，实际是 {s.asr[-1]!r}"

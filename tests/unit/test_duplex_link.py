@@ -411,6 +411,62 @@ async def test_the_persona_goes_out_in_place() -> None:
             await duplex.aclose()
 
 
+async def test_what_the_streamer_said_lands_as_a_finished_line() -> None:
+    """`UserTranscriptDone` is the streamer's side of the conversation.
+
+    The chat page writes its line from it (ui/events.py:199), the console
+    prints 你说： from it and `on_transcript` fires from it
+    (dev_talk.py:1180). Sending only `SpeechStopped` left the panel showing
+    her half of every exchange and none of his — which reads as a UI bug and
+    is this adapter.
+
+    The words have to be rebuilt here: the `completed` frame's own
+    `transcript` is empty on this protocol, so the last cumulative delta is
+    the only copy.
+    """
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear("今天打算打几把游戏", flap="？")
+            done = await _next(events, link.UserTranscriptDone)
+            assert done.text == "今天打算打几把游戏？", "报的是转写最后定下来的那一版"
+        finally:
+            await duplex.aclose()
+
+
+async def test_the_transcript_deltas_go_up_as_increments_not_as_restatements() -> None:
+    """Cumulative on this protocol（「你」「你叫」「你叫什么」）, incremental in
+    the contract everywhere else. Nothing reads them today, which is exactly
+    why forwarding them raw would sit there until something did."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        seen: list[str] = []
+
+        async def collect() -> None:
+            async for event in events:
+                if isinstance(event, link.UserTranscriptDelta):
+                    seen.append(event.text)
+                elif isinstance(event, link.UserTranscriptDone):
+                    return
+
+        try:
+            await server.hear("你叫什么", flap="？")
+            await asyncio.wait_for(collect(), timeout=2.0)
+            assert seen == [
+                "你",
+                "叫",
+                "什",
+                "么",
+                "？",
+            ], f"送上去的该是增量，而且标点反复也只送一次，实际是 {seen}"
+        finally:
+            await duplex.aclose()
+
+
 async def test_speech_edges_come_off_the_transcriber() -> None:
     """There is no input_audio_buffer.speech_started on this protocol; the
     floor would never close for a client that waited for one."""

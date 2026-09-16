@@ -305,6 +305,12 @@ class DuplexLink:
         # Her streamed words for the turn in flight. Ours never stream, so
         # this stays empty on the replies we drive — see _spoken_text.
         self._heard: list[str] = []
+        # The streamer's words as the transcriber last had them, and how much
+        # of that has already gone up as increments. Two fields because the
+        # tail flaps: the latest value is what the done reports, the longest
+        # sent is what the next increment is measured against.
+        self._asr_text = ""
+        self._asr_sent = ""
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -621,17 +627,39 @@ class DuplexLink:
         if kind == "conversation.item.input_audio_transcription.started":
             # This protocol has no input_audio_buffer.speech_started; the
             # transcriber's first word is the earliest edge it offers.
+            self._asr_text = ""
+            self._asr_sent = ""
             self._events.put_nowait(link.SpeechStarted())
             return
         if kind == "conversation.item.input_audio_transcription.delta":
-            # Cumulative, not incremental: 「你」「你叫」「你叫什么」. Downstream
-            # expects increments, so only the tail of each delta goes up.
-            self._events.put_nowait(link.UserTranscriptDelta(str(frame.get("delta") or "")))
+            # CUMULATIVE here, incremental everywhere else: 「今天」「今天打算」
+            # 「今天打算打」…. The contract downstream is an increment, so only
+            # the growth goes up.
+            #
+            # And the tail flaps: 「…游戏」「…游戏？」「…游戏」「…游戏？」 in one
+            # measured run, the transcriber changing its mind about the
+            # punctuation. Emitting against the LAST value would send 「？」
+            # twice; emitting against the longest already sent sends it once
+            # and stays quiet through the revision, which the done then
+            # settles. Every delta is a prefix of the last one, so nothing is
+            # lost by waiting.
+            whole = str(frame.get("delta") or "")
+            self._asr_text = whole
+            if whole.startswith(self._asr_sent) and len(whole) > len(self._asr_sent):
+                self._events.put_nowait(link.UserTranscriptDelta(whole[len(self._asr_sent) :]))
+                self._asr_sent = whole
             return
         if kind == "conversation.item.input_audio_transcription.completed":
-            # Its `transcript` comes back empty — the words live in the last
-            # delta. L3's transcript sink reads the deltas, so this is the
-            # edge and nothing more.
+            # Its own `transcript` comes back EMPTY — the words only ever live
+            # in the last delta. Sending the edge alone left the streamer's own
+            # side of the conversation out of the chat page, the console and
+            # `on_transcript` entirely (ui/events.py:199, dev_talk.py:1180 both
+            # key on the done), which looked like a UI bug and was this line.
+            said = str(frame.get("transcript") or "") or self._asr_text
+            if said:
+                self._events.put_nowait(link.UserTranscriptDone(said))
+            self._asr_text = ""
+            self._asr_sent = ""
             self._events.put_nowait(link.SpeechStopped())
             return
         if kind == "response.function_call_arguments.done":

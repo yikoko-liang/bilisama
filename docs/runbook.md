@@ -324,6 +324,22 @@ int16 读是白噪声，这个比值 0.6 上下、过零率接近 0.5。
 
 假服务端原来也是先发音频帧再发文字，正好把这个 bug 挡住了；现在它照真端点的顺序发。
 
+#### 主播那一侧的转写也要自己拼
+
+`conversation.item.input_audio_transcription` 这一组有两个坑：
+
+- **`completed` 里的 `transcript` 是空的**（实测 `None`）。主播说了什么，只存在于最后一块 delta 里。
+- **delta 是累积式的，而且结尾标点会反复**：`今天` → `今天打算` → … → `…游戏` → `…游戏？`
+  → `…游戏` → `…游戏？`。所有块都是最后那块的前缀，但不是每块都比上一块长。
+
+adapter 原来只在 `completed` 上发了个 `SpeechStopped`，**没发 `UserTranscriptDone`**——
+而聊天页那条「主播说了什么」是由它写的（[ui/events.py:199](../src/bilisama/ui/events.py:199)），
+终端的 `你说：` 和 `on_transcript` 也都是（[dev_talk.py:1180](../src/bilisama/dev_talk.py:1180)）。
+于是界面上只有她的话、没有主播的，看着像界面的 bug，其实是这一行。
+
+现在按最后一块 delta 重建整句发 `UserTranscriptDone`；增量是对「已经送上去的最长前缀」算的，
+所以标点横跳时那个问号只送一次。
+
 #### 另外三条实测
 
 - **人设中途能改。** `session.update` 改 `instructions` 当场生效（改前答「豆腐」、改后答「小明」），
@@ -357,7 +373,7 @@ int16 读是白噪声，这个比值 0.6 上下、过零率接近 0.5。
 .venv/bin/python -m pytest tests/integration/test_duplex_contract.py -m provider_a -v
 ```
 
-十八个用例，真端点跑一遍约六分半，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
+十九个用例，真端点跑一遍约七分钟，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
 不是我们的 adapter——厂商哪天改了主意，从红测试知道，而不是从一场她突然不回弹幕的直播知道。
 原始探针脚本 `/tmp/duplex_probe{1..17}.py` 也还在（先 `source path.sh`）。
 

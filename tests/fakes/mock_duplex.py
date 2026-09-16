@@ -313,17 +313,26 @@ class MockDuplexServer:
             },
         )
 
-    async def hear(self, transcript: str) -> None:
-        """The streamer speaks. Deltas are cumulative, `completed` is empty."""
+    async def hear(self, transcript: str, *, flap: str = "") -> None:
+        """The streamer speaks. Deltas are cumulative, `completed` is empty.
+
+        `flap` replays the tail the real transcriber changes its mind about:
+        measured as 「…游戏」「…游戏？」「…游戏」「…游戏？」, punctuation going
+        back and forth after the words have settled. A client that measures
+        the next increment against the LAST value sends that mark twice.
+        """
         ws = self._ws
         assert ws is not None
         await self._send(ws, {"type": "conversation.item.input_audio_transcription.started"})
-        for i in range(1, len(transcript) + 1):
+        steps = [transcript[:i] for i in range(1, len(transcript) + 1)]
+        if flap:
+            steps += [transcript + flap, transcript, transcript + flap]
+        for step in steps:
             await self._send(
                 ws,
                 {
                     "type": "conversation.item.input_audio_transcription.delta",
-                    "delta": transcript[:i],
+                    "delta": step,
                 },
             )
         await self._send(
