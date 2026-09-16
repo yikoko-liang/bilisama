@@ -18,29 +18,61 @@ scripts are recorded in docs/runbook.md.
 3. **Speech edges ride the transcriber.** No `input_audio_buffer.speech_*`
    here; the streamer's first word arrives as
    `conversation.item.input_audio_transcription.started`.
-4. **`response.create` is not an error, it is a disconnect.** The socket closes
-   with 1006, twice out of two tries.
+4. **The uplink vocabulary is closed, and stepping outside it is a
+   disconnect.** Not an error frame: a 1006. `response.create` is not
+   specially rejected — it simply is not in the protocol, and fifteen guessed
+   names (`chat.text.query`, `ChatTextQuery`, `input_text_buffer.commit`, …)
+   all hang up identically. So a wrong event name costs the session.
 
 And the one that shapes the product rather than the file:
 
-5. **It will not compose.** ChatTextQuery is gone — absent from the vendor's
-   own old-to-new event table, and a lone user item in
-   `conversation.item.create` is stored (it comes back from
-   `conversation.item.retrieve`) and never reaches the model. The only path
-   from words to sound is `speech_text_buffer.replacement`, which says what it
-   is given. So `request_reply` needs `ReplySpec.text`, L3 fills it, and the
-   capability bit `composes_replies=False` is how L3 knows to. Nothing here
-   calls a model to write her lines: whose words come out of her mouth is a
-   product decision, and an adapter that quietly made it would be the wrong
-   place to discover it.
+5. **She composes. She cannot be made to START.** The distinction took three
+   rounds of probes to get right, and the first two readings of it were wrong,
+   so it is worth stating precisely.
 
-One more measured fact worth keeping next to the code that relies on it:
-history reaches the model ONLY at `session.create`, through
+   She composes: a danmaku sitting in a legal `dialog_context` is answered in
+   her own words the next time the streamer says anything at all — 「欢迎回来呀，
+   刚才观众小王问我播到几点，我打算看大家状态，聊得久就多待会儿」 off the
+   streamer saying 「我回来了」, with `tts_type` `default`.
+
+   What does not exist is a way to start a turn. ChatTextQuery is gone from the
+   vendor's own old-to-new table and `response.create` is outside the uplink
+   vocabulary (fact 4). Measured, each on its own socket: a legal context and
+   25 s of nothing → silence; an empty assistant placeholder so the last turn
+   looks unanswered → silence; `input_audio_buffer.commit` → silence; two
+   seconds of pushed silence → silence; `extension.dialog.extra.input_mod`
+   `"text"`, the old protocol's text-input mode → accepted, then silence.
+   Tools come closest: `session.tools` is accepted and she really does emit
+   `response.function_call_arguments.done`, but six shapes of result return
+   produced no continuation. And `speech_text_buffer.append`, the one name in
+   the sweep that did not hang up, answers with `tts_type` `chat_tts_text` —
+   it reads, it does not write.
+
+   So a reply that has to go out at a moment of OUR choosing arrives with its
+   words already written: `request_reply` needs `ReplySpec.text`, L3 fills it,
+   and `composes_on_demand=False` is how L3 knows to. Nothing here calls a
+   model to write her lines — whose words come out of her mouth is a product
+   decision, and an adapter that quietly made it would be the wrong place to
+   discover it.
+
+Two more measured facts worth keeping next to the code that relies on them.
+
+History reaches the model ONLY at `session.create`, through
 `extension.dialog.dialog_context`. Mid-session `conversation.item.create` acks
 with `conversation.item.added` and `session.update` with a `dialog_context`
 acks with `session.updated`; neither changes what she knows. Same shape as
 SC2.0's character manifest, and the same remedy — a new session — which
 `set_context` uses for the persona.
+
+And `dialog_context` must have an EVEN number of turns, because the endpoint
+reads it positionally in pairs and does not look at `role` at all. An odd
+length discards the whole context — not the odd turn, the whole thing — while
+`session.created` comes back exactly as it does on success, so nothing on the
+wire tells you. An even length in the wrong order is worse than useless rather
+than rejected: `[user, user, assistant, assistant]` came back with the second
+line attributed to her. Measured 2026-09-16, one session each. `pair_up` below
+therefore emits even-length, correctly-ordered pairs and reports what it had
+to drop to get there.
 """
 
 from __future__ import annotations
@@ -61,7 +93,7 @@ from bilisama.realtime.client import SessionRefused
 from bilisama.realtime.errors import ErrorClass, classify_error, describe
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from bilisama.config.schema import VolcanoDuplexConfig
 
@@ -83,6 +115,44 @@ _OURS = "chat_tts_text"
 
 def _text_content(text: str) -> list[dict[str, str]]:
     return [{"type": "input_text", "text": text}]
+
+
+def pair_up(
+    items: Sequence[Mapping[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Shape a run of context items into what `dialog_context` actually keeps.
+
+    The endpoint reads the array positionally in pairs and never looks at
+    `role`, so two rules fall out: the length must be even (an odd one
+    discards the whole context, silently) and the order must really alternate
+    (a wrong order is accepted and comes back with the wrong speaker attached
+    to the line). L3 hands us neither: three danmaku arrive in a row before she
+    answers any of them, and a mirrored assistant line can turn up with nothing
+    in front of it.
+
+    So consecutive same-role items merge into one turn — three danmaku become
+    one user turn of three lines, which keeps the text rather than dropping it
+    — and a leading assistant or trailing user, having nothing to pair with,
+    comes back to the caller instead of poisoning the array. Returns the pairs
+    and the leftovers, so the caller can say what went missing rather than lose
+    it quietly.
+    """
+    merged: list[dict[str, str]] = []
+    for item in items:
+        role = "assistant" if item.get("role") == "assistant" else "user"
+        text = str(item.get("text") or "")
+        if not text:
+            continue
+        if merged and merged[-1]["role"] == role:
+            merged[-1]["text"] += "\n" + text
+        else:
+            merged.append({"role": role, "text": text})
+    dropped: list[dict[str, str]] = []
+    if merged and merged[0]["role"] == "assistant":
+        dropped.append(merged.pop(0))  # nothing prompted it
+    if len(merged) % 2:
+        dropped.append(merged.pop())  # trailing user, still unanswered
+    return merged, dropped
 
 
 def session_body(
@@ -198,6 +268,7 @@ class DuplexLink:
             additional_headers={"X-Api-Key": self._api_key},
             close_timeout=2.0,
         )
+        history, dropped = pair_up(self._pending_items)
         await self._send(
             {
                 "type": "session.create",
@@ -207,10 +278,17 @@ class DuplexLink:
                     model=self._model,
                     speaker=self._speaker,
                     session_id=self._session_id,
-                    history=list(self._pending_items) or None,
+                    history=history or None,
                 ),
             }
         )
+        if dropped:
+            log.info(
+                "duplex.context_unpaired",
+                dropped=len(dropped),
+                kept=len(history),
+                error_text="这些上下文条目凑不成一问一答，没随会话带过去——带上会让整段历史被丢弃。",
+            )
         self._pending_items.clear()
         raw = await self._ws.recv()
         try:
@@ -316,6 +394,10 @@ class DuplexLink:
         comes back, `conversation.item.retrieve` shows the item, and she still
         answers as if it never happened. So it is kept for the next
         `session.create`, where `dialog_context` does reach her.
+
+        Kept raw, in arrival order. `pair_up` does the shaping at create time,
+        because only then is it known whether the last danmaku ever got an
+        answer — and an unanswered one on the end voids the whole context.
         """
         self._pending_items.append({"role": role, "text": text})
 
@@ -323,7 +405,7 @@ class DuplexLink:
         """Say `spec.text`, as it stands.
 
         There is no composing step on this protocol; see the module note and
-        `capabilities.composes_replies`. A spec that arrives without text is a
+        `capabilities.composes_on_demand`. A spec that arrives without text is a
         wiring bug in L3, and it gets one line rather than a guess — guessing
         would put words in her mouth that nobody wrote.
         """

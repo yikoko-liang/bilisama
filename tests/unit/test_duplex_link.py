@@ -17,6 +17,7 @@ import pytest
 from bilisama.config.schema import VolcanoDuplexConfig
 from bilisama.realtime import link
 from bilisama.realtime.providers.duplex import DuplexLink, session_body
+from tests.fakes.mock_duplex import _KNOWN as _VOCABULARY
 from tests.fakes.mock_duplex import MockDuplexServer
 
 
@@ -173,11 +174,79 @@ async def test_history_waits_for_the_next_session_because_mid_session_is_ignored
     async with MockDuplexServer() as second:
         duplex = _link(second)
         await duplex.add_context_item("[弹幕] 观众A: 主播今天播到几点")
+        await duplex.add_context_item("那得看嗓子撑不撑得住。", role="assistant")
         await duplex.connect()
         try:
             assert second.context == [
-                {"role": "user", "text": "[弹幕] 观众A: 主播今天播到几点"}
+                {"role": "user", "text": "[弹幕] 观众A: 主播今天播到几点"},
+                {"role": "assistant", "text": "那得看嗓子撑不撑得住。"},
             ], "建会话时它必须走 dialog_context"
+            assert not second.context_refused
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_danmaku_she_never_answered_does_not_void_the_whole_history() -> None:
+    """The endpoint takes strictly alternating turns and discards EVERYTHING
+    when it does not get them — measured 2026-09-16. A stash of danmaku is
+    naturally a run of user turns, so without pair_up the reconnect would come
+    back with no memory at all and nothing would say so."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.add_context_item("[弹幕] 观众A: 主播今天播到几点")
+        await duplex.add_context_item("[弹幕] 观众B: 这把打完还播吗")
+        await duplex.add_context_item("播到十点，这把打完再说。", role="assistant")
+        await duplex.add_context_item("[弹幕] 观众C: 还没人回我")  # 她还没答的那条
+        await duplex.connect()
+        try:
+            assert not server.context_refused, "发出去的形状必须是端点收得下的"
+            assert server.context == [
+                {
+                    "role": "user",
+                    "text": "[弹幕] 观众A: 主播今天播到几点\n[弹幕] 观众B: 这把打完还播吗",
+                },
+                {"role": "assistant", "text": "播到十点，这把打完再说。"},
+            ], "连着的弹幕并成一轮，没人接的那条留到下次"
+        finally:
+            await duplex.aclose()
+
+
+def test_pair_up_keeps_what_it_can_and_hands_back_what_it_cannot() -> None:
+    from bilisama.realtime.providers.duplex import pair_up
+
+    kept, dropped = pair_up(
+        [
+            {"role": "assistant", "text": "没头没尾的一句"},
+            {"role": "user", "text": "问题一"},
+            {"role": "user", "text": "问题二"},
+            {"role": "assistant", "text": "一起答了"},
+            {"role": "user", "text": "还没答的"},
+        ]
+    )
+    assert kept == [
+        {"role": "user", "text": "问题一\n问题二"},
+        {"role": "assistant", "text": "一起答了"},
+    ]
+    assert [d["text"] for d in dropped] == ["没头没尾的一句", "还没答的"]
+    assert pair_up([]) == ([], [])
+
+
+async def test_an_event_outside_the_vocabulary_is_never_sent() -> None:
+    """Any unknown uplink name hangs the socket up — fifteen guesses, fifteen
+    1006s. So a typo in an event name is not a warning, it is a dropped call."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex.set_context("你叫豆腐")
+            await duplex.add_context_item("[弹幕] 观众A: 在吗")
+            await duplex.request_reply(link.ReplySpec(text="在的"))
+            await _settles(
+                lambda: server.recorded.count("speech_text_buffer.replacement.commit") == 1,
+                "回复没发出去",
+            )
+            unknown = [f for f in server.recorded.frames if f.get("type") not in _VOCABULARY]
+            assert not unknown, f"发了协议里没有的事件：{[f.get('type') for f in unknown]}"
         finally:
             await duplex.aclose()
 

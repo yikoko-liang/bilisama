@@ -2050,7 +2050,7 @@ async def run_director(args: argparse.Namespace) -> int:
         proactive.note_dialogue("assistant", text)
         note_recent_line(text)
 
-    composes = profile_for(provider).caps.composes_replies
+    composes = profile_for(provider).caps.composes_on_demand
     if not composes and side is None:
         raise SystemExit(
             f"{provider.value} 不会自己组织弹幕/礼物的回复，需要一个侧路模型替她写。\n"
@@ -2102,7 +2102,7 @@ async def run_director(args: argparse.Namespace) -> int:
         implicit_spoken_sink=spoken_line,
         # Only the duplex protocol reads these: everywhere else the endpoint
         # writes her lines itself and the ghostwriter is never called.
-        link_composes_replies=composes,
+        link_composes_on_demand=composes,
         ghostwriter=None if composes else ghostwrite,
     )
 

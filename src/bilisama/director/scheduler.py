@@ -202,7 +202,7 @@ class Scheduler:
         spoken_sink: Callable[[str], None] | None = None,
         implicit_spoken_sink: Callable[[str], None] | None = None,
         ghostwriter: Callable[[Intent], Awaitable[str]] | None = None,
-        link_composes_replies: bool = True,
+        link_composes_on_demand: bool = True,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -222,7 +222,7 @@ class Scheduler:
         # the other; dev-talk wires both to the same line.
         self._implicit_spoken_sink = implicit_spoken_sink
         # Writes her lines for an endpoint that cannot
-        # (capabilities.composes_replies False). The scheduler knows only that
+        # (capabilities.composes_on_demand False). The scheduler knows only that
         # finished words are required before it may dispatch; who supplies
         # them, and in whose voice, is the entry point's business. Left None
         # everywhere else, and never consulted there.
@@ -231,7 +231,7 @@ class Scheduler:
         # reading a provider's capability table, and the entry point already
         # unpacks these one by one (Assembly's per_reply_scope is the same
         # pattern). True everywhere except the duplex protocol.
-        self._link_composes = link_composes_replies
+        self._link_composes = link_composes_on_demand
         self._implicit: _Implicit | None = None
         # Handle ids of implicit turns whose done has been processed. skip_implicit
         # used handle.stale as "already over", but only a NON-completed settle marks

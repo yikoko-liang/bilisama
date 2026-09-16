@@ -218,20 +218,48 @@ export volcano_api_key=...
 3. **主播开口的边沿在转写上。** 没有 `input_audio_buffer.speech_*`，最早的一帧是
    `conversation.item.input_audio_transcription.started`。它的 `delta` 是**累积式**的
    （「你」「你叫」「你叫什么」…），`completed` 里 `transcript` 是空的，最终文本取最后一条 delta。
-4. **`response.create` 不是报错，是掉线。** 服务端直接 1006 掐断，两次试两次都掐。
+4. **上行事件名是封闭的，写错一个字就掉线。** 不是错误帧，是 1006 直接掐断。
+   `response.create` 并没有被「特别拒绝」——它只是不在协议里，和 `chat.text.query`、
+   `ChatTextQuery`、`input_text_buffer.commit` 一个待遇：**十五个猜名，十五次掐断**
+   （2026-09-16 实测）。所以这条路上没有「未知事件名」这种软失败。
 
-#### 它不会写，只会念
+#### 她会写，只是起不了头
 
-`ChatTextQuery` 在这条协议里没了——官方新旧事件对照表里找不到，十个可能的名字全回
-`unknown event name`。单条 user 的 `conversation.item.create` 存得进去（`retrieve` 拿得回来），
-**但她下一轮不认**（问「我叫什么」答「你还没告诉我」）；注入后发 `input_audio_buffer.commit`
-强制判停也不生成。从文字到声音只剩 `speech_text_buffer.replacement`，它照着念。
+这一节的结论在 2026-09-16 被推翻过两次，两次都是因为**证据本身无效**，所以下面把「测了什么」
+和「证明了什么」分开写。探针 `/tmp/duplex_probe{8..15}.py`，`source path.sh` 后可复跑。
 
-所以这条路上的分工是**侧路模型写、duplex 念**：能力位 `composes_replies=False`
-告诉 L3 这件事，[dev_talk.py](../src/bilisama/dev_talk.py) 挂一个代笔函数交给
-`Scheduler(ghostwriter=...)`，`ReplySpec.text` 带着成品词下去。代笔用的系统提示
-和她自己写时拿到的是同一份（公共前缀 + 事件规则），换后端不该换性格。
-adapter 自己不调任何模型：**她嘴里的话是谁写的，是产品决定，不该藏在协议层**——
+**先说立得住的那条：她自己会写。** 把弹幕用合法形状放进 `dialog_context`，主播只说了句
+「我回来了」，她答的是：
+
+> 欢迎回来呀，刚才观众小王问我播到几点，我打算看大家状态，聊得久就多待会儿～
+
+`tts_type` 是 `default`，文字通道有内容——**她自己组织的，不是我们递的稿子**。直接问
+「刚才那条弹幕问的是什么」，她也复述得出。
+
+**真正没有的是「起头」。** 这条协议上只有主播的麦克风能起一轮。各开一条连接分别测：
+
+| 试的 | 结果 |
+|---|---|
+| 合法上下文 ＋ 一帧不发，等 25 秒 | 一帧都没有 |
+| 把 assistant 占位写成空串（最后一问看着还没答），等 25 秒 | 一帧都没有 |
+| `input_audio_buffer.commit` 当触发 | 只回 `committed` |
+| 推 2 秒静音让 VAD 判停 | 一帧都没有 |
+| `extension.dialog.extra.input_mod="text"`（旧协议的纯文本模式） | 字段收下了，`session.created` 正常，然后还是一帧都没有 |
+| 弹幕写进 `instructions`（这条通道确实中途生效）＋ 主播出声 | 她答主播那句，把弹幕无视了 |
+| 声明 `session.tools` ＋ 主播问「弹幕里有人问什么」 | **她真调了工具**，`response.function_call_arguments.done` 带 `call_id` 回来 |
+| 把弹幕当工具结果回传（六种帧形状） | 五种整帧被丢（无回执也无报错），一种回 `45000000 invalid event payload`，没有一种让她续写 |
+| `speech_text_buffer.append`（非 replacement，扫描里唯一没被掐断的名字） | `tts_type` 是 `chat_tts_text`，文字通道空——**它念，不写** |
+
+**前两次为什么判错**，记在这儿免得再犯：第一次的「她不答文字」全部走
+`conversation.item.create`，而那条通道她读不到；第二次改用 `dialog_context` 了，但塞的是
+**奇数长度**的数组，按下面那条规矩整段被丢——等于又一次隔着墙提问。两次都是拿她从没收到的
+文字问她为什么不答。
+
+所以现在的分工是这样：**要「此刻就回」的那种回复（弹幕、礼物、进房派发），她起不了头，
+词得有人先写好**——能力位叫 `composes_on_demand=False`，重点在 on demand。
+[dev_talk.py](../src/bilisama/dev_talk.py) 挂一个代笔函数交给 `Scheduler(ghostwriter=...)`，
+`ReplySpec.text` 带着成品词下去。代笔用的系统提示和她自己写时拿到的是同一份（公共前缀 ＋
+事件规则）。adapter 自己不调任何模型：**她嘴里的话是谁写的，是产品决定，不该藏在协议层**——
 所以 `request_reply` 拿不到 `text` 时直接抛错，不替谁编。
 
 她**记得自己念过什么**（问「你刚才说了什么」能复述），所以这条路不用再往历史里补问答对。
@@ -244,10 +272,27 @@ adapter 自己不调任何模型：**她嘴里的话是谁写的，是产品决�
   `conversation.item.create` 回 `conversation.item.added`、带 `dialog_context` 的
   `session.update` 回 `session.updated`，两个都是**收下了但她看不见**。所以
   `add_context_item` 是先攒着，下次建会话一起带过去。
+- **而且 `dialog_context` 的长度必须是偶数**，因为服务端**按位置两两配对，根本不看 `role`**。
+  奇数长度**不是丢那一条，是整段全丢**，而且照样回 `session.created`，线上没有任何回执
+  能看出区别。2026-09-16 各开一条连接实测：
+
+  | 发过去的角色序列 | 她记不记得 |
+  |---|---|
+  | `[user, assistant]` | ✅ 全留住 |
+  | `[user, assistant, user, assistant]` | ✅ 全留住 |
+  | `[user]` / `[user, user, assistant]` / `[user, assistant, user]`（奇数） | ❌ 整段没了 |
+  | `[user, user, assistant, assistant]`（偶数但顺序错） | ⚠️ 没被拒，但**话安到了另一个人头上** |
+  | `[assistant, user, assistant, user]`（偶数，位置上仍是一问一答） | ✅ 留住了 |
+
+  这条直接决定了 `add_context_item` 怎么攒——弹幕天然是一串连续的 user，原样发出去是奇数，
+  会让**整场记忆消失**。`pair_up`（[duplex.py](../src/bilisama/realtime/providers/duplex.py)）
+  在建会话时把连续同角色的合并成一轮、掐掉没人接的头尾，凑成偶数且顺序正确的数组，
+  丢掉的条数记进 `duplex.context_unpaired`。
 - **主播开口不会掐断她。** 她把整段说完才理打断，得靠我们发 `response.cancel`：
   ack 是立刻回的，但已生成的音频照流完（31 帧），要靠 `stale` 丢帧。和旧协议一样。
 
-探针脚本 `/tmp/duplex_probe{1..5}.py` 可复跑。这些事实在
+探针脚本 `/tmp/duplex_probe{1..13}.py` 可复跑（要先 `source path.sh` 拿 `volcano_api_key`）。
+这些事实在
 [tests/unit/test_duplex_link.py](../tests/unit/test_duplex_link.py) 里是可执行的——
 假服务端 [tests/fakes/mock_duplex.py](../tests/fakes/mock_duplex.py) 照着真端点的坏脾气写：
 不先发 `session.create` 就发别的帧算违规、`response.create` 直接关连接、中途注入的历史

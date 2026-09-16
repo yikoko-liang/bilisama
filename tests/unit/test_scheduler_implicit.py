@@ -431,7 +431,7 @@ async def test_a_link_that_cannot_compose_gets_finished_words() -> None:
         SpeakingFloor(clock),
         clock,
         ghostwriter=write,
-        link_composes_replies=False,
+        link_composes_on_demand=False,
     )
     spec = await sched._with_text(_danmaku_intent())
     assert spec.text == "谢谢关注呀，今天播到十点"
@@ -450,7 +450,7 @@ async def test_a_missing_ghostwriter_is_loud() -> None:
         _TextLink(),  # type: ignore[arg-type]
         SpeakingFloor(clock),
         clock,
-        link_composes_replies=False,
+        link_composes_on_demand=False,
     )
     with pytest.raises(RuntimeError, match="代笔"):
         await sched._with_text(_danmaku_intent())

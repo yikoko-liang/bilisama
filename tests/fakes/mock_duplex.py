@@ -16,14 +16,23 @@ What it insists on:
   `default` for one she started herself. A client that cannot tell them apart
   puts her own turns and ours in the same basket, and the voice gate then
   holds the wrong ones.
-* **`response.create` closes the socket.** Not an error frame: a 1006. Any
-  client that reaches for it must die here the way it dies there.
-* **History only lands at create.** `conversation.item.create` acks with
-  `conversation.item.added` and `session.update` with a `dialog_context` acks
-  with `session.updated`, and neither reaches `context`. Only
-  `extension.dialog.dialog_context` on `session.create` does. The acks are
-  what makes this worth modelling — a client cannot tell success from silence
-  by the reply, only by asking her afterwards.
+* **An unknown event name closes the socket.** Not an error frame: a 1006.
+  Measured 2026-09-16 across fifteen guessed names — `response.create`,
+  `chat.text.query`, `ChatTextQuery` and the rest all hang up identically.
+  The uplink vocabulary is closed, and a client that reaches outside it dies
+  here the way it dies there.
+* **History only lands at create, and only in even-length pairs.**
+  `conversation.item.create` acks with `conversation.item.added` and
+  `session.update` with a `dialog_context` acks with `session.updated`, and
+  neither reaches `context`. Only `extension.dialog.dialog_context` on
+  `session.create` does — and the real endpoint reads that array positionally
+  in pairs without looking at `role`, so an odd length discards the WHOLE
+  context while still answering `session.created`. This fake discards it the
+  same way. It additionally records a violation for an array that is even but
+  out of order: there the endpoint keeps the text and hangs the wrong speaker
+  on it, which is harder to notice and worse to ship. The acks are what makes
+  all this worth modelling — a client cannot tell success from silence by the
+  reply, only by asking her afterwards.
 * **Transcription carries the speech edges.** There is no
   `input_audio_buffer.speech_started`; `...transcription.started` is the
   earliest one, its deltas are CUMULATIVE, and `...completed` comes back with
@@ -51,6 +60,33 @@ __all__ = ["MockDuplexServer", "Recorded"]
 
 _OURS = "chat_tts_text"
 _HERS = "default"
+
+# The closed uplink vocabulary. Anything else and the real endpoint hangs up.
+_KNOWN = frozenset(
+    {
+        "session.create",
+        "session.update",
+        "session.close",
+        "input_audio_buffer.append",
+        "input_audio_buffer.commit",
+        "conversation.item.create",
+        "conversation.item.retrieve",
+        "conversation.item.delete",
+        "response.cancel",
+        "speech_text_buffer.append",
+        "speech_text_buffer.commit",
+        "speech_text_buffer.replacement.append",
+        "speech_text_buffer.replacement.commit",
+    }
+)
+
+
+def _in_order(context: list[dict[str, str]]) -> bool:
+    """user, assistant, user, assistant — what the positional read assumes."""
+    return all(
+        turn.get("role") == ("user" if i % 2 == 0 else "assistant")
+        for i, turn in enumerate(context)
+    )
 
 
 @dataclass
@@ -80,6 +116,8 @@ class MockDuplexServer:
         # What the model would answer from, as far as this fake models it:
         # only what arrived in dialog_context at create.
         self.context: list[dict[str, str]] = []
+        # True when a dialog_context arrived and was thrown away for shape.
+        self.context_refused = False
         self.instructions = ""
         self.session_id = "sess-1"
         self._refuse_session = refuse_session
@@ -168,8 +206,9 @@ class MockDuplexServer:
             await self._send(ws, {"type": "response.canceled"})
         elif kind == "session.close":
             await self._send(ws, {"type": "session.closed"})
-        elif kind == "response.create":
-            # The real endpoint does not answer this. It hangs up.
+        elif kind not in _KNOWN:
+            # Outside the vocabulary. The real endpoint does not answer and
+            # does not complain — it hangs up.
             await ws.close(code=1006)
 
     async def _on_create(self, ws: ServerConnection, frame: dict[str, Any]) -> None:
@@ -180,8 +219,17 @@ class MockDuplexServer:
             return
         session = frame.get("session") or {}
         self.instructions = str(session.get("instructions") or "")
-        dialog = ((frame.get("extension") or {}).get("dialog") or {}).get("dialog_context") or []
-        self.context = list(dialog)
+        dialog = list(
+            ((frame.get("extension") or {}).get("dialog") or {}).get("dialog_context") or []
+        )
+        # Odd length and the endpoint keeps NONE of it, silently. The session
+        # still comes up, so a client only finds out by asking her.
+        self.context_refused = bool(dialog) and len(dialog) % 2 == 1
+        self.context = [] if self.context_refused else dialog
+        self._refuse(
+            "dialog_context 顺序错了：服务端按位置配对，不看 role，会把话安到另一个人头上",
+            ok=_in_order(self.context),
+        )
         self._created = True
         await self._send(ws, {"type": "session.created", "session": {"id": self.session_id}})
         self._ready.set()

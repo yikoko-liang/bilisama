@@ -75,6 +75,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "dev_talk.ui_started",
         "dev_talk.uplink_resumed",
         "duplex.context_pushed",
+        "duplex.context_unpaired",
         "duplex.reconnect_failed",
         "duplex.reply_requested",
         "duplex.reply_watchdog",

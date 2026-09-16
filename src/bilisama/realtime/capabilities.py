@@ -40,14 +40,15 @@ class Capabilities:
     # instruction channel at all, so the Assembly folds event rules into the
     # session context there instead of scoping per turn.
     per_reply_base_instructions: bool = True
-    # Whether this endpoint will COMPOSE a reply when asked for one. Every
-    # provider here does except the duplex protocol, which dropped the text
-    # query: its only path from words to sound is TTS, which says what it is
-    # given and writes nothing. False means L3 must supply finished text in
-    # ReplySpec.text rather than instructions — and that is a product fact,
-    # not a wire detail, which is why it surfaces here instead of being
-    # papered over inside an adapter.
-    composes_replies: bool = True
+    # Whether this endpoint will compose a reply AT THE MOMENT WE ASK. Every
+    # provider here does except the duplex protocol, and the qualifier is the
+    # whole content of the flag: that one composes perfectly well — it just
+    # cannot be made to start a turn. Only the streamer's microphone starts
+    # one there, so a reply that has to go out now needs finished words.
+    # False means L3 must supply them in ReplySpec.text rather than
+    # instructions — a product fact rather than a wire detail, which is why it
+    # surfaces here instead of being papered over inside an adapter.
+    composes_on_demand: bool = True
 
     @property
     def expr_tags_safe(self) -> bool:
@@ -157,11 +158,12 @@ VOLCANO_DUPLEX = Capabilities(
     # so the adapter books from the first frame and tells ours from hers by
     # the tts_type on response.output_audio.started.
     single_response_slot=True,
-    # No response.create at all, so no conversation="none" to exempt. Sending
-    # response.create does not draw an error: the server closes the socket.
+    # No response.create at all, so no conversation="none" to exempt. It is
+    # not rejected, it is simply outside the uplink vocabulary — and anything
+    # outside that vocabulary closes the socket rather than erroring.
     out_of_band_exempt_from_slot=False,
     # conversation.item.delete exists and acks, but history only reaches the
-    # model at session.create (see composes_replies below for the sibling
+    # model at session.create (see composes_on_demand below for the sibling
     # finding); trimming what the model cannot see buys nothing.
     item_truncate=False,
     # session.update is acknowledged with session.updated — and the ack means
@@ -173,12 +175,16 @@ VOLCANO_DUPLEX = Capabilities(
     # No per-response instruction channel: the only per-turn text this
     # protocol takes is the TTS body, which is content, not instruction.
     per_reply_base_instructions=False,
-    # The one that decides the product shape. ChatTextQuery is gone from this
-    # protocol — it is absent from the vendor's own old-to-new event table,
-    # a lone user item in conversation.item.create is stored and never read,
-    # and response.create closes the socket. What remains is
-    # speech_text_buffer.replacement, which speaks the words it is handed.
-    composes_replies=False,
+    # The one that decides the product shape — and the one whose first reading
+    # was wrong. She composes from text fine: a danmaku sitting in a legal
+    # dialog_context gets answered in her own words the next time the streamer
+    # says anything at all (measured 2026-09-16). What is missing is the
+    # TRIGGER. ChatTextQuery is gone, response.create is outside the uplink
+    # vocabulary, and nothing else starts a turn — not a commit, not silence,
+    # not a tool-call return, not input_mod="text". So a reply that must go
+    # out at a moment of our choosing has to arrive with its words already
+    # written. See providers/duplex.py's header for the probe table.
+    composes_on_demand=False,
 )
 
 

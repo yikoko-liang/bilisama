@@ -140,11 +140,11 @@ default_host、key_env；四条记录在 333-367 行。
 | HostedLink（DashScope 与 OpenAI GA 共用） | `providers/hosted.py` | 连上先发引导帧 modalities / turn_detection / voice / pcm16（:173-206）；会话到期前 3 分钟主动换 socket（:128-138）；改音色或判停参数走 `reconfigure_session` 换 socket（:235-255）；protected 只打一条警告，DashScope 实测不认 interrupt_response（:292-323，计划 #45 探明不可行）；end_protection 空实现（:328-333） |
 | S2SLink | `providers/s2s.py` | 文件头 1-25 行逐条写了 §3.3 八条规则各住在哪；注入恒走 out-of-band（:182-233）；protected 时先发 interrupt_response=false 并记账，重连后补回（:105-133、:235-245） |
 | VolcanoLink | `providers/volcano.py` + `volcano_wire.py` | 二进制帧、数字事件号，不共用 RealtimeClient，自己实现槽位、看门狗、按 question_id 的墓碑和六次重连（:988-1106、:1108-1167）；没有 response.create，`add_context_item` 只暂存，`request_reply` 把事件块和本轮要求合成一条 ChatTextQuery（:867-939）；人设走 StartSession，O2.0 事后用 UpdateConfig 改，SC2.0 改不了只能换会话（:679-782）；改名、换音色也走换会话（:551-605）；`dialog_id` 让重连接得上前 20 轮；ASR_INFO 翻成 SpeechStarted，TTS_ENDED 才算回复完成（:1208-1341） |
-| DuplexLink | `providers/duplex.py` | 纯 JSON 帧、OpenAI 那套事件名，但握手是客户端先发 `session.create`、回复不报幕（靠 `response.output_audio.started` 的 `tts_type` 分「我们点的」和「她自起的」）、主播开口的边沿在 `...input_audio_transcription.started` 上、`response.create` 会被服务端断连——四条都和 `RealtimeClient` 对不上，所以自己一套；**它不会组织回复**，`request_reply` 要 `ReplySpec.text`，没有就抛错；历史只在 `session.create` 时随 `extension.dialog.dialog_context` 进得去，`add_context_item` 因此只暂存；人设走 `session.update` 中途生效，不用换会话 |
+| DuplexLink | `providers/duplex.py` | 纯 JSON 帧、OpenAI 那套事件名，但握手是客户端先发 `session.create`、回复不报幕（靠 `response.output_audio.started` 的 `tts_type` 分「我们点的」和「她自起的」）、主播开口的边沿在 `...input_audio_transcription.started` 上、上行事件名封闭到写错一个就 1006 断连——四条都和 `RealtimeClient` 对不上，所以自己一套；**她会组织回复，但只有主播的麦克风能起一轮**，所以派发型回复的 `request_reply` 要 `ReplySpec.text`，没有就抛错；历史只在 `session.create` 时随 `extension.dialog.dialog_context` 进得去且长度必须偶数（服务端按位置配对、不看 role，奇数整段丢弃），`add_context_item` 因此只暂存、建会话时由 `pair_up` 凑形状；人设走 `session.update` 中途生效，不用换会话 |
 
 火山两条路都没有逐轮指令通道，所以都带 `per_reply_base_instructions=False`，装配层在它们身上把
-事件规则坍缩进会话上下文（`app.py:392-398`）。全双工那条还多一位 `composes_replies=False`，
-调度器那侧的代笔缝见 §3.3 末条。
+事件规则坍缩进会话上下文（`app.py:392-398`）。全双工那条还多一位 `composes_on_demand=False`
+（她会写，但只有主播的麦克风能起一轮），调度器那侧的代笔缝见 §3.3 末条。
 
 ## 3. L3 director：调度与说话权
 
@@ -629,19 +629,30 @@ import」。
      健康运行里 81% 的「漏」压根没出声。量漏接必须看音频帧，不能只看有没有被拦。
 - **全双工协议（Seeduplex 3.0）已接入（2026-09-16）**：`--provider volcano_duplex`，走
   `providers/duplex.py` 自己的 adapter（复用不了 `RealtimeClient`：客户端先发 `session.create`、
-  回复不报幕、主播开口的边沿在转写上、`response.create` 会被服务端断连）。欠账 #79 那个阻塞点
-  **没有消失，是被绕过了**：这条协议仍然没有任何原语能让她「拿一段文字自己组织回复」，所以弹幕、
-  礼物、进房的回复由侧路模型代笔、duplex 照着念。能力位 `composes_replies=False` 是这件事的开关，
-  `ReplySpec.text` 是承载，`Scheduler(ghostwriter=...)` 是接口——**代笔这个决定放在 L3，adapter
-  自己不调任何模型**，拿不到成品词就抛错。没配侧路模型时 `dev-talk` 在启动阶段就退出，不会等到
-  第一条弹幕才发现她哑了。
+  回复不报幕、主播开口的边沿在转写上、上行事件名封闭到写错一个字就 1006 断连）。
 
-  **未拍板的是产品取舍，不是技术可行性**：她的弹幕回复由 `qwen3.7-flash` 写、火山的嗓子念，
-  和另外三家「同一个模型既想也说」不是一回事。代笔用的系统提示与她自己写时相同（公共前缀 ＋
-  事件规则），但仍是两个模型两种文风。主播语音那条路不受影响——她自起的轮次仍然是端到端的。
+  **欠账 #79 的说法要改。** 那条写的是「没有任何原语能让她拿一段文字自己组织回复」——错了，
+  而且错在证据无效：判定用的注入通道她读不到。十五轮探针后的准确说法是
+  **她会写，但起不了头**。弹幕用合法形状进 `dialog_context` 之后，主播随口说句「我回来了」，
+  她自己答的是「欢迎回来呀，刚才观众小王问我播到几点，我打算看大家状态，聊得久就多待会儿」，
+  `tts_type` 是 `default`。缺的是触发：零音频等 25 秒、空 assistant 占位、`commit`、推静音、
+  `input_mod="text"`、工具结果回传六种形状，全部不起轮次。只有主播的麦克风能起一轮。
 
-  用法、探针事实和可执行的契约（`tests/unit/test_duplex_link.py` ＋ 假服务端
-  `tests/fakes/mock_duplex.py`）见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。
+  所以能力位叫 `composes_on_demand=False`，**重点在 on demand**：要「此刻就回」的派发型回复
+  （弹幕、礼物、进房）她起不了头，词得先写好。`ReplySpec.text` 是承载，
+  `Scheduler(ghostwriter=...)` 是接口——**代笔这个决定放在 L3，adapter 自己不调任何模型**，
+  拿不到成品词就抛错。没配侧路模型时 `dev-talk` 在启动阶段就退出。
+
+  **还没拍板的是产品取舍**：派发型回复用代笔（立刻回，但是侧路模型的文风），还是只把弹幕塞进
+  上下文、等她下次开口自己答（她的文风，但要等主播说话，冷场时那条弹幕就没人接）。两条可以并存。
+
+  另有一条会让整场记忆消失的坑，已修：`dialog_context` 长度必须偶数，服务端按位置两两配对、
+  不看 `role`，奇数长度**整段丢弃**且照回 `session.created`。弹幕天然是一串连续 user，
+  `pair_up` 负责凑成合法形状并把丢掉的记进 `duplex.context_unpaired`。
+
+  用法、完整探针表和可执行的契约（`tests/unit/test_duplex_link.py` ＋ 假服务端
+  `tests/fakes/mock_duplex.py`，后者会照真端点的规矩拒收奇数上下文和协议外的事件名）
+  见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。
 - **火山 SC2.0 把思维链标记漏进文字通道（2026-09-09 新开）**：回复开头形如
   `<eocot>确实，地龙这血量顶不住啊。`。`MarkerHead` 见到 `<` 即判 `plain`，所以只要有这个前缀，
   她就算写了记号门也看不见——拿她的原话验过。DashScope 无此现象。解析器该容忍开头的 ASCII 控制标记。
