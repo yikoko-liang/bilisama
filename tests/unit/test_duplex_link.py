@@ -70,6 +70,21 @@ async def test_the_client_speaks_first() -> None:
             await duplex.aclose()
 
 
+def test_the_audio_format_names_the_width_not_just_the_family() -> None:
+    """`pcm` and `pcm_s16le` are both accepted and are not the same thing.
+
+    `pcm` hands back float32 on the downlink. Everything downstream — the
+    broker, the page's AudioContext, the local speaker — reads signed 16-bit,
+    and float32 read that way is full-scale white noise. There is no error
+    frame, no warning, and `session.created` looks identical, so the only
+    thing standing between this and a stream of noise is the literal below.
+    """
+    body = session_body(VolcanoDuplexConfig(), instructions="p", model="1.2.6.1", speaker="v")
+    audio = body["session"]["audio"]
+    assert audio["output"]["format"] == {"type": "pcm_s16le", "rate": 24000}
+    assert audio["input"]["format"] == {"type": "pcm_s16le", "rate": 16000}
+
+
 async def test_a_refused_session_raises_rather_than_hangs() -> None:
     from bilisama.realtime.client import SessionRefused
 

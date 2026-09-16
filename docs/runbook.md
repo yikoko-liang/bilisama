@@ -291,6 +291,25 @@ export volcano_api_key=...
 
 她**记得自己念过什么**（问「你刚才说了什么」能复述），所以这条路不用再往历史里补问答对。
 
+#### 音频格式：`pcm` 不是「PCM」
+
+`session.create` 里 `audio.output.format.type` 这个值三种写法三种结果，**全都照回
+`session.created`，一个错误帧都没有**：
+
+| 写什么 | 拿回来的 | 当 16 位 PCM 播出来 |
+|---|---|---|
+| `"pcm_s16le"` | 真的 16 位 PCM | ✅ 正常人声 |
+| `"pcm"` | **float32 PCM** | ❌ 刺耳噪声 |
+| 不写 | **Ogg Opus**（魔数 `OggS`） | ❌ 刺耳噪声 |
+
+判据是波形连不连续：真语音相邻样本挨得近，平均差只有峰值的 0.03；float32 或压缩流当
+int16 读是白噪声，这个比值 0.6 上下、过零率接近 0.5。
+
+这条最早写成了 `"pcm"`，实盘一放就是噪声——而十七轮探针全程只数帧、一次没听，所以全绿。
+现在 `tests/integration/test_duplex_contract.py` 里有一条专门听波形的用例，把坏值装回去它会红。
+上行那一格 `"pcm"` 和 `"pcm_s16le"` 转写没差别（服务端宽容或在嗅探），但既然下行证明这个值
+有意义，两边都写成我们实际发的东西。
+
 #### 另外三条实测
 
 - **人设中途能改。** `session.update` 改 `instructions` 当场生效（改前答「豆腐」、改后答「小明」），
@@ -324,7 +343,7 @@ export volcano_api_key=...
 .venv/bin/python -m pytest tests/integration/test_duplex_contract.py -m provider_a -v
 ```
 
-十六个用例，真端点跑一遍约六分钟，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
+十七个用例，真端点跑一遍约六分钟，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
 不是我们的 adapter——厂商哪天改了主意，从红测试知道，而不是从一场她突然不回弹幕的直播知道。
 原始探针脚本 `/tmp/duplex_probe{1..17}.py` 也还在（先 `source path.sh`）。
 

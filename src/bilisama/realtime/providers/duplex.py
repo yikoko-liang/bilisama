@@ -212,9 +212,17 @@ def session_body(
         "model": model,
         "instructions": instructions + (PULL_RULE if pull_tool else ""),
         "audio": {
-            "input": {"format": {"type": "pcm", "rate": 16000}},
+            # `pcm_s16le`, not `pcm`. Both are accepted, both come back with a
+            # plain `session.created`, and they mean different things: `pcm`
+            # is FLOAT32 on the downlink. Read as the signed 16-bit everything
+            # downstream expects, that is full-scale white noise — the sound a
+            # streamer described as 刺耳噪声 rather than anything recognisable.
+            # Nothing on the wire says so, which is why seventeen rounds of
+            # frame-counting probes missed it; test_duplex_contract.py now
+            # listens to the waveform instead of counting frames.
+            "input": {"format": {"type": "pcm_s16le", "rate": 16000}},
             "output": {
-                "format": {"type": "pcm", "rate": 24000},
+                "format": {"type": "pcm_s16le", "rate": 24000},
                 "speed": cfg.speed,
                 "loudness": cfg.loudness,
             },

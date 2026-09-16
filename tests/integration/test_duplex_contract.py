@@ -39,6 +39,7 @@ import asyncio
 import base64
 import json
 import os
+import struct
 import time
 import wave
 from collections import Counter
@@ -111,6 +112,7 @@ class _Session:
         self.tts_types: list[str] = []
         self.errors: list[dict[str, Any]] = []
         self.call_ids: list[str] = []
+        self.audio = bytearray()
 
     async def send(self, frame: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(frame))
@@ -135,6 +137,8 @@ class _Session:
                 texts.append(str(frame.get("delta") or ""))
             elif kind == "response.output_audio.started":
                 self.tts_types.append(str(frame.get("tts_type") or ""))
+            elif kind == "response.output_audio.delta":
+                self.audio.extend(base64.b64decode(str(frame.get("delta") or "")))
             elif kind == "response.function_call_arguments.done":
                 items = frame.get("items") or [{}]
                 self.call_ids.append(str(items[0].get("call_id") or ""))
@@ -400,3 +404,52 @@ async def test_instructions_apply_mid_session(tmp_path: Path) -> None:
         await s.speak("你叫什么名字")
         await s.collect(13)
         assert "小明" in s.said, f"改完人设该改口，她说的是 {s.said!r}"
+
+
+# ------------------------------------------------------------ 4. what it sounds like
+
+
+def _continuity(pcm: bytes) -> tuple[int, float]:
+    """Peak, and mean absolute step between neighbours, read as signed 16-bit.
+
+    Speech is a continuous waveform: consecutive samples are close, so the
+    mean step is a small fraction of the peak. Anything that is NOT 16-bit
+    PCM — float32, Ogg Opus, MP3 — read this way is white noise, where the
+    mean step approaches the peak. That ratio is the whole test, and it
+    separates the two by an order of magnitude rather than a hair.
+    """
+    count = len(pcm) // 2
+    values = struct.unpack(f"<{count}h", pcm[: count * 2])
+    peak = max(abs(v) for v in values)
+    step = sum(abs(values[i + 1] - values[i]) for i in range(count - 1)) / (count - 1)
+    return peak, step
+
+
+async def test_the_audio_she_sends_is_the_pcm_we_asked_for(tmp_path: Path) -> None:
+    """The one that would have caught the noise, and the reason this file
+    exists at all.
+
+    Seventeen rounds of probes counted frames and never listened, so a session
+    asking for `pcm` — which is float32 here — passed every check while the
+    streamer got harsh static. Nothing else in the suite can catch it: the
+    fake server sends two placeholder bytes, and the endpoint reports a format
+    it does not honour with the same `session.created` as one it does.
+    """
+    async for s in _open(tmp_path):
+        await s.speak("你好，今天天气怎么样")
+        await s.collect(14)
+        assert len(s.audio) > 20000, f"没收到够长的音频，只有 {len(s.audio)} 字节"
+
+        for magic, name in ((b"OggS", "Ogg/Opus"), (b"ID3", "MP3"), (b"RIFF", "WAV")):
+            assert not bytes(s.audio).startswith(
+                magic
+            ), f"收到的是 {name}，不是裸 PCM——这个后端的音频要直接喂播放器"
+
+        peak, step = _continuity(bytes(s.audio))
+        assert peak > 1000, f"音频几乎是静音（峰值 {peak}），这一轮不算数"
+        assert step / peak < 0.15, (
+            f"当 16 位 PCM 读是白噪声（峰值 {peak}，相邻样本平均差 {step:.0f}，"
+            f"比值 {step / peak:.2f}）。真语音这个比值在 0.05 上下。"
+            "多半是 session.create 里的 format.type 不是 pcm_s16le——"
+            "写 pcm 会拿到 float32，不写会拿到 Ogg Opus，两种都照回 session.created"
+        )

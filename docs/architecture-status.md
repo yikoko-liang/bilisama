@@ -657,10 +657,16 @@ import」。
   不看 `role`，奇数长度**整段丢弃**且照回 `session.created`。弹幕天然是一串连续 user，
   `pair_up` 负责凑成合法形状并把丢掉的记进 `duplex.context_unpaired`。
 
+  **踩过一个只有耳朵能发现的坑**：`audio.output.format.type` 写 `"pcm"` 拿到的是 float32，
+  不写拿到的是 Ogg Opus，写 `"pcm_s16le"` 才是 16 位 PCM——三种都照回 `session.created`，
+  线上没有任何区别。最早写的是 `"pcm"`，实盘一放就是刺耳噪声，而十七轮探针全程只数帧、
+  一次没听，所以全绿。契约测试里现在有一条听波形的用例（相邻样本平均差 ÷ 峰值，真语音 0.03、
+  白噪声 0.6）。
+
   用法和完整探针表见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。两层测试：
   `tests/unit/test_duplex_link.py` 对着假服务端钉 adapter（`tests/fakes/mock_duplex.py`
   照真端点的规矩拒收奇数上下文、协议外的事件名和不合形状的 FC 回传），
-  `tests/integration/test_duplex_contract.py`（`-m provider_a`，16 个用例，真端点约六分钟）
+  `tests/integration/test_duplex_contract.py`（`-m provider_a`，17 个用例，真端点约六分钟）
   钉**端点本身**的行为——那一天的教训是无效证据活得很久，而且藏在没人能复跑的终端回滚里。
 - **火山 SC2.0 把思维链标记漏进文字通道（2026-09-09 新开）**：回复开头形如
   `<eocot>确实，地龙这血量顶不住啊。`。`MarkerHead` 见到 `<` 即判 `plain`，所以只要有这个前缀，
