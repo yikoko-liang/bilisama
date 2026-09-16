@@ -197,6 +197,19 @@ class VolcanoDuplexConfig(BaseModel):
     voice: str = Field("zh_female_vv_uranus_bigtts")
     speed: int = Field(0, ge=-50, le=100)
     loudness: int = Field(0, ge=-50, le=100)
+    # Who answers a danmaku on this protocol, and it is a real fork rather
+    # than a tuning knob, because this endpoint cannot start a turn (probed
+    # 2026-09-16, see providers/duplex.py).
+    #
+    # "ghostwriter": the side model writes the line and the endpoint speaks
+    #   it. The viewer gets an answer within a second of asking. The words are
+    #   qwen3.7-flash's, not hers.
+    # "tool": the danmaku is filed, and she pulls it herself through a
+    #   function call the next time the streamer's voice starts a turn. Her
+    #   own words, no side model — but the wait is however long until the
+    #   streamer next speaks, and a danmaku arriving during dead air keeps
+    #   waiting.
+    event_replies: Literal["ghostwriter", "tool"] = Field("ghostwriter")
 
 
 class SpeechConfig(BaseModel):

@@ -231,6 +231,81 @@ def test_pair_up_keeps_what_it_can_and_hands_back_what_it_cannot() -> None:
     assert pair_up([]) == ([], [])
 
 
+# ------------------------------------------------------------ she pulls them herself
+
+
+async def test_the_pull_tool_is_only_declared_when_that_route_is_chosen() -> None:
+    """Declaring it changes what she does on every turn, so it is not a
+    harmless default: under the ghostwriter route L3 answers the danmaku and a
+    tool she could call would have her answering it twice."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            assert server.tools == []
+            assert "get_live_events" not in server.instructions
+        finally:
+            await duplex.aclose()
+
+    async with MockDuplexServer() as second:
+        duplex = _link(second, pull_tool=True)
+        await duplex.connect()
+        try:
+            assert [t["name"] for t in second.tools] == ["get_live_events"]
+            # Without the rule she has a tool and no idea it exists.
+            assert "get_live_events" in second.instructions
+        finally:
+            await duplex.aclose()
+
+
+async def test_filed_events_go_back_when_she_asks_for_them() -> None:
+    async with MockDuplexServer() as server:
+        duplex = _link(server, pull_tool=True)
+        await duplex.connect()
+        try:
+            await duplex.add_context_item("[弹幕] 观众A: 今天播到几点")
+            await duplex.add_context_item("[礼物] 观众B 送了火箭")
+            await server.wants_events(call_id="call-abc")
+            await _settles(lambda: len(server.tool_results) == 1, "她要了，但没回传")
+            assert server.tool_results[0] == "[弹幕] 观众A: 今天播到几点\n[礼物] 观众B 送了火箭"
+
+            # Handed over once. A second pull must not read them again, or she
+            # thanks the same rocket twice.
+            await server.wants_events(call_id="call-def")
+            await _settles(lambda: len(server.tool_results) == 2, "第二次没回传")
+            assert "暂时没有" in server.tool_results[1]
+        finally:
+            await duplex.aclose()
+
+
+async def test_her_own_lines_are_not_filed_as_viewer_events() -> None:
+    """`add_context_item(role="assistant")` is the scheduler mirroring what she
+    said (scheduler.py:287). Filing it would read it back to her as a viewer
+    message on the next pull."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server, pull_tool=True)
+        await duplex.connect()
+        try:
+            await duplex.add_context_item("谢谢火箭！", role="assistant")
+            await server.wants_events()
+            await _settles(lambda: len(server.tool_results) == 1, "没回传")
+            assert "暂时没有" in server.tool_results[0]
+        finally:
+            await duplex.aclose()
+
+
+async def test_nothing_is_filed_when_l3_is_the_one_answering() -> None:
+    """Under the ghostwriter route the queue would only ever grow."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex.add_context_item("[弹幕] 观众A: 今天播到几点")
+            assert not duplex._unpulled, "代笔路线下没人来拉，攒起来只会越攒越多"
+        finally:
+            await duplex.aclose()
+
+
 async def test_an_event_outside_the_vocabulary_is_never_sent() -> None:
     """Any unknown uplink name hangs the socket up — fifteen guesses, fifteen
     1006s. So a typo in an event name is not a warning, it is a dropped call."""

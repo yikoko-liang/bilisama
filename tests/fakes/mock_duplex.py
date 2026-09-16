@@ -122,6 +122,9 @@ class MockDuplexServer:
         self.context: list[dict[str, str]] = []
         # True when a dialog_context arrived and was thrown away for shape.
         self.context_refused = False
+        # What came back as a function-call result, in arrival order.
+        self.tool_results: list[str] = []
+        self.tools: list[dict[str, Any]] = []
         self.instructions = ""
         self.session_id = "sess-1"
         self._refuse_session = refuse_session
@@ -201,6 +204,19 @@ class MockDuplexServer:
             await self._send(ws, {"type": "input_audio_buffer.committed"})
         elif kind == "conversation.item.create":
             items = frame.get("items") or []
+            first = items[0] if items else {}
+            if "call_id" in first:
+                # A function-call result. The real endpoint is unforgiving
+                # about this shape — five near-misses were dropped whole, with
+                # neither an ack nor an error — so anything else is a
+                # violation here rather than a silent pass.
+                self._refuse(
+                    "FC 回传要用文档的形状：role=tool、content=[{type:input_text,text}]",
+                    ok=first.get("role") == "tool"
+                    and [c.get("type") for c in first.get("content") or []] == ["input_text"],
+                )
+                self.tool_results.append(str((first.get("content") or [{}])[0].get("text") or ""))
+                return
             await self._send(ws, {"type": "conversation.item.added", "items": items})
         elif kind in ("speech_text_buffer.replacement.append", "speech_text_buffer.commit"):
             self._pending = str(frame.get("text") or "")
@@ -223,6 +239,7 @@ class MockDuplexServer:
             return
         session = frame.get("session") or {}
         self.instructions = str(session.get("instructions") or "")
+        self.tools = list(session.get("tools") or [])
         dialog = list(
             ((frame.get("extension") or {}).get("dialog") or {}).get("dialog_context") or []
         )
@@ -263,6 +280,23 @@ class MockDuplexServer:
         )
         await self._send(ws, {"type": "response.output_audio.done"})
         await self._send(ws, {"type": "response.done"})
+
+    async def wants_events(self, call_id: str = "call-1") -> None:
+        """She calls the pull tool, the way she does after a streamer turn.
+
+        Only meaningful when the client declared one: `tools` is recorded off
+        session.create so a test can assert the declaration went out at all.
+        """
+        ws = self._ws
+        assert ws is not None
+        self._refuse("没声明 tools 就不该收到工具调用", ok=bool(self.tools))
+        await self._send(
+            ws,
+            {
+                "type": "response.function_call_arguments.done",
+                "items": [{"call_id": call_id, "name": "get_live_events", "arguments": "{}"}],
+            },
+        )
 
     async def hear(self, transcript: str) -> None:
         """The streamer speaks. Deltas are cumulative, `completed` is empty."""

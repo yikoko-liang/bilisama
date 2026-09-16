@@ -66,6 +66,10 @@ class SkipReason(StrEnum):
     """The provider's own microphone turn was cut: the streamer was not
     talking to her (the voice gate's ruling, director/voice_turn.py)."""
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat
+    FILED_FOR_PULL = "link.filed_for_pull"
+    """Nobody dropped it and nobody answered it yet: the backend cannot be made
+    to start a turn, so the event was filed and she brings it up herself on her
+    next one (the duplex protocol's 「tool」 route)."""
     # The danmaku funnel's accounts (selector.py). LOW_VALUE and DUPLICATE
     # above serve the funnel too — one vocabulary, not a parallel one.
     UID_COOLDOWN = (

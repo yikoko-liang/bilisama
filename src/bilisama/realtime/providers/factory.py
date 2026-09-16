@@ -226,6 +226,10 @@ def build_link(request: LinkRequest) -> BuiltLink:
                     config=duplex_cfg,
                     speaker=duplex_cfg.voice,
                     model=request.endpoint.model or duplex_cfg.model,
+                    # "tool" means she pulls viewer events herself; the
+                    # declaration has to be on the session from the start,
+                    # so it is a construction-time fact rather than a toggle.
+                    pull_tool=duplex_cfg.event_replies == "tool",
                     quiet_window_s=quiet_window_s(request.settings, provider),
                 ),
                 request.endpoint.url,

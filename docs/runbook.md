@@ -197,11 +197,11 @@ export volcano_api_key=...
 |---|---|
 | `model` | 固定 `1.2.6.1`，厂商升版本才改 |
 | `voice` | 走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表。**和上面那套火山的音色表不通用**（探针里 `jupiter` 的 `zh_female_vv_jupiter_bigtts` 也能连上，但别指望通用） |
+| `event_replies` | 弹幕由谁来回：`ghostwriter`（出厂，侧路模型写词她念）或 `tool`（她自己拉、自己答）。两条的差别见下面那张表 |
 | `speed` / `loudness` | 0 是原速原音量，范围 -50~100 |
 
-**开播前先有侧路模型，否则直接报错退出。** 这条协议不会自己组织回复（下面「它不会写」），
-弹幕、礼物、进房的回复得有人代笔。没配 `[speech.side]` 时 `dev-talk` 在启动阶段就
-`SystemExit`，不会等到第一条弹幕进来才发现她哑了。
+**走出厂的 `ghostwriter` 就得先有侧路模型，否则启动阶段直接退出**——不会等到第一条弹幕进来
+才发现她哑了。报错里会同时告诉你另一条路：把 `event_replies` 改成 `tool` 就不需要侧路模型。
 
 #### 为什么它要一个自己的 adapter（2026-09-16 真端点五轮探针）
 
@@ -265,12 +265,29 @@ export volcano_api_key=...
 **奇数长度**的数组，按下面那条规矩整段被丢——等于又一次隔着墙提问。两次都是拿她从没收到的
 文字问她为什么不答。
 
-所以现在的分工是这样：**要「此刻就回」的那种回复（弹幕、礼物、进房派发），她起不了头，
-词得有人先写好**——能力位叫 `composes_on_demand=False`，重点在 on demand。
+#### 所以弹幕回复有两条路，配置里选
+
+`[speech.volcano_duplex] event_replies`，出厂是 `ghostwriter`：
+
+| | `ghostwriter`（出厂） | `tool` |
+|---|---|---|
+| 谁写这句话 | 侧路模型（`qwen3.7-flash`） | **她自己** |
+| 观众多久等到 | 一秒上下 | 等主播下次开口，冷场时一直等 |
+| 要不要侧路模型 | 要，没配就启动时退出 | 不要 |
+| 文风 | 另一个模型的 | 她本人的 |
+
+**`ghostwriter`**：能力位 `composes_on_demand=False`（重点在 on demand），
 [dev_talk.py](../src/bilisama/dev_talk.py) 挂一个代笔函数交给 `Scheduler(ghostwriter=...)`，
 `ReplySpec.text` 带着成品词下去。代笔用的系统提示和她自己写时拿到的是同一份（公共前缀 ＋
 事件规则）。adapter 自己不调任何模型：**她嘴里的话是谁写的，是产品决定，不该藏在协议层**——
 所以 `request_reply` 拿不到 `text` 时直接抛错，不替谁编。
+
+**`tool`**：建会话时声明一个 `get_live_events` 工具，弹幕到了先**存着不派发**
+（调度器的判决写 `link.filed_for_pull`，面板上看得到它没丢），她跟主播说话时自己来拉，
+拉到什么就用自己的话捎带答了。没有侧路模型，也不用换会话。代价写在上面那张表里——
+她起不了头这件事没变，只是改成「等她下次有话头」而不是「找人替她写」。
+
+两条都不能凭空起一轮。真要「此刻就回」，只有 `ghostwriter`。
 
 她**记得自己念过什么**（问「你刚才说了什么」能复述），所以这条路不用再往历史里补问答对。
 
@@ -301,7 +318,16 @@ export volcano_api_key=...
 - **主播开口不会掐断她。** 她把整段说完才理打断，得靠我们发 `response.cancel`：
   ack 是立刻回的，但已生成的音频照流完（31 帧），要靠 `stale` 丢帧。和旧协议一样。
 
-探针脚本 `/tmp/duplex_probe{1..13}.py` 可复跑（要先 `source path.sh` 拿 `volcano_api_key`）。
+**上面这些事实现在是可复跑的契约测试**，不再只活在临时脚本里：
+
+```bash
+.venv/bin/python -m pytest tests/integration/test_duplex_contract.py -m provider_a -v
+```
+
+十六个用例，真端点跑一遍约六分钟，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
+不是我们的 adapter——厂商哪天改了主意，从红测试知道，而不是从一场她突然不回弹幕的直播知道。
+原始探针脚本 `/tmp/duplex_probe{1..17}.py` 也还在（先 `source path.sh`）。
+
 这些事实在
 [tests/unit/test_duplex_link.py](../tests/unit/test_duplex_link.py) 里是可执行的——
 假服务端 [tests/fakes/mock_duplex.py](../tests/fakes/mock_duplex.py) 照着真端点的坏脾气写：

@@ -2051,25 +2051,37 @@ async def run_director(args: argparse.Namespace) -> int:
         note_recent_line(text)
 
     composes = profile_for(provider).caps.composes_on_demand
-    if not composes and side is None:
+    # Which of the two routes a backend that cannot start a turn should take.
+    # Only the duplex protocol has the choice, so only its config carries it;
+    # everywhere else `composes` is True and none of this is consulted.
+    pulls_events = not composes and settings.speech.volcano_duplex.event_replies == "tool"
+    if not composes and not pulls_events and side is None:
         raise SystemExit(
-            f"{provider.value} 不会自己组织弹幕/礼物的回复，需要一个侧路模型替她写。\n"
-            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。"
+            f"{provider.value} 起不了自己的轮次，弹幕/礼物的回复需要一个侧路模型替她写。\n"
+            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。\n"
+            '也可以把 [speech.volcano_duplex] event_replies 改成 "tool"，'
+            "让她在跟主播说话时自己把弹幕捎带答了（不用侧路模型，但要等主播开口）。"
         )
 
-    async def ghostwrite(intent: Intent) -> str:
-        """Write one event reply for a link that cannot.
+    async def ghostwrite(intent: Intent) -> str | None:
+        """Write one event reply for a link that cannot start its own turn.
 
-        The same context she would have been given if the endpoint could
-        compose: the public prefix plus the event contract, with the event
-        line and this turn's ask as the question. Matching it is the whole
-        point — the words come from another model, so everything else about
-        the request has to stay the same or she changes character the moment
-        the backend does.
+        The same context she would have been given if the endpoint could be
+        asked to compose: the public prefix plus the event contract, with the
+        event line and this turn's ask as the question. Matching it is the
+        whole point — the words come from another model, so everything else
+        about the request has to stay the same or she changes character the
+        moment the backend does.
+
+        Under the 「tool」 route nobody ghostwrites: returning None tells the
+        scheduler this one is filed rather than spoken, and the context item
+        it already wrote is what she pulls on her next turn.
 
         `assembly` is bound later in this function and read here at call
         time; the first dispatch is many seconds after setup finishes.
         """
+        if pulls_events:
+            return None
         assert side is not None  # the SystemExit above
         parts = [
             part

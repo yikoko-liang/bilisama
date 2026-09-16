@@ -369,9 +369,10 @@ class _TextLink(_StubLink):
     def __init__(self) -> None:
         super().__init__()
         self.specs: list[link.ReplySpec] = []
+        self.items: list[str] = []
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
-        return None
+        self.items.append(text)
 
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
         self.specs.append(spec)
@@ -408,6 +409,7 @@ async def test_a_link_that_composes_never_calls_the_ghostwriter() -> None:
 
     sched = Scheduler(stub, SpeakingFloor(clock), clock, ghostwriter=never)  # type: ignore[arg-type]
     spec = await sched._with_text(_danmaku_intent())
+    assert spec is not None
     assert spec.text is None and not called
 
 
@@ -434,9 +436,43 @@ async def test_a_link_that_cannot_compose_gets_finished_words() -> None:
         link_composes_on_demand=False,
     )
     spec = await sched._with_text(_danmaku_intent())
+    assert spec is not None, "有代笔就该有词"
     assert spec.text == "谢谢关注呀，今天播到十点"
     assert spec.instructions == "回一句", "简报不变，代笔看的就是它"
     assert seen == ["[弹幕] 观众A: 主播今天播到几点"], "代笔拿到的是这条弹幕本身"
+
+
+async def test_a_ghostwriter_that_declines_files_the_event_instead_of_speaking() -> None:
+    """The duplex protocol's other route: nobody writes the line, the danmaku
+    is left where she pulls it on a turn of her own. The context item still
+    goes out — it IS the delivery — and the intent gets its one verdict, so
+    the panel shows it accounted for rather than vanished."""
+    from bilisama.clock import FakeClock
+    from bilisama.director.floor import SpeakingFloor
+    from bilisama.obs.outcome import Outcome, SkipReason
+
+    clock = FakeClock()
+    stub = _TextLink()
+    verdicts: list[Any] = []
+
+    async def defer(_intent: Any) -> str | None:
+        return None
+
+    sched = Scheduler(
+        stub,  # type: ignore[arg-type]
+        SpeakingFloor(clock),
+        clock,
+        verdict_sink=verdicts.append,
+        ghostwriter=defer,
+        link_composes_on_demand=False,
+    )
+    await sched._dispatch(_danmaku_intent())
+
+    assert stub.items == ["[弹幕] 观众A: 主播今天播到几点"], "弹幕要进上下文，她才拉得到"
+    assert stub.specs == [], "这一条不派发，等她自己提"
+    assert len(verdicts) == 1, "一条意图恰好一个判决"
+    assert verdicts[0].outcome is Outcome.SKIPPED
+    assert verdicts[0].reason is SkipReason.FILED_FOR_PULL
 
 
 async def test_a_missing_ghostwriter_is_loud() -> None:

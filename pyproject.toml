@@ -146,10 +146,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: 需要真实的 speech-to-speech 服务，默认不跑",
-    # Nothing carries provider_a yet — half of ledger #37. Registered anyway,
-    # because plan section 10.5 owes the tier; what keeps that from reading as
-    # covered is test_gate.py's EMPTY_TIERS, which names it as excused AND empty
-    # instead of letting one line of excuse balance a row of zeroes.
+    # Carried by three contract files now (hosted, volcano, duplex), so the
+    # EMPTY_TIERS excuse this comment used to describe is gone from
+    # test_gate.py. Left registered and deselected: these dial real endpoints
+    # and cost money, which is not something a default `pytest` should do.
     "provider_a: 需要真实的托管 Realtime 端点，默认不跑",
     # A `manual` marker was removed from here: registered, deselected below and
     # excused in the gate, with not one test carrying it and an excuse describing

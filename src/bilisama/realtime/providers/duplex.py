@@ -168,6 +168,29 @@ def pair_up(
     return merged, dropped
 
 
+# The tool she pulls pending viewer events with, when the danmaku route is
+# "tool" rather than "ghostwriter". The name and the argument-free signature
+# are this adapter's business: L3 decides WHETHER she answers her own danmaku,
+# never how the frames spell it.
+PULL_TOOL = {
+    "type": "function",
+    "name": "get_live_events",
+    "description": "拉取直播间里还没回过的观众消息（弹幕、礼物、进房）",
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+# Appended to the persona when the tool is declared. It is a statement about
+# what this endpoint can and cannot see rather than about who she is, which is
+# why it lives here and not in config/personas: on the other three providers
+# the events arrive in the prompt and none of this is true.
+PULL_RULE = (
+    "\n\n观众的弹幕、礼物和进房你看不到，要调用 get_live_events 才能拿到。"
+    "和主播说话时，如果有还没回的观众消息，顺口带一句再接着聊；没有就正常说话，"
+    "不要提这个工具，也不要说自己去查了。"
+)
+
+_NO_EVENTS = "（暂时没有新的观众消息）"
+
+
 def session_body(
     cfg: VolcanoDuplexConfig,
     *,
@@ -176,6 +199,7 @@ def session_body(
     speaker: str,
     session_id: str = "",
     history: list[dict[str, str]] | None = None,
+    pull_tool: bool = False,
 ) -> dict[str, Any]:
     """The session block both `session.create` and `session.update` carry.
 
@@ -186,7 +210,7 @@ def session_body(
     """
     session: dict[str, Any] = {
         "model": model,
-        "instructions": instructions,
+        "instructions": instructions + (PULL_RULE if pull_tool else ""),
         "audio": {
             "input": {"format": {"type": "pcm", "rate": 16000}},
             "output": {
@@ -198,6 +222,8 @@ def session_body(
     }
     if speaker:
         session["audio"]["output"]["voice"] = speaker
+    if pull_tool:
+        session["tools"] = [PULL_TOOL]
     if session_id:
         # The vendor's own words: 「对应原 dialog id，接续历史对话时传入」.
         session["id"] = session_id
@@ -218,6 +244,7 @@ class DuplexLink:
         config: VolcanoDuplexConfig,
         speaker: str = "",
         model: str = "",
+        pull_tool: bool = False,
         quiet_window_s: float = 1.8,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
@@ -267,6 +294,12 @@ class DuplexLink:
         # accepted and ignored — see the module note.
         self._pending_items: deque[dict[str, str]] = deque(maxlen=40)
         self._warned_no_text = False
+        self._pull_tool = pull_tool
+        # Viewer events filed but not yet handed to her. Only fills when the
+        # tool is declared; in ghostwriter mode L3 answers these itself and
+        # nothing would ever drain the queue. Bounded because a quiet streamer
+        # is exactly when it grows: she can only pull on a turn she takes.
+        self._unpulled: deque[str] = deque(maxlen=20)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -292,6 +325,7 @@ class DuplexLink:
                     speaker=self._speaker,
                     session_id=self._session_id,
                     history=history or None,
+                    pull_tool=self._pull_tool,
                 ),
             }
         )
@@ -388,6 +422,7 @@ class DuplexLink:
                     model=self._model,
                     speaker=self._speaker,
                     session_id=self._session_id,
+                    pull_tool=self._pull_tool,
                 ),
             }
         )
@@ -411,8 +446,14 @@ class DuplexLink:
         Kept raw, in arrival order. `pair_up` does the shaping at create time,
         because only then is it known whether the last danmaku ever got an
         answer — and an unanswered one on the end voids the whole context.
+
+        With the pull tool declared this is also the filing step: a viewer
+        event waits here until she asks for it on a turn of her own. Her own
+        lines are not viewer events and never queue.
         """
         self._pending_items.append({"role": role, "text": text})
+        if self._pull_tool and role != "assistant":
+            self._unpulled.append(text)
 
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
         """Say `spec.text`, as it stands.
@@ -545,7 +586,18 @@ class DuplexLink:
                 except ValueError:
                     continue
                 if isinstance(frame, dict):
-                    self._dispatch(frame)
+                    try:
+                        self._dispatch(frame)
+                    except Exception as exc:  # a bug here, not a dead socket
+                        # Letting this reach the handler below would report a
+                        # healthy link as disconnected and quietly reconnect,
+                        # which is how a NameError in a frame handler spent an
+                        # afternoon looking like a flaky endpoint.
+                        log.exception(
+                            "duplex.frame_handler_failed",
+                            kind=str(frame.get("type") or ""),
+                            error_text=str(exc)[:200],
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # the socket died
@@ -569,6 +621,9 @@ class DuplexLink:
             # delta. L3's transcript sink reads the deltas, so this is the
             # edge and nothing more.
             self._events.put_nowait(link.SpeechStopped())
+            return
+        if kind == "response.function_call_arguments.done":
+            self._on_pull(frame)
             return
         if kind == "response.output_audio.started":
             self._on_reply_started(frame)
@@ -601,6 +656,50 @@ class DuplexLink:
                     str(error.get("message") or ""),
                 )
             )
+
+    def _on_pull(self, frame: Mapping[str, Any]) -> None:
+        """She asked for the pending viewer events. Hand them over.
+
+        The reply shape is the vendor's published one and nothing near it
+        works: five near-misses were dropped whole, with neither an ack nor an
+        error, so there is no runtime signal to tell a typo from a refusal.
+        `call_id` must be the one she issued — a fabricated one draws nothing.
+        """
+        items = frame.get("items") or []
+        # `dict`, not `Mapping`: that name is a typing-only import here, and an
+        # isinstance against it raises inside the receive loop — which reads as
+        # a dropped socket and a reconnect, not as the bug it is.
+        first = items[0] if items and isinstance(items[0], dict) else {}
+        call_id = str(first.get("call_id") or frame.get("call_id") or "")
+        if not call_id:
+            log.warning(
+                "duplex.pull_without_call_id",
+                error_text="她调了工具但帧里没有 call_id，这一轮回传不了。",
+            )
+            return
+        pending = list(self._unpulled)
+        self._unpulled.clear()
+        log.info("duplex.events_pulled", count=len(pending))
+        payload = "\n".join(pending) if pending else _NO_EVENTS
+        # _dispatch runs inside the receive loop, so the send goes on a task
+        # of its own rather than blocking the next frame.
+        task = asyncio.create_task(
+            self._send(
+                {
+                    "type": "conversation.item.create",
+                    "items": [
+                        {
+                            "call_id": call_id,
+                            "role": "tool",
+                            "content": [{"type": "input_text", "text": payload}],
+                        }
+                    ],
+                }
+            ),
+            name="duplex:pull",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def _on_reply_started(self, frame: Mapping[str, Any]) -> None:
         """Book the reply, and decide whose words these are.

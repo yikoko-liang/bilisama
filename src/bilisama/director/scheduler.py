@@ -201,7 +201,7 @@ class Scheduler:
         on_hit: Literal["drop_sentence", "mute_all"] = "drop_sentence",
         spoken_sink: Callable[[str], None] | None = None,
         implicit_spoken_sink: Callable[[str], None] | None = None,
-        ghostwriter: Callable[[Intent], Awaitable[str]] | None = None,
+        ghostwriter: Callable[[Intent], Awaitable[str | None]] | None = None,
         link_composes_on_demand: bool = True,
     ) -> None:
         self._speech = speech
@@ -221,11 +221,12 @@ class Scheduler:
         # Separate from spoken_sink so an entry point can wire one and not
         # the other; dev-talk wires both to the same line.
         self._implicit_spoken_sink = implicit_spoken_sink
-        # Writes her lines for an endpoint that cannot
-        # (capabilities.composes_on_demand False). The scheduler knows only that
-        # finished words are required before it may dispatch; who supplies
-        # them, and in whose voice, is the entry point's business. Left None
-        # everywhere else, and never consulted there.
+        # Writes her lines for an endpoint that cannot start a turn of its
+        # own (capabilities.composes_on_demand False). The scheduler knows
+        # only that finished words are required before it may dispatch; who
+        # supplies them, in whose voice, or that this one should wait for her
+        # to raise it herself (None back), is the entry point's business.
+        # Left None everywhere else, and never consulted there.
         self._ghostwriter = ghostwriter
         # A bool rather than the Capabilities object: L3 has no business
         # reading a provider's capability table, and the entry point already
@@ -734,6 +735,21 @@ class Scheduler:
                 await self._speech.add_context_item(intent.injection.item_text)
                 wrote_item = True
             reply = await self._with_text(intent)
+            if reply is None:
+                # Filed, not spoken: the context item above is the whole
+                # delivery, and she raises it herself next time she has the
+                # floor. One verdict either way, so nothing hangs.
+                self._free_key(intent)
+                self._emit(
+                    Verdict(
+                        intent_id=intent.dedup_key or intent.source,
+                        source=intent.source,
+                        outcome=Outcome.SKIPPED,
+                        phase=Phase.SELECTED,
+                        reason=SkipReason.FILED_FOR_PULL,
+                    )
+                )
+                return
             handle = await self._speech.request_reply(reply)
         except Exception as exc:
             log.warning(
@@ -844,19 +860,25 @@ class Scheduler:
         if active is not None and handle is active.handle:
             active.output_started = True
 
-    async def _with_text(self, intent: Intent) -> ReplySpec:
+    async def _with_text(self, intent: Intent) -> ReplySpec | None:
         """The reply to send, with finished words when the link needs them.
 
         Most endpoints compose from `instructions`, and this hands the spec
-        straight back. The duplex protocol has no composing step at all — its
-        only path from words to sound says exactly what it is given — so the
+        straight back. The duplex protocol cannot be made to start a turn, so
+        a reply that has to go out now needs its words already written: the
         ghostwriter runs here, inside the dispatch that was already awaiting,
         and its output rides `ReplySpec.text`.
 
-        A ghostwriter that fails is not a reason to say something else: the
-        dispatch raises, `_dispatch` turns it into a verdict the same way a
-        failed send becomes one, and the intent is accounted for rather than
-        answered in a voice nobody chose.
+        `None` back from the ghostwriter means nobody is writing this one and
+        that is on purpose — the event has been filed where she will pick it
+        up on a turn of her own. `_dispatch` books it as filed rather than
+        spoken. The context item is already written by then, which is exactly
+        what filing needs.
+
+        A ghostwriter that FAILS is a different thing and not a reason to say
+        something else: the dispatch raises, `_dispatch` turns it into a
+        verdict the same way a failed send becomes one, and the intent is
+        accounted for rather than answered in a voice nobody chose.
         """
         reply = intent.injection.reply
         if self._link_composes or reply.text is not None:
@@ -865,7 +887,8 @@ class Scheduler:
             raise RuntimeError(
                 "这个语音后端不会自己组织回复，但没有接代笔（Scheduler(ghostwriter=...)）"
             )
-        return replace(reply, text=await self._ghostwriter(intent))
+        written = await self._ghostwriter(intent)
+        return None if written is None else replace(reply, text=written)
 
     def _open_implicit(self, handle: link.ReplyHandle) -> None:
         # Every adapter emits ReplyStarted ahead of the turn's first delta

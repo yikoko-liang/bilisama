@@ -647,16 +647,21 @@ import」。
   `Scheduler(ghostwriter=...)` 是接口——**代笔这个决定放在 L3，adapter 自己不调任何模型**，
   拿不到成品词就抛错。没配侧路模型时 `dev-talk` 在启动阶段就退出。
 
-  **还没拍板的是产品取舍**：派发型回复用代笔（立刻回，但是侧路模型的文风），还是只把弹幕塞进
-  上下文、等她下次开口自己答（她的文风，但要等主播说话，冷场时那条弹幕就没人接）。两条可以并存。
+  **两条路都做了，配置里选**（`[speech.volcano_duplex] event_replies`，出厂 `ghostwriter`）：
+  `ghostwriter` 是侧路模型写词、她念，一秒上下就回，文风是另一个模型的；`tool` 是建会话时
+  声明 `get_live_events`，弹幕到了只存不派发（判决写 `link.filed_for_pull`，面板上看得见
+  它没丢），她跟主播说话时自己拉、自己答，是她本人的文风但要等主播开口。要「此刻就回」
+  只有 `ghostwriter`——她起不了头这件事两条路都绕不开。
 
   另有一条会让整场记忆消失的坑，已修：`dialog_context` 长度必须偶数，服务端按位置两两配对、
   不看 `role`，奇数长度**整段丢弃**且照回 `session.created`。弹幕天然是一串连续 user，
   `pair_up` 负责凑成合法形状并把丢掉的记进 `duplex.context_unpaired`。
 
-  用法、完整探针表和可执行的契约（`tests/unit/test_duplex_link.py` ＋ 假服务端
-  `tests/fakes/mock_duplex.py`，后者会照真端点的规矩拒收奇数上下文和协议外的事件名）
-  见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。
+  用法和完整探针表见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。两层测试：
+  `tests/unit/test_duplex_link.py` 对着假服务端钉 adapter（`tests/fakes/mock_duplex.py`
+  照真端点的规矩拒收奇数上下文、协议外的事件名和不合形状的 FC 回传），
+  `tests/integration/test_duplex_contract.py`（`-m provider_a`，16 个用例，真端点约六分钟）
+  钉**端点本身**的行为——那一天的教训是无效证据活得很久，而且藏在没人能复跑的终端回滚里。
 - **火山 SC2.0 把思维链标记漏进文字通道（2026-09-09 新开）**：回复开头形如
   `<eocot>确实，地龙这血量顶不住啊。`。`MarkerHead` 见到 `<` 即判 `plain`，所以只要有这个前缀，
   她就算写了记号门也看不见——拿她的原话验过。DashScope 无此现象。解析器该容忍开头的 ASCII 控制标记。

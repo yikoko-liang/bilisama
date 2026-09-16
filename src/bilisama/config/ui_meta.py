@@ -605,6 +605,20 @@ UI_META: dict[str, FieldMeta] = {
         order=4,
         wizard_step=2,
     ),
+    "speech.volcano_duplex.event_replies": FieldMeta(
+        label="弹幕由谁来回",
+        hint=(
+            "这条协议起不了自己的轮次。ghostwriter：侧路模型写词、她照着念，"
+            "弹幕一到立刻回，但那是另一个模型的文风。"
+            "tool：她在跟主播说话时自己把没回的弹幕捎带答了，是她自己的话，"
+            "但要等主播下次开口，冷场时那条弹幕就一直等着"
+        ),
+        provider_scoped="volcano_duplex",
+        audience=Audience.STREAMER,
+        reload=Reload.RECONNECT,
+        group="火山全双工",
+        order=5,
+    ),
     "speech.volcano_duplex.speed": FieldMeta(
         label="语速",
         hint="0 是原速；-50 约慢一半，100 约两倍速",
