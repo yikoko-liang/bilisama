@@ -46,11 +46,17 @@ _SEGMENT = b"\x00\x00" * 6000
 # drop the audio socket the way `socket.onerror -> close()` does in production
 # (audio.js:113), and count what the page opens in response; `window.__streams`
 # and `window.__gum` are how a test can see a microphone the page forgot to let
-# go of, which no DOM assertion can reach.
+# go of, which no DOM assertion can reach. `window.__contexts` is the same idea
+# for the playback clock: `AudioContext.currentTime` stops while the autoplay
+# policy has the context parked, so wall-clock time in a test and audible time
+# on the page are different quantities, and only the second one is what
+# played_ms counts. audio.js builds at most one (`context ?? new
+# AudioContext()`, four call sites).
 _SPY = """
 window.__sockets = [];
 window.__streams = [];
 window.__gum = [];
+window.__contexts = [];
 class RecordingSocket extends WebSocket {
   constructor(...args) {
     super(...args);
@@ -58,6 +64,13 @@ class RecordingSocket extends WebSocket {
   }
 }
 window.WebSocket = RecordingSocket;
+class RecordingAudioContext extends AudioContext {
+  constructor(...args) {
+    super(...args);
+    window.__contexts.push(this);
+  }
+}
+window.AudioContext = RecordingAudioContext;
 const media = navigator.mediaDevices;
 const realGetUserMedia = media.getUserMedia.bind(media);
 media.getUserMedia = async (constraints) => {
@@ -207,6 +220,23 @@ async def _until(check: Callable[[], bool], *, what: str, timeout: float = 8.0) 
             return
         await asyncio.sleep(0.02)
     raise AssertionError(what)
+
+
+async def _let_it_play(page: Page, seconds: float) -> None:
+    """Wait until that much of the buffer has actually left the speaker.
+
+    Not `asyncio.sleep`. `schedule` (audio.js:228) starts a buffer at
+    `context.currentTime + 0.05`, and while the autoplay policy has the
+    context parked that clock does not run — `resume()` is asynchronous and
+    fire-and-forget. So a second of wall-clock time bought about 275 ms of
+    audible time on this machine, and the test that asked for ≥300 ms failed
+    three runs in eight. Sleeping longer would only move the odds; the page's
+    own clock is the quantity `played_ms` is computed from, so it is the one
+    to wait on.
+    """
+    started_at = await page.evaluate("window.__contexts[0].currentTime")
+    # +0.05 for the cushion schedule() puts between currentTime and the start.
+    await _wait(page, f"window.__contexts[0].currentTime >= {started_at + seconds + 0.05}")
 
 
 async def _ready(page: Page, harness: Harness) -> None:
@@ -438,10 +468,8 @@ async def test_a_barge_in_on_the_audio_socket_stops_the_sound(
     # Let a slice of that ONE buffer play before the cut. played_ms used to
     # credit only buffers whose onended had fired, so a cut anywhere inside
     # the first buffer reported 0 — and the number the runbook says to read
-    # as "did she talk over the streamer" answered no every time. A full
-    # second, because the context's resume() after autoplay parking is
-    # asynchronous and ate most of a shorter wait once.
-    await asyncio.sleep(1.0)
+    # as "did she talk over the streamer" answered no every time.
+    await _let_it_play(audio_page, 1.0)
     harness.broker.flush()
     await _until(
         lambda: harness.count(ClientEvent.PLAYBACK_CANCELLED) >= 1,
