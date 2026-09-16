@@ -35,18 +35,31 @@ And the one that shapes the product rather than the file:
    刚才观众小王问我播到几点，我打算看大家状态，聊得久就多待会儿」 off the
    streamer saying 「我回来了」, with `tts_type` `default`.
 
-   What does not exist is a way to start a turn. ChatTextQuery is gone from the
-   vendor's own old-to-new table and `response.create` is outside the uplink
-   vocabulary (fact 4). Measured, each on its own socket: a legal context and
-   25 s of nothing → silence; an empty assistant placeholder so the last turn
-   looks unanswered → silence; `input_audio_buffer.commit` → silence; two
-   seconds of pushed silence → silence; `extension.dialog.extra.input_mod`
-   `"text"`, the old protocol's text-input mode → accepted, then silence.
-   Tools come closest: `session.tools` is accepted and she really does emit
-   `response.function_call_arguments.done`, but six shapes of result return
-   produced no continuation. And `speech_text_buffer.append`, the one name in
-   the sweep that did not hang up, answers with `tts_type` `chat_tts_text` —
-   it reads, it does not write.
+   She composes from mid-session text too, through exactly one channel: a
+   function-call result, in the vendor's published shape — `items[0] =
+   {call_id, role: "tool", content: [{type: "input_text", text}]}`. Hand her
+   a danmaku that way and she answers it in her own words. The shape is
+   unforgiving: five near-misses were dropped whole, with no ack and no error,
+   and one drew `45000000 invalid event payload`.
+
+   What does not exist is a way to START a turn. ChatTextQuery is gone from
+   the vendor's own old-to-new table and `response.create` is outside the
+   uplink vocabulary (fact 4). Measured, each on its own socket: a legal
+   context and 25 s of nothing → silence; an empty assistant placeholder so
+   the last turn looks unanswered → silence; `input_audio_buffer.commit` →
+   silence; two seconds of pushed silence → silence;
+   `extension.dialog.extra.input_mod` `"text"`, the old protocol's text-input
+   mode → accepted, then silence; `input_audio_mute.commit` /
+   `input_audio_unmute.commit`, which do exist → silence.
+   `speech_text_buffer.append`, the one guessed name in the sweep that did
+   not hang up, answers with `tts_type` `chat_tts_text` — it reads, it does
+   not write.
+
+   The function-call channel does not get around this, and the reason is
+   worth keeping: the pending call has to be one SHE issued. A fabricated
+   `call_id` draws nothing, and the pushed audio that finally flushed the
+   real one moves nothing on its own (control: same silence, empty context,
+   no reply). So the sequence always starts with the streamer's microphone.
 
    So a reply that has to go out at a moment of OUR choosing arrives with its
    words already written: `request_reply` needs `ReplySpec.text`, L3 fills it,

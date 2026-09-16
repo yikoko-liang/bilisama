@@ -176,14 +176,16 @@ VOLCANO_DUPLEX = Capabilities(
     # protocol takes is the TTS body, which is content, not instruction.
     per_reply_base_instructions=False,
     # The one that decides the product shape — and the one whose first reading
-    # was wrong. She composes from text fine: a danmaku sitting in a legal
-    # dialog_context gets answered in her own words the next time the streamer
-    # says anything at all (measured 2026-09-16). What is missing is the
-    # TRIGGER. ChatTextQuery is gone, response.create is outside the uplink
-    # vocabulary, and nothing else starts a turn — not a commit, not silence,
-    # not a tool-call return, not input_mod="text". So a reply that must go
-    # out at a moment of our choosing has to arrive with its words already
-    # written. See providers/duplex.py's header for the probe table.
+    # was wrong. She composes from text fine, by two routes: a danmaku in a
+    # legal dialog_context is answered in her own words the next time the
+    # streamer says anything, and a function-call result in the vendor's
+    # published shape is answered too. What is missing is the TRIGGER.
+    # ChatTextQuery is gone, response.create is outside the uplink vocabulary,
+    # and nothing starts a turn — not a commit, not silence, not mute/unmute,
+    # not input_mod="text", not a fabricated call_id. Every turn begins at the
+    # streamer's microphone. So a reply that must go out at a moment of OUR
+    # choosing has to arrive with its words already written.
+    # See providers/duplex.py's header for the probe table.
     composes_on_demand=False,
 )
 

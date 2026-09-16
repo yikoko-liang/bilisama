@@ -69,6 +69,10 @@ _KNOWN = frozenset(
         "session.close",
         "input_audio_buffer.append",
         "input_audio_buffer.commit",
+        # The keepalive pair. Documented, and confirmed present 2026-09-16 —
+        # neither hangs up. Neither starts a turn either.
+        "input_audio_mute.commit",
+        "input_audio_unmute.commit",
         "conversation.item.create",
         "conversation.item.retrieve",
         "conversation.item.delete",

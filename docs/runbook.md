@@ -236,6 +236,11 @@ export volcano_api_key=...
 `tts_type` 是 `default`，文字通道有内容——**她自己组织的，不是我们递的稿子**。直接问
 「刚才那条弹幕问的是什么」，她也复述得出。
 
+**中途也能递文字给她写，只有一条通道**：工具调用的结果回传，形状必须是文档原样的
+`items[0] = {call_id, role: "tool", content: [{type: "input_text", text}]}`。这样递过去一条弹幕，
+她会用自己的话答。形状极不宽容——五种近似写法整帧被丢（无回执也无报错），一种回
+`45000000 invalid event payload`。
+
 **真正没有的是「起头」。** 这条协议上只有主播的麦克风能起一轮。各开一条连接分别测：
 
 | 试的 | 结果 |
@@ -245,10 +250,15 @@ export volcano_api_key=...
 | `input_audio_buffer.commit` 当触发 | 只回 `committed` |
 | 推 2 秒静音让 VAD 判停 | 一帧都没有 |
 | `extension.dialog.extra.input_mod="text"`（旧协议的纯文本模式） | 字段收下了，`session.created` 正常，然后还是一帧都没有 |
+| `input_audio_mute.commit` / `input_audio_unmute.commit`（文档说的保活事件） | 事件确实存在（不掐断），但也不起轮次 |
 | 弹幕写进 `instructions`（这条通道确实中途生效）＋ 主播出声 | 她答主播那句，把弹幕无视了 |
-| 声明 `session.tools` ＋ 主播问「弹幕里有人问什么」 | **她真调了工具**，`response.function_call_arguments.done` 带 `call_id` 回来 |
-| 把弹幕当工具结果回传（六种帧形状） | 五种整帧被丢（无回执也无报错），一种回 `45000000 invalid event payload`，没有一种让她续写 |
+| 弹幕在合法上下文里 ＋ 只推静音不说话 | 一帧都没有——「每条弹幕开一条新会话」也触发不了 |
+| **伪造** 一个 `call_id` 回传工具结果 ＋ 推静音 | 一帧都没有：那个调用必须是**她自己发起**的 |
 | `speech_text_buffer.append`（非 replacement，扫描里唯一没被掐断的名字） | `tts_type` 是 `chat_tts_text`，文字通道空——**它念，不写** |
+
+工具那条路也绕不开这一点：她得先开口才会调工具，而开口要主播先说话。回传之后还要再推一段
+音频当轮次边沿才会吐字——但**静音本身不让她开口**（对照组：同样推静音、空上下文，一帧都没有），
+它只是把一个**已经在等**的结果冲出来。所以整条链条的起点永远是主播的麦克风。
 
 **前两次为什么判错**，记在这儿免得再犯：第一次的「她不答文字」全部走
 `conversation.item.create`，而那条通道她读不到；第二次改用 `dialog_context` 了，但塞的是
