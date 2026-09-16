@@ -199,6 +199,38 @@ def build_link(request: LinkRequest) -> BuiltLink:
             # simply defaults elsewhere.
             return _build_hosted(request, provider)
 
+        case ProviderName.VOLCANO_DUPLEX:
+            from bilisama.realtime.providers.duplex import DuplexLink
+
+            duplex_cfg = request.settings.speech.volcano_duplex
+            # One credential, one header. The legacy pair (app id + access
+            # token) has no place on this protocol: the vendor documents
+            # X-Api-Key alone, and that is what the 2026-09-16 probes used.
+            duplex_key = secrets.resolve(duplex_cfg.api_key_ref) or request.env.get(
+                profile_for(provider).key_env, ""
+            )
+            if not duplex_key:
+                raise SystemExit(
+                    "缺火山凭据。\n"
+                    "控制台 > API Key 管理里拿一个 API Key，填进 "
+                    "[speech.volcano_duplex] api_key_ref，或 export volcano_api_key。"
+                )
+            # `request.voice` is deliberately not read: it belongs to the
+            # three providers whose voice is a runtime override, and this one
+            # has a single model with one catalogue (`uranus`) — no pairing to
+            # get wrong, so no reason to widen the ownership table for it.
+            return BuiltLink(
+                DuplexLink(
+                    request.endpoint.url,
+                    api_key=duplex_key,
+                    config=duplex_cfg,
+                    speaker=duplex_cfg.voice,
+                    model=request.endpoint.model or duplex_cfg.model,
+                    quiet_window_s=quiet_window_s(request.settings, provider),
+                ),
+                request.endpoint.url,
+            )
+
         case ProviderName.VOLCANO:
             from bilisama.realtime.providers.volcano import VolcanoLink
 

@@ -13,6 +13,7 @@ class ProviderName(StrEnum):
     DASHSCOPE = "dashscope"
     OPENAI_GA = "openai_ga"
     VOLCANO = "volcano"
+    VOLCANO_DUPLEX = "volcano_duplex"
 
 
 class Chattiness(StrEnum):

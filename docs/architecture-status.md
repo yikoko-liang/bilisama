@@ -133,16 +133,18 @@ default_host、key_env；四条记录在 333-367 行。
 - `factory.py` 的 `build_link`（:167-266）是全仓唯一一处按 provider 分支的 match，`LinkRequest`
   装所有适配器可能要的输入。
 
-### 2.6 三个适配器
+### 2.6 四个适配器
 
 | 适配器 | 文件 | 关键行为 |
 |---|---|---|
 | HostedLink（DashScope 与 OpenAI GA 共用） | `providers/hosted.py` | 连上先发引导帧 modalities / turn_detection / voice / pcm16（:173-206）；会话到期前 3 分钟主动换 socket（:128-138）；改音色或判停参数走 `reconfigure_session` 换 socket（:235-255）；protected 只打一条警告，DashScope 实测不认 interrupt_response（:292-323，计划 #45 探明不可行）；end_protection 空实现（:328-333） |
 | S2SLink | `providers/s2s.py` | 文件头 1-25 行逐条写了 §3.3 八条规则各住在哪；注入恒走 out-of-band（:182-233）；protected 时先发 interrupt_response=false 并记账，重连后补回（:105-133、:235-245） |
 | VolcanoLink | `providers/volcano.py` + `volcano_wire.py` | 二进制帧、数字事件号，不共用 RealtimeClient，自己实现槽位、看门狗、按 question_id 的墓碑和六次重连（:988-1106、:1108-1167）；没有 response.create，`add_context_item` 只暂存，`request_reply` 把事件块和本轮要求合成一条 ChatTextQuery（:867-939）；人设走 StartSession，O2.0 事后用 UpdateConfig 改，SC2.0 改不了只能换会话（:679-782）；改名、换音色也走换会话（:551-605）；`dialog_id` 让重连接得上前 20 轮；ASR_INFO 翻成 SpeechStarted，TTS_ENDED 才算回复完成（:1208-1341） |
+| DuplexLink | `providers/duplex.py` | 纯 JSON 帧、OpenAI 那套事件名，但握手是客户端先发 `session.create`、回复不报幕（靠 `response.output_audio.started` 的 `tts_type` 分「我们点的」和「她自起的」）、主播开口的边沿在 `...input_audio_transcription.started` 上、`response.create` 会被服务端断连——四条都和 `RealtimeClient` 对不上，所以自己一套；**它不会组织回复**，`request_reply` 要 `ReplySpec.text`，没有就抛错；历史只在 `session.create` 时随 `extension.dialog.dialog_context` 进得去，`add_context_item` 因此只暂存；人设走 `session.update` 中途生效，不用换会话 |
 
-火山没有逐轮指令通道，所以多了一位 `per_reply_base_instructions=False`，装配层在它身上把事件规则
-坍缩进会话上下文（`app.py:392-398`）。
+火山两条路都没有逐轮指令通道，所以都带 `per_reply_base_instructions=False`，装配层在它们身上把
+事件规则坍缩进会话上下文（`app.py:392-398`）。全双工那条还多一位 `composes_replies=False`，
+调度器那侧的代笔缝见 §3.3 末条。
 
 ## 3. L3 director：调度与说话权
 
@@ -193,6 +195,11 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 - 每条 Intent 恰好一个 Verdict（`_emit`，:349-376），outcome 乘 phase；过期时记下当时挡它的闸门名
   （:491-531）；播放回执到了才写 spoken@played，否则 spoken@generating（:1041-1071）。
 - `panic_mute`（:307-333）是唯一能杀保护段回复的东西；LinkDown 时清空队列并拒收新意图。
+- **代笔缝（2026-09-16，为全双工加的）**：派发前先过一道 `_with_text`——后端自己会写就原样交给
+  `request_reply`，不会写（`link_composes_replies=False`）就调 `ghostwriter` 把成品词填进
+  `ReplySpec.text`。两个参数都在构造函数上，默认是「后端自己写」，所以另外三家一行代码都没变。
+  接不上代笔就抛错，不静默降级成一条没有内容的回复。挂代笔的是 `dev_talk`，不是 adapter：
+  谁替她写、用什么口吻，是产品决定。
 - 她自起的回复（provider 自己判停生成的那条，`ReplyHandle.implicit`）也记账（2026-09-09）：`_Implicit`（:144）
   从 ReplyStarted 活到 ReplyDone；杀它只有一条路 `skip_implicit`（:391），语音门、出口守卫、panic 三个调用方
   共用，幂等，一条取消一条判决（source「voice」，intent_id「voice:<句柄>」）。说完的文字进 `implicit_spoken_sink`，
@@ -620,10 +627,21 @@ import」。
      （`voice_turn.py:248-251`），`MarkerHead` 对空文本返回 `PLAIN`
      （`turn_protocol.py:144`），于是空回复和断在记号中间的残记号都被记成「漏接」。
      健康运行里 81% 的「漏」压根没出声。量漏接必须看音频帧，不能只看有没有被拦。
-- **全双工协议（Seeduplex 3.0）重探（2026-09-16）**：欠账 #79 的阻塞点原样成立——没有任何原语能让她「拿一段
-  文字自己组织回复」，生成只由主播语音触发；`response.create` 会被服务端断连。但 `session.update` 中途改 `instructions`
-  生效、TTS 直合成的话进她的记忆、主播开口不会掐她的语音回复。唯一可行的接法是「侧路模型写、duplex 念」，
-  是产品取舍，未拍板。事实清单见 runbook「为什么不迁到全双工版本」下的重探段。
+- **全双工协议（Seeduplex 3.0）已接入（2026-09-16）**：`--provider volcano_duplex`，走
+  `providers/duplex.py` 自己的 adapter（复用不了 `RealtimeClient`：客户端先发 `session.create`、
+  回复不报幕、主播开口的边沿在转写上、`response.create` 会被服务端断连）。欠账 #79 那个阻塞点
+  **没有消失，是被绕过了**：这条协议仍然没有任何原语能让她「拿一段文字自己组织回复」，所以弹幕、
+  礼物、进房的回复由侧路模型代笔、duplex 照着念。能力位 `composes_replies=False` 是这件事的开关，
+  `ReplySpec.text` 是承载，`Scheduler(ghostwriter=...)` 是接口——**代笔这个决定放在 L3，adapter
+  自己不调任何模型**，拿不到成品词就抛错。没配侧路模型时 `dev-talk` 在启动阶段就退出，不会等到
+  第一条弹幕才发现她哑了。
+
+  **未拍板的是产品取舍，不是技术可行性**：她的弹幕回复由 `qwen3.7-flash` 写、火山的嗓子念，
+  和另外三家「同一个模型既想也说」不是一回事。代笔用的系统提示与她自己写时相同（公共前缀 ＋
+  事件规则），但仍是两个模型两种文风。主播语音那条路不受影响——她自起的轮次仍然是端到端的。
+
+  用法、探针事实和可执行的契约（`tests/unit/test_duplex_link.py` ＋ 假服务端
+  `tests/fakes/mock_duplex.py`）见 runbook「火山引擎（全双工 Seeduplex 3.0）」一节。
 - **火山 SC2.0 把思维链标记漏进文字通道（2026-09-09 新开）**：回复开头形如
   `<eocot>确实，地龙这血量顶不住啊。`。`MarkerHead` 见到 `<` 即判 `plain`，所以只要有这个前缀，
   她就算写了记号门也看不见——拿她的原话验过。DashScope 无此现象。解析器该容忍开头的 ASCII 控制标记。

@@ -15,6 +15,7 @@ import pytest
 from bilisama.config.enums import ProviderName
 from bilisama.config.schema import Settings
 from bilisama.realtime.providers import Endpoint, resolve_endpoint
+from bilisama.realtime.providers.duplex import DuplexLink
 from bilisama.realtime.providers.factory import LinkRequest, build_link
 from bilisama.realtime.providers.hosted import HostedLink
 from bilisama.realtime.providers.s2s import S2SLink
@@ -232,7 +233,7 @@ def test_the_env_fallback_name_comes_off_the_profile() -> None:
         if not name:
             continue
         built = build_link(_request(provider, env={name: "从环境来的"}))
-        assert isinstance(built.link, HostedLink | VolcanoLink)
+        assert isinstance(built.link, HostedLink | VolcanoLink | DuplexLink)
 
 
 def test_the_older_pairs_access_token_is_not_read_as_an_api_key() -> None:

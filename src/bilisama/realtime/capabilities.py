@@ -40,6 +40,14 @@ class Capabilities:
     # instruction channel at all, so the Assembly folds event rules into the
     # session context there instead of scoping per turn.
     per_reply_base_instructions: bool = True
+    # Whether this endpoint will COMPOSE a reply when asked for one. Every
+    # provider here does except the duplex protocol, which dropped the text
+    # query: its only path from words to sound is TTS, which says what it is
+    # given and writes nothing. False means L3 must supply finished text in
+    # ReplySpec.text rather than instructions — and that is a product fact,
+    # not a wire detail, which is why it surfaces here instead of being
+    # papered over inside an adapter.
+    composes_replies: bool = True
 
     @property
     def expr_tags_safe(self) -> bool:
@@ -137,6 +145,40 @@ VOLCANO = Capabilities(
     # mid-session (see providers/volcano.py). The Assembly folds event rules
     # into the session context on this provider instead.
     per_reply_base_instructions=False,
+)
+
+
+# The duplex protocol (Doubao Seeduplex 3.0). Probed against the real endpoint
+# 2026-09-16; every value below was seen rather than read off a page.
+VOLCANO_DUPLEX = Capabilities(
+    owns_tts=True,
+    # One dialogue at a time, and the model claims it after VAD like the
+    # legacy protocol does. Nothing announces a reply — no response.created —
+    # so the adapter books from the first frame and tells ours from hers by
+    # the tts_type on response.output_audio.started.
+    single_response_slot=True,
+    # No response.create at all, so no conversation="none" to exempt. Sending
+    # response.create does not draw an error: the server closes the socket.
+    out_of_band_exempt_from_slot=False,
+    # conversation.item.delete exists and acks, but history only reaches the
+    # model at session.create (see composes_replies below for the sibling
+    # finding); trimming what the model cannot see buys nothing.
+    item_truncate=False,
+    # session.update is acknowledged with session.updated — and the ack means
+    # the FIELDS were stored, not that all of them apply. instructions do;
+    # extension.dialog.dialog_context does not, mid-session.
+    acknowledges_session_update=True,
+    # The vendor exposes no turn-detection block on this protocol.
+    turn_detection_types=frozenset({"server_vad"}),
+    # No per-response instruction channel: the only per-turn text this
+    # protocol takes is the TTS body, which is content, not instruction.
+    per_reply_base_instructions=False,
+    # The one that decides the product shape. ChatTextQuery is gone from this
+    # protocol — it is absent from the vendor's own old-to-new event table,
+    # a lone user item in conversation.item.create is stored and never read,
+    # and response.create closes the socket. What remains is
+    # speech_text_buffer.replacement, which speaks the words it is handed.
+    composes_replies=False,
 )
 
 

@@ -171,6 +171,34 @@ class VolcanoConfig(BaseModel):
     end_smooth_window_ms: int = Field(1500, ge=0, le=10000)
 
 
+class VolcanoDuplexConfig(BaseModel):
+    """Doubao Seeduplex 3.0 — the full-duplex protocol, plain JSON frames.
+
+    A separate section rather than a flag on VolcanoConfig: the two protocols
+    share an account and nothing else. Voices come from a different catalogue
+    (`uranus`, not `jupiter` or `saturn`), the model string is fixed, and the
+    endpoint is a different path. Probed 2026-09-16 — see docs/runbook.md.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    endpoint: str = Field("")
+    # The same console API Key as the legacy protocol; one header, no app id.
+    api_key_ref: str = Field("")
+    # The vendor publishes exactly one value for the duplex protocol. Kept as
+    # a field so a bump is a config edit, and Literal so a typo is a startup
+    # error rather than a session that opens and never answers.
+    model: Literal["1.2.6.1"] = Field("1.2.6.1")
+    # Voice. Named `voice` rather than the legacy protocol's `speaker`
+    # because that is what this one calls it on the wire, and because
+    # validate.py builds its 「改哪个字段」 advice from the name. Empty leaves
+    # it to the server, which picks its own character — the mistake
+    # VolcanoConfig.speaker documents for the legacy protocol.
+    voice: str = Field("zh_female_vv_uranus_bigtts")
+    speed: int = Field(0, ge=-50, le=100)
+    loudness: int = Field(0, ge=-50, le=100)
+
+
 class SpeechConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -179,6 +207,7 @@ class SpeechConfig(BaseModel):
     dashscope: HostedConfig = Field(default_factory=HostedConfig)
     openai_ga: HostedConfig = Field(default_factory=HostedConfig)
     volcano: VolcanoConfig = Field(default_factory=VolcanoConfig)
+    volcano_duplex: VolcanoDuplexConfig = Field(default_factory=VolcanoDuplexConfig)
     side: SideModelConfig = Field(default_factory=SideModelConfig)
 
 

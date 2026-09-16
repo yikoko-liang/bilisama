@@ -212,6 +212,12 @@ def quiet_window_s(settings: Settings, provider: ProviderName) -> float:
             # Its only endpointing knob, and a much longer default (1500 ms)
             # than the hosted pair's 300.
             grace_ms = settings.speech.volcano.end_smooth_window_ms
+        case ProviderName.VOLCANO_DUPLEX:
+            # This protocol publishes no endpointing knob at all — there is no
+            # turn_detection block and no end_smooth_window. Borrowing the
+            # legacy default is a guess, and saying so beats a number that
+            # looks measured: the reopen grace wants a probe of its own.
+            grace_ms = 1500
         case _ as unhandled:
             assert_never(unhandled)
     return grace_ms / 1000 + margin
@@ -350,6 +356,22 @@ PROFILES: dict[ProviderName, ProviderProfile] = {
         # unchanged rather than quietly emptied: which way it should go is a
         # decision, and item 85 is where it gets made.
         key_env="api_key",
+    ),
+    ProviderName.VOLCANO_DUPLEX: ProviderProfile(
+        caps_mod.VOLCANO_DUPLEX,
+        # Plain JSON frames, but replies that never announce and a handshake
+        # the client speaks first — RealtimeClient's shape does not fit, so
+        # there is no codec to hand it. providers/duplex.py does its own.
+        None,
+        socket_path="/api/v3/duplex/realtime/dialogue",
+        # Fixed by the vendor for this protocol; the config field carries the
+        # same value so a bump is an edit rather than a code change.
+        default_model="1.2.6.1",
+        # No published per-connection cap. The 10-minute idle timeout
+        # (error 45000003) is unreachable: our uplink never goes quiet.
+        session_cap_min=0,
+        default_host="wss://openspeech.bytedance.com",
+        key_env="volcano_api_key",
     ),
     ProviderName.VOLCANO: ProviderProfile(
         caps_mod.VOLCANO,

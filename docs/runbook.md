@@ -181,26 +181,81 @@ SC 版本（`2.2.0.0`）不看 `bot_name`——名字从 `character_manifest` �
 打断后只剩 1 帧在途。重连走协议自己的 `dialog_id`：`SessionStarted` 给一个，
 下次带着它建会话就接回上一段（服务端留最近 20 轮），所以掉线回来她还记得这一场。
 
-**为什么不迁到「全双工版本」**：那是现行协议，纯 JSON、事件名就是 OpenAI 那套、
-`x-api-key` 单头就能连，看着都更好。但它**把 `ChatTextQuery` 删掉了**——官方新旧
-事件对照表里没有它，十个可能的名字全回 `unknown event name`，单条 user 上下文
-静默丢弃。弹幕和 SC 进来让她用自己的话回一句，是这个产品的主循环，新协议撑不起来。
-详见欠账 #79。
+### 火山引擎（全双工 Seeduplex 3.0）
 
-**2026-09-16 重探（模型 `1.2.6.1`，五轮真端点，脚本 `/tmp/duplex_probe{1..5}.py` 可复跑）**——阻塞点原样成立，
-但几条 8 月的记录要改：
-- 单条 user `conversation.item.create` 仍然静默丢弃（连 ack 都没有）；成对 user/assistant 能存进去（要 `input_text`，
-  能 `retrieve` 回来），**但她下一轮不认**（问「我叫什么」答「你还没告诉我」）。注入后发 `input_audio_buffer.commit`
-  强制判停也不生成。`response.create` 不是回错误，是**服务端直接掐断连接**。
-- **`session.update` 中途改 `instructions` 生效**（改前答「豆腐」、改后答「小明」）——比 SC2.0 强，门的合同可以重推、不用换会话。
-- **`speech_text_buffer.replacement` 念出去的话她自己记得**（问「你刚才说了什么」能复述）。所以「侧路模型写、duplex 念」
-  这条路不需要往历史里塞问答对。
-- **主播开口不会掐断她的语音回复**（她把整段说完才回应打断），和旧协议一样得靠我们发 `response.cancel`；
-  `response.cancel` 立刻 ack，但已生成的音频照流完（31 帧），要靠 `stale` 丢帧。
-- ASR 转写 `delta` 是**累积式**的（「你」「你叫」「你叫什么」…），`completed` 里 `transcript` 为空——最终文本取最后一条 delta。
-- 音色走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表；探针用 `jupiter` 的 `zh_female_vv_jupiter_bigtts` 也通了。
-- 握手是**客户端先发** `session.create`，`RealtimeClient` 是先收服务端的 `session.created`（`client.py:181`），复用不了；
-  加上没有 `response.create`，接的话是一个新的 `DuplexLink`，`request_reply` 换成侧路模型代笔 + TTS。**接不接是产品取舍。**
+**`--provider volcano_duplex`。** 和上面那套是同一个账号、同一个 API Key，但是两条协议，
+配置也分两段（`[speech.volcano]` 和 `[speech.volcano_duplex]`）。
+
+```bash
+export volcano_api_key=...
+.venv/bin/python -m bilisama dev-talk --director --provider volcano_duplex
+```
+
+配置在 `[speech.volcano_duplex]`：
+
+| 字段 | 说明 |
+|---|---|
+| `model` | 固定 `1.2.6.1`，厂商升版本才改 |
+| `voice` | 走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表。**和上面那套火山的音色表不通用**（探针里 `jupiter` 的 `zh_female_vv_jupiter_bigtts` 也能连上，但别指望通用） |
+| `speed` / `loudness` | 0 是原速原音量，范围 -50~100 |
+
+**开播前先有侧路模型，否则直接报错退出。** 这条协议不会自己组织回复（下面「它不会写」），
+弹幕、礼物、进房的回复得有人代笔。没配 `[speech.side]` 时 `dev-talk` 在启动阶段就
+`SystemExit`，不会等到第一条弹幕进来才发现她哑了。
+
+#### 为什么它要一个自己的 adapter（2026-09-16 真端点五轮探针）
+
+看着像 `RealtimeClient` 的活：纯 JSON 文本帧、事件名就是 OpenAI 那套、`X-Api-Key`
+单头就能连。但有四件事跟那套客户端对不上，全是协议层的，不是口味问题
+（清单和出处在 [providers/duplex.py](../src/bilisama/realtime/providers/duplex.py) 的文件头）：
+
+1. **客户端先说话。** `RealtimeClient` 开了 socket 等 `session.created`；这条协议里
+   会话得我们发 `session.create` 才存在，等是等不来的。
+2. **回复不报幕。** 没有 `response.created`。`RealtimeClient` 见到没报幕的回复就记成
+   「她自己起的轮」，那样我们点的弹幕回复会被塞进语音门、因为不带记号被拦掉。
+   分辨靠 `response.output_audio.started` 上的 `tts_type`：`chat_tts_text` 是我们递过去的词，
+   `default` 是她自己的轮。
+3. **主播开口的边沿在转写上。** 没有 `input_audio_buffer.speech_*`，最早的一帧是
+   `conversation.item.input_audio_transcription.started`。它的 `delta` 是**累积式**的
+   （「你」「你叫」「你叫什么」…），`completed` 里 `transcript` 是空的，最终文本取最后一条 delta。
+4. **`response.create` 不是报错，是掉线。** 服务端直接 1006 掐断，两次试两次都掐。
+
+#### 它不会写，只会念
+
+`ChatTextQuery` 在这条协议里没了——官方新旧事件对照表里找不到，十个可能的名字全回
+`unknown event name`。单条 user 的 `conversation.item.create` 存得进去（`retrieve` 拿得回来），
+**但她下一轮不认**（问「我叫什么」答「你还没告诉我」）；注入后发 `input_audio_buffer.commit`
+强制判停也不生成。从文字到声音只剩 `speech_text_buffer.replacement`，它照着念。
+
+所以这条路上的分工是**侧路模型写、duplex 念**：能力位 `composes_replies=False`
+告诉 L3 这件事，[dev_talk.py](../src/bilisama/dev_talk.py) 挂一个代笔函数交给
+`Scheduler(ghostwriter=...)`，`ReplySpec.text` 带着成品词下去。代笔用的系统提示
+和她自己写时拿到的是同一份（公共前缀 + 事件规则），换后端不该换性格。
+adapter 自己不调任何模型：**她嘴里的话是谁写的，是产品决定，不该藏在协议层**——
+所以 `request_reply` 拿不到 `text` 时直接抛错，不替谁编。
+
+她**记得自己念过什么**（问「你刚才说了什么」能复述），所以这条路不用再往历史里补问答对。
+
+#### 另外三条实测
+
+- **人设中途能改。** `session.update` 改 `instructions` 当场生效（改前答「豆腐」、改后答「小明」），
+  比 SC2.0 强——语音门的合同可以重推，不用换会话。
+- **历史只在建会话时进得去**，走 `extension.dialog.dialog_context`。中途的
+  `conversation.item.create` 回 `conversation.item.added`、带 `dialog_context` 的
+  `session.update` 回 `session.updated`，两个都是**收下了但她看不见**。所以
+  `add_context_item` 是先攒着，下次建会话一起带过去。
+- **主播开口不会掐断她。** 她把整段说完才理打断，得靠我们发 `response.cancel`：
+  ack 是立刻回的，但已生成的音频照流完（31 帧），要靠 `stale` 丢帧。和旧协议一样。
+
+探针脚本 `/tmp/duplex_probe{1..5}.py` 可复跑。这些事实在
+[tests/unit/test_duplex_link.py](../tests/unit/test_duplex_link.py) 里是可执行的——
+假服务端 [tests/fakes/mock_duplex.py](../tests/fakes/mock_duplex.py) 照着真端点的坏脾气写：
+不先发 `session.create` 就发别的帧算违规、`response.create` 直接关连接、中途注入的历史
+收下就丢。跑：
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_duplex_link.py -v
+```
 
 ## 起本地语音服务器（原装三段管线：识别 → 对话 → 合成）
 

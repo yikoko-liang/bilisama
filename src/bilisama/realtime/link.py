@@ -54,6 +54,12 @@ class ReplySpec:
     # ignore it (capabilities.per_reply_base_instructions).
     base_instructions: str | None = None
     max_tokens: int | None = None
+    # Finished words, to be said as they stand. Only for endpoints that cannot
+    # compose (capabilities.composes_replies False); everywhere else it is
+    # None and `instructions` is what the model works from. Filled by L3 —
+    # who ghostwrites for her, and in whose voice, is a product decision and
+    # never an adapter's.
+    text: str | None = None
     write_history: bool = False
     protected: bool = False
     protect_ms: int = 4000

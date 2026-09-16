@@ -20,6 +20,8 @@ import contextlib
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, cast
 
+import pytest
+
 from bilisama.clock import SystemClock
 from bilisama.director.floor import SpeakingFloor
 from bilisama.director.scheduler import PlaybackClear, Scheduler
@@ -356,3 +358,99 @@ async def test_a_skip_that_arrives_after_the_turn_completed_is_ignored() -> None
     await asyncio.sleep(0)
     assert sched.status()["implicit_active"] is False, "its done already came; nothing to re-book"
     assert stub.cancels == [], "and nothing to kill"
+
+
+# ------------------------------------------ the ghostwriter seam (duplex)
+
+
+class _TextLink(_StubLink):
+    """Records the spec each dispatch actually sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.specs: list[link.ReplySpec] = []
+
+    async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        return None
+
+    async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
+        self.specs.append(spec)
+        return link.ReplyHandle()
+
+
+def _danmaku_intent() -> Any:
+    from bilisama.director.intent import Injection, Intent, Priority
+
+    return Intent(
+        source="danmaku",
+        priority=Priority.DANMAKU,
+        injection=Injection(
+            reply=link.ReplySpec(instructions="回一句"),
+            item_text="[弹幕] 观众A: 主播今天播到几点",
+        ),
+    )
+
+
+async def test_a_link_that_composes_never_calls_the_ghostwriter() -> None:
+    """Three of the four providers write her lines themselves. The seam must
+    be invisible to them — no extra await, no text on the spec."""
+    from bilisama.clock import FakeClock
+    from bilisama.director.floor import SpeakingFloor
+
+    clock = FakeClock()
+    stub = _TextLink()
+    called = False
+
+    async def never(_intent: Any) -> str:
+        nonlocal called
+        called = True
+        return "不该被叫到"
+
+    sched = Scheduler(stub, SpeakingFloor(clock), clock, ghostwriter=never)  # type: ignore[arg-type]
+    spec = await sched._with_text(_danmaku_intent())
+    assert spec.text is None and not called
+
+
+async def test_a_link_that_cannot_compose_gets_finished_words() -> None:
+    """On duplex the endpoint only says what it is handed, so the words are
+    written above and ride ReplySpec.text — and the instructions stay on the
+    spec untouched, because they are what the ghostwriter was briefed with."""
+    from bilisama.clock import FakeClock
+    from bilisama.director.floor import SpeakingFloor
+
+    clock = FakeClock()
+    stub = _TextLink()
+    seen: list[str] = []
+
+    async def write(intent: Any) -> str:
+        seen.append(intent.injection.item_text or "")
+        return "谢谢关注呀，今天播到十点"
+
+    sched = Scheduler(
+        stub,  # type: ignore[arg-type]
+        SpeakingFloor(clock),
+        clock,
+        ghostwriter=write,
+        link_composes_replies=False,
+    )
+    spec = await sched._with_text(_danmaku_intent())
+    assert spec.text == "谢谢关注呀，今天播到十点"
+    assert spec.instructions == "回一句", "简报不变，代笔看的就是它"
+    assert seen == ["[弹幕] 观众A: 主播今天播到几点"], "代笔拿到的是这条弹幕本身"
+
+
+async def test_a_missing_ghostwriter_is_loud() -> None:
+    """Silence would be the worst outcome: every danmaku would fail to
+    dispatch with no reason anyone could act on."""
+    from bilisama.clock import FakeClock
+    from bilisama.director.floor import SpeakingFloor
+
+    clock = FakeClock()
+    sched = Scheduler(
+        _TextLink(),  # type: ignore[arg-type]
+        SpeakingFloor(clock),
+        clock,
+        link_composes_replies=False,
+    )
+    with pytest.raises(RuntimeError, match="代笔"):
+        await sched._with_text(_danmaku_intent())

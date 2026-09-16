@@ -1678,6 +1678,7 @@ async def run_director(args: argparse.Namespace) -> int:
         live_voice_rules,
         template_variables,
     )
+    from bilisama.persona.prompt import assemble_scoped
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.realtime.providers.volcano import VolcanoLink
     from bilisama.side import OpenAICompatSideModel, SideModel
@@ -2049,6 +2050,38 @@ async def run_director(args: argparse.Namespace) -> int:
         proactive.note_dialogue("assistant", text)
         note_recent_line(text)
 
+    composes = profile_for(provider).caps.composes_replies
+    if not composes and side is None:
+        raise SystemExit(
+            f"{provider.value} 不会自己组织弹幕/礼物的回复，需要一个侧路模型替她写。\n"
+            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。"
+        )
+
+    async def ghostwrite(intent: Intent) -> str:
+        """Write one event reply for a link that cannot.
+
+        The same context she would have been given if the endpoint could
+        compose: the public prefix plus the event contract, with the event
+        line and this turn's ask as the question. Matching it is the whole
+        point — the words come from another model, so everything else about
+        the request has to stay the same or she changes character the moment
+        the backend does.
+
+        `assembly` is bound later in this function and read here at call
+        time; the first dispatch is many seconds after setup finishes.
+        """
+        assert side is not None  # the SystemExit above
+        parts = [
+            part
+            for part in (intent.injection.item_text, intent.injection.reply.instructions)
+            if part
+        ]
+        return await side.complete(
+            system=assemble_scoped(assembly.build_public_context(), event_rules),
+            user="\n\n".join(parts),
+            max_tokens=intent.injection.reply.max_tokens or 256,
+        )
+
     scheduler = Scheduler(
         speech,
         floor,
@@ -2067,6 +2100,10 @@ async def run_director(args: argparse.Namespace) -> int:
         # Her own microphone turns go the same way: what she said to the
         # streamer used to reach no memory at all (plan, voice gate 5.3).
         implicit_spoken_sink=spoken_line,
+        # Only the duplex protocol reads these: everywhere else the endpoint
+        # writes her lines itself and the ghostwriter is never called.
+        link_composes_replies=composes,
+        ghostwriter=None if composes else ghostwrite,
     )
 
     from bilisama.event_pacing import EventPacer

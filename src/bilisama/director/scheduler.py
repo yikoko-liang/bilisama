@@ -49,7 +49,7 @@ import heapq
 import itertools
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, cast
 
 from bilisama.clock import Clock
@@ -58,6 +58,7 @@ from bilisama.director.intent import Injection, Intent
 from bilisama.obs.logging import bind, get_logger
 from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
 from bilisama.realtime import link
+from bilisama.realtime.link import ReplySpec
 
 __all__ = ["PlaybackClear", "Scheduler"]
 
@@ -200,6 +201,8 @@ class Scheduler:
         on_hit: Literal["drop_sentence", "mute_all"] = "drop_sentence",
         spoken_sink: Callable[[str], None] | None = None,
         implicit_spoken_sink: Callable[[str], None] | None = None,
+        ghostwriter: Callable[[Intent], Awaitable[str]] | None = None,
+        link_composes_replies: bool = True,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -218,6 +221,17 @@ class Scheduler:
         # Separate from spoken_sink so an entry point can wire one and not
         # the other; dev-talk wires both to the same line.
         self._implicit_spoken_sink = implicit_spoken_sink
+        # Writes her lines for an endpoint that cannot
+        # (capabilities.composes_replies False). The scheduler knows only that
+        # finished words are required before it may dispatch; who supplies
+        # them, and in whose voice, is the entry point's business. Left None
+        # everywhere else, and never consulted there.
+        self._ghostwriter = ghostwriter
+        # A bool rather than the Capabilities object: L3 has no business
+        # reading a provider's capability table, and the entry point already
+        # unpacks these one by one (Assembly's per_reply_scope is the same
+        # pattern). True everywhere except the duplex protocol.
+        self._link_composes = link_composes_replies
         self._implicit: _Implicit | None = None
         # Handle ids of implicit turns whose done has been processed. skip_implicit
         # used handle.stale as "already over", but only a NON-completed settle marks
@@ -719,7 +733,8 @@ class Scheduler:
             if intent.injection.item_text is not None:
                 await self._speech.add_context_item(intent.injection.item_text)
                 wrote_item = True
-            handle = await self._speech.request_reply(intent.injection.reply)
+            reply = await self._with_text(intent)
+            handle = await self._speech.request_reply(reply)
         except Exception as exc:
             log.warning(
                 "scheduler.dispatch_failed", source=intent.source, error_text=str(exc)[:200]
@@ -828,6 +843,29 @@ class Scheduler:
         active = self._active
         if active is not None and handle is active.handle:
             active.output_started = True
+
+    async def _with_text(self, intent: Intent) -> ReplySpec:
+        """The reply to send, with finished words when the link needs them.
+
+        Most endpoints compose from `instructions`, and this hands the spec
+        straight back. The duplex protocol has no composing step at all — its
+        only path from words to sound says exactly what it is given — so the
+        ghostwriter runs here, inside the dispatch that was already awaiting,
+        and its output rides `ReplySpec.text`.
+
+        A ghostwriter that fails is not a reason to say something else: the
+        dispatch raises, `_dispatch` turns it into a verdict the same way a
+        failed send becomes one, and the intent is accounted for rather than
+        answered in a voice nobody chose.
+        """
+        reply = intent.injection.reply
+        if self._link_composes or reply.text is not None:
+            return reply
+        if self._ghostwriter is None:
+            raise RuntimeError(
+                "这个语音后端不会自己组织回复，但没有接代笔（Scheduler(ghostwriter=...)）"
+            )
+        return replace(reply, text=await self._ghostwriter(intent))
 
     def _open_implicit(self, handle: link.ReplyHandle) -> None:
         # Every adapter emits ReplyStarted ahead of the turn's first delta
