@@ -154,6 +154,62 @@ async def test_a_turn_she_started_is_implicit() -> None:
             await duplex.aclose()
 
 
+async def test_her_whole_sentence_survives_including_what_came_before_the_audio() -> None:
+    """Her text starts streaming BEFORE the frame that announces the turn.
+
+    Booking on the audio frame threw the opening away — eleven characters in
+    one measured run. Nothing looked wrong: she was audible, and the panel
+    just showed her starting mid-sentence.
+    """
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.say("我主要是陪主播聊天", ours=False)
+            started = await _next(events, link.ReplyStarted)
+            assert started.handle.implicit, "她自起的轮必须过语音门"
+
+            said = ""
+
+            async def until_done() -> str:
+                whole = ""
+                async for event in events:
+                    if isinstance(event, link.ReplyTextDelta):
+                        whole += event.text
+                    elif isinstance(event, link.ReplyDone):
+                        assert event.text == "我主要是陪主播聊天", "结算时报的是整句"
+                        return whole
+                raise AssertionError("事件流结束了也没等到 ReplyDone")
+
+            said = await asyncio.wait_for(until_done(), timeout=2.0)
+            assert said == "我主要是陪主播聊天", "开头那两个字不能在音频帧之前掉了"
+        finally:
+            await duplex.aclose()
+
+
+async def test_what_she_said_reaches_the_done_not_the_words_we_last_supplied() -> None:
+    """`ReplyDone.text` is what memory, the chat page and the log all read
+    (scheduler.py:917). Reporting the TTS text we happened to hold made her
+    own turns arrive empty — audible, and invisible everywhere else."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            # A reply we drove first, so the supplied words are sitting there
+            # to be wrongly reported by the turn that follows.
+            await duplex.request_reply(link.ReplySpec(text="谢谢小明送的火箭"))
+            ours = await _next(events, link.ReplyDone)
+            assert ours.text == "谢谢小明送的火箭", "我们点的回复报的是我们给的词"
+
+            await server.say("刚才那个火箭真好看", ours=False)
+            hers = await _next(events, link.ReplyDone)
+            assert hers.text == "刚才那个火箭真好看", "她自己的轮报的必须是她自己说的"
+        finally:
+            await duplex.aclose()
+
+
 async def test_asking_for_a_reply_without_words_is_refused_not_guessed() -> None:
     """A spec with no text is a wiring bug in L3. Making something up would
     put words in her mouth that nobody wrote, so it raises instead."""

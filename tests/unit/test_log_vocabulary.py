@@ -86,6 +86,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "duplex.resumed",
         "duplex.session_started",
         "duplex.suspended",
+        "duplex.turn_overlapped",
         "distill.batch_applied",
         "distill.batch_failed",
         "distill.batch_started",

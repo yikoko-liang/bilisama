@@ -10,12 +10,14 @@ What it insists on:
 * **The client speaks first.** No greeting until `session.create` arrives.
   A client that waits for one waits forever, which is exactly what
   RealtimeClient does and why this provider has its own adapter.
-* **Replies never announce.** There is no `response.created`. The first frame
-  of any reply is `response.output_audio.started`, carrying the `tts_type`
-  that says whose words these are — `chat_tts_text` for text we were handed,
-  `default` for one she started herself. A client that cannot tell them apart
-  puts her own turns and ours in the same basket, and the voice gate then
-  holds the wrong ones.
+* **Replies never announce, and hers start before they announce.** There is
+  no `response.created`. `response.output_audio.started` carries the
+  `tts_type` that says whose words these are — `chat_tts_text` for text we
+  were handed, `default` for one she started herself — and a client that
+  cannot tell them apart puts her own turns and ours in the same basket,
+  where the voice gate then holds the wrong ones. But on HER turns the first
+  text deltas arrive ahead of that frame, so a client that waits for it to
+  book the turn silently drops the opening of every sentence.
 * **An unknown event name closes the socket.** Not an error frame: a 1006.
   Measured 2026-09-16 across fifteen guessed names — `response.create`,
   `chat.text.query`, `ChatTextQuery` and the rest all hang up identically.
@@ -60,6 +62,9 @@ __all__ = ["MockDuplexServer", "Recorded"]
 
 _OURS = "chat_tts_text"
 _HERS = "default"
+# How much of her turn streams before the audio frame announces it. Measured
+# at 11 characters over 5 deltas; 2 is enough to keep a client honest.
+_AHEAD = 2
 
 # The closed uplink vocabulary. Anything else and the real endpoint hangs up.
 _KNOWN = frozenset(
@@ -262,16 +267,26 @@ class MockDuplexServer:
     # ------------------------------------------------------------ scripting
 
     async def say(self, text: str, *, ours: bool, audio: bytes = b"\x01\x02") -> None:
-        """One reply. `ours` decides the tts_type, which is the whole game."""
+        """One reply. `ours` decides the tts_type, which is the whole game.
+
+        On her own turns the first characters arrive BEFORE
+        `response.output_audio.started` — eleven of them in one measured run —
+        so a client that books the turn on the audio frame throws away the
+        start of everything she says. This fake used to send the audio frame
+        first, which is precisely why it certified a client that did.
+        """
         ws = self._ws
         assert ws is not None
+        head, tail = (text[:_AHEAD], text[_AHEAD:]) if not ours else ("", "")
+        for ch in head:
+            await self._send(ws, {"type": "response.output_text.delta", "delta": ch})
         await self._send(
             ws, {"type": "response.output_audio.started", "tts_type": _OURS if ours else _HERS}
         )
         if not ours:
             # Only her own turns stream text; the TTS path sends none, which
             # is why the adapter has to report the words it supplied.
-            for ch in text:
+            for ch in tail:
                 await self._send(ws, {"type": "response.output_text.delta", "delta": ch})
             await self._send(ws, {"type": "response.output_text.done", "text": text})
         await self._send(

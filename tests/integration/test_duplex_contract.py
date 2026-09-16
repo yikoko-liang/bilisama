@@ -113,6 +113,9 @@ class _Session:
         self.errors: list[dict[str, Any]] = []
         self.call_ids: list[str] = []
         self.audio = bytearray()
+        # Frame kinds in arrival order, audio deltas folded out — the order is
+        # the whole point of one of the tests below.
+        self.order: list[str] = []
 
     async def send(self, frame: dict[str, Any]) -> None:
         await self.ws.send(json.dumps(frame))
@@ -133,6 +136,8 @@ class _Session:
             frame = json.loads(raw)
             kind = str(frame.get("type") or "?")
             self.kinds[kind] += 1
+            if kind != "response.output_audio.delta":
+                self.order.append(kind)
             if kind == "response.output_text.delta":
                 texts.append(str(frame.get("delta") or ""))
             elif kind == "response.output_audio.started":
@@ -453,3 +458,29 @@ async def test_the_audio_she_sends_is_the_pcm_we_asked_for(tmp_path: Path) -> No
             "多半是 session.create 里的 format.type 不是 pcm_s16le——"
             "写 pcm 会拿到 float32，不写会拿到 Ogg Opus，两种都照回 session.created"
         )
+
+
+async def test_her_words_start_before_the_frame_that_announces_the_turn(
+    tmp_path: Path,
+) -> None:
+    """Nothing announces a reply here, and her text does not wait for the
+    audio frame that comes closest.
+
+    An adapter that books the turn on `response.output_audio.started` drops
+    everything streamed ahead of it — measured at eleven characters over five
+    deltas, which reads on the panel as her starting mid-sentence rather than
+    as anything broken.
+    """
+    async for s in _open(tmp_path):
+        await s.speak("给我讲讲你平时都干什么")
+        await s.collect(16)
+        assert "response.output_text.delta" in s.order, f"她没说话：{dict(s.kinds)}"
+        assert "response.output_audio.started" in s.order, "没有音频起始帧"
+
+        first_text = s.order.index("response.output_text.delta")
+        announced = s.order.index("response.output_audio.started")
+        assert (
+            first_text < announced
+        ), "这一轮音频帧先到，那这条测试就白写了——重跑几次确认端点改了行为"
+        ahead = sum(1 for kind in s.order[:announced] if kind == "response.output_text.delta")
+        assert ahead >= 1, f"音频帧之前只有 {ahead} 个文本块"

@@ -302,6 +302,9 @@ class DuplexLink:
         # accepted and ignored — see the module note.
         self._pending_items: deque[dict[str, str]] = deque(maxlen=40)
         self._warned_no_text = False
+        # Her streamed words for the turn in flight. Ours never stream, so
+        # this stays empty on the replies we drive — see _spoken_text.
+        self._heard: list[str] = []
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -545,6 +548,7 @@ class DuplexLink:
         self._active = None
         self._pending_ours = None
         self._pending_text = ""
+        self._heard = []
         self._slot_free.set()
         if self._watchdog is not None:
             self._watchdog.cancel()
@@ -637,9 +641,26 @@ class DuplexLink:
             self._on_reply_started(frame)
             return
         if kind == "response.output_text.delta":
-            handle = self._active
-            if handle is not None and not handle.stale:
-                self._events.put_nowait(link.ReplyTextDelta(handle, str(frame.get("delta") or "")))
+            # Her words arrive BEFORE the audio frame that used to book the
+            # turn — 11 characters ahead of it in one measured run — so
+            # booking only on audio threw away the start of everything she
+            # said. A streamed delta can only be hers: the TTS path we drive
+            # streams no text at all (measured: audio.started, audio deltas,
+            # done, and not one text frame).
+            handle = self._active or self._book_her_turn()
+            if handle is None or handle.stale:
+                return
+            text = str(frame.get("delta") or "")
+            self._heard.append(text)
+            self._events.put_nowait(link.ReplyTextDelta(handle, text))
+            return
+        if kind == "response.output_text.done":
+            # Carries the whole turn, byte-identical to the deltas joined.
+            # Kept as the authority for what she said, so a delta lost to a
+            # race cannot quietly shorten what memory and the chat page get.
+            whole = str(frame.get("text") or "")
+            if whole:
+                self._heard = [whole]
             return
         if kind == "response.output_audio.delta":
             handle = self._active
@@ -729,14 +750,38 @@ class DuplexLink:
                 self._events.put_nowait(link.ReplyTextDelta(self._active, self._pending_text))
             return
         if self._active is not None:
-            return  # already booked; a second sentence of the same reply
+            return  # already booked — by a text delta, or a second sentence
+        self._book_her_turn()
+
+    def _book_her_turn(self) -> link.ReplyHandle | None:
+        """Open a turn of her own, from whichever frame announced it first.
+
+        Returns None when one of OUR replies is already waiting to start: the
+        slot is spoken for, and guessing which of the two a stray frame
+        belongs to would be worse than saying so. Not seen in any probe —
+        the protocol is single-slot and our TTS announces within ~84 ms.
+        """
+        if self._pending_ours is not None:
+            log.warning(
+                "duplex.turn_overlapped",
+                error_text="我们点的回复还没开口，她的文字先到了——这一段丢了。",
+            )
+            return None
         handle = link.ReplyHandle(implicit=True)
         self._take_slot(handle, ours=False)
-        self._active = handle
         self._events.put_nowait(link.ReplyStarted(handle))
+        return handle
 
     def _spoken_text(self) -> str:
-        return self._pending_text
+        """What this turn actually said.
+
+        Hers streams and is collected in `_heard`; ours never streams, so the
+        words we handed over are the only record. Reading `_pending_text` for
+        both was the bug that made her own turns arrive at memory, the chat
+        page and the log carrying an empty string — audible, and invisible
+        everywhere else.
+        """
+        return "".join(self._heard) or self._pending_text
 
     # ------------------------------------------------------------ reconnect
 
