@@ -122,6 +122,12 @@ _WATCHDOG_S = 25.0
 # already feed at 20 ms, so this is a ceiling for the replay paths, not a
 # throttle on the microphone.
 _FRAME_MS = 20
+# How long a transcription may stay open before we call the streamer's turn
+# over ourselves. Generous — a long sentence with pauses is ordinary, and
+# closing early hands her the floor while he is mid-thought. What it bounds is
+# the case where the completed frame never comes at all, which stops her
+# answering anything for the rest of the session.
+_SPEECH_EDGE_S = 20.0
 # What a reply's own frames carry when the words were ours rather than hers.
 _OURS = "chat_tts_text"
 
@@ -256,6 +262,7 @@ class DuplexLink:
         quiet_window_s: float = 1.8,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
+        speech_edge_s: float = _SPEECH_EDGE_S,
         auto_reconnect: bool = True,
         reconnect_backoff_s: float = 1.0,
         max_reconnect_attempts: int = 6,
@@ -268,6 +275,7 @@ class DuplexLink:
         self.quiet_window_s = quiet_window_s
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
+        self._speech_edge_s = speech_edge_s
         self._auto_reconnect = auto_reconnect
         self._reconnect_backoff_s = reconnect_backoff_s
         self._max_reconnect_attempts = max_reconnect_attempts
@@ -311,6 +319,9 @@ class DuplexLink:
         # sent is what the next increment is measured against.
         self._asr_text = ""
         self._asr_sent = ""
+        # A transcription is open; the floor is closed until it ends.
+        self._speech_open = False
+        self._speech_edge: asyncio.Task[None] | None = None
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -518,12 +529,27 @@ class DuplexLink:
         The ack is immediate, but audio already generated keeps arriving —
         31 frames after the cancel in one probe — so the handle goes stale
         first and the consumers drop the tail on that flag.
+
+        A reply we asked for but that has not announced yet is cancellable
+        too, and used to be dropped here: `_active` is only set when
+        `response.output_audio.started` arrives, so a barge-in landing before
+        that returned without sending anything AND without settling. The slot
+        then sat taken until the 25-second watchdog, which is a quarter of a
+        minute of her answering nothing at all — measured in a live session on
+        2026-09-17, request at :47 and watchdog at :12.
         """
-        if self._active is None or self._active is not handle:
+        mine = self._active is handle or self._pending_ours is handle
+        if not mine:
             return
         handle.stale = True
         with contextlib.suppress(Exception):
             await self._send({"type": "response.cancel"})
+        if self._pending_ours is handle:
+            # Never announced, so no response.canceled is coming for it: the
+            # server has nothing booked under that name. Settle it here or
+            # nothing will until the watchdog.
+            log.info("duplex.cancel_before_start", handle_id=handle.handle_id)
+            self._settle(link.ReplyStatus.CANCELLED)
 
     async def end_protection(self) -> None:
         """Nothing to re-arm: this protocol has no interrupt switch to disarm.
@@ -559,6 +585,57 @@ class DuplexLink:
         if self._watchdog is not None:
             self._watchdog.cancel()
             self._watchdog = None
+
+    # ------------------------------------------------------------ speech edges
+
+    def _close_speech(self, *, timed_out: bool = False) -> None:
+        """End the streamer's turn: report what was said, then drop the floor.
+
+        Both halves matter and only one of them is obvious. The transcript is
+        the streamer's line in the chat page; `SpeechStopped` is what lets her
+        answer anything ever again, because until it arrives the floor holds
+        `streamer_speaking` and every intent is gated `gate.host_speaking`.
+        """
+        if not self._speech_open:
+            return
+        self._speech_open = False
+        if self._speech_edge is not None:
+            self._speech_edge.cancel()
+            self._speech_edge = None
+        if self._asr_text:
+            self._events.put_nowait(link.UserTranscriptDone(self._asr_text))
+        self._asr_text = ""
+        self._asr_sent = ""
+        if timed_out:
+            log.warning(
+                "duplex.speech_edge_missing",
+                error_text=(
+                    "主播开口之后迟迟没有转写结束帧，按结束处理。"
+                    "再不放开说话权，她对任何事情都不会开口了。"
+                ),
+            )
+        self._events.put_nowait(link.SpeechStopped())
+
+    def _arm_speech_edge(self) -> None:
+        """A start with no end wedges the gate shut, so bound the wait.
+
+        This protocol's only 「the streamer stopped」 signal is the
+        transcriber's completed frame. Nothing guarantees it: the uplink can
+        stall, the session can go quiet, and the socket stays open and healthy
+        through all of it. Every other provider has a VAD edge that does not
+        depend on transcription, so this backstop is this file's alone.
+        """
+        self._speech_open = True
+        if self._speech_edge is not None:
+            self._speech_edge.cancel()
+        task = asyncio.create_task(self._await_speech_edge(), name="duplex:speech-edge")
+        self._speech_edge = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _await_speech_edge(self) -> None:
+        await self._clock.sleep(self._speech_edge_s)
+        self._close_speech(timed_out=True)
 
     def _arm_watchdog(self) -> None:
         if self._watchdog is not None:
@@ -629,6 +706,7 @@ class DuplexLink:
             # transcriber's first word is the earliest edge it offers.
             self._asr_text = ""
             self._asr_sent = ""
+            self._arm_speech_edge()
             self._events.put_nowait(link.SpeechStarted())
             return
         if kind == "conversation.item.input_audio_transcription.delta":
@@ -655,12 +733,7 @@ class DuplexLink:
             # side of the conversation out of the chat page, the console and
             # `on_transcript` entirely (ui/events.py:199, dev_talk.py:1180 both
             # key on the done), which looked like a UI bug and was this line.
-            said = str(frame.get("transcript") or "") or self._asr_text
-            if said:
-                self._events.put_nowait(link.UserTranscriptDone(said))
-            self._asr_text = ""
-            self._asr_sent = ""
-            self._events.put_nowait(link.SpeechStopped())
+            self._close_speech()
             return
         if kind == "response.function_call_arguments.done":
             self._on_pull(frame)

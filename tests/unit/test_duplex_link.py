@@ -210,6 +210,32 @@ async def test_what_she_said_reaches_the_done_not_the_words_we_last_supplied() -
             await duplex.aclose()
 
 
+async def test_cancelling_a_reply_that_never_announced_frees_the_slot() -> None:
+    """A barge-in can land before the reply has said a word.
+
+    `_active` is only set when the audio frame announces the reply, so a
+    cancel arriving first used to return having sent nothing and settled
+    nothing — and the slot then sat taken until the 25-second watchdog, with
+    nothing dispatchable in the meantime. Measured live on 2026-09-17: reply
+    requested at :47, watchdog at :12.
+    """
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await duplex.request_reply(link.ReplySpec(text="谢谢小明送的火箭"))
+            await duplex.cancel(handle)  # before any response.output_audio.started
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is handle
+            assert done.status is link.ReplyStatus.CANCELLED
+            # The slot is what matters: the next reply must not have to wait
+            # out a watchdog to get it.
+            await asyncio.wait_for(duplex.request_reply(link.ReplySpec(text="下一条")), timeout=1.0)
+        finally:
+            await duplex.aclose()
+
+
 async def test_asking_for_a_reply_without_words_is_refused_not_guessed() -> None:
     """A spec with no text is a wiring bug in L3. Making something up would
     put words in her mouth that nobody wrote, so it raises instead."""
@@ -463,6 +489,60 @@ async def test_the_transcript_deltas_go_up_as_increments_not_as_restatements() -
                 "么",
                 "？",
             ], f"送上去的该是增量，而且标点反复也只送一次，实际是 {seen}"
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_transcript_that_never_closes_still_hands_the_floor_back() -> None:
+    """A start with no end wedges the gate shut for the rest of the session.
+
+    `SpeechStopped` is the only thing that clears `streamer_speaking`
+    (floor.py:97), and on this protocol its only source is the transcriber's
+    completed frame — every other provider has a VAD edge that does not depend
+    on transcription. A live session on 2026-09-17 lost that frame and she
+    answered nothing afterwards, every intent gated `gate.host_speaking`.
+    """
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=20.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("我说到一半")
+            await _next(events, link.SpeechStarted)
+            await clock.advance(21.0)
+            done = await _next(events, link.UserTranscriptDone)
+            assert done.text == "我说到一半", "超时收尾也要把听到的报上去"
+            await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_real_ending_cancels_the_backstop() -> None:
+    """Otherwise the timer fires into the next utterance and drops the floor
+    while the streamer is still talking."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=20.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear("说完了")
+            await _next(events, link.SpeechStopped)
+            await clock.advance(30.0)
+            await server.hear_without_ending("下一句")
+            await _next(events, link.SpeechStarted)
+            # Only ONE stopped may be in flight: the first turn's backstop must
+            # be gone, or this start is closed the instant it opens.
+            await asyncio.sleep(0.05)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(
+                isinstance(e, link.SpeechStopped) for e in pending
+            ), f"上一句的兜底计时器还活着，把这一句当场收了：{pending}"
         finally:
             await duplex.aclose()
 

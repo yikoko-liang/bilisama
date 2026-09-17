@@ -340,6 +340,32 @@ adapter 原来只在 `completed` 上发了个 `SpeechStopped`，**没发 `UserTr
 现在按最后一块 delta 重建整句发 `UserTranscriptDone`；增量是对「已经送上去的最长前缀」算的，
 所以标点横跳时那个问号只送一次。
 
+#### 她突然对什么都不回了，先看说话权
+
+2026-09-17 实盘遇到一次「她不回复了，即使我说话」。**不是断线**——日志里没有 `link.fatal`、
+没有 `duplex.reconnect_*`、没有 `LinkDown`，socket 一直好好的。看这两行：
+
+```
+floor.speech_started      主播开口
+（再也没有 floor.speech_stopped）
+scheduler.gate_blocked    reason=gate.host_speaking
+```
+
+`streamer_speaking` 只有 `SpeechStopped` 能清掉（[floor.py:97](../src/bilisama/director/floor.py:97)），
+而这条协议上它唯一的来源是转写的 `completed` 帧——**别家有独立于转写的 VAD 边沿，这条没有**。
+那一帧一旦不来，说话权就永久关着，之后每条意图都被 `gate.host_speaking` 挡掉。
+
+adapter 现在给它兜了底：主播开口后 20 秒还没等到结束帧，就自己收尾（把听到的发成
+`UserTranscriptDone`，再发 `SpeechStopped`），并打一条 `duplex.speech_edge_missing`。
+**看到这条警告就说明端点那侧漏帧了**，不是我们卡住。
+
+同一场还暴露了第二件事：打断一条**还没开口**的回复，`cancel()` 什么都不做——`_active` 要等
+音频帧才置上，所以 barge-in 来得早就既不发 `response.cancel` 也不结算，名额一直占到 25 秒后的
+看门狗（实盘 :47 请求、:12 看门狗）。现在这种情况直接就地结算，打一条
+`duplex.cancel_before_start`。
+
+排查顺序：`grep -E "speech_edge_missing|cancel_before_start|gate.host_speaking|reply_watchdog"`。
+
 #### 另外三条实测
 
 - **人设中途能改。** `session.update` 改 `instructions` 当场生效（改前答「豆腐」、改后答「小明」），

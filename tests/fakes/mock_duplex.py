@@ -340,6 +340,26 @@ class MockDuplexServer:
             {"type": "conversation.item.input_audio_transcription.completed", "transcript": ""},
         )
 
+    async def hear_without_ending(self, transcript: str) -> None:
+        """The streamer speaks and the transcriber never says he stopped.
+
+        Seen in a live session: the started frame and the deltas arrive, the
+        completed frame does not, the socket stays healthy, and nothing on the
+        wire says anything is wrong. On this protocol that is the end of her
+        talking for the rest of the session.
+        """
+        ws = self._ws
+        assert ws is not None
+        await self._send(ws, {"type": "conversation.item.input_audio_transcription.started"})
+        for i in range(1, len(transcript) + 1):
+            await self._send(
+                ws,
+                {
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "delta": transcript[:i],
+                },
+            )
+
     async def fail(self, code: str = "50000000", message: str = "模型推理出错") -> None:
         ws = self._ws
         assert ws is not None
