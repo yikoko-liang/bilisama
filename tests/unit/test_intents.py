@@ -180,7 +180,10 @@ def test_danmaku_instruction_answers_with_its_own_judgment() -> None:
     assert "这得问主播" in rules, "the banned phrasing is named, not implied"
 
 
-def test_danmaku_instruction_filters_viewer_to_viewer_replies() -> None:
+def test_danmaku_instruction_leaves_viewer_chat_to_the_harness() -> None:
+    """Viewer chat is decided by fact in the assembly (director/viewer_threads)
+    since 2026-09-17; the line still names the platform target, but the rules
+    no longer invite the model to call anything chat on its own."""
     event = _danmaku("你这个按钮是不是越修越歪？")
     event = dataclasses.replace(
         event,
@@ -192,8 +195,9 @@ def test_danmaku_instruction_filters_viewer_to_viewer_replies() -> None:
     assert intent is not None
     rules = intent.injection.reply.instructions or ""
     assert "@其他观众" in (intent.injection.item_text or "")
-    assert "默认输出[SKIP]" in rules
-    assert "不要替被@的观众回答" in rules
+    assert "观众互聊由程序按事实判定" in rules
+    assert "能到你这里的观众弹幕都不是互聊" in rules
+    assert "默认输出[SKIP]" not in rules and "没有@也可能是观众互聊" not in rules
 
 
 def test_amounts_never_enter_any_paid_prompt() -> None:

@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
+
+import pytest
 
 from bilisama.clock import SystemClock
 from bilisama.director.floor import SpeakingFloor
@@ -84,7 +87,7 @@ async def _wait_verdicts(scheduler: Scheduler, count: int, *, timeout: float = 8
 async def test_status_reports_an_idle_scheduler() -> None:
     """The shape the health card renders, on a scheduler with nothing to do.
 
-    Five keys, and none of them optional: the card and the panel both index into
+    Six keys, and none of them optional: the card and the panel both index into
     this dict, so a renamed key is a KeyError on the operator's screen rather
     than a missing line.
     """
@@ -95,6 +98,7 @@ async def test_status_reports_an_idle_scheduler() -> None:
             "active_source": None,
             "dispatching": False,
             "implicit_active": False,
+            "welcome_unnamed": 0,
         }
 
 
@@ -243,3 +247,46 @@ async def test_notify_on_an_empty_queue_does_nothing_visible() -> None:
 
         assert scheduler.verdicts == []
         assert scheduler.status()["queued"] == 0
+
+
+async def test_a_welcome_that_never_names_the_viewer_is_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Measurement, not enforcement: a VIP welcome that does not say the
+    viewer's name is what 2026-09-15 15:59:16 looked like. One log line and
+    one counter per such reply, so the rate is readable before anyone
+    decides whether a gate is worth its latency."""
+    from bilisama.ingest.events import EventKind, GuardLevel, LiveEvent, Viewer
+
+    def _vip(text: str, uid: int) -> Intent:
+        event = LiveEvent(
+            kind=EventKind.VIP_ENTER,
+            event_id=f"vip:{uid}",
+            viewer=Viewer(uid=uid, name="南瓜", guard_level=GuardLevel.CAPTAIN),
+        )
+        return Intent(
+            source="vip_enter",
+            priority=Priority.VIP_ENTER,
+            injection=Injection(reply=ReplySpec(instructions=text), item_text="[进房·舰长] 南瓜"),
+            event=event,
+            dedup_key=f"vip:{uid}",
+        )
+
+    caplog.set_level(logging.INFO, logger="bilisama.director.scheduler")
+    async with _running(
+        Script(reply_text="因为这样角色才连贯呀，不然大家会以为换了个新角色。")
+    ) as (
+        scheduler,
+        _floor,
+    ):
+        scheduler.submit(_vip("欢迎", 1))
+        await _wait_verdicts(scheduler, 1)
+        assert scheduler.verdicts[0].outcome is Outcome.SPOKEN
+        assert scheduler.status()["welcome_unnamed"] == 1
+        lines = [r for r in caplog.records if r.getMessage() == "scheduler.welcome_unnamed"]
+        assert len(lines) == 1
+        assert dict(getattr(lines[0], "fields", {})).get("source") == "vip_enter"
+    async with _running(Script(reply_text="南瓜来啦，今天在调角色的服装。")) as (scheduler, _floor):
+        scheduler.submit(_vip("欢迎", 2))
+        await _wait_verdicts(scheduler, 1)
+        assert scheduler.status()["welcome_unnamed"] == 0

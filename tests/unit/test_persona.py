@@ -758,10 +758,10 @@ def test_the_contract_spells_the_tag_the_decoder_actually_knows() -> None:
 
     config_dir = Path(__file__).resolve().parent.parent.parent / "config"
     on = live_voice_rules(config_dir, template_variables(PersonaConfig()), addressing=True)
-    tag = tag_for(SceneCategory.SKIP)
-    assert f"[{tag}]" in on
+    for category in (SceneCategory.SKIP, SceneCategory.SUMMARY):
+        assert f"[{tag_for(category)}]" in on, category
     for word in re.findall(r"\[([A-Za-z_]+)\]", on):
-        assert lookup(word) is SceneCategory.SKIP, f"提示词里的 [{word}] 解码器不认识"
+        assert lookup(word) is not None, f"提示词里的 [{word}] 解码器不认识"
 
 
 def test_no_acceptance_line_is_a_sentence_the_prompt_already_teaches() -> None:

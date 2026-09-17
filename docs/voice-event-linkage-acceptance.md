@@ -202,3 +202,31 @@ ASR 与前两轮相同。这里按原正文和完整后台协议共同判断，�
 20 个集成测试和 82 个浏览器测试通过；这些测试验证传输、绑定和状态机，不替代真实模型是否调用函数的验收。
 逐字输入和响应保存在 [`probe-live-linkage-results-report-last-conditional.jsonl`](../outputs/voice-event-linkage/probe-live-linkage-results-report-last-conditional.jsonl)，
 脚本不会覆盖旧产物。没有增加第二个判定模型；若要解决必需报告的漏报，需要另行确认是否允许独立后台判断。
+
+### 弹幕总结委托改走 `[SUMMARY]` 记号后的真机探测（2026-09-16）
+
+委托的发起从 `danmaku_summary.action=start` 函数报告改成语音回合开头的 `[SUMMARY]` 记号（改动说明见
+[runbook](runbook.md) 总结段和 `docs/current-interaction-prompts.md`）。探测脚本
+[`probe_summary_marker.py`](../outputs/voice-event-linkage/probe_summary_marker.py)：直连 DashScope
+`qwen-audio-3.0-realtime-flash`，完整生产提示词加 hard-10 那四条未答弹幕当账本，缓存 Seed 音频实时推送，
+每条台词各 3 次，VAD 判停 600 ms（整句）和 300 ms（生产值，逗号处切句）各一组，共 24 次；不经语音门和调度器，
+只量模型这一侧；harness 那一侧由单元测试覆盖（`test_voice_turn` 26 条、`test_voice_gate_wiring`、
+`test_interaction_assembly`）。逐字记录在
+[`probe-summary-marker-run1.jsonl`](../outputs/voice-event-linkage/probe-summary-marker-run1.jsonl)。
+
+| 台词 | 期望开头 | 600 ms 整句 | 300 ms 生产（切句后按片段列） |
+|---|---|---|---|
+| hard-10 s5「帮我看下弹幕，大家有什么问题？」 | SUMMARY | 3/3 SUMMARY | 3/3 至少一个片段 SUMMARY（SUMMARY+SKIP、EMPTY+SUMMARY、SUMMARY+SKIP） |
+| hard-16 s5「豆腐，我离开的时候大家都问了你什么？」 | SUMMARY | 1/3 SUMMARY，1 直接口答账本内容，1 误判 SKIP | 3/3 SUMMARY |
+| hard-21 s1「我先看看大家的讨论……各位也可以说说自己的体验」 | SKIP | 3/3 SKIP | 切成三段：首尾段 SKIP，中段「刚才我们聊的是模型选择，」3/3 直接接话 |
+| hard-05 s3「大家自己用的时候，更怕它不动手，还是更怕它改太多？」 | SKIP | 2 直接代答，**1 误写 SUMMARY** | 2 直接代答，1 SKIP |
+
+24 次响应里函数调用 0 次，和 9 月 14 日一致。结论只描述这一次观察，不作为稳定成功率：
+
+- 委托句上记号到达 10/12（对比函数报告通道 0/10）；hard-10 在生产 300 ms 下三次都至少有一个片段写了记号，
+  切句本身没有把委托切丢——第 1 段被第 2 段掐断时记号已闭合（「[SUMMARY] 整理」），语音门在闭合括号处已静音，
+  取消结束照样发出 Skip（`test_a_summary_turn_cut_by_the_next_speech_edge_still_reports`）。
+- 非委托句误写 SUMMARY 1/12，出在 hard-05 这种「承接的选择题」上，这是 9 月 9 日就记过的固定错类；同一句
+  另外 4 次直接代答观众，属于征集判断的旧问题，与记号无关。
+- 所有 SUMMARY 备注都是提示词例子的原话「整理弹幕热议话题」；备注只进面板和冷场素材，不影响链路。
+- 300 ms 下 hard-21 的中段片段三次都直接接话，会在主播句中开口；这是切句的既有问题，按决定暂不处理。

@@ -17,11 +17,13 @@ import asyncio
 import dataclasses
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from bilisama.config.enums import GrowthMode
 from bilisama.config.schema import InteractionConfig
 from bilisama.director.intents import (
+    _event_ref,
     anchor_danmaku_context_item,
     burst_welcome_intent,
     danmaku_batch_intent,
@@ -31,13 +33,14 @@ from bilisama.director.intents import (
     observed_events_context_item,
 )
 from bilisama.director.interaction_state import REPORT_RULES
+from bilisama.director.viewer_threads import ViewerThreads, turns_to_room, viewer_chat_target
 from bilisama.ingest.bilibili.safety import DedupRing, aggregate_gift_events
 from bilisama.ingest.bilibili.selector import SELECTOR_KINDS
 from bilisama.ingest.events import EventKind, GuardLevel, is_vip_entry
 from bilisama.ingest.sources import EventSink, Source, SupervisedSource, merge
 from bilisama.memory.context import memory_segments
 from bilisama.obs.logging import get_logger
-from bilisama.obs.outcome import Outcome, Phase, Verdict
+from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
 from bilisama.persona.prompt import DynamicContext, assemble, assemble_scoped, static_prefix
 
 if TYPE_CHECKING:
@@ -57,7 +60,7 @@ if TYPE_CHECKING:
     from bilisama.persona.loader import PersonaStore
     from bilisama.proactive import ProactiveTopicLoop
 
-__all__ = ["Assembly"]
+__all__ = ["Assembly", "SummaryOutcome"]
 
 log = get_logger(__name__)
 
@@ -77,6 +80,25 @@ _AUDIENCE_ACTIVITY_KINDS = frozenset(
         EventKind.ENTRY,
     }
 )
+
+
+def _answered_by(verdict: Verdict) -> bool:
+    """Spoken to, or looked at and declined: either way the audience line is
+    handled. Interrupted, expired and gated turns leave it open."""
+    if verdict.outcome is Outcome.SPOKEN:
+        return True
+    return verdict.outcome is Outcome.SKIPPED and verdict.reason is SkipReason.MODEL_DECLINED
+
+
+class SummaryOutcome(StrEnum):
+    """What a voice-delegated danmaku summary turned into."""
+
+    DELIVERED = "delivered"  # a summary over the pre-voice backlog
+    EMPTY = "empty"  # nothing to summarize: she says so in one line
+    SILENT = "silent"  # this delegation was already served moments ago
+
+
+_EMPTY_SUMMARY_GUARD_S = 30.0
 
 
 class Assembly:
@@ -170,6 +192,13 @@ class Assembly:
         # marathon mega-room stream must not grow it forever.
         self._vip_greeted: OrderedDict[str, None] = OrderedDict()
         self._vip_pending: dict[str, str] = {}
+        # Danmaku turns in flight, by intent key, with the audience lines each
+        # one is about. Settled at the verdict: a line the reply lane spoke to
+        # or declined is answered for good in the proactive loop — the core
+        # of the "she brought my question up again as a topic" repeat
+        # (2026-09-16).
+        self._danmaku_pending: OrderedDict[str, frozenset[str]] = OrderedDict()
+        self._last_summary_at: float | None = None
         self._pending_observations: OrderedDict[str, LiveEvent] = OrderedDict()
         # Replay shield for the direct lane (SC / guard / VIP and selector
         # winners): blivedm's inner reconnect re-delivers recent packets, and
@@ -178,9 +207,17 @@ class Assembly:
         # the wide window cannot eat genuine reposts.
         self._direct_ring = DedupRing(window_s=30.0, capacity=2048)
         self.events_deduped = 0
-        self._prefix = static_prefix(
-            persona.anchors(variables or {"userName": "主播", "agentName": "助手"})
-        )
+        names = variables or {"userName": "主播", "agentName": "助手"}
+        self._prefix = static_prefix(persona.anchors(names))
+        # The two names a typed @ may legitimately address (director/
+        # viewer_threads): the host under either template key, and her.
+        self._host_names = tuple(
+            name for name in (names.get("userName", ""), names.get("username", "")) if name
+        ) or ("主播",)
+        self._assistant_names = (names.get("agentName", "") or "助手",)
+        self._threads = ViewerThreads(clock)
+        self.viewer_chat_skipped = 0
+        self.viewer_chat_reasons: dict[str, int] = {}
         self._last_pushed = ""
         self._supervised: list[SupervisedSource] = []
         self.events_seen = 0
@@ -197,6 +234,36 @@ class Assembly:
         self._proactive.note_event(event)
         # The feed and memory keep the platform event above; the shared
         # ledger uses the same canonical kind that the reply lane will use.
+        # Thread facts first, so the ledger, the observations and the reply
+        # line all carry the same note (director/viewer_threads).
+        chat_target: str | None = None
+        chat_reason: str | None = None
+        if event.kind is EventKind.DANMAKU and not event.viewer.is_anchor:
+            chat_target = viewer_chat_target(
+                event, host_names=self._host_names, assistant_names=self._assistant_names
+            )
+            thread = self._threads.reply_context(event)
+            self._threads.note(event, target=chat_target)
+            if chat_target is not None:
+                chat_reason = "at_viewer"
+            if thread is not None:
+                by_name, ago_s = thread
+                event = dataclasses.replace(event, thread_note=f"{ago_s} 秒前被观众 {by_name} @过")
+                # Viewer chat is a matter of fact here, not of model judgment
+                # (2026-09-17): written back within the window after being
+                # @'d, and not turning to the host, her or the room, it stays
+                # out of the reply lane. Everything else an audience member
+                # writes is an ordinary danmaku.
+                if (
+                    chat_reason is None
+                    and event.reply_to_anchor is not True
+                    and not turns_to_room(
+                        event.text,
+                        host_names=self._host_names,
+                        assistant_names=self._assistant_names,
+                    )
+                ):
+                    chat_reason = "thread_reply"
         observed = self._observe_interaction_event(event)
         if (
             event.room_id > 0
@@ -241,6 +308,24 @@ class Assembly:
             return
         event = observed
         if self._interaction_state is not None and self._interaction_state.is_handled(event):
+            return
+        if chat_reason is not None:
+            # Addressed to another viewer (platform reply target or an
+            # unambiguous typed @), or written back to one who @'d them a
+            # moment ago. Seen, remembered, in the shared context — and not
+            # a reply candidate. The model used to be the only judge here
+            # and answered 「@白团 …」 on 2026-09-15; since 2026-09-17 it no
+            # longer gets to call anything else viewer chat.
+            self.viewer_chat_skipped += 1
+            self.viewer_chat_reasons[chat_reason] = self.viewer_chat_reasons.get(chat_reason, 0) + 1
+            log.info(
+                "assembly.viewer_chat_skipped",
+                identity=event.viewer.identity,
+                reason=chat_reason,
+                target_text=chat_target or "",
+                platform_target=event.reply_to_anchor is False,
+                thread_note=event.thread_note,
+            )
             return
         if not self._speak_enabled(event.kind.value):
             return
@@ -352,7 +437,7 @@ class Assembly:
         if summary is not None:
             self._submit_danmaku_summary(summary)
             return
-        self._submit(
+        self._submit_danmaku_turn(
             danmaku_batch_intent(
                 tuple(event.redacted() for event in events),
                 now=self._clock.monotonic(),
@@ -361,6 +446,22 @@ class Assembly:
             )
         )
         self.intents_submitted += 1
+
+    def _submit_danmaku_turn(self, intent: Intent) -> None:
+        """Submit one danmaku (or summary) turn and remember its audience lines
+        until the verdict settles them."""
+        events = intent.events or ((intent.event,) if intent.event is not None else ())
+        refs = frozenset(
+            ref
+            for event in events
+            if event.kind is EventKind.DANMAKU and event.dedup_key
+            for ref in (event.dedup_key, _event_ref(event))
+        )
+        self._submit(intent)
+        if refs and intent.dedup_key:
+            self._danmaku_pending[intent.dedup_key] = refs
+            while len(self._danmaku_pending) > 512:
+                self._danmaku_pending.popitem(last=False)
 
     def _observe_interaction_event(self, event: LiveEvent) -> LiveEvent:
         """Keep report IDs aligned with the event kind used for scheduling."""
@@ -407,18 +508,11 @@ class Assembly:
         self._proactive.set_silenced(self._interaction_state.silenced)
         if report.danmaku_summary.action == "start":
             # The report arrives in the same Realtime response as the
-            # streamer turn. Use that turn's start as the upper bound so the
-            # summary contains the backlog the streamer asked to inspect,
-            # not messages that arrived while she was speaking.
-            boundary = voice_started_at if voice_started_at is not None else self._clock.monotonic()
-            self._proactive.request_danmaku_summary(before_at=boundary)
-            summary = self._proactive.danmaku_summary_intent(now=self._clock.monotonic())
-            if summary is None:
-                # A request with no eligible backlog has nothing to deliver;
-                # do not leave it armed for a later, unrelated danmaku.
-                self._proactive.cancel_danmaku_summary()
-            else:
-                self._submit_danmaku_summary(summary)
+            # streamer turn, so that turn's start is the boundary. Kept as a
+            # second producer: the shipped contract asks for the [SUMMARY]
+            # head marker instead (request_danmaku_summary below), and a
+            # model that still reports finds the backlog already consumed.
+            self.request_danmaku_summary(voice_started_at=voice_started_at)
         elif report.danmaku_summary.action == "cancel":
             self._proactive.cancel_danmaku_summary()
         if report.discussion.action == "start":
@@ -427,6 +521,43 @@ class Assembly:
             # "finish" means this voice turn already supplied the summary.
             self._proactive.cancel_collection()
         return handled
+
+    def request_danmaku_summary(self, *, voice_started_at: float | None = None) -> SummaryOutcome:
+        """Deliver the backlog summary the streamer just delegated by voice.
+
+        Provider-neutral on purpose: the [SUMMARY] head marker reaches here
+        from the voice gate on every backend, with no report channel and no
+        InteractionState involved. `voice_started_at` is the upper bound of
+        the material — what the streamer asked to inspect is what arrived
+        BEFORE they started asking, not while they were speaking; without an
+        edge the moment of the request stands in.
+
+        The streamer asked for something, so silence is never the answer
+        (2026-09-16): no eligible backlog gets one plain "没有新弹幕" line —
+        unless a summary went out within the last half minute, in which case
+        this is the report channel repeating the marker's delegation and the
+        room already heard it.
+        """
+        now = self._clock.monotonic()
+        boundary = voice_started_at if voice_started_at is not None else now
+        self._proactive.request_danmaku_summary(before_at=boundary)
+        summary = self._proactive.danmaku_summary_intent(now=now)
+        if summary is not None:
+            self._submit_danmaku_summary(summary)
+            self._last_summary_at = now
+            return SummaryOutcome.DELIVERED
+        # A request with no eligible backlog has nothing to deliver; do not
+        # leave it armed for a later, unrelated danmaku.
+        self._proactive.cancel_danmaku_summary()
+        if (
+            self._last_summary_at is not None
+            and now - self._last_summary_at < _EMPTY_SUMMARY_GUARD_S
+        ):
+            return SummaryOutcome.SILENT
+        self._submit(self._proactive.empty_danmaku_summary_intent(now=now))
+        self.intents_submitted += 1
+        self._last_summary_at = now
+        return SummaryOutcome.EMPTY
 
     async def flush_event_observations(self) -> None:
         """Coalesce observation writes without blocking platform intake."""
@@ -454,7 +585,12 @@ class Assembly:
                 log.warning("assembly.event_observation_failed", error_text=str(exc)[:200])
 
     def note_verdict(self, verdict: Verdict) -> None:
-        """A queued welcome is not yet a completed welcome."""
+        """A queued welcome is not yet a completed welcome; a danmaku turn
+        that spoke, or that the model declined, settles its lines as
+        answered."""
+        refs = self._danmaku_pending.pop(verdict.intent_id, None)
+        if refs is not None and _answered_by(verdict):
+            self._proactive.mark_answered(refs)
         identity = self._vip_pending.pop(verdict.intent_id, None)
         if identity is None:
             return
@@ -540,7 +676,10 @@ class Assembly:
                 self._vip_pending[intent.dedup_key] = event.viewer.identity
             submitted = False
             try:
-                self._submit(intent)
+                if event.kind is EventKind.DANMAKU:
+                    self._submit_danmaku_turn(intent)
+                else:
+                    self._submit(intent)
                 submitted = True
             finally:
                 if not submitted:
@@ -558,7 +697,7 @@ class Assembly:
         keys = {event.dedup_key for event in summary.events if event.dedup_key}
         if self._selector is not None:
             self._selector.discard_events(keys)
-        self._submit(summary)
+        self._submit_danmaku_turn(summary)
         self._proactive.mark_danmaku_summary_used(keys)
         self._proactive.complete_danmaku_summary(summary.dedup_key)
         self.intents_submitted += 1
@@ -587,6 +726,7 @@ class Assembly:
         self._vip_pending.clear()
         self._pending_observations.clear()
         self._direct_ring = DedupRing(window_s=30.0, capacity=2048)
+        self._threads.reset()
         if self._interaction_state is not None:
             self._interaction_state.reset()
             self._proactive.set_silenced(False)
@@ -810,6 +950,8 @@ class Assembly:
             "events_seen": self.events_seen,
             "intents_submitted": self.intents_submitted,
             "events_deduped": self.events_deduped,
+            "viewer_chat_skipped": self.viewer_chat_skipped,
+            "viewer_chat_reasons": dict(self.viewer_chat_reasons),
             "anchor_context_written": self.anchor_context_written,
             "event_input_enabled": self._event_input_enabled,
             "context_chars": len(self._last_pushed),

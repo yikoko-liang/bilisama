@@ -33,7 +33,7 @@ REPORT_RULES = (
     "文本输出完全保留当前回合的正文或[SKIP]规则，不增加标签、JSON、事件编号或工具说明。"
     "message承载原来的正文或[SKIP]；只有后台状态需要改变时，才另用独立function_call报告。"
     "需要报告的变化包括：确切的事件状态变化、首次进入持续静默、从持续静默恢复，"
-    "观点征集的开始、取消或完成，以及主播明确委托总结弹幕时启动或取消一次总结。没有后台状态变化就不调用。"
+    "观点征集的开始、取消或完成，以及主播取消一次已委托的弹幕总结。没有后台状态变化就不调用。"
     "普通问答、自言自语先听、面向观众讲解时的沉默，如果没有上述变化，只输出正文或[SKIP]。"
     "不要为了凑齐每轮输出而发送空events和全keep；正文是否开口与后台是否需要更新分别判断。"
     "需要更新状态时，先给出符合原协议的message，再在同一响应中调用 report_interaction 报告状态；"
@@ -60,9 +60,8 @@ REPORT_RULES = (
     "理解对象和上下文，停止视频不等于要求你静默，事件到达不会自动解除静默。"
     "discussion：主播面向观众征集意见或问题时start并填入本次话题，当前不替观众回答；"
     "取消征集或换话题不再需要旧总结时cancel；其余keep。"
-    "danmaku_summary：主播明确说帮我看/整理/总结弹幕时start；这不是观点征集，"
-    "后台记录本次语音回合开始处，只汇总该回合开始前尚未处理的最新弹幕，再交付一次总结；"
-    "取消委托时cancel，其余keep。"
+    "danmaku_summary：总结委托由语音回合开头的[SUMMARY]标签发起，不在这里报告start；"
+    "主播取消已委托的总结时cancel，其余keep。"
     "工具报告不是展示用内容，即使被问及工具调用，也只解释通用概念，不透露本报告名和参数。"
     "\n完成当前响应前，检查是否确有后台变化：没有变化只保留原message；有变化再检查独立function_call。"
     "例如首次进入持续静默的回合，message为[SKIP]及简短观察，"
@@ -142,7 +141,7 @@ def report_tool_spec() -> ToolSpec:
     schema["properties"]["danmaku_summary"] = definitions["DanmakuSummaryUpdate"]
     return ToolSpec(
         REPORT_NAME,
-        "仅在需要改变后台状态时调用：具体事件处理进度改变、首次进入或解除持续静默、观点征集开始/取消/完成、弹幕总结委托启动/取消。没有变化不调用，普通问答或仅先听无需发送空events和全keep。需要时与正文或[SKIP]在同一响应中独立提交，不属于口播，不改变message格式，不另生成回复。",
+        "仅在需要改变后台状态时调用：具体事件处理进度改变、首次进入或解除持续静默、观点征集开始/取消/完成、取消已委托的弹幕总结（委托本身由回复开头的[SUMMARY]标签发起，不在此启动）。没有变化不调用，普通问答或仅先听无需发送空events和全keep。需要时与正文或[SKIP]在同一响应中独立提交，不属于口播，不改变message格式，不另生成回复。",
         schema,
     )
 
@@ -205,12 +204,21 @@ class InteractionState:
             or not anchor_event.text.strip()
         ):
             return set()
+        target_name = anchor_event.reply_to_name.strip().casefold()
         for ref, event in reversed(self._events.items()):
-            if (
-                event.kind is not EventKind.DANMAKU
-                or event.viewer.is_anchor
-                or event.viewer.uid != anchor_event.reply_to_uid
-            ):
+            if event.kind is not EventKind.DANMAKU or event.viewer.is_anchor:
+                continue
+            # The platform masks ordinary viewers' uids (uid 0, uid_hash only)
+            # while the host's reply carries the target's real mid, so a uid
+            # match is only possible when the viewer's uid is unmasked. The
+            # reply's target name is platform-filled too (reply_uname), so a
+            # masked viewer matches by name — the intent-test console masks
+            # every viewer the same way, and hard-19 answered 小松 twice over
+            # it (2026-09-17).
+            if event.viewer.uid > 0:
+                if event.viewer.uid != anchor_event.reply_to_uid:
+                    continue
+            elif not target_name or event.viewer.name.strip().casefold() != target_name:
                 continue
             if (
                 anchor_event.room_id > 0

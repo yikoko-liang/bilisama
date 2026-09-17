@@ -724,7 +724,9 @@ async def test_a_requeued_intent_writes_its_history_line_only_once() -> None:
     to write item_text again — add_context_item dedups nothing (s2s.py:126-142)
     — so a thank-you the streamer talked over twice reached the model as three
     identical `[SC ¥30] 金主: 加油` lines. What it sees then is one viewer
-    spamming, which is exactly the reply we do not want.
+    spamming, which is exactly the reply we do not want. Since 2026-09-17 the
+    replay writes a [重放] line instead — a different text that says it is
+    the same event, never a second SC.
     """
     text = "[SC ¥30] 金主: 加油"
     speech = _ScriptedLink()
@@ -743,7 +745,10 @@ async def test_a_requeued_intent_writes_its_history_line_only_once() -> None:
         speech.feed.put_nowait(SpeechStopped(audio_ms=1))
 
         await _until(lambda: len(speech.replies) == 2, "重排队之后没有再说一次")
-    assert speech.items == [text], f"会话历史里这条被写了 {len(speech.items)} 遍"
+    assert speech.items[0] == text and len(speech.items) == 2
+    assert (
+        speech.items[1].startswith("[重放]") and text not in speech.items[1]
+    ), f"会话历史里这条 SC 被写了 {sum(1 for item in speech.items if item == text)} 遍"
 
 
 async def test_a_failed_history_write_is_retried_on_the_requeue() -> None:

@@ -284,7 +284,10 @@ class ProactiveConfig(BaseModel):
 
     max_per_hour: int = Field(12, ge=0, le=60)
     wake_interval_s: int = Field(30, ge=5, le=300)
-    collection_window_s: int = Field(120, ge=5, le=1800)
+    collection_window_s: int = Field(30, ge=5, le=1800)
+    # Which trivia files under config/prompts/topics/ feed the quiet-room
+    # floor: file stems, comma-separated ("aigc,coding"); empty reads all.
+    topic_pool: str = Field("", max_length=120)
 
 
 class EntryWelcomeConfig(BaseModel):

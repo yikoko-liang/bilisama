@@ -83,6 +83,12 @@ class Skip:
     ruling: Ruling | None
     # Frames of this turn already reached the speakers (late marker): flush.
     clear_playback: bool
+    # When the streamer's utterance this turn answers began (the last
+    # SpeechStarted before the turn opened), on the gate's clock; None when
+    # no speech edge was seen. A SUMMARY ruling uses it as the boundary of
+    # the backlog to summarise — the words after the edge are the delegation
+    # itself, not material.
+    speech_started_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -91,6 +97,7 @@ class _Turn:
     head: MarkerHead
     opened_at: float
     holding: bool
+    speech_started_at: float | None = None
     frames: list[link.LinkEvent] = field(default_factory=list)
     released: bool = False
     # Muted: the tag was read, the frames stop here, nothing more will play.
@@ -126,6 +133,7 @@ class VoiceTurnGate:
         self._hold_cap_frames = hold_cap_frames
         self._emit: Emit | None = None
         self._turns: dict[int, _Turn] = {}
+        self._speech_started_at: float | None = None
         self._skipped_ids: deque[int] = deque(maxlen=_SKIPPED_REMEMBERED)
         # One bool per decided turn, True for skipped. Only the tail matters.
         self._recent: deque[bool] = deque(maxlen=_RECENT_WINDOW)
@@ -201,6 +209,11 @@ class VoiceTurnGate:
         if isinstance(event, link.LinkDown):
             self._drop_all()
             return (event,)
+        if isinstance(event, link.SpeechStarted):
+            # Noted, not held: the edge passes through like every non-reply
+            # frame. It is read back when the next turn opens.
+            self._speech_started_at = self._clock.monotonic()
+            return (event,)
         if isinstance(event, link.ReplyStarted):
             return self._on_started(event)
         if isinstance(event, link.ReplyTextDelta):
@@ -219,6 +232,7 @@ class VoiceTurnGate:
             head=self._decoder_factory(),
             opened_at=self._clock.monotonic(),
             holding=holding,
+            speech_started_at=self._speech_started_at if handle.implicit else None,
             # Under ALWAYS the frames flow straight to the views, which is
             # what "released" means to the done below.
             released=not holding,
@@ -450,7 +464,14 @@ class VoiceTurnGate:
             clear_playback=clear_playback,
         )
         try:
-            self._on_skip(Skip(turn.handle, ruling, clear_playback))
+            self._on_skip(
+                Skip(
+                    turn.handle,
+                    ruling,
+                    clear_playback,
+                    speech_started_at=turn.speech_started_at,
+                )
+            )
         except Exception as exc:
             # The kill is somebody else's; failing to report it must not take
             # the pump down — the frames are dropped here regardless.
@@ -461,6 +482,7 @@ class VoiceTurnGate:
             )
 
     def _drop_all(self) -> None:
+        self._speech_started_at = None
         for turn in self._turns.values():
             self._disarm(turn)
             if turn.note_timer is not None:

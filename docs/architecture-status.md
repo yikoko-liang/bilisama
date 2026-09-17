@@ -211,6 +211,12 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 小额当弹幕；付费事件 `requeue_on_interrupt=True`；`protected` 由 `[interaction] protect_paid_replies` 决定（默认关，开了只保护 SC 和高额礼物，2026-09-03 加）——关着时主播开口是硬上限，付费保护的含义是「回来再说」；弹幕 TTL 20 秒从到达时刻起算。主播自己的弹幕走
 `anchor_danmaku_context_item`（:106-122）只写上下文不回复。
 
+事件 prompt 不让模型判断播放时机（2026-09-16，`TIMING_IS_NOT_YOURS`）：主播在不在说话、要不要等，是地板和调度器的事，
+模型只管生成；判断一条事件要不要回只看这条事件和它的处理记录，主播最近讲什么只用来措辞。被插话后重新入队的付费 / VIP
+意图重放是另一种输入（`intents.replay_injection`，2026-09-17）：写一条 [重放] 条目带上她已说出的片段，指令只留形状规则加 `REPLAY_RULES`（只判插话期间主播有没有亲口处理，不调报告工具），base 去掉报告规则；最多重放两次。
+弹幕总结委托找不到素材时改为一句「没有新弹幕」（`Assembly.request_danmaku_summary` → `SummaryOutcome.EMPTY`），
+半分钟内重复的委托才静默。
+
 这里的逐类规则和 `config/personas/live/event_responses.md` 有意重叠，代码注释明说要靠人手保持同步，
 没有测试守着（计划 #94）。
 
@@ -224,7 +230,7 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 
 麦克风收的是全场声音，语音后端每次判停都会生成一条回复，四家都关不掉。做法是让模型报场景、程序决定接不接：
 
-- `scene_markers.py`（无依赖，persona 和 director 都 import 它）：**只有一个记号 `[SKIP]`**（2026-09-09 归并），
+- `scene_markers.py`（无依赖，persona 和 director 都 import 它）：**两个记号**——`[SKIP]`（2026-09-09 归并）和 `[SUMMARY]`（2026-09-15 加，主播委托整理弹幕；同样静音，区别只在门的 `Skip` 回调里多走一步 `Assembly.request_danmaku_summary`，边界用门记下的这轮 `SpeechStarted` 时刻。改记号的原因：函数报告在真实模型上必报组 0/10，记号合规 98/98）。`[SKIP]`
   意思是「这一轮不接话」；对她说的不写记号。英文是因为 s2s 官方管线的剥字符规则只放行半角 `[]` 和 `\w`。
   退役的五个场景记号（`AUDIENCE` `SELF_TALK` `READING` `GUEST` `UNSURE`）和 `DECLINED` 留在 `ALIASES` 里
   折向 `SKIP`，不删——旧合同开的会话可能还在跑，模型也爱自创写法，认得比不认得好。
@@ -317,15 +323,42 @@ UPSERT viewer，streams_seen 只在 last_stream_id 变化时加一；`write_batc
 
 ## 6. 主动性：ProactiveTopicLoop
 
-`proactive.py` 后台每 `wake_interval_s` 用侧路模型读近 20 条事件、本场进展、最近 12 行对话产一个候选，
-指纹跳过（:340-381）。主动开口成功提交后，会把本次注入所依赖的观众弹幕记入“已用事件”账本：它们仍保留在
-记忆库供蒸馏和审计，但不再进入后续主动候选（新来的弹幕照常进入）。前台每秒一 tick（:187-224）：闸门未阻塞、冷场超过阈值（接了节奏器时读房间
-活跃度派生的 30 / 60 / 120 秒，热闹时关）、每小时预算未满、没有弹幕窗口或欢迎在等、从节奏器拿到
-令牌，才 `_speak`。
+2026-09-16 重做了选题来源和防重复，原因是实测同一个话题反复起（观众问过、普通车道答过的问题，
+十分钟后又被当成「有人问」起了一次；主播刚说完一段，她九秒后就接话题）。现在的结构：
 
-`_speak`（:226-326）提交 PROACTIVE 意图：trusted=True、写一条「[本场] 这会儿没人说话」的 item
-（DashScope 空会话拒绝 response.create，计划 #56 的修法）、指令模板带「连续无人回应次数」、TTL 30 秒、
-write_history=True。没配侧路模型时不闭嘴，改让实时模型自己从共享上下文挑话题。
+**七层来源，按房间档位放行**（`proactive_sources.py`：`Layer`、`allowed_layers`）。1 欠着的回复（被打断
+未重排的候选：生成被打断的片段，和已说完但播放被打断、观众只听到开头的全文，素材里标明是哪种）→ 2 真没人答的观众弹幕 → 3 最近弹幕观点整理出的可讨论话题（至少 3 条自上次整理后新来的
+弹幕）→ 4 接主播的话（最近 2 分钟主播转写）→ 5 本场进展 / 直播简介钩子 → 6 在场常客的记忆（一人一场
+点名不超过 2 次）→ 7 通用趣味池（`config/prompts/topics/*.md`，一场每条只用一次，随机抽 3 条给模型挑，
+`interaction.proactive.topic_pool` 选文件）。繁忙房不起题；活跃房只放 1–4；稀疏房加 5；冷清房全开。
+每次开口只取最靠前一层有素材的（5 分钟内用过的层让位给别的有素材的层）；冷清房一层都没素材时仍由
+实时模型从共享上下文起一句，稀疏 / 活跃房则不起（`proactive.no_material` 记一次）。
+
+**素材记账**（`proactive_opportunities.py`）。普通车道对弹幕的判决（说了、或模型判过不值得回）由
+`Assembly.note_verdict` 转成 `mark_answered`：这条弹幕永久不再是「没人答的」，只在第 3 层带
+「[已回答，不要再答]」标注出现。主动话题自己用过的素材按半衰期处理：10 分钟内硬排除，之后带
+「N 分钟前作为主动话题提过」回到候选，60 分钟后忘掉这层标记；话题没播出去（过期、被抢、开口前被切）
+时 `note_verdict` 把素材还回去（欠着的回复也一样：`take_interrupted` 随开口带走，没播出去 `restore_interrupted`
+还回来；被切的第 1 层开口不会把自己再记成一条欠账）。欠账池满 8 条时先挤掉她自己被说过头的语音片段，
+回观众的排在前面。意图测试台进用例全清、出用例只撤背景（`reset_for_replay(None)`）。
+
+**出口查重**（`proactive_sources.py`：`TopicLedger`、`topic_similarity`）。本场发起过的话题记在账本里
+（候选提交时记候选，说完后换成她实际说的话——`Scheduler.on_spoken` 把意图和文本一起交给
+`note_spoken`）。侧路模型给的候选与账本相似度 ≥ 0.6（字二元 Dice 与 difflib 取大）就丢弃
+（`proactive.candidate_duplicate`），改由实时模型按层素材起；她实际说出的话若重复了账本
+（音频已播，收不回）记 `proactive.repeat_detected` 并冷却 5 分钟。账本同时写进侧路提示和实时指令
+（「已经发起过的主动话题，不要重复，也不要换个说法再提」）。
+
+**节奏**。两次主动开口至少隔 90 秒（连续两次无人接则翻倍，三次后等房间有新事件再起）；主播说话和她
+自己说完都重置冷场计时（此前主播独白期间计时不停，是「九秒接话」的来源）；侧路候选只在同一层且
+60 秒内有效。对话环从 12 行放宽到 30 行。
+
+前台每秒一 tick：闸门未阻塞、冷场超过阈值（接了节奏器时读房间活跃度派生的 30 / 60 / 120 秒，热闹时关）、
+每小时预算未满、没有弹幕窗口或欢迎在等、选到有素材的层、从节奏器拿到令牌，才 `_speak`。
+
+`_speak` 提交 PROACTIVE 意图：trusted=True、item 是「[本场] 这会儿没人说话」加本层素材（DashScope 空会话
+拒绝 response.create，计划 #56 的修法）、指令模板带「连续无人回应次数」、本轮选题层和账本、TTL 30 秒、
+write_history=True。没配侧路模型时不闭嘴，改让实时模型自己按层素材挑话题。
 
 戳桌宠（`ui/poke.py`）也走 PROACTIVE 意图，但绕过所有 speak 开关（计划 #48，等产品拍板）。
 
@@ -400,6 +433,11 @@ B 站 WebSocket → vendored blivedm → `_Forwarder` 预算闸门 → 纯函数
 
 ### 8.4 打分
 
+**2026-09-16 订正：本节和 8.5 描述的是 9 月 14 日之前的选择器。提交 0d103a9 删掉了本地文本漏斗，`scoring.py`
+的三个函数在 `src/` 里已无调用方；现在的选择器只做去重和按新鲜度取最新 ≤8 条打批（`selector.py:1-5`、`:176-177`）。
+程序侧模型之前唯一的语义无关兜底是 `director/viewer_threads.py`（对其他观众说的弹幕不进回复车道，被 @ 过的观众
+写回来的弹幕标注线索），接在 `Assembly.on_event` 里。下文保留作历史。**
+
 `ingest/bilibili/scoring.py` 两阶段。`danmaku_text_signal`（:161-189）先判三态：空、纯数字、「666」
 这类低信息、重复率过高直接拒；疑问、点名、纠错、故障、请求、与直播简介相关的硬通过；其余打分。
 `danmaku_score`（:217-261）权重：文本实质 0.4、疑问 0.15、舰队 0.3 到 0.4、房管 0.15、本房粉丝牌最高
@@ -459,7 +497,7 @@ chattiness 只是乘在上面的系数 1.35 / 1.0 / 0.7，另定普通车道令�
 | custom_tts | engine, voice, speed, api_key_ref | 整节无运行期读者，阶段 4 |
 | audio | input_device, output_device, output_route, echo_guard, input_enabled, output_enabled, noise_sensitivity | 前四个无读者，`tests/unit/test_ui_meta.py:277` 守着这个事实 |
 | safety | wordlist_path, allowlist_path, on_hit | |
-| interaction | chattiness, reply_length, speak 十一开关, protect_paid_replies, sc_protect_ms, gift_battery_high / medium, burst_* 三个, entry_welcome 三分闸, proactive{max_per_hour, wake_interval_s} | burst_* 已无实际语义；sc_protect_ms 只在 protect_paid_replies 开着时生效 |
+| interaction | chattiness, reply_length, speak 十一开关, protect_paid_replies, sc_protect_ms, gift_battery_high / medium, burst_* 三个, entry_welcome 三分闸, proactive{max_per_hour, wake_interval_s, collection_window_s（默认 30s，2026-09-17 从 120 改）, topic_pool} | burst_* 已无实际语义；sc_protect_ms 只在 protect_paid_replies 开着时生效 |
 | memory | db_path, distill_every_n_events, retain_event_days, write_batch_ms, clock_granularity_min | db_path 无读者，实际用 room_dir/memory.db |
 | persona | id, data_dir, streamer_name, display_name（≤20）, growth{relationship, voice} | |
 | avatar | renderer sprite / live2d, model_id, expression_source | v4 拆成两轴 |

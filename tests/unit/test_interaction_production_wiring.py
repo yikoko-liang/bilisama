@@ -36,6 +36,28 @@ def test_production_keeps_skip_generation_and_delivers_proactive_results() -> No
     assert "interaction_reports.status" in source
 
 
+def test_production_wires_the_ledger_the_pool_and_the_answered_lines() -> None:
+    """The three legs of "no repeated proactive topics" (2026-09-16): the
+    scheduler hands her spoken words with the intent to the ledger, the pool
+    files under config/prompts/topics/ are the quiet-room floor, and the
+    verdict sink reaches assembly.note_verdict, which settles danmaku lines
+    as answered."""
+    scheduler = keywords("Scheduler")
+    assert scheduler["on_spoken"] == "lambda intent, text: proactive.note_spoken(intent, text)"
+    loop = keywords("ProactiveTopicLoop")
+    assert "TopicPool.load(config_path.parent / 'prompts' / 'topics'" in loop["topic_pool"]
+    assert "settings.interaction.proactive.topic_pool.split(',')" in loop["topic_pool"]
+    assert loop["stream_intro"] == "lambda: settings.room.stream_intro"
+    source = ast.unparse(_run_director())
+    assert "assembly.note_verdict(verdict)" in source
+    assert (
+        Path(__file__).resolve().parents[2] / "config" / "prompts" / "topics" / "aigc.md"
+    ).is_file()
+    assert (
+        Path(__file__).resolve().parents[2] / "config" / "prompts" / "topics" / "coding.md"
+    ).is_file()
+
+
 def test_reporting_instructions_follow_voice_contract_without_duplicating_it(
     tmp_path: Path,
 ) -> None:
@@ -47,3 +69,12 @@ def test_reporting_instructions_follow_voice_contract_without_duplicating_it(
     assert context.count(REPORT_RULES) == 1
     assert REPORT_RULES in kit.assembly.build_public_context()
     kit.store.close()
+
+
+def test_production_starts_the_summary_from_the_summary_marker() -> None:
+    """The delegation rides the head marker, not the function report: the
+    gate's skip callback is where the summary starts, with the speech edge
+    the gate recorded as its boundary."""
+    source = ast.unparse(_run_director())
+    assert "ruling.category is SceneCategory.SUMMARY" in source
+    assert "assembly.request_danmaku_summary(voice_started_at=skip.speech_started_at)" in source

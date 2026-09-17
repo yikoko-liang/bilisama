@@ -28,6 +28,7 @@ from bilisama.realtime import dialect as dia
 from bilisama.realtime import link
 from bilisama.realtime.providers.hosted import HostedLink
 from bilisama.realtime.providers.s2s import S2SLink
+from bilisama.scene_markers import SceneCategory
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
 
 _S2S_TTS = replace(caps_mod.S2S, owns_tts=True)
@@ -42,6 +43,7 @@ class _Rig:
     gated: list[link.LinkEvent] = field(default_factory=list)
     raw: list[link.LinkEvent] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    skips: list[Skip] = field(default_factory=list)
 
 
 @contextlib.asynccontextmanager
@@ -66,6 +68,7 @@ async def _wired(
 
         def on_skip(skip: Skip) -> None:
             # dev_talk.on_voice_skip, minus the proactive loop.
+            rig.skips.append(skip)
             ruling = skip.ruling
             scheduler.skip_implicit(
                 skip.handle,
@@ -245,3 +248,26 @@ async def test_an_intent_waits_while_her_turn_is_held() -> None:
         await _until(lambda: len(rig.scheduler.verdicts) == 1, what="弹幕回复的判决")
         assert rig.scheduler.verdicts[0].outcome is Outcome.SPOKEN
         assert rig.server.recorded.count("response.create") == 1
+
+
+async def test_a_summary_delegation_is_muted_and_dated_from_the_speech_edge() -> None:
+    """[SUMMARY] on the real fan-out: no audio for the speakers, one skip for
+    the wiring, and the streamer's speech edge on it as the summary boundary."""
+    script = Script(reply_text="[SUMMARY] 整理弹幕", delta_chunks=2, delta_interval_s=0.05)
+    async with _wired(script, hosted=True) as rig:
+        loop = asyncio.get_running_loop()
+        before = loop.time()
+        await rig.server.speech_started()
+        await rig.server.speech_stopped()
+        await _until(lambda: not rig.floor.streamer_speaking, what="主播停口")
+        await rig.server.emit_implicit_reply()
+        await _until(lambda: len(rig.skips) == 1, what="门的判决")
+        skip = rig.skips[0]
+        assert skip.ruling is not None
+        assert skip.ruling.category is SceneCategory.SUMMARY
+        assert skip.speech_started_at is not None
+        assert before <= skip.speech_started_at <= loop.time()
+        await _until(lambda: len(rig.scheduler.verdicts) == 1, what="调度器判决")
+        assert rig.scheduler.verdicts[0].detail == "SUMMARY · 整理弹幕"
+        await asyncio.sleep(0.1)
+        assert _audio_frames(rig.gated) == [], "the delegation turn is never spoken"

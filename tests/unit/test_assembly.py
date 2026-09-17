@@ -713,6 +713,53 @@ async def test_audience_danmaku_and_sc_reset_the_unanswered_topic_count(tmp_path
     assert proactive.status()["unanswered_count"] == 0
 
 
+async def test_a_danmaku_the_reply_lane_settled_is_never_a_proactive_topic(tmp_path: Path) -> None:
+    """The core of the repeat: a question she already answered in the reply
+    lane came back ten minutes later as "someone asked ...". The verdict is
+    where it is settled — spoken, or looked at and declined — and a turn that
+    never played leaves the line open."""
+    from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
+    from tests.fakes.bili import danmaku_event
+
+    kit = build_assembly_kit(tmp_path)
+    proactive = kit.proactive
+    assert proactive is not None
+    await kit.assembly.on_event(danmaku_event("这个工具会联网吗", uid=6))
+    await kit.assembly.on_event(danmaku_event("能跑在 mac 上吗", uid=7))
+    await kit.assembly.on_event(danmaku_event("有没有教程", uid=8))
+    assert [intent.source for intent in kit.intents] == ["danmaku"] * 3
+    pool = proactive._opportunities
+    assert len(pool.unanswered_events()) == 3
+
+    spoken, declined, expired = (intent.dedup_key for intent in kit.intents)
+    kit.assembly.note_verdict(
+        Verdict(intent_id=spoken, source="danmaku", outcome=Outcome.SPOKEN, phase=Phase.PLAYED)
+    )
+    kit.assembly.note_verdict(
+        Verdict(
+            intent_id=declined,
+            source="danmaku",
+            outcome=Outcome.SKIPPED,
+            phase=Phase.GENERATING,
+            reason=SkipReason.MODEL_DECLINED,
+        )
+    )
+    kit.assembly.note_verdict(
+        Verdict(intent_id=expired, source="danmaku", outcome=Outcome.EXPIRED, phase=Phase.QUEUED)
+    )
+    left = [event.text for event in pool.unanswered_events()]
+    assert left == [
+        "有没有教程"
+    ], "spoken and declined are settled; the expired turn's line stays open"
+    await kit.clock.advance(3600.0)
+    assert "这个工具会联网吗" not in pool.recent_danmaku_lines(
+        window_s=7200.0
+    ) or "[已回答" in "".join(
+        pool.recent_danmaku_lines(window_s=7200.0)
+    ), "answered is permanent, not a decaying mark"
+    assert proactive.status()["answered_event_material"] == 4
+
+
 async def test_paused_release_from_the_deferred_pool_stays_silent(tmp_path: Path) -> None:
     """deliver_selected re-checks the pause gate: a winner deferred before the
     pause must neither speak nor spend budget after it."""

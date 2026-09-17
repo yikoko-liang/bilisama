@@ -70,6 +70,8 @@ class SkipReason(StrEnum):
     """The provider's own microphone turn was cut: the streamer was not
     talking to her (the voice gate's ruling, director/voice_turn.py)."""
     REVOKED = "platform.revoked"  # the platform withdrew it, e.g. a deleted super chat
+    EMPTY_REPLY = "model.empty_reply"  # completed with no text and no audio (a report-only turn)
+    REPLAY_LIMIT = "scheduler.replay_limit"  # talked over on every replay it was allowed
     # The danmaku funnel's accounts (selector.py). LOW_VALUE and DUPLICATE
     # above serve the funnel too — one vocabulary, not a parallel one.
     UID_COOLDOWN = (

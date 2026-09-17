@@ -18,7 +18,7 @@ def test_transitions_still_require_a_separate_same_response_report() -> None:
         "首次进入持续静默",
         "从持续静默恢复",
         "观点征集的开始、取消或完成",
-        "主播明确委托总结弹幕时启动或取消一次总结",
+        "主播取消一次已委托的弹幕总结",
         "已经处于静默且本轮继续先听，不重复enter",
         "原本没有静默，不因普通回答报告release",
         "再在同一响应中调用 report_interaction",
@@ -38,6 +38,12 @@ def test_tool_description_matches_conditional_call_policy_without_schema_change(
         "start",
         "cancel",
     ]
+
+
+def test_the_summary_delegation_starts_from_the_marker_not_the_report() -> None:
+    assert "[SUMMARY]" in REPORT_RULES
+    assert "不在这里报告start" in REPORT_RULES
+    assert "帮我看/整理/总结弹幕时start" not in REPORT_RULES
 
 
 def test_danmaku_summary_is_an_independent_report_dimension() -> None:

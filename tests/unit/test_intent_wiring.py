@@ -177,6 +177,9 @@ class _WiredReplay:
             event_observer=self.events.append,
             voice_rules="当前语音来自主播。",
             event_rules="当前直播事件来自观众。",
+            # The catalog addresses her as 豆腐 (「@小月 豆腐你怎么看」): the
+            # viewer-chat backstop must know that name, as production does.
+            variables={"userName": "主播", "username": "主播", "agentName": "豆腐"},
         )
         self.kit.assembly._stream_intro = lambda: "今天调试本地工具。"
         self.source = ScenarioSource("wired-replay")
@@ -339,7 +342,12 @@ async def test_each_catalog_platform_stimulus_reaches_assembly_memory_and_event_
         assert replay.runner.state()["status"] == "completed"
         assert len(replay.events) == len(expected)
         assert len(replay.kit.store.recent_events()) == len(expected)
-        assert replay.selector.status()["offered"] == sum(
+        # Every audience danmaku and gift reaches the funnel, except the ones
+        # addressed to another viewer (director/viewer_threads), which the
+        # assembly keeps out of the reply lane and counts instead.
+        offered = replay.selector.status()["offered"]
+        assert isinstance(offered, int)
+        assert offered + replay.kit.assembly.viewer_chat_skipped == sum(
             event.kind in {EventKind.DANMAKU, EventKind.GIFT} and not event.viewer.is_anchor
             for event in expected
         )

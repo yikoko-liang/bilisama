@@ -199,6 +199,10 @@ class LiveEvent:
     reply_to_name: str = ""
     # None means the target or room owner's UID is unknown, not "a viewer".
     reply_to_anchor: bool | None = None
+    # Stamped by the assembly, read by the model's event line only: a short
+    # fact about the thread this danmaku sits in (「6 秒前被观众 小路 @过」).
+    # Derived from the danmaku stream, never from the platform.
+    thread_note: str = ""
 
     @property
     def is_anonymous(self) -> bool:

@@ -1659,7 +1659,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from pydantic import ValidationError
 
     from bilisama import secrets
-    from bilisama.app import Assembly
+    from bilisama.app import Assembly, SummaryOutcome
     from bilisama.cli import DEFAULT_CONFIG, report_problems, report_validation
     from bilisama.clock import SystemClock
     from bilisama.config import ConfigError, check, derive, load
@@ -1685,7 +1685,9 @@ async def run_director(args: argparse.Namespace) -> int:
         template_variables,
     )
     from bilisama.proactive import ProactiveTopicLoop
+    from bilisama.proactive_sources import TopicPool
     from bilisama.realtime.providers.volcano import VolcanoLink
+    from bilisama.scene_markers import SceneCategory, looks_like_summary_delegation
     from bilisama.side import OpenAICompatSideModel, SideModel
     from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
     from bilisama.ui.config_edit import (
@@ -2063,7 +2065,9 @@ async def run_director(args: argparse.Namespace) -> int:
 
     last_host_transcript = ""
 
-    def on_interrupted(intent: Intent | None, handle: link.ReplyHandle, text: str) -> None:
+    def on_interrupted(
+        intent: Intent | None, handle: link.ReplyHandle, text: str, stage: str
+    ) -> None:
         from bilisama.director.intents import _event_ref, event_context_line
 
         if runtime_paused or intent_test_resetting:
@@ -2076,6 +2080,7 @@ async def run_director(args: argparse.Namespace) -> int:
                 "voice",
                 last_host_transcript or "主播与助手的近期语音对话",
                 text,
+                stage=stage,
             )
             return
         events = intent.events or ((intent.event,) if intent.event is not None else ())
@@ -2093,6 +2098,7 @@ async def run_director(args: argparse.Namespace) -> int:
             background or intent.injection.item_text or "近期尚未完成的互动",
             text,
             event_refs=tuple(_event_ref(event) for event in remaining),
+            stage=stage,
         )
 
     scheduler = Scheduler(
@@ -2110,6 +2116,9 @@ async def run_director(args: argparse.Namespace) -> int:
         # One clean spoken line, two readers: the distiller's voice-exemplar
         # buffer and the proactive loop's dialogue material.
         spoken_sink=spoken_line,
+        # The same line with its intent: the proactive ledger keeps what she
+        # said for an opening, and a reheat of an earlier one cools her down.
+        on_spoken=lambda intent, text: proactive.note_spoken(intent, text),
         # Her own microphone turns go the same way: what she said to the
         # streamer used to reach no memory at all (plan, voice gate 5.3).
         implicit_spoken_sink=spoken_line,
@@ -2202,13 +2211,43 @@ async def run_director(args: argparse.Namespace) -> int:
         reply_base_instructions=lambda: assembly.build_public_context(),
         collection_window_s=float(settings.interaction.proactive.collection_window_s),
         revoke=scheduler.revoke,
+        # The quiet-room floor: light questions by stream type, one use each
+        # per stream, drawn at random (config/prompts/topics/).
+        topic_pool=TopicPool.load(
+            config_path.parent / "prompts" / "topics",
+            names=settings.interaction.proactive.topic_pool.split(","),
+        ),
+        stream_intro=lambda: settings.room.stream_intro,
     )
+
+    # The last gate SKIP awaiting the streamer's transcript, for the summary
+    # text backstop: (handle_id, speech_started_at, skipped_at).
+    pending_skip: tuple[int, float | None, float] | None = None
+    last_transcript_at = 0.0
+
+    def summary_by_text(handle_id: int, speech_started_at: float | None, transcript: str) -> None:
+        nonlocal pending_skip
+        pending_skip = None
+        if not looks_like_summary_delegation(transcript):
+            return
+        outcome = assembly.request_danmaku_summary(voice_started_at=speech_started_at)
+        log.info(
+            "voice_gate.summary_by_text",
+            handle_id=handle_id,
+            outcome=outcome.value,
+            bounded=speech_started_at is not None,
+        )
 
     def on_streamer_transcript(text: str) -> None:
         # The native realtime conversation already carries this host turn.
-        nonlocal last_host_transcript
+        nonlocal last_host_transcript, last_transcript_at
         last_host_transcript = text[-1000:]
+        last_transcript_at = clock.monotonic()
         proactive.note_dialogue("streamer", text)
+        # A SKIP the gate wrote moments ago, whose transcript arrives now:
+        # if the words were a delegation, the summary still goes out.
+        if pending_skip is not None and clock.monotonic() - pending_skip[2] <= 3.0:
+            summary_by_text(pending_skip[0], pending_skip[1], text)
 
     async def push_context(text: str) -> None:
         await speech.set_context(text)
@@ -2217,6 +2256,7 @@ async def run_director(args: argparse.Namespace) -> int:
             print("─" * 40 + f"\n{text}\n" + "─" * 40)
 
     def on_voice_skip(skip: Skip) -> None:
+        nonlocal pending_skip
         ruling = skip.ruling
         if intent_test_active:
             test_runner.note_model_skip(skip.handle)
@@ -2233,6 +2273,29 @@ async def run_director(args: argparse.Namespace) -> int:
             # label used to lead this line; with one tag left it said 「先听」
             # every time, which is about the gate rather than the streamer.
             proactive.note_dialogue("streamer", f"[主播语音] {ruling.note}")
+        if skip.handle.implicit and ruling is not None and ruling.category is SceneCategory.SKIP:
+            # The transcript may have landed before the marker (then check it
+            # now) or may still be on its way (then on_streamer_transcript
+            # checks it, within three seconds).
+            started = skip.speech_started_at
+            if started is not None and last_transcript_at >= started and last_host_transcript:
+                summary_by_text(skip.handle.handle_id, started, last_host_transcript)
+            else:
+                pending_skip = (skip.handle.handle_id, started, clock.monotonic())
+        if skip.handle.implicit and ruling is not None and ruling.category is SceneCategory.SUMMARY:
+            # The streamer delegated a danmaku summary. The marker is the
+            # whole signal — no function report, no InteractionState — and
+            # the gate's speech edge bounds the backlog: what arrived before
+            # they started asking. `assembly` is built a page below; this
+            # closure only runs once frames flow, long after.
+            outcome = assembly.request_danmaku_summary(voice_started_at=skip.speech_started_at)
+            log.info(
+                "dev_talk.summary_delegated",
+                handle_id=skip.handle.handle_id,
+                delivered=outcome is SummaryOutcome.DELIVERED,
+                outcome=outcome.value,
+                bounded=skip.speech_started_at is not None,
+            )
 
     # Which of her own microphone turns may play (plan, voice gate). Decides
     # in the fan-out's pump; the scheduler's kill path does the rest. Reads
@@ -3755,6 +3818,20 @@ async def run_director(args: argparse.Namespace) -> int:
                                     "kind": "danmaku",
                                     "events": [live_event_payload(item) for item in intent.events],
                                 }
+                            if intent.source == "proactive":
+                                # The panel names the layer the opening drew
+                                # on, and whether the side candidate arrived
+                                # in time or the realtime model picked alone.
+                                opening = proactive.opening_info(intent.dedup_key)
+                                if opening is not None:
+                                    reference = {
+                                        "kind": "proactive",
+                                        "name": (
+                                            f"第 {opening['layer']} 层·{opening['label']}"
+                                            + ("·侧路候选" if opening["candidate"] else "·实时自选")
+                                        ),
+                                        "layer": opening["layer"],
+                                    }
                             # priority rides along so the page can decide
                             # bubble-worthiness from the scheduler's own tier
                             # instead of re-deriving it from source names —

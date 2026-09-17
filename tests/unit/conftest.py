@@ -8,7 +8,7 @@ forgot, green-lighting wiring the product no longer uses.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,6 +75,7 @@ def build_assembly_kit(
     observe_context_item: Callable[[str], Awaitable[None]] | None = None,
     voice_rules: str = "",
     event_rules: str = "",
+    variables: Mapping[str, str] | None = None,
 ) -> AssemblyKit:
     """One Assembly, wired the way dev-talk wires it, on a FakeClock.
 
@@ -125,6 +126,7 @@ def build_assembly_kit(
         gift_battery_medium=interaction.gift_battery_medium,
         voice_rules=voice_rules,
         event_rules=event_rules,
+        variables=variables,
     )
     return AssemblyKit(
         assembly=assembly,

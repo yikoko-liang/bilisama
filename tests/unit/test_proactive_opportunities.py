@@ -48,6 +48,7 @@ def h() -> Iterator[Harness]:
         idle_threshold_s=9999,
         event_pacer=pacer,
         collection_window_s=120,
+        min_gap_s=0.0,
     )
     try:
         yield Harness(loop, clock, floor, pacer, intents)
@@ -195,7 +196,7 @@ async def test_replay_reset_clears_all_new_state(h: Harness) -> None:
 
 
 def test_collection_configuration_and_invalid_requests(h: Harness) -> None:
-    assert ProactiveConfig().collection_window_s == 120
+    assert ProactiveConfig().collection_window_s == 30
     with pytest.raises(ValueError):
         ProactiveConfig(collection_window_s=0)
     with pytest.raises(ValueError):
@@ -451,3 +452,69 @@ async def test_summary_already_dispatched_is_not_rebuilt_when_revoke_fails(h: Ha
     h.loop._tick()
     assert len(h.intents) == 1
     assert not h.loop.status()["opinion_collection_pending"]
+
+
+async def test_topic_material_decays_instead_of_vanishing_for_good(h: Harness) -> None:
+    """mark_used used to be a one-way door: a topic that expired in the queue
+    burned its material forever. Now a use is a timestamp — hard-excluded for
+    a while, then back with a note that it was raised, then forgotten."""
+    from bilisama.proactive_opportunities import USED_FORGET_S, USED_HARD_S
+
+    old = _event(1, "聊过一次的观众问题")
+    h.loop.note_event(old)
+    h.loop._opportunities.mark_used({_event_ref(old)})
+    pool = h.loop._opportunities
+    assert "聊过一次的观众问题" not in pool.material()
+    assert not any("聊过一次的观众问题" in line for line in pool.recent_danmaku_lines())
+    assert any(
+        "聊过一次的观众问题" in line for line in pool.used_event_lines()
+    ), "the side model's store view hides it too"
+    await h.clock.advance(USED_HARD_S + 1)
+    lines = pool.recent_danmaku_lines()
+    assert any(
+        "聊过一次的观众问题" in line and "分钟前作为主动话题提过" in line for line in lines
+    ), "back for the discussion layer, flagged as raised once"
+    assert not any("聊过一次的观众问题" in line for line in pool.used_event_lines())
+    await h.clock.advance(USED_FORGET_S)
+    assert pool._used_age(old) is None, "forgotten"
+
+
+async def test_unmarking_restores_material_a_topic_never_spoke(h: Harness) -> None:
+    old = _event(1, "排队时过期的话题素材")
+    h.loop.note_event(old)
+    h.loop._opportunities.mark_used({_event_ref(old)})
+    assert "排队时过期的话题素材" not in h.loop._opportunities.material()
+    h.loop._opportunities.unmark_used({_event_ref(old)})
+    assert "排队时过期的话题素材" in h.loop._opportunities.material()
+    assert "分钟前作为主动话题提过" not in h.loop._opportunities.material()
+
+
+async def test_an_answered_danmaku_never_returns_as_unanswered_material(h: Harness) -> None:
+    """The 16:02 repeat: 小满's question was answered in the danmaku lane and
+    still fed two proactive topics. Answered is permanent for this stream;
+    it stays visible only to the discussion layer, marked as answered."""
+    from bilisama.proactive_opportunities import USED_FORGET_S
+
+    done = _event(1, "已经被普通车道回答的问题")
+    h.loop.note_event(done)
+    h.loop._opportunities.mark_answered({_event_ref(done)})
+    assert "已经被普通车道回答的问题" not in h.loop._opportunities.material()
+    await h.clock.advance(USED_FORGET_S * 2)
+    assert "已经被普通车道回答的问题" not in h.loop._opportunities.material()
+    lines = h.loop._opportunities.recent_danmaku_lines(window_s=USED_FORGET_S * 3)
+    assert any("已经被普通车道回答的问题" in line and "已回答" in line for line in lines)
+
+
+def test_over_capacity_her_own_cut_off_turns_go_before_a_reply_that_answered_someone(
+    h: Harness,
+) -> None:
+    pool = h.loop._opportunities
+    pool.note_interrupted(
+        "danmaku:1", "danmaku", "[弹幕] 糯米：会传服务器吗", "糯米别担心", event_refs=("a",)
+    )
+    for n in range(9):
+        pool.note_interrupted(f"voice:{n}", "voice", "主播在排查", f"太好了{n}")
+    assert pool.status()["interrupted_candidates"] == 8
+    material = pool.interrupted_material()
+    assert "糯米" in material, "the danmaku reply outlives nine voice fragments"
+    assert material.index("糯米") < material.index("太好了"), "and is listed first"

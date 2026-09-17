@@ -22,10 +22,12 @@ from typing import Any, Literal, cast
 
 from bilisama.clock import SystemClock
 from bilisama.director.floor import SpeakingFloor
+from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.director.scheduler import PlaybackClear, Scheduler
 from bilisama.obs.outcome import Outcome, Phase, SkipReason
 from bilisama.realtime import capabilities as caps_mod
 from bilisama.realtime import link
+from bilisama.realtime.link import ReplySpec
 from bilisama.realtime.providers.s2s import S2SLink
 from tests.fakes.mock_realtime import MockRealtimeServer, Script
 
@@ -62,6 +64,7 @@ async def _running(
     on_hit: Literal["drop_sentence", "mute_all"] = "drop_sentence",
     spoken_sink: Callable[[str], None] | None = None,
     implicit_spoken_sink: Callable[[str], None] | None = None,
+    on_spoken: Callable[[Intent, str], None] | None = None,
 ) -> AsyncIterator[tuple[Scheduler, MockRealtimeServer, _Tee]]:
     clock = SystemClock()
     async with MockRealtimeServer(caps=caps_mod.S2S, script=script) as server:
@@ -76,6 +79,7 @@ async def _running(
             on_hit=on_hit,
             spoken_sink=spoken_sink,
             implicit_spoken_sink=implicit_spoken_sink,
+            on_spoken=on_spoken,
         )
         runner = asyncio.create_task(scheduler.run())
         try:
@@ -125,6 +129,32 @@ async def test_a_completed_turn_reaches_the_implicit_sink_and_only_that_one() ->
         await server.emit_implicit_reply()
         await _until(lambda: hers == ["我自己说的"], what="文字到达 implicit_spoken_sink")
         assert ours == [], "the dispatched-reply sink is not hers to fill"
+
+
+async def test_a_completed_dispatched_reply_reaches_on_spoken_with_its_intent() -> None:
+    """The proactive ledger needs the intent and the words together; her own
+    microphone turns have no intent and never arrive here."""
+    spoken: list[tuple[str, str]] = []
+    async with _running(
+        Script(reply_text="那我们聊聊键盘"),
+        on_spoken=lambda intent, text: spoken.append((intent.source, text)),
+    ) as (scheduler, server, _):
+        await server.emit_implicit_reply()
+        await _until(lambda: not scheduler.status()["implicit_active"], what="她自起的回复结束")
+        assert spoken == [], "an implicit turn answers no intent"
+        scheduler.submit(
+            Intent(
+                source="proactive",
+                priority=Priority.PROACTIVE,
+                injection=Injection(
+                    reply=ReplySpec(instructions="开个话题"), item_text="[本场] 没人说话"
+                ),
+                dedup_key="proactive:1",
+            )
+        )
+        await _until(
+            lambda: spoken == [("proactive", "那我们聊聊键盘")], what="文字连同意图到达 on_spoken"
+        )
 
 
 async def test_skip_implicit_kills_once_with_one_cancel_and_one_verdict() -> None:

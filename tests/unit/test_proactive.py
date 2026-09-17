@@ -20,12 +20,14 @@ import pytest
 
 from bilisama.clock import FakeClock
 from bilisama.director.floor import SpeakingFloor
-from bilisama.director.intent import Intent, Priority
+from bilisama.director.intent import Injection, Intent, Priority
 from bilisama.event_pacing import EventPacer
 from bilisama.ingest.events import EventKind, LiveEvent, Viewer
 from bilisama.memory.store import MemoryStore
 from bilisama.obs.logging import setup
 from bilisama.proactive import ProactiveTopicLoop
+from bilisama.proactive_sources import Layer, TopicPool
+from bilisama.realtime.link import ReplySpec
 
 _QUIETED = ("websockets", "asyncio", "aiohttp", "httpx", "uvicorn")
 
@@ -59,14 +61,30 @@ def _lines(stream: io.StringIO, event: str) -> list[dict[str, Any]]:
     return [line for line in parsed if line["event"] == event]
 
 
+# Distinct openings, the way a side model that reads the ledger answers: a
+# side that keeps returning one line is what the ledger exists to drop.
+_FRESH_TOPICS = (
+    "聊聊主播的新键盘",
+    "问问大家周末有没有出门",
+    "今晚这个插件到底装不装得上",
+    "观众里有没有人也在学画画",
+    "主播桌上那杯咖啡已经第几杯了",
+    "最近有什么好看的番推荐一下",
+    "谁家的猫今天又拆家了",
+    "上次说的那个显卡到货了吗",
+)
+
+
 class FakeSide:
-    def __init__(self, topic: str = "聊聊主播的新键盘") -> None:
+    def __init__(self, topic: str | None = None) -> None:
         self.topic = topic
         self.calls = 0
 
     async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
         self.calls += 1
-        return self.topic
+        if self.topic is not None:
+            return self.topic
+        return _FRESH_TOPICS[(self.calls - 1) % len(_FRESH_TOPICS)]
 
     async def aclose(self) -> None:
         return None
@@ -118,6 +136,8 @@ async def _running(
     side: FakeSide | None,
     idle_threshold_s: float = 10.0,
     max_per_hour: int = 12,
+    min_gap_s: float = 0.0,
+    topic_pool: TopicPool | None = None,
 ) -> AsyncIterator[tuple[ProactiveTopicLoop, SpeakingFloor, list[Intent], FakeClock]]:
     clock = FakeClock()
     store = MemoryStore(":memory:", clock)
@@ -134,6 +154,8 @@ async def _running(
         idle_threshold_s=idle_threshold_s,
         wake_interval_s=5.0,
         max_per_hour=max_per_hour,
+        min_gap_s=min_gap_s,
+        topic_pool=topic_pool,
     )
     task = asyncio.create_task(loop.run())
     try:
@@ -424,6 +446,7 @@ async def _running_paced(
     *,
     side: FakeSide | None,
     chattiness_level: str = "medium",
+    topic_pool: TopicPool | None = None,
 ) -> AsyncIterator[tuple[ProactiveTopicLoop, SpeakingFloor, list[Intent], FakeClock, EventPacer]]:
     from bilisama.config.enums import Chattiness
 
@@ -444,6 +467,8 @@ async def _running_paced(
         wake_interval_s=5.0,
         event_pacer=pacer,
         reply_base_instructions=lambda: "公共上下文",
+        min_gap_s=0.0,
+        topic_pool=topic_pool,
     )
     task = asyncio.create_task(loop.run())
     try:
@@ -467,15 +492,20 @@ async def test_without_a_side_model_the_realtime_link_still_breaks_the_ice() -> 
         assert loop.status()["fallback_topics"] == 1
 
 
-async def test_streamer_speech_does_not_reset_the_live_event_clock() -> None:
-    """A monologue is topic material, not room activity: with a pacer wired
-    the dead-air clock keeps running under the floor."""
+async def test_streamer_speech_resets_the_live_event_clock() -> None:
+    """Flipped on 2026-09-16. A monologue used to be "material, not activity":
+    the dead-air clock kept running under the floor, so the moment the
+    streamer stopped she opened a topic. That is jumping in on the streamer,
+    and it is what put a proactive line nine seconds after a streamer↔her
+    exchange at 16:02:44. The streamer's completed line restarts the clock."""
     async with _running_paced(side=None) as (loop, floor, intents, clock, _pacer):
-        loop.note_dialogue("streamer", "我先把这段跑通")
         floor.on_speech_started()
         await clock.advance(25.0)
         floor.on_speech_stopped(quiet_s=0.0)
-        await clock.advance(7.0)  # 25 + 7 > 30: the quiet-room target passed under speech
+        loop.note_dialogue("streamer", "我先把这段跑通")
+        await clock.advance(7.0)  # would have crossed the 30s quiet target under the old rule
+        assert intents == []
+        await clock.advance(24.0)  # 30s after the streamer's line
         assert len(intents) == 1
 
 
@@ -583,3 +613,332 @@ async def test_dialogue_lines_enter_the_candidate_material() -> None:
     assert "主播：这段显存爆了" in material
     assert "豆腐：换低显存模式试试" in material
     assert "连续无人回应次数" in material
+
+
+async def test_her_own_spoken_reply_resets_the_idle_clock() -> None:
+    """16:02:35 she answered the streamer; 16:02:44 a proactive topic repeated
+    it. Her own completed line is room activity for the dead-air clock."""
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        await clock.advance(25.0)
+        loop.note_dialogue("assistant", "小满问为什么砍了自动分类，主播解释是怕测试太复杂")
+        await clock.advance(7.0)
+        assert intents == []
+        await clock.advance(24.0)
+        assert len(intents) == 1
+
+
+async def test_two_openings_keep_the_minimum_gap_whatever_the_room() -> None:
+    async with _running(side=FakeSide(), min_gap_s=90.0) as (_loop, _floor, intents, clock):
+        await clock.advance(11.0)
+        assert len(intents) == 1
+        await clock.advance(11.0)
+        assert len(intents) == 1, "idle again, but inside the 90s gap"
+        await clock.advance(70.0)
+        assert len(intents) == 1, "t=92: still eight seconds short of the gap"
+        await clock.advance(10.0)
+        assert len(intents) == 2
+
+
+async def test_the_dialogue_ring_keeps_thirty_lines() -> None:
+    class RecordingSide(FakeSide):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inputs: list[str] = []
+
+        async def complete(self, *, system: str, user: str, max_tokens: int = 512) -> str:
+            self.inputs.append(user)
+            return await super().complete(system=system, user=user, max_tokens=max_tokens)
+
+    side = RecordingSide()
+    async with _running(side=side, idle_threshold_s=999.0) as (loop, _floor, _intents, _clock):
+        for index in range(35):
+            loop.note_dialogue("streamer", f"第{index}句话")
+        await loop._refresh()
+        assert "第34句话" in side.inputs[-1]
+        assert "第5句话" in side.inputs[-1], "thirty lines, not twelve"
+        assert "第4句话" not in side.inputs[-1]
+
+
+async def test_a_candidate_that_reheats_a_recent_opening_is_dropped(
+    log_stream: io.StringIO,
+) -> None:
+    """The ledger is checked before the candidate is ever spoken."""
+    side = FakeSide("大家平时更常用哪个模型？")
+    async with _running_paced(side=side) as (loop, _floor, intents, clock, _pacer):
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        first = intents[0].injection.reply.instructions or ""
+        assert "候选话题是：大家平时更常用哪个模型" in first
+        await clock.advance(31.0)
+        assert len(intents) == 2
+        second = intents[1].injection.reply.instructions or ""
+        assert (
+            "候选话题是：大家平时更常用哪个模型" not in second
+        ), "the same candidate again is a reheat: dropped, the realtime fallback opens instead"
+        assert "后台候选暂不可用" in second
+        assert (
+            "已经发起过" in second and "大家平时更常用哪个模型" in second
+        ), "the ledger still shows her the opening she must not repeat"
+        assert _lines(log_stream, "proactive.candidate_duplicate")
+        assert loop.status()["candidates_dropped"] >= 1
+
+
+async def test_what_she_actually_said_enters_the_ledger_and_a_repeat_cools_her_down(
+    log_stream: io.StringIO,
+) -> None:
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        loop.note_spoken(
+            intents[0], "小满问为什么砍了自动分类，主播解释是怕测试太复杂，先把手动流程跑通"
+        )
+        assert "自动分类" in loop.status()["recent_topics"][0]
+        await clock.advance(31.0)
+        assert len(intents) == 2
+        loop.note_spoken(
+            intents[1], "刚才小满问自动分类为啥砍了，我解释过是怕测试太复杂，先跑通手动流程"
+        )
+        assert _lines(log_stream, "proactive.repeat_detected")
+        assert loop.status()["repeats_detected"] == 1
+        await clock.advance(31.0)
+        assert len(intents) == 2, "a detected repeat buys a cooldown before the next opening"
+        await clock.advance(280.0)
+        assert len(intents) == 3
+
+
+async def test_a_topic_that_never_played_gives_its_material_back() -> None:
+    from bilisama.obs.outcome import Outcome, Phase, Verdict
+
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        event = LiveEvent(
+            kind=EventKind.DANMAKU,
+            room_id=10,
+            event_id="q1",
+            viewer=Viewer(uid=1, name="小满"),
+            text="这个工具会联网吗",
+        )
+        loop.note_event(event)
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        assert loop.status()["last_layer"] == int(Layer.UNANSWERED)
+        assert "这个工具会联网吗" not in loop._opportunities.material(), "consumed at submit"
+        loop.note_verdict(
+            Verdict(
+                intent_id=intents[0].dedup_key,
+                source="proactive",
+                outcome=Outcome.EXPIRED,
+                phase=Phase.QUEUED,
+            )
+        )
+        assert (
+            "这个工具会联网吗" in loop._opportunities.material()
+        ), "never played: back in the pool"
+
+
+async def test_layers_follow_the_room_band_and_the_pool_is_the_quiet_room_floor(
+    tmp_path: Any,
+) -> None:
+    """A sparse room (six people walked in, nobody spoke) may not open with
+    trivia; the moment the pacer reads quiet, it may."""
+    from pathlib import Path
+
+    pool_dir = Path(tmp_path)
+    (pool_dir / "aigc.md").write_text("你们第一次用 AI 画图是哪一年？\n", encoding="utf-8")
+    pool = TopicPool.load(pool_dir)
+    async with _running_paced(side=None, topic_pool=pool) as (loop, _floor, intents, clock, pacer):
+        for uid in range(1, 7):
+            pacer.note_event(
+                LiveEvent(
+                    kind=EventKind.ENTRY,
+                    room_id=10,
+                    event_id=f"in{uid}",
+                    viewer=Viewer(uid=uid, name=f"v{uid}"),
+                )
+            )
+        loop.note_activity()
+        assert pacer.snapshot().activity.value == "sparse"
+        await clock.advance(85.0)  # idle > 60s, still sparse (downshift hold)
+        assert pacer.snapshot().activity.value == "sparse"
+        assert intents == [], "sparse room, no material in any allowed layer: no trivia, no topic"
+        await clock.advance(10.0)  # t=95: quiet now
+        assert pacer.snapshot().activity.value == "quiet"
+        assert len(intents) == 1
+        rules = intents[0].injection.reply.instructions or ""
+        assert "趣味池" in rules and "第一次用 AI 画图" in rules
+        assert loop.status()["last_layer"] == int(Layer.POOL)
+        assert pool.draw(5) == [], "offered once, marked used"
+
+
+async def test_answered_danmaku_seed_one_discussion_then_the_pool_takes_over(tmp_path: Any) -> None:
+    """Three answered danmaku are a discussable angle once (layer 3, allowed
+    in a sparse room); the same three lines do not seed a second one, so the
+    next quiet-room opening falls through to the pool."""
+    from pathlib import Path
+
+    from bilisama.director.intents import _event_ref
+
+    pool_dir = Path(tmp_path)
+    (pool_dir / "aigc.md").write_text("你们第一次用 AI 画图是哪一年？\n", encoding="utf-8")
+    pool = TopicPool.load(pool_dir)
+    async with _running_paced(side=None, topic_pool=pool) as (loop, _floor, intents, clock, pacer):
+        for uid in (1, 2, 3):
+            event = LiveEvent(
+                kind=EventKind.DANMAKU,
+                room_id=10,
+                event_id=f"e{uid}",
+                viewer=Viewer(uid=uid, name=f"v{uid}"),
+                text="这个模型多少钱",
+            )
+            pacer.note_event(event)
+            loop.note_event(event)
+            loop.note_activity()
+            loop._opportunities.mark_answered({_event_ref(event)})
+            await clock.advance(10.0)
+        assert pacer.snapshot().activity.value == "sparse"
+        await clock.advance(60.0)  # t=90: idle 60s in a sparse room
+        assert len(intents) == 1
+        first = intents[0].injection.reply.instructions or ""
+        assert "第 3 层" in first and "[已回答，不要再答]" in first and "趣味池" not in first
+        assert loop.status()["last_layer"] == int(Layer.DISCUSSION)
+        await clock.advance(40.0)  # quiet by now, idle again
+        assert len(intents) == 2, "the pool is the quiet room's floor"
+        second = intents[1].injection.reply.instructions or ""
+        assert "第 7 层" in second and "第一次用 AI 画图" in second
+        assert "这个模型多少钱" in second, "the ledger shows the discussion she already opened"
+
+
+async def test_a_reply_cut_mid_playback_is_owed_first_and_says_so() -> None:
+    """Layer 1 carries both kinds of interruption: a fragment she never
+    finished and a whole reply the room only heard the start of. The prompt
+    tells the model which, so it continues rather than restarts."""
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        loop.note_interrupted(
+            "danmaku:batch:1",
+            "danmaku",
+            "[记录 a 观众 UID 1] [弹幕] 小满：这个工具会联网吗",
+            "小满问会不会联网，答案是本地跑的，不联网，模型文件都在你自己电脑上",
+            event_refs=("a",),
+            stage="playing",
+        )
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        assert loop.status()["last_layer"] == int(Layer.OWED)
+        body = intents[0].injection.item_text or ""
+        assert "danmaku·播放被打断" in body and "观众只听到了开头一部分" in body
+        assert "会不会联网" in body
+
+
+async def test_the_gates_voice_notes_are_not_something_to_pick_up() -> None:
+    """ "[主播语音] 整理弹幕热议话题" is what she saw him doing, not what he
+    said: a delegation must not come back 20 s later as layer 4 material."""
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        loop.note_dialogue("streamer", "[主播语音] 整理弹幕热议话题")
+        await clock.advance(31.0)
+        assert len(intents) == 1
+        assert loop.status()["last_layer"] != int(Layer.STREAMER)
+        assert "整理弹幕热议话题" not in (intents[0].injection.reply.instructions or "")
+
+
+async def test_an_owed_opening_that_never_played_gives_the_replies_back() -> None:
+    """Taking the owed replies at submit must not lose them when the opening
+    expires in the queue or is pre-empted before a word: they return, and the
+    next idle stretch opens from them again."""
+    from bilisama.obs.outcome import Outcome, Phase, Verdict
+
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        loop.note_interrupted(
+            "danmaku:batch:1",
+            "danmaku",
+            "[弹幕] 糯米：任务会不会传到服务器",
+            "糯米别担心，任务数据",
+            event_refs=("a",),
+        )
+        await clock.advance(31.0)
+        assert len(intents) == 1 and loop.status()["last_layer"] == int(Layer.OWED)
+        assert loop._opportunities.interrupted_material() == "", "taken by the opening"
+        loop.note_verdict(
+            Verdict(
+                intent_id=intents[0].dedup_key,
+                source="proactive",
+                outcome=Outcome.EXPIRED,
+                phase=Phase.QUEUED,
+            )
+        )
+        assert "糯米" in loop._opportunities.interrupted_material(), "never played: owed again"
+        await clock.advance(31.0)
+        assert len(intents) == 2 and loop.status()["last_layer"] == int(Layer.OWED)
+        loop.note_verdict(
+            Verdict(
+                intent_id=intents[1].dedup_key,
+                source="proactive",
+                outcome=Outcome.SPOKEN,
+                phase=Phase.PLAYED,
+            )
+        )
+        assert loop._opportunities.interrupted_material() == "", "played: settled"
+
+
+async def test_an_owed_opening_talked_over_is_not_owed_as_a_copy_of_itself() -> None:
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        loop.note_interrupted(
+            "danmaku:batch:1",
+            "danmaku",
+            "[弹幕] 糯米：任务会不会传到服务器",
+            "糯米别担心",
+            event_refs=("a",),
+        )
+        await clock.advance(31.0)
+        key = intents[0].dedup_key
+        loop.note_interrupted(key, "proactive", intents[0].injection.item_text or "", "刚才糯米问")
+        assert loop._opportunities.status()["interrupted_candidates"] == 0
+        from bilisama.obs.outcome import Outcome, Phase, Verdict
+
+        loop.note_verdict(
+            Verdict(
+                intent_id=key, source="proactive", outcome=Outcome.CANCELLED, phase=Phase.SPEAKING
+            )
+        )
+        assert loop._opportunities.status()["interrupted_candidates"] == 1, "the original, once"
+
+
+async def test_leaving_a_replay_case_keeps_what_the_room_experienced() -> None:
+    """The intent-test console resets on the way INTO a case; on the way out
+    the owed replies, the unanswered danmaku and the ledger survive, so the
+    next idle stretch continues the case instead of opening trivia."""
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        await loop.reset_for_replay("本例背景")
+        loop.note_interrupted(
+            "danmaku:batch:1",
+            "danmaku",
+            "[弹幕] 糯米：任务会不会传到服务器",
+            "糯米别担心",
+            event_refs=("a",),
+        )
+        loop.note_spoken(
+            Intent(
+                source="proactive",
+                priority=Priority.PROACTIVE,
+                injection=Injection(reply=ReplySpec()),
+                dedup_key="proactive:earlier",
+            ),
+            "大家觉得哪个模型写代码最顺手",
+        )
+        await loop.reset_for_replay(None)
+        assert "糯米" in loop._opportunities.interrupted_material()
+        assert "写代码最顺手" in loop.status()["recent_topics"][0]
+        await clock.advance(31.0)
+        assert len(intents) == 1 and loop.status()["last_layer"] == int(Layer.OWED)
+        await loop.reset_for_replay("下一例背景")
+        assert (
+            loop._opportunities.interrupted_material() == ""
+            and loop.status()["recent_topics"] == []
+        )
+
+
+async def test_an_opening_reports_its_layer_for_the_panel() -> None:
+    async with _running_paced(side=None) as (loop, _floor, intents, clock, _pacer):
+        loop.note_dialogue("streamer", "这个自动分类我先砍了")
+        await clock.advance(31.0)
+        info = loop.opening_info(intents[0].dedup_key)
+        assert info == {"layer": int(Layer.STREAMER), "label": "接主播的话", "candidate": False}
+        assert loop.opening_info("proactive:opinions:1") is None

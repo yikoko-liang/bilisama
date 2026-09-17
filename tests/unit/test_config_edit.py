@@ -118,4 +118,4 @@ def test_opinion_collection_window_rejects_out_of_bounds(value: int) -> None:
     settings = Settings()
     with pytest.raises(ConfigEditError):
         apply_config_edit(settings, "interaction.proactive.collection_window_s", value)
-    assert settings.interaction.proactive.collection_window_s == 120
+    assert settings.interaction.proactive.collection_window_s == 30

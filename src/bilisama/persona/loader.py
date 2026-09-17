@@ -146,11 +146,12 @@ def live_voice_rules(
 
 
 def scene_marker_lines() -> str:
-    """The marker as a prompt bullet, from the one vocabulary (scene_markers).
+    """The markers as prompt bullets, from the one vocabulary (scene_markers).
 
-    One line since the five scenes merged into ``[SKIP]``. It stays rendered
-    rather than typed into the prompt so the tag has a single home; the
-    contract's examples spell it out too, and a test holds those in step.
+    Two lines: ``[SKIP]`` (the five scenes merged into it) and ``[SUMMARY]``
+    (the danmaku-summary delegation). Rendered rather than typed into the
+    prompt so each tag has a single home; the contract's examples spell them
+    out too, and a test holds those in step.
     """
     return "\n".join(f"  - `[{marker.tag}]`：{marker.meaning}" for marker in MARKERS)
 

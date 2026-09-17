@@ -20,6 +20,7 @@ gate) both import this, and persona must not reach into director.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -30,6 +31,7 @@ __all__ = [
     "SceneCategory",
     "is_tag_prefix",
     "label_for",
+    "looks_like_summary_delegation",
     "lookup",
     "tag_for",
 ]
@@ -38,8 +40,14 @@ __all__ = [
 class SceneCategory(StrEnum):
     """What she reported about a microphone turn.
 
-    Two values, because the gate makes one decision: play this turn or hold
-    it. TO_ME has no marker — it is what a plain head means.
+    The gate makes one decision — play this turn or hold it — and TO_ME has
+    no marker: it is what a plain head means. SKIP and SUMMARY are both held
+    turns; SUMMARY differs only in what the wiring does next (it starts the
+    danmaku summary the streamer just delegated, director/voice_turn.Skip →
+    Assembly.request_danmaku_summary). The delegation used to travel as a
+    function report in the same response; the real model sent 0 of 10 of
+    those (docs/voice-event-linkage-acceptance.md, 2026-09-14), while the head
+    marker is the channel it follows reliably.
 
     It used to be five scenes (AUDIENCE, SELF_TALK, READING, GUEST, UNSURE)
     plus DECLINED. They all mapped to the same action, production used one of
@@ -52,6 +60,7 @@ class SceneCategory(StrEnum):
 
     TO_ME = "to_me"
     SKIP = "skip"
+    SUMMARY = "summary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +73,15 @@ class Marker:
     meaning: str
 
 
-MARKERS: tuple[Marker, ...] = (Marker("SKIP", SceneCategory.SKIP, "先听", "这一轮不接话"),)
+MARKERS: tuple[Marker, ...] = (
+    Marker("SKIP", SceneCategory.SKIP, "先听", "这一轮不接话"),
+    Marker(
+        "SUMMARY",
+        SceneCategory.SUMMARY,
+        "总结委托",
+        "主播委托你整理弹幕；这一轮不接话，后台会把边界前的弹幕候选交给你另做一轮总结",
+    ),
+)
 
 # Spellings that also mean "not for me". The five retired scene tags are here
 # rather than deleted: a session opened under the old contract may still be
@@ -118,3 +135,21 @@ def label_for(category: SceneCategory) -> str:
     """The Chinese label the prompt and the panel use; 「对你说的」 for TO_ME."""
     marker = _BY_CATEGORY.get(category)
     return marker.label if marker is not None else "对你说的"
+
+
+# The streamer's own words for "look at the danmaku for me". A backstop for
+# the gate: on 2026-09-17 「帮我看下弹幕，大家有什么问题？」 came back
+# [SKIP] 主播在面向观众提问 three runs out of three, the second clause
+# pulling the model away from the delegation. Narrow on purpose — the verb
+# and the word 弹幕 together — so that a mention of danmaku in passing
+# (「弹幕好多」) never arms a summary.
+_SUMMARY_DELEGATION = re.compile(
+    r"(?:帮我|替我|给我)?(?:看|瞅|整理|总结|盘)(?:一下|下|看|一看)?(?:刚才的|最近的|这些)?弹幕"
+    r"|弹幕(?:总结|整理)(?:一下|下)?"
+)
+
+
+def looks_like_summary_delegation(transcript: str) -> bool:
+    """Whether the streamer's transcript reads as a danmaku-summary delegation."""
+    text = " ".join(transcript.split())
+    return bool(text) and _SUMMARY_DELEGATION.search(text) is not None

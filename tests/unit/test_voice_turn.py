@@ -404,3 +404,81 @@ async def test_the_health_card_shows_the_last_few_turns_not_just_the_total() -> 
     assert status["skipped"] == 20, "the cumulative count still remembers the good stretch"
     assert status["recent_skipped"] == 0, "but the window says it has stopped"
     assert status["recent_turns"] == 20, "the window is full, not empty"
+
+
+async def test_a_summary_head_is_muted_and_the_skip_carries_the_speech_start() -> None:
+    """The delegation turn plays nothing, like any marked turn, and the Skip
+    says when the streamer's utterance began: that instant is the summary's
+    boundary (only danmaku before it are material), and the gate is the one
+    place that sees the speech edge and the turn on the same stream."""
+    rig = _Rig()
+    await rig.clock.advance(5)
+    assert rig.gate.feed(link.SpeechStarted()) == (link.SpeechStarted(),)
+    await rig.clock.advance(2)
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SUMMARY] 整理弹幕")) == ()
+    assert rig.gate.feed(_audio(hers)) == ()
+    await rig.settle()
+    assert rig.skips == [
+        Skip(hers, Ruling(SceneCategory.SUMMARY, "整理弹幕"), False, speech_started_at=5.0)
+    ]
+    assert rig.gate.feed(_done(hers)) == ()
+    assert not any(isinstance(e, link.ReplyAudioDelta) for e in rig.emitted)
+
+
+async def test_a_turn_with_no_speech_edge_before_it_reports_no_speech_start() -> None:
+    rig = _Rig()
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SUMMARY]")) == ()
+    await rig.settle()
+    assert rig.skips[0].speech_started_at is None
+
+
+async def test_a_summary_turn_cut_by_the_next_speech_edge_still_reports() -> None:
+    """Production at 300 ms VAD (probe run1, 2026-09-16): the delegation line
+    splits at its comma, the server cuts the first fragment's reply right
+    after ``[SUMMARY] 整理`` when the second fragment starts. The bracket
+    closed, so the mute already landed — the cancelled end must still carry
+    the Skip out, or the delegation is lost with the cut."""
+    rig = _Rig()
+    assert rig.gate.feed(link.SpeechStarted()) == (link.SpeechStarted(),)
+    hers = rig.start()
+    assert rig.gate.feed(_text(hers, "[SUMMARY] 整理")) == ()
+    assert rig.skips == [], "the note window is still open"
+    assert rig.gate.feed(link.SpeechStarted()) == (link.SpeechStarted(),)
+    assert rig.gate.feed(_done(hers, link.ReplyStatus.CANCELLED)) == ()
+    assert rig.skips == [
+        Skip(hers, Ruling(SceneCategory.SUMMARY, "整理"), False, speech_started_at=0.0)
+    ], "the boundary is the edge that opened THIS turn, not the one that cut it"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我看下弹幕，大家有什么问题？",
+        "帮我看一下弹幕，大家都在问什么",
+        "整理一下刚才的弹幕",
+        "豆腐你总结下弹幕",
+        "弹幕总结一下",
+    ],
+)
+def test_the_summary_text_backstop_reads_a_delegation(text: str) -> None:
+    from bilisama.scene_markers import looks_like_summary_delegation
+
+    assert looks_like_summary_delegation(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "弹幕好多啊",
+        "大家有什么问题可以打在弹幕里",
+        "我看了一眼弹幕好像没人",
+        "刚才那条弹幕说得对",
+        "",
+    ],
+)
+def test_the_summary_text_backstop_leaves_a_mention_alone(text: str) -> None:
+    from bilisama.scene_markers import looks_like_summary_delegation
+
+    assert not looks_like_summary_delegation(text)

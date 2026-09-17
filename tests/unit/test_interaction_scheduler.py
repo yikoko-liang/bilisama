@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Literal
 
 import pytest
@@ -352,12 +353,14 @@ async def test_genuine_barge_in_notifies_once_with_source_and_partial_text(
 ) -> None:
     clock = FakeClock()
     speech = _ScriptedLink()
-    interrupted: list[tuple[Intent | None, link.ReplyHandle, str]] = []
+    interrupted: list[tuple[Intent | None, link.ReplyHandle, str, str]] = []
     scheduler = Scheduler(
         speech,
         SpeakingFloor(clock),
         clock,
-        on_interrupted=lambda intent, handle, text: interrupted.append((intent, handle, text)),
+        on_interrupted=lambda intent, handle, text, stage: interrupted.append(
+            (intent, handle, text, stage)
+        ),
     )
     intent = None if implicit else _intent(_event(1))
     if intent is None:
@@ -375,7 +378,91 @@ async def test_genuine_barge_in_notifies_once_with_source_and_partial_text(
     if not done_before_speech:
         scheduler._handle_event(done)
     scheduler._handle_event(link.SpeechStarted())
-    assert interrupted == [(intent, handle, "先说到这里")]
+    assert interrupted == [(intent, handle, "先说到这里", "generating")]
+    await _cleanup(scheduler)
+
+
+async def test_a_replay_is_a_different_input_with_one_question_left() -> None:
+    """Talked over, requeued: the replay turn writes a [重放] item carrying
+    what she got out, drops the general decision block and the report
+    invitation, keeps the kind's shape rules and asks the one open question —
+    did the streamer handle it himself meanwhile (2026-09-17)."""
+    from bilisama.director.intents import EVENT_DECISION_RULES, REPLAY_RULES
+    from bilisama.director.interaction_state import REPORT_RULES
+
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    scheduler = Scheduler(speech, SpeakingFloor(clock), clock)
+    intent = _intent(_event(1, EventKind.VIP_ENTER))
+    intent = replace(
+        intent,
+        injection=Injection(
+            reply=replace(
+                intent.injection.reply, base_instructions="人设\n\n" + REPORT_RULES.strip()
+            ),
+            item_text=intent.injection.item_text,
+        ),
+    )
+    await scheduler._dispatch(intent)
+    scheduler._handle_event(link.ReplyTextDelta(speech.handles[0], "观众1舰长来啦"))
+    scheduler._handle_event(link.SpeechStarted())
+    scheduler._handle_event(
+        link.ReplyDone(speech.handles[0], link.ReplyStatus.CANCELLED, text="观众1舰长来啦")
+    )
+    queued = scheduler._heap[0].intent
+    item = queued.injection.item_text or ""
+    assert item.startswith("[重放]") and "观众1舰长来啦" in item and "主播插话" in item
+    rules = queued.injection.reply.instructions or ""
+    assert rules.endswith(REPLAY_RULES)
+    assert "第一句必须叫出" in rules, "the kind's shape rules stay"
+    assert EVENT_DECISION_RULES not in rules and "本次只评估候选记录" not in rules
+    assert "report_interaction 报告状态" not in (queued.injection.reply.base_instructions or "")
+    assert (queued.injection.reply.base_instructions or "").startswith("人设")
+    await _cleanup(scheduler)
+
+
+async def test_two_replays_then_a_verdict() -> None:
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    scheduler = Scheduler(speech, SpeakingFloor(clock), clock)
+    intent = _intent(_event(1, EventKind.VIP_ENTER))
+    for n in range(3):
+        await scheduler._dispatch(intent)
+        scheduler._handle_event(link.ReplyTextDelta(speech.handles[n], "来"))
+        scheduler._handle_event(link.SpeechStarted())
+        scheduler._handle_event(
+            link.ReplyDone(speech.handles[n], link.ReplyStatus.CANCELLED, text="来")
+        )
+        scheduler._handle_event(link.SpeechStopped())
+        if n < 2:
+            intent = scheduler._heap[0].intent
+            scheduler._heap.clear()
+            scheduler._queued_keys.clear()
+    assert scheduler._heap == []
+    assert [str(v) for v in scheduler.verdicts][-1] == "cancelled@speaking(scheduler.replay_limit)"
+    await _cleanup(scheduler)
+
+
+async def test_a_report_only_turn_is_a_failed_verdict_not_spoken() -> None:
+    """16:00:23 on 2026-09-17: a replay completed with no text and no audio
+    (a report_interaction call and nothing else) and was booked
+    spoken@generating. Nothing was said, so nothing was spoken."""
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    scheduler = Scheduler(speech, SpeakingFloor(clock), clock)
+    await scheduler._dispatch(_intent(_event(1, EventKind.VIP_ENTER)))
+    scheduler._handle_event(link.ReplyDone(speech.handles[0], link.ReplyStatus.COMPLETED, text=""))
+    assert [str(v) for v in scheduler.verdicts] == ["failed@generating(model.empty_reply)"]
+    await _cleanup(scheduler)
+
+
+async def test_an_ordinary_empty_turn_is_a_failed_verdict_not_spoken() -> None:
+    clock = FakeClock()
+    speech = _ScriptedLink()
+    scheduler = Scheduler(speech, SpeakingFloor(clock), clock)
+    await scheduler._dispatch(_intent(_event(1)))
+    scheduler._handle_event(link.ReplyDone(speech.handles[0], link.ReplyStatus.COMPLETED, text=""))
+    assert [str(v) for v in scheduler.verdicts] == ["failed@generating(model.empty_reply)"]
     await _cleanup(scheduler)
 
 
@@ -385,12 +472,14 @@ async def test_playback_barge_in_reports_completed_generation_as_interrupted(
 ) -> None:
     clock = FakeClock()
     speech = _ScriptedLink()
-    interrupted: list[tuple[Intent | None, link.ReplyHandle, str]] = []
+    interrupted: list[tuple[Intent | None, link.ReplyHandle, str, str]] = []
     scheduler = Scheduler(
         speech,
         SpeakingFloor(clock),
         clock,
-        on_interrupted=lambda intent, handle, text: interrupted.append((intent, handle, text)),
+        on_interrupted=lambda intent, handle, text, stage: interrupted.append(
+            (intent, handle, text, stage)
+        ),
     )
     intent = None if implicit else _intent(_event(1))
     if intent is None:
@@ -404,7 +493,9 @@ async def test_playback_barge_in_reports_completed_generation_as_interrupted(
     scheduler._handle_event(link.SpeechStarted())
     scheduler._floor.on_playback(False)
     scheduler._flush_played()
-    assert interrupted == [(intent, handle, "尚未播完")]
+    assert interrupted == [
+        (intent, handle, "尚未播完", "playing")
+    ], "a whole reply cut mid-playback is owed too, and labelled as such"
     await _cleanup(scheduler)
 
 
@@ -419,7 +510,7 @@ async def test_audio_already_drained_before_next_speech_is_not_interrupted(
         speech,
         SpeakingFloor(clock),
         clock,
-        on_interrupted=lambda _intent, _handle, text: interrupted.append(text),
+        on_interrupted=lambda _intent, _handle, text, _stage: interrupted.append(text),
     )
     await scheduler._dispatch(_intent(_event(1, kind)))
     scheduler._floor.on_playback(True)
@@ -579,7 +670,7 @@ async def test_nonrecoverable_endings_do_not_emit_interruption_candidates(ending
         speech,
         SpeakingFloor(clock),
         clock,
-        on_interrupted=lambda _intent, _handle, text: interrupted.append(text),
+        on_interrupted=lambda _intent, _handle, text, _stage: interrupted.append(text),
     )
     kind = EventKind.VIP_ENTER if ending == "requeued" else EventKind.DANMAKU
     await scheduler._dispatch(_intent(_event(1, kind)))

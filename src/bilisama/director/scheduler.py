@@ -54,8 +54,8 @@ from typing import Any, Literal, Protocol, cast
 
 from bilisama.clock import Clock
 from bilisama.director.floor import SpeakingFloor
-from bilisama.director.intent import Injection, Intent
-from bilisama.director.intents import event_context_line, wrap_events
+from bilisama.director.intent import Intent
+from bilisama.director.intents import event_context_line, replay_injection, wrap_events
 from bilisama.director.interaction_state import InteractionState
 from bilisama.ingest.events import EventKind
 from bilisama.obs.logging import bind, get_logger
@@ -63,6 +63,10 @@ from bilisama.obs.outcome import Outcome, Phase, SkipReason, Verdict
 from bilisama.realtime import link
 
 __all__ = ["PlaybackClear", "Scheduler"]
+
+# What the streamer talked over: a reply mid-generation, or one that had
+# finished and was playing.
+InterruptionStage = Literal["generating", "playing"]
 
 log = get_logger(__name__)
 
@@ -80,6 +84,10 @@ _DISPATCH_RETRY_WINDOW_S = 6.0
 # How many dispatched replies the handle->intent reverse index remembers for
 # the panel. Well past anything in flight; eviction is dispatch order.
 _REPLY_INTENTS_CAP = 128
+# Replays one intent may get after being talked over; beyond that it is a verdict.
+_REPLAY_LIMIT = 2
+# Welcomes whose contract asks for the viewer's name in the first sentence.
+_NAMED_WELCOME_KINDS = frozenset({EventKind.VIP_ENTER, EventKind.GUARD_BUY})
 # And the attempts inside that window are spaced. A failed send means the
 # socket is sick, and redispatching into it as fast as the loop allows is not
 # a retry, it is a spin: probed 2026-08-25 at roughly 65000 attempts a second
@@ -194,7 +202,10 @@ class Scheduler:
         spoken_sink: Callable[[str], None] | None = None,
         implicit_spoken_sink: Callable[[str], None] | None = None,
         interaction_state: InteractionState | None = None,
-        on_interrupted: Callable[[Intent | None, link.ReplyHandle, str], None] | None = None,
+        on_interrupted: (
+            Callable[[Intent | None, link.ReplyHandle, str, InterruptionStage], None] | None
+        ) = None,
+        on_spoken: Callable[[Intent, str], None] | None = None,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -218,9 +229,16 @@ class Scheduler:
         self._interaction_errors: set[str] = set()
         self._interaction_inflight: Intent | None = None
         self._on_interrupted = on_interrupted
+        # A completed dispatched reply with the intent it answered: the
+        # proactive loop's ledger keeps what she said for an opening, not
+        # the candidate she was handed (2026-09-16). spoken_sink carries the
+        # text alone; this one carries the intent.
+        self._on_spoken = on_spoken
         self._interrupted_handles: OrderedDict[int, None] = OrderedDict()
+        # Replays per intent key: two is the ceiling, then a verdict.
+        self._replays: OrderedDict[str, int] = OrderedDict()
         self._pending_interruptions: OrderedDict[
-            int, tuple[Intent | None, link.ReplyHandle, str, float]
+            int, tuple[Intent | None, link.ReplyHandle, str, float, InterruptionStage]
         ] = OrderedDict()
         self._implicit_playback: _Implicit | None = None
         self._implicit: _Implicit | None = None
@@ -251,6 +269,7 @@ class Scheduler:
         self._tasks: set[asyncio.Task[None]] = set()
         # handle_id -> the Intent whose reply it is; see _dispatch.
         self._reply_intents: OrderedDict[int, Intent] = OrderedDict()
+        self.welcome_unnamed = 0
 
     # ------------------------------------------------------------ intake
 
@@ -724,6 +743,7 @@ class Scheduler:
             "active_source": active.intent.source if active else None,
             "dispatching": self._dispatching,
             "implicit_active": self._implicit is not None,
+            "welcome_unnamed": self.welcome_unnamed,
         }
 
     # ------------------------------------------------------------ the loop
@@ -1170,9 +1190,23 @@ class Scheduler:
             return
         if event.text:
             active.text = event.text[:4000]
+        if (
+            event.status is link.ReplyStatus.COMPLETED
+            and not event.text
+            and not active.output_started
+        ):
+            # Completed, but nothing was said: the model spent the turn on a
+            # report call (2026-09-17, three of three). Not spoken, whatever
+            # the status says.
+            log.warning("scheduler.empty_reply", source=active.intent.source)
+            self._settle_active(Outcome.FAILED, Phase.GENERATING, reason=SkipReason.EMPTY_REPLY)
+            return
         if event.status is link.ReplyStatus.COMPLETED:
             if self._spoken_sink is not None and event.text:
                 self._spoken_sink(event.text)
+            if self._on_spoken is not None and event.text:
+                self._on_spoken(active.intent, event.text)
+            self._note_welcome_shape(active.intent, event.text)
             if active.intent.injection.reply.write_history and event.text:
                 # Out-of-band replies never enter the provider's own history,
                 # so without this she cannot remember what she just said — the
@@ -1227,6 +1261,29 @@ class Scheduler:
             else:
                 self._settle_active(Outcome.FAILED, Phase.GENERATING)
 
+    def _note_welcome_shape(self, intent: Intent, text: str) -> None:
+        """Measure, not enforce: did a welcome say the viewer's name?
+
+        The welcome contracts (intents.py VIP_ENTER / GUARD_BUY) ask for the
+        name in the first sentence; on 2026-09-15 15:59:16 a VIP welcome came
+        out as a restatement of her previous answer with no name at all. One
+        line and one counter per such reply, so the miss rate is readable
+        before anyone buys a content gate with its latency.
+        """
+        event_ = intent.event
+        if event_ is None or event_.kind not in _NAMED_WELCOME_KINDS or not text:
+            return
+        name = (event_.viewer.name or "").strip()
+        if not name or name in text:
+            return
+        self.welcome_unnamed += 1
+        with bind(intent_id=intent.dedup_key or intent.source):
+            log.info(
+                "scheduler.welcome_unnamed",
+                source=intent.source,
+                reply_chars=len(text),
+            )
+
     def _barge_in(self) -> None:
         """The streamer opened their mouth while a reply is still booked.
 
@@ -1246,9 +1303,9 @@ class Scheduler:
         """
         pending = tuple(self._pending_interruptions.values())
         self._pending_interruptions.clear()
-        for intent, handle, text, deadline in pending:
+        for intent, handle, text, deadline, stage in pending:
             if self._clock.monotonic() <= deadline:
-                self._record_interruption(intent, handle, text, confirmed=True)
+                self._record_interruption(intent, handle, text, confirmed=True, stage=stage)
         implicit = self._implicit
         if implicit is not None and not implicit.killed:
             implicit.host_interrupted = True
@@ -1256,7 +1313,9 @@ class Scheduler:
         playback = self._implicit_playback
         self._implicit_playback = None
         if playback is not None and self._floor.queued_audio:
-            self._record_interruption(None, playback.handle, playback.text, confirmed=True)
+            self._record_interruption(
+                None, playback.handle, playback.text, confirmed=True, stage="playing"
+            )
         # A new speech edge is conclusive even if the audio-drained receipt
         # arrives after the streamer has stopped talking again.
         self._flush_played(played=False)
@@ -1294,8 +1353,16 @@ class Scheduler:
         text: str,
         *,
         confirmed: bool,
+        stage: InterruptionStage = "generating",
     ) -> None:
-        """Only a genuine speech edge may offer non-requeued work for recovery."""
+        """Only a genuine speech edge may offer non-requeued work for recovery.
+
+        `stage` says what the streamer talked over: a reply still being
+        generated (the text is a fragment) or one that had finished and was
+        playing (the text is whole, the audience heard some prefix of it).
+        Both are owed; the proactive loop's first layer carries them and
+        tells the model which is which (2026-09-16).
+        """
         state = self._interaction_state
         if self._on_interrupted is None or self._panicked or (state is not None and state.silenced):
             return
@@ -1313,6 +1380,7 @@ class Scheduler:
                 handle,
                 text,
                 self._clock.monotonic() + _SPEECH_EDGE_GRACE_S,
+                stage,
             )
             while len(self._pending_interruptions) > _REPLY_INTENTS_CAP:
                 self._pending_interruptions.popitem(last=False)
@@ -1320,7 +1388,7 @@ class Scheduler:
         self._interrupted_handles[handle.handle_id] = None
         while len(self._interrupted_handles) > _REPLY_INTENTS_CAP:
             self._interrupted_handles.popitem(last=False)
-        self._on_interrupted(intent, handle, text)
+        self._on_interrupted(intent, handle, text, stage)
 
     def _note_barge(self, active: _Active, *, where: str) -> None:
         """Name the reply the streamer just talked over.
@@ -1442,7 +1510,12 @@ class Scheduler:
         self._sync_interaction_retention()
 
     def _requeue(
-        self, intent: Intent, *, item_written: bool, deadline: float | None = None
+        self,
+        intent: Intent,
+        *,
+        item_written: bool,
+        deadline: float | None = None,
+        spoken_text: str = "",
     ) -> None:
         """Put one intent back at the end of its priority band.
 
@@ -1464,8 +1537,32 @@ class Scheduler:
         history of a fresh session.
         """
         injection = intent.injection
-        if item_written and injection.item_text is not None:
-            injection = Injection(reply=injection.reply)
+        if item_written:
+            # The model already saw the event. The replay turn is a different
+            # input, not the same one again: a [重放] item saying what she got
+            # out before the interruption and the one question left (did the
+            # streamer handle it himself meanwhile), the kind's shape rules,
+            # and no invitation to the report tool (2026-09-17). Two replays
+            # per intent; a third interruption is a verdict.
+            key = intent.dedup_key or intent.source
+            count = self._replays.get(key, 0) + 1
+            if count > _REPLAY_LIMIT:
+                self._replays.pop(key, None)
+                self._emit(
+                    Verdict(
+                        intent_id=key,
+                        source=intent.source,
+                        outcome=Outcome.CANCELLED,
+                        phase=Phase.SPEAKING,
+                        reason=SkipReason.REPLAY_LIMIT,
+                        waited_s=self._waited_s(intent, self._clock.monotonic()),
+                    )
+                )
+                return
+            self._replays[key] = count
+            while len(self._replays) > _REPLY_INTENTS_CAP:
+                self._replays.popitem(last=False)
+            injection = replay_injection(intent, spoken_text)
         self.submit(
             replace(
                 intent,
@@ -1529,7 +1626,7 @@ class Scheduler:
             # An active reply means dispatch got past both sends, so its
             # history line is already written — carrying it again would say
             # the same paid message arrived twice.
-            self._requeue(intent, item_written=True)
+            self._requeue(intent, item_written=True, spoken_text=active.text)
             self._sync_interaction_retention()
             return
         if parking:
@@ -1612,10 +1709,12 @@ class Scheduler:
                 and parked.intent.event.kind is EventKind.VIP_ENTER
                 and parked.intent.requeue_on_interrupt
             ):
-                self._requeue(parked.intent, item_written=True)
+                self._requeue(parked.intent, item_written=True, spoken_text=parked.text)
                 continue
             if not heard and self._floor.streamer_speaking:
-                self._record_interruption(parked.intent, parked.handle, parked.text, confirmed=True)
+                self._record_interruption(
+                    parked.intent, parked.handle, parked.text, confirmed=True, stage="playing"
+                )
             self._emit(
                 Verdict(
                     intent_id=parked.intent.dedup_key or parked.intent.source,

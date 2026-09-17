@@ -219,3 +219,28 @@ def test_the_detail_line_and_the_labels() -> None:
     assert tag_for(SceneCategory.TO_ME) == ""
     assert label_for(SceneCategory.TO_ME) == "对你说的"
     assert label_for(SceneCategory.SKIP) == "先听"
+
+
+def test_the_summary_tag_is_its_own_category_and_the_policy_still_mutes_it() -> None:
+    """A delegation to summarise danmaku travels as a head marker, the same
+    way SKIP does: decoded on the bracket, never spoken, but a category of
+    its own so the wiring can start the summary instead of only killing the
+    turn. Function calling was the previous channel; the real model sent
+    0/10 of them (docs/voice-event-linkage-acceptance.md, 2026-09-14)."""
+    head = _decode("[SUMMARY] 整理弹幕热议")
+    assert head.state is HeadState.MARKED
+    assert head.ruling == Ruling(SceneCategory.SUMMARY, "整理弹幕热议")
+    assert head.ruling.tag == "SUMMARY"
+    assert head.ruling.label == "总结委托"
+    assert TurnPolicy().action(head.ruling) is TurnAction.SKIP
+
+
+@pytest.mark.parametrize("text", ["[SU", "[SUMM", "[summa"])
+def test_a_summary_fragment_stays_pending_beside_skip(text: str) -> None:
+    assert _decode(text).state is HeadState.PENDING
+
+
+def test_the_bare_summary_tag_counts_too() -> None:
+    head = _decode("SUMMARY，收到")
+    assert head.state is HeadState.MARKED
+    assert head.ruling == Ruling(SceneCategory.SUMMARY, "收到", unbracketed=True)

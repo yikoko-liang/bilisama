@@ -35,6 +35,8 @@ __all__ = [
     "gift_combo_intent",
     "intent_for",
     "neutralize_tags",
+    "replay_injection",
+    "replay_item_text",
     "wrap_events",
 ]
 
@@ -99,23 +101,91 @@ _DISPATCH_FLOOR_S = 5.0  # minimum runway once an already-old winner leaves the 
 
 _GUARD_TIER_ZH = {"captain": "舰长", "admiral": "提督", "governor": "总督"}
 
+# Playback timing is the harness's (SpeakingFloor + scheduler), never the
+# model's: it cannot see the floor, so any rule that asks it to weigh
+# "is the streamer talking right now" gets answered from the newest
+# transcript in history — a VIP welcome replayed after the streamer's
+# explanation came back as "[SKIP] 主播正在解释设定" (2026-09-16). The
+# instructions therefore state the division of labour instead.
+TIMING_IS_NOT_YOURS = (
+    "什么时候播、要不要等主播说完，由程序决定：主播在说就等，说完再播。"
+    "你不用判断主播现在有没有在讲话，也不用等任何回合结束，只管生成这次的回复。"
+)
+
+# The replay turn (an intent talked over, or held while the streamer handled
+# it, coming back for another go). It is not a fresh judgment of the event —
+# that was made — but one question does stay open: did the streamer, in the
+# words that interrupted her, handle this very thing himself? The item puts
+# that question in front of the model with what she already said; the rules
+# below replace EVENT_DECISION_RULES for this turn; the report tool is not
+# invited (2026-09-17: replays with the full judgment block came back as
+# report-only turns with no words at all).
+REPLAY_RULES = (
+    "这一轮是接续，不是重新判断这条事件值不值得回，那已经判过了。只判一件事："
+    "被打断到现在这段时间里，主播说的话有没有覆盖这条具体事件。依据只有主播语音转写和主播本人打字；"
+    "他讲别的事、讲解、随口一句都不算覆盖。"
+    "覆盖了：只输出[SKIP] 主播已处理，或者一句知情的附和，不重复完整欢迎、不重新答谢。"
+    "没覆盖：直接说正文，接着被打断的地方续，不说成又发生一次。"
+    "这一轮不调用 report_interaction：覆盖与否由你的正文或[SKIP]表达，程序据此结案；"
+    "不要发只有报告没有正文的响应。"
+)
+
+
+def replay_item_text(intent: Intent, spoken_text: str) -> str:
+    """The [重放] line written before a replay turn: which event, what she
+    already got out, and the one question left."""
+    event = intent.event
+    label = _line_for(event) if event is not None else intent.source
+    said = " ".join(spoken_text.split())[:80]
+    said_part = f"，你说到「{neutralize_tags(said)}」" if said else ""
+    return (
+        f"[重放] 你对 {neutralize_tags(label)} 的回复被主播插话打断{said_part}，主播现在说完了。"
+        "先看主播插话这段说了什么：如果他已经亲口处理了这件事，你不要再完整来一遍，"
+        "可以轻轻附和一句或者不说；如果他说的是别的事，把这次回复接着补上，不说成又发生一次。"
+    )
+
+
+def replay_injection(intent: Intent, spoken_text: str) -> Injection:
+    """The injection for one replay turn of ``intent``.
+
+    The per-kind shape rules stay (first sentence names the viewer, no
+    amounts, ...); the general decision block and the candidate focus go,
+    REPLAY_RULES take their place; the scoped base loses the report-rules
+    section so the tool is not invited.
+    """
+    from bilisama.director.interaction_state import REPORT_RULES
+
+    spec = intent.injection.reply
+    shape = (spec.instructions or "").removeprefix(EVENT_DECISION_RULES)
+    cut = shape.find("本次只评估候选记录")
+    if cut >= 0:
+        shape = shape[:cut]
+    base = spec.base_instructions
+    if base:
+        base = base.replace("\n\n" + REPORT_RULES.strip(), "").replace(REPORT_RULES.strip(), "")
+    return Injection(
+        reply=dataclasses.replace(spec, base_instructions=base, instructions=shape + REPLAY_RULES),
+        item_text=replay_item_text(intent, spoken_text),
+    )
+
+
 EVENT_DECISION_RULES = (
-    "先结合共享的近期主播语音、主播打字、观众事件和你的回复判断本次是否值得开口。"
+    "判断一条事件要不要回，只看这条事件本身和共享处理记录里它的处理状态；"
+    "主播最近在讲什么、你上一轮说了什么，只用来措辞和避免重复，不是跳过它的理由。"
     "结合事件语义、昵称、UID、时间和行为确认主播处理的是哪条记录；"
     "不能仅凭话题相近认定已回复，同一用户的不同问题或不同时间的事件不能一并算作完成。"
     "记录和候选可能描述同一次互动，不能当作又发生一次。主播只念问题、叫昵称或准备回答不等于答完；"
     "只跳过实际回答已覆盖的问题，批次中未回答的内容仍可回应。"
     "主播已经回答、感谢或欢迎时，不再独立重复播报；有新的有用补充可以自然接一句，"
     "也可以知道主播已处理后轻量附和，但不要重新完整答谢、欢迎或声称又发生一次。"
-    "对进房、上舰和礼物事件，主播当前正在讲话、解释、回复其他内容，或已有语音正在生成/播放，"
-    "只表示当前播放时机需要等待，不表示这条事件已经处理；不能因此输出[SKIP]，也不能把它改成延迟重排。"
-    "尚未有可靠证据表明主播完成了这一次具体欢迎或答谢时，仍生成本次事件的回复，等待当前语音回合结束后按事件优先级播放。"
-    "这三类事件只有在共享处理记录明确标记该条具体事件已由主播完成欢迎/答谢时才可以[SKIP]；"
+    + TIMING_IS_NOT_YOURS
+    + "进房、上舰和礼物只有在共享处理记录明确标记该条具体事件已由主播完成欢迎/答谢时才可以[SKIP]；"
     "读到昵称、提到背景、准备回答、正在生成、被打断或只说了一半都不算完成。"
     "需要主播确认不等于不回复：面向主播的有效弹幕仍要开口，先交代观众昵称和问题，"
-    "再把问题自然交给主播；只有互聊、已处理且无补充、无价值或仍需静默时才输出[SKIP]。"
+    "再把问题自然交给主播；弹幕只有共享记录标明已处理且无补充、或仍需静默时才输出[SKIP]，"
+    "观众互聊由程序按@判定，不是你的理由。"
     "主播要求先安静时，结合后续对话判断是否已经允许恢复；事件不会自动解除静默要求。"
-    "不值得回应、观众互聊无需参与、已处理且没有补充或仍需静默时，"
+    "已处理且没有补充或仍需静默时，"
     "只输出[SKIP]及十字以内原因；否则直接输出口语正文，不加分类或判断过程。"
     "中断、未播完和生成完成不等于观众已经听完，重排也不是又一次进房或送礼。"
 )
@@ -211,6 +281,8 @@ def _line_for(event: LiveEvent) -> str:
             f" [{relationship} UID {event.reply_to_uid} "
             f"昵称 {neutralize_tags(event.reply_to_name)[:80]}]"
         )
+    if event.thread_note:
+        target += f" [{neutralize_tags(event.thread_note)[:80]}]"
     return f"[弹幕] {name}{target}: {text}"
 
 
@@ -218,12 +290,12 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
     """The per-kind speaking rules, in the model's own working language."""
     if event.kind is EventKind.DANMAKU:
         return (
-            "先结合近期对话判断弹幕是在对主播、对你、整个直播间还是其他观众说话。"
+            "观众互聊由程序按事实判定（@了其他观众的、刚被@过就写回去的，到不了你这里）；"
+            "能到你这里的观众弹幕都不是互聊，不要自己判成互聊跳过，接梗、笑、附和、评价也是正常弹幕。"
             "平台@目标UID与主播一致时，按正常面向主播的弹幕判断，不因@而忽略；"
-            "平台@目标UID明确是其他观众时，除非这条内容同时明确邀请主播、你或全场参与，默认输出[SKIP]，"
-            "不要替被@的观众回答；连续弹幕如果只是观众之间问答、接梗、打招呼或互相评价，也输出[SKIP]。"
-            "只有内容明确转向主播、你或全场，或需要你整理共同观点时才参与；"
-            "没有可靠UID时不能凭同名断定身份，没有@也可能是观众互聊。"
+            "没有可靠UID时不能凭同名断定身份。"
+            "观众回应主播提问或观点的弹幕按正常弹幕处理：单条就交代谁说了什么再接；"
+            "多条合并同题、点出分歧，简短整理给主播和全场，不逐条答，不替观众下结论；主播在忙不是理由。"
             "单条弹幕先自然交代观众昵称和具体问题，让只听音频的人知道在回复谁；"
             "不机械套用同一格式。再直接回答；转述不能作为完整回复。"
             "必须提供实际答案、判断或必要的转交；短档压缩措辞，保留实际答案，"
@@ -281,8 +353,7 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
         return (
             f"尚未被接待时欢迎对方成为{tier}；{detail}；"
             "主播已经欢迎过这次上舰时可以知情附和，不再按新上舰完整播报；"
-            "主播正在说话或已有回复在播只影响播放时机，不代表这次上舰已处理；未确认主播已欢迎时仍生成本次回复，"
-            "等当前语音回合结束后按事件优先级播放，不输出[SKIP]；"
+            "未确认主播已欢迎时直接生成本次回复，不输出[SKIP]；"
             "可以结合昵称、当前直播主题或以后常来自然接一句；"
             "不背诵会员权益，不替主播承诺回报；严禁说出或暗示金额。"
         )
@@ -299,17 +370,20 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
                 "这是本房五级以上粉丝牌观众进房，点名欢迎，"
                 "表达对本房粉丝牌支持的重视，但不要假装是熟人"
             )
+        name = neutralize_tags(event.viewer.name or event.viewer.identity)[:40]
         return (
-            f"{emotion}；尚未接待时先点名欢迎，再简短同步近期相关话题或直播背景，"
-            "不能只接上文而漏掉欢迎。从# 直播简介或# 本场进展选最相关的一点；"
-            "如果最近刚介绍过同样内容或没有可靠背景，本次省略内容介绍，不强行凑话。"
+            f"{emotion}。回复的形状固定：第一句必须叫出「{name}」并表示欢迎或招呼，"
+            "第二句可有可无——有的话只能是一句直播间此刻在做什么，取自# 本场进展或# 直播简介；"
+            "这句话是说给刚进来的人听的，不是接着刚才的对话：不重复或改写你上一条回复，"
+            "不回答主播刚才提出或回答过的问题，不能只接上文而漏掉欢迎。"
+            "如果最近刚介绍过同样内容或没有可靠背景，本次省略第二句，不强行凑话。"
             "对照共享历史中最近三次进房回复，不要连续使用相同开头或固定句式，要变换句子结构；不要套用"
             "「欢迎某某，咱们正聊着……」模板；可以直接叫昵称、先说来啦或轻量招呼，"
             "不必每次都使用欢迎二字；"
             "只有可靠上下文确认来过或有共同经历时，才表达想念或说欢迎回来；"
             "没有可靠依据时不要假装认识，也不要提消费记录或公开粉丝牌等级。"
-            "主播正在讲话、解释或处理别的事件只影响播放时机，不是这次进房已完成；未有明确的主播欢迎证据时仍生成本次欢迎，"
-            "等当前语音回合结束后按事件优先级播放，不输出[SKIP]。"
+            "主播正在讲话、解释或处理别的事件不是这次进房已完成；未有明确的主播欢迎证据时直接生成本次欢迎，"
+            "不输出[SKIP]。"
             "被打断后恢复的是原来那次进房的欢迎，结合已经说出的部分自然接续，不说成又进房；"
             "主播已经完成接待时可以知情附和，不重复完整欢迎。"
         )
@@ -568,8 +642,7 @@ def entry_welcome_intent(
             "「欢迎某某，咱们正聊着……」模板；可以直接叫昵称、先说来啦或轻量招呼，"
             "不必每次都使用欢迎二字；"
             "一句话，不要假装认识，不公开 UID 或内部身份字段。"
-            "主播当前正在讲话或已有回复在播只影响播放时机；没有明确的主播欢迎证据时不要输出[SKIP]，"
-            "生成本次欢迎后等待当前语音回合结束。"
+            "没有明确的主播欢迎证据时直接生成本次欢迎，不输出[SKIP]。"
         )
     else:
         instruction = (
@@ -578,8 +651,7 @@ def entry_welcome_intent(
             "如果最近已经在共享历史里介绍过直播内容，优先只做简短欢迎。"
             "对照共享历史中最近三次进房回复，不要连续使用相同开头或固定句式，要变换句子结构；"
             "用不点名的集体招呼，不要播报、暗示或猜测人数，不要逐个念名单。"
-            "主播当前正在讲话或已有回复在播只影响播放时机；没有明确的主播欢迎证据时不要输出[SKIP]，"
-            "生成本次欢迎后等待当前语音回合结束。"
+            "没有明确的主播欢迎证据时直接生成本次欢迎，不输出[SKIP]。"
         )
     identities = ",".join(event.viewer.identity for event in events)
     intent = Intent(

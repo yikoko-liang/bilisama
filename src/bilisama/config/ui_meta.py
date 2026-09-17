@@ -406,6 +406,16 @@ UI_META: dict[str, FieldMeta] = {
         group="互动",
         order=15,
     ),
+    "interaction.proactive.topic_pool": FieldMeta(
+        label="趣味池文件",
+        hint=(
+            "config/prompts/topics/ 下的文件名（不带 .md），逗号分隔，如 aigc,coding；"
+            "留空用全部。只在安静房间兜底，一场每条只用一次"
+        ),
+        audience=Audience.OPERATOR,
+        group="互动",
+        order=16,
+    ),
     "memory.db_path": FieldMeta(
         label="记忆库位置",
         hint="auto = 用户数据目录",
