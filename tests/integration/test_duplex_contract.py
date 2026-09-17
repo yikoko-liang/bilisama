@@ -524,3 +524,119 @@ async def test_the_streamers_words_only_exist_in_the_last_delta(tmp_path: Path) 
         assert any(
             word in s.asr[-1] for word in ("游戏", "几把", "今天")
         ), f"最后一块 delta 应该是整句，实际是 {s.asr[-1]!r}"
+
+
+# ------------------------------------------------------------ 5. the poison
+
+
+async def test_a_tts_replacement_kills_the_dialogue_while_the_uplink_runs(
+    tmp_path: Path,
+) -> None:
+    """The reason `event_replies = "ghostwriter"` is refused on this provider.
+
+    With audio flowing the way a live microphone flows, one
+    `speech_text_buffer.replacement` is never spoken AND ends the session: the
+    transcriber stops closing turns and every later reply is swallowed, with
+    the socket healthy and nothing on the wire saying so. Isolated on
+    2026-09-17 against a control that differs only in whether the replacement
+    is sent — the control ran three clean turns, this arm was dead after one.
+
+    Pinned so the day the vendor fixes it shows up as a red test rather than
+    as a guess. If this goes green, re-run /tmp/duplex_safe.py and give the
+    ghostwriter route back.
+    """
+    import base64 as _b64
+
+    url, key = _credentials()
+    ws = await websockets.connect(
+        url, additional_headers={"X-Api-Key": key}, open_timeout=15, max_size=16 << 20
+    )
+    frames: list[tuple[str, str]] = []
+
+    async def reader() -> None:
+        try:
+            async for raw in ws:
+                got = json.loads(raw)
+                kind = str(got.get("type") or "?")
+                if kind != "response.output_audio.delta":
+                    frames.append((kind, str(got.get("tts_type") or "")))
+        except Exception:
+            return
+
+    pending: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def uplink() -> None:
+        """A microphone that never stops, which is the whole point."""
+        try:
+            while True:
+                try:
+                    chunk = pending.get_nowait()
+                except asyncio.QueueEmpty:
+                    chunk = b"\x00" * 640
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": _b64.b64encode(chunk).decode(),
+                        }
+                    )
+                )
+                await asyncio.sleep(0.02)
+        except Exception:
+            return
+
+    def speak(line: str) -> None:
+        with wave.open(str(speech_wav(tmp_path, line))) as handle:
+            pcm = handle.readframes(handle.getnframes())
+        for i in range(0, len(pcm), 640):
+            pending.put_nowait(pcm[i : i + 640].ljust(640, b"\x00"))
+
+    tasks = [asyncio.create_task(reader()), asyncio.create_task(uplink())]
+    try:
+        await ws.send(json.dumps(_create()))
+        await asyncio.sleep(2)
+
+        def closed_turns() -> int:
+            return sum(
+                1
+                for kind, _ in frames
+                if kind == "conversation.item.input_audio_transcription.completed"
+            )
+
+        speak("你好呀")
+        await asyncio.sleep(13)
+        assert closed_turns() >= 1, f"对照就不通，这一轮不算数：{frames[:8]}"
+        before = closed_turns()
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "speech_text_buffer.replacement.append",
+                    "event_id": "poison",
+                    "text": "我插一句主动话题",
+                }
+            )
+        )
+        await ws.send(
+            json.dumps({"type": "speech_text_buffer.replacement.commit", "event_id": "poison2"})
+        )
+        await asyncio.sleep(8)
+        spoke = any(tts == "chat_tts_text" for _, tts in frames)
+
+        speak("现在还能听见我吗")
+        await asyncio.sleep(14)
+        after = closed_turns() - before
+
+        assert not spoke, (
+            "端点居然念了我们的稿子——上行在流动时它一直是吞掉的。"
+            "如果这条稳定复现，ghostwriter 那条路可以放开了，先跑 /tmp/duplex_safe.py 复核"
+        )
+        assert after == 0, (
+            f"发完 TTS 之后转写居然还活着（又收了 {after} 个结束帧）。"
+            "这条测试钉的就是它会死；真好了的话，dev_talk 里那条拒绝也该撤掉"
+        )
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await ws.close()

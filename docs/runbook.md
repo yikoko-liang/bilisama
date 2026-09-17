@@ -265,11 +265,34 @@ export volcano_api_key=...
 **奇数长度**的数组，按下面那条规矩整段被丢——等于又一次隔着墙提问。两次都是拿她从没收到的
 文字问她为什么不答。
 
+#### ⚠️ `speech_text_buffer.replacement` 在真实直播里不能用
+
+**麦克风开着的时候发一条 TTS 稿子，那条不会被念出来，而且整场对话当场报废。**
+转写从此不再收尾（`duplex.speech_edge_missing`），之后每条回复都被吞
+（`duplex.reply_never_spoken`），而 socket 一直连着，哪里都不报错。
+
+2026-09-17 单变量对照，唯一差别是中间发不发那条 TTS：
+
+| | 第 1 轮 | 中间 | 第 2 轮 | 第 3 轮 |
+|---|---|---|---|---|
+| 不发 | ✅ | — | ✅ | ✅ |
+| 发一条 | ✅ | ❌ 被吞 | **全死** | **全死** |
+
+这就是主播说的「聊一会儿就不行了」：第一条主动话题或弹幕回复发出去，这一场就结束了。
+
+**没有安全的发法。** 试过停推上行 0.5/2/5 秒、`input_audio_mute.commit`、
+`input_audio_buffer.commit`，四种全部照吞照死。只有**从头到尾没推过上行**的会话里它才播
+（112ms 开播）——而那不是直播。
+
+所以 `event_replies` 出厂改成了 `"tool"`，选 `"ghostwriter"` 会在启动时被拒绝并说明原因。
+[test_duplex_contract.py](../tests/integration/test_duplex_contract.py) 里钉了这条行为，
+**厂商哪天修好了那条测试会变红**，那时候再把路放开。
+
 #### 所以弹幕回复有两条路，配置里选
 
 `[speech.volcano_duplex] event_replies`，出厂是 `ghostwriter`：
 
-| | `ghostwriter`（出厂） | `tool` |
+| | `ghostwriter`（**已禁用**） | `tool`（出厂） |
 |---|---|---|
 | 谁写这句话 | 侧路模型（`qwen3.7-flash`） | **她自己** |
 | 观众多久等到 | 一秒上下 | 等主播下次开口，冷场时一直等 |
@@ -438,7 +461,7 @@ source path.sh && .venv/bin/python tools/side_latency.py
 .venv/bin/python -m pytest tests/integration/test_duplex_contract.py -m provider_a -v
 ```
 
-十九个用例，真端点跑一遍约七分钟，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
+二十个用例，真端点跑一遍约八分钟，没凭据就逐条跳过并说清楚怎么补。它钉的是**端点的行为**，
 不是我们的 adapter——厂商哪天改了主意，从红测试知道，而不是从一场她突然不回弹幕的直播知道。
 原始探针脚本 `/tmp/duplex_probe{1..17}.py` 也还在（先 `source path.sh`）。
 
