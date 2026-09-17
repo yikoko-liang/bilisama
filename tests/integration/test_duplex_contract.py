@@ -529,21 +529,25 @@ async def test_the_streamers_words_only_exist_in_the_last_delta(tmp_path: Path) 
 # ------------------------------------------------------------ 5. the poison
 
 
-async def test_a_tts_replacement_kills_the_dialogue_while_the_uplink_runs(
+async def test_a_tts_replacement_is_never_spoken_while_the_uplink_runs(
     tmp_path: Path,
 ) -> None:
     """The reason `event_replies = "ghostwriter"` is refused on this provider.
 
-    With audio flowing the way a live microphone flows, one
-    `speech_text_buffer.replacement` is never spoken AND ends the session: the
-    transcriber stops closing turns and every later reply is swallowed, with
-    the socket healthy and nothing on the wire saying so. Isolated on
-    2026-09-17 against a control that differs only in whether the replacement
-    is sent — the control ran three clean turns, this arm was dead after one.
+    With audio flowing the way a live microphone flows, a
+    `speech_text_buffer.replacement` is never spoken. Not sometimes: forty
+    attempts across eight live sessions on 2026-09-16/17 produced zero audio
+    frames, in healthy stretches of a session as much as sick ones. It only
+    speaks in a session whose uplink never ran at all — 112 ms to first audio
+    — which is not a livestream.
+
+    This used to also assert that the frame KILLS the session. That was wrong,
+    and the log says so: the session it was inferred from carried on for
+    another sixty minutes on the same socket, with twenty streamer turns in
+    one five-minute stretch. Two unrelated faults had been read as one story.
 
     Pinned so the day the vendor fixes it shows up as a red test rather than
-    as a guess. If this goes green, re-run /tmp/duplex_safe.py and give the
-    ghostwriter route back.
+    as a guess.
     """
     import base64 as _b64
 
@@ -623,18 +627,14 @@ async def test_a_tts_replacement_kills_the_dialogue_while_the_uplink_runs(
         await asyncio.sleep(8)
         spoke = any(tts == "chat_tts_text" for _, tts in frames)
 
-        speak("现在还能听见我吗")
-        await asyncio.sleep(14)
-        after = closed_turns() - before
-
         assert not spoke, (
-            "端点居然念了我们的稿子——上行在流动时它一直是吞掉的。"
-            "如果这条稳定复现，ghostwriter 那条路可以放开了，先跑 /tmp/duplex_safe.py 复核"
+            "端点居然念了我们的稿子——上行在流动时它一直是吞掉的（实盘 40/40）。"
+            "如果这条稳定复现，ghostwriter 那条路可以放开了"
         )
-        assert after == 0, (
-            f"发完 TTS 之后转写居然还活着（又收了 {after} 个结束帧）。"
-            "这条测试钉的就是它会死；真好了的话，dev_talk 里那条拒绝也该撤掉"
-        )
+        # Deliberately NOT asserting that the session dies here. It does not:
+        # the live session this was first inferred from went on talking for
+        # another hour. What the frame reliably does is nothing at all.
+        assert before >= 1
     finally:
         for task in tasks:
             task.cancel()

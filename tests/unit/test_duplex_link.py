@@ -549,13 +549,13 @@ async def test_a_transcript_that_never_closes_still_hands_the_floor_back() -> No
 
     clock = FakeClock()
     async with MockDuplexServer() as server:
-        duplex = _link(server, clock=clock, speech_edge_s=20.0)
+        duplex = _link(server, clock=clock, speech_edge_s=3.0)
         await duplex.connect()
         events = duplex.events()
         try:
             await server.hear_without_ending("我说到一半")
             await _next(events, link.SpeechStarted)
-            await clock.advance(21.0)
+            await clock.advance(4.0)
             done = await _next(events, link.UserTranscriptDone)
             assert done.text == "我说到一半", "超时收尾也要把听到的报上去"
             await _next(events, link.SpeechStopped)
@@ -570,13 +570,13 @@ async def test_a_real_ending_cancels_the_backstop() -> None:
 
     clock = FakeClock()
     async with MockDuplexServer() as server:
-        duplex = _link(server, clock=clock, speech_edge_s=20.0)
+        duplex = _link(server, clock=clock, speech_edge_s=3.0)
         await duplex.connect()
         events = duplex.events()
         try:
             await server.hear("说完了")
             await _next(events, link.SpeechStopped)
-            await clock.advance(30.0)
+            await clock.advance(10.0)
             await server.hear_without_ending("下一句")
             await _next(events, link.SpeechStarted)
             # Only ONE stopped may be in flight: the first turn's backstop must
@@ -638,3 +638,37 @@ def test_dialog_context_only_rides_when_it_can_work() -> None:
     without = session_body(cfg, instructions="p", model="1.2.6.1", speaker="v")
     assert without["extension"]["dialog"] == {}
     assert "id" not in without["session"], "没有 session id 时不该发一个空的"
+
+
+async def test_a_long_sentence_keeps_pushing_the_backstop_out() -> None:
+    """The backstop counts quiet since the last delta, not time since the
+    start — otherwise it cuts the streamer off mid-thought.
+
+    Timing it from the start is what made a lost ending cost a flat twenty
+    seconds of her ignoring everything, three or four times per five minutes.
+    """
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=3.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("我")
+            await _next(events, link.SpeechStarted)
+            # Still talking: a delta every two seconds for ten seconds, which
+            # a start-relative deadline would have cut off three times over.
+            for i in range(5):
+                await clock.advance(2.0)
+                await server.still_hearing("我" + "说" * (i + 1))
+                await asyncio.sleep(0.02)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(
+                isinstance(e, link.SpeechStopped) for e in pending
+            ), f"她还在说就被收尾了：{[type(e).__name__ for e in pending]}"
+            # Now the ending goes missing: deltas stop and nothing closes it.
+            await clock.advance(4.0)
+            await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()

@@ -365,6 +365,17 @@ class MockDuplexServer:
                 },
             )
 
+    async def still_hearing(self, so_far: str) -> None:
+        """One more cumulative delta on a turn already open — the streamer
+        carrying on. A client timing its backstop from the START of the turn
+        cuts him off here; one timing it from the last delta does not."""
+        ws = self._ws
+        assert ws is not None
+        await self._send(
+            ws,
+            {"type": "conversation.item.input_audio_transcription.delta", "delta": so_far},
+        )
+
     async def fail(self, code: str = "50000000", message: str = "模型推理出错") -> None:
         ws = self._ws
         assert ws is not None

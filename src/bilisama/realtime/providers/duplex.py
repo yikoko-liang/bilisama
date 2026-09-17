@@ -122,12 +122,14 @@ _WATCHDOG_S = 25.0
 # already feed at 20 ms, so this is a ceiling for the replay paths, not a
 # throttle on the microphone.
 _FRAME_MS = 20
-# How long a transcription may stay open before we call the streamer's turn
-# over ourselves. Generous — a long sentence with pauses is ordinary, and
-# closing early hands her the floor while he is mid-thought. What it bounds is
-# the case where the completed frame never comes at all, which stops her
-# answering anything for the rest of the session.
-_SPEECH_EDGE_S = 20.0
+# How long the transcriber may say NOTHING about an open turn before we call
+# it over ourselves. Quiet since the last delta, not elapsed since the start:
+# a long sentence keeps producing deltas and keeps resetting this, so three
+# seconds cannot cut anyone off mid-thought — it only catches the ending that
+# never arrives. Measured 2026-09-16/17: the endings go missing about fifteen
+# times across an hour of talking, in healthy stretches as much as sick ones,
+# and each one costs the streamer a window of her ignoring him completely.
+_SPEECH_EDGE_S = 3.0
 # How long a reply we asked for may stay silent before we give up on it. The
 # endpoint answers a replacement in about 84 ms when it is going to answer at
 # all, so six seconds is not a race — it is the gap between "slow" and "never",
@@ -330,6 +332,9 @@ class DuplexLink:
         # A transcription is open; the floor is closed until it ends.
         self._speech_open = False
         self._speech_edge: asyncio.Task[None] | None = None
+        # When the transcriber last said anything about this turn. The backstop
+        # measures quiet from here, not from the start.
+        self._asr_at = 0.0
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -617,9 +622,10 @@ class DuplexLink:
         if timed_out:
             log.warning(
                 "duplex.speech_edge_missing",
+                quiet_ms=round((self._clock.monotonic() - self._asr_at) * 1000),
                 error_text=(
-                    "主播开口之后迟迟没有转写结束帧，按结束处理。"
-                    "再不放开说话权，她对任何事情都不会开口了。"
+                    "转写不再更新，但结束帧一直没来，按这一句说完处理。"
+                    "端点偶尔会漏这一帧；不自己收尾的话说话权就一直关着。"
                 ),
             )
         self._events.put_nowait(link.SpeechStopped())
@@ -628,12 +634,23 @@ class DuplexLink:
         """A start with no end wedges the gate shut, so bound the wait.
 
         This protocol's only 「the streamer stopped」 signal is the
-        transcriber's completed frame. Nothing guarantees it: the uplink can
-        stall, the session can go quiet, and the socket stays open and healthy
-        through all of it. Every other provider has a VAD edge that does not
-        depend on transcription, so this backstop is this file's alone.
+        transcriber's completed frame, and that frame goes missing — fifteen
+        times across the corpus of 2026-09-16/17, scattered through healthy
+        stretches as much as sick ones, and self-healing on the next
+        utterance. Every other provider has a VAD edge that does not depend on
+        transcription, so this backstop is this file's alone.
+
+        Timed from the last DELTA rather than from the start, which is the
+        difference between a two-second hiccup and a twenty-second one. A long
+        sentence with pauses keeps producing deltas and keeps pushing the
+        deadline out, so this never cuts a streamer off mid-thought; a lost
+        ending shows up as deltas simply stopping, which is exactly what it
+        now measures. Timing it from the start instead cost a flat twenty
+        seconds of her ignoring everything, three or four times per five
+        minutes — the shape the streamer described as 「聊一会儿就不行了」.
         """
         self._speech_open = True
+        self._asr_at = self._clock.monotonic()
         if self._speech_edge is not None:
             self._speech_edge.cancel()
         task = asyncio.create_task(self._await_speech_edge(), name="duplex:speech-edge")
@@ -642,7 +659,13 @@ class DuplexLink:
         task.add_done_callback(self._tasks.discard)
 
     async def _await_speech_edge(self) -> None:
-        await self._clock.sleep(self._speech_edge_s)
+        # Re-check rather than sleep once: every delta pushes _asr_at forward,
+        # and the turn is only over when the stream has actually gone quiet.
+        while True:
+            quiet_for = self._clock.monotonic() - self._asr_at
+            if quiet_for >= self._speech_edge_s:
+                break
+            await self._clock.sleep(self._speech_edge_s - quiet_for)
         self._close_speech(timed_out=True)
 
     def _arm_watchdog(self) -> None:
@@ -752,6 +775,7 @@ class DuplexLink:
             # lost by waiting.
             whole = str(frame.get("delta") or "")
             self._asr_text = whole
+            self._asr_at = self._clock.monotonic()  # the turn is still going
             if whole.startswith(self._asr_sent) and len(whole) > len(self._asr_sent):
                 self._events.put_nowait(link.UserTranscriptDelta(whole[len(self._asr_sent) :]))
                 self._asr_sent = whole
