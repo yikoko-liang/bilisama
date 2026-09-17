@@ -2878,6 +2878,20 @@ async def run_director(args: argparse.Namespace) -> int:
             sync_panel = push_panel_state
 
             async def on_poke(_data: dict[str, Any]) -> None:
+                if pulls_events:
+                    # A poke means 「说句话，现在」, which is precisely the one
+                    # thing this backend cannot do. Filing it would be worse
+                    # than refusing: the poke's real ask lives in
+                    # ReplySpec.instructions and the pull route only files
+                    # item_text, so all she would ever receive is the marker
+                    # 「[面板] 主播戳了你一下」 — read back later as a viewer
+                    # line, with the ask itself gone.
+                    log.info(
+                        "dev_talk.poke_unavailable",
+                        provider=provider.value,
+                        error_text="这个后端起不了自己的轮次，戳一下没法让她开口。跟她说句话就行。",
+                    )
+                    return
                 poke.poke()  # False = cooldown; the page animates either way
 
             async def on_panel_set(data: dict[str, Any]) -> None:
