@@ -119,7 +119,7 @@ class Recorded:
 class MockDuplexServer:
     """One connection, one session, and the endpoint's own bad manners."""
 
-    def __init__(self, *, refuse_session: bool = False) -> None:
+    def __init__(self, *, refuse_session: bool = False, deaf_to_tts: bool = False) -> None:
         self.recorded = Recorded()
         self.violations: list[str] = []
         # What the model would answer from, as far as this fake models it:
@@ -133,6 +133,10 @@ class MockDuplexServer:
         self.instructions = ""
         self.session_id = "sess-1"
         self._refuse_session = refuse_session
+        # Takes a speech_text_buffer.replacement and plays nothing: no error,
+        # no refusal, no frames. Seen live on 2026-09-17, twice in a row, and
+        # the slot it holds is the one her own turns need.
+        self._deaf_to_tts = deaf_to_tts
         self._server: Any = None
         self._ws: ServerConnection | None = None
         self._ready = asyncio.Event()
@@ -226,7 +230,8 @@ class MockDuplexServer:
         elif kind in ("speech_text_buffer.replacement.append", "speech_text_buffer.commit"):
             self._pending = str(frame.get("text") or "")
         elif kind == "speech_text_buffer.replacement.commit":
-            await self.say(getattr(self, "_pending", ""), ours=True)
+            if not self._deaf_to_tts:
+                await self.say(getattr(self, "_pending", ""), ours=True)
         elif kind == "response.cancel":
             await self._send(ws, {"type": "response.canceled"})
         elif kind == "session.close":

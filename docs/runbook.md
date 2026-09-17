@@ -364,7 +364,24 @@ adapter 现在给它兜了底：主播开口后 20 秒还没等到结束帧，�
 看门狗（实盘 :47 请求、:12 看门狗）。现在这种情况直接就地结算，打一条
 `duplex.cancel_before_start`。
 
-排查顺序：`grep -E "speech_edge_missing|cancel_before_start|gate.host_speaking|reply_watchdog"`。
+还有第三条，2026-09-17 第二场实盘暴露的：**服务端会收下一条
+`speech_text_buffer.replacement` 然后什么都不播**——不报错、不拒绝、一帧不回。原来这种情况
+要等 25 秒看门狗才放开名额，而那个名额**也是她自己轮次要用的**，所以这 25 秒里你说什么她都
+不理。实盘连着出现两次（`:04:58→:05:23`、`:05:48→:06:13`）。
+
+现在两头都堵上了：
+- 点了回复 6 秒还不开口就按取消结算，打 `duplex.reply_never_spoken`；
+- 她自己先说上了，那条没开口的直接让位（`duplex.turn_overlapped`）——她的轮次是真在响的，
+  我们那条只是个假设。
+
+排查顺序：
+
+```bash
+grep -E "speech_edge_missing|reply_never_spoken|turn_overlapped|cancel_before_start|gate.host_speaking|reply_watchdog" \
+  ~/.local/share/bilisama/logs/dev-talk.jsonl
+```
+
+**`reply_never_spoken` 反复出现说明端点在吞我们的 TTS**，那是厂商侧的事，不是这边卡住。
 
 #### 另外三条实测
 

@@ -128,6 +128,12 @@ _FRAME_MS = 20
 # the case where the completed frame never comes at all, which stops her
 # answering anything for the rest of the session.
 _SPEECH_EDGE_S = 20.0
+# How long a reply we asked for may stay silent before we give up on it. The
+# endpoint answers a replacement in about 84 ms when it is going to answer at
+# all, so six seconds is not a race — it is the gap between "slow" and "never",
+# and the cost of guessing wrong is her ignoring the streamer for the rest of
+# the wait.
+_UNSPOKEN_S = 6.0
 # What a reply's own frames carry when the words were ours rather than hers.
 _OURS = "chat_tts_text"
 
@@ -262,6 +268,7 @@ class DuplexLink:
         quiet_window_s: float = 1.8,
         clock: Clock | None = None,
         watchdog_s: float = _WATCHDOG_S,
+        unspoken_s: float = _UNSPOKEN_S,
         speech_edge_s: float = _SPEECH_EDGE_S,
         auto_reconnect: bool = True,
         reconnect_backoff_s: float = 1.0,
@@ -275,6 +282,7 @@ class DuplexLink:
         self.quiet_window_s = quiet_window_s
         self._clock: Clock = clock or SystemClock()
         self._watchdog_s = watchdog_s
+        self._unspoken_s = min(unspoken_s, watchdog_s)
         self._speech_edge_s = speech_edge_s
         self._auto_reconnect = auto_reconnect
         self._reconnect_backoff_s = reconnect_backoff_s
@@ -646,7 +654,28 @@ class DuplexLink:
         task.add_done_callback(self._tasks.discard)
 
     async def _watch(self) -> None:
-        await self._clock.sleep(self._watchdog_s)
+        # Two deadlines, because the two failures are nothing alike. A reply
+        # that started and will not stop is rare and gets the long wait. A
+        # reply that never SAYS anything is the common one here — the endpoint
+        # takes a speech_text_buffer.replacement, answers nothing, and plays
+        # nothing — and it costs far more, because the slot it holds is also
+        # the slot her own microphone turns need. Twenty-five seconds of that
+        # is twenty-five seconds of her ignoring the streamer entirely.
+        await self._clock.sleep(self._unspoken_s)
+        if self._slot_free.is_set():
+            return
+        if self._pending_ours is not None:
+            log.warning(
+                "duplex.reply_never_spoken",
+                waited_s=self._unspoken_s,
+                error_text=(
+                    "点了一条回复，服务端既不开口也不报错，按取消结算并放开名额。"
+                    "占着名额时她连自己的轮次都起不了。"
+                ),
+            )
+            self._settle(link.ReplyStatus.CANCELLED)
+            return
+        await self._clock.sleep(max(0.0, self._watchdog_s - self._unspoken_s))
         if self._slot_free.is_set():
             return
         log.warning(
@@ -857,17 +886,19 @@ class DuplexLink:
     def _book_her_turn(self) -> link.ReplyHandle | None:
         """Open a turn of her own, from whichever frame announced it first.
 
-        Returns None when one of OUR replies is already waiting to start: the
-        slot is spoken for, and guessing which of the two a stray frame
-        belongs to would be worse than saying so. Not seen in any probe —
-        the protocol is single-slot and our TTS announces within ~84 ms.
+        A reply of OURS still waiting to be spoken does not outrank this. Hers
+        is happening — the frames are here — and ours is hypothetical: the
+        endpoint accepts a `speech_text_buffer.replacement` and sometimes never
+        plays it, with no error and no refusal. Holding the slot for the
+        hypothetical one muted her for a full 25 seconds at a time in a live
+        session on 2026-09-17, so the one that is actually making sound wins.
         """
         if self._pending_ours is not None:
             log.warning(
                 "duplex.turn_overlapped",
-                error_text="我们点的回复还没开口，她的文字先到了——这一段丢了。",
+                error_text="我们点的回复还没开口，她自己先说上了——让给她，那条按取消结算。",
             )
-            return None
+            self._settle(link.ReplyStatus.CANCELLED)
         handle = link.ReplyHandle(implicit=True)
         self._take_slot(handle, ours=False)
         self._events.put_nowait(link.ReplyStarted(handle))

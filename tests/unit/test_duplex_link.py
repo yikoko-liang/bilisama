@@ -236,6 +236,49 @@ async def test_cancelling_a_reply_that_never_announced_frees_the_slot() -> None:
             await duplex.aclose()
 
 
+async def test_a_reply_the_endpoint_never_speaks_lets_go_of_the_slot_early() -> None:
+    """The endpoint takes a replacement and sometimes plays nothing — no
+    error, no refusal, no frames. The slot it holds is the same one her own
+    microphone turns need, so the old 25-second watchdog meant 25 seconds of
+    her ignoring the streamer. Measured twice in a row in a live session on
+    2026-09-17."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer(deaf_to_tts=True) as server:
+        duplex = _link(server, clock=clock, unspoken_s=6.0, watchdog_s=25.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await duplex.request_reply(link.ReplySpec(text="她永远不会念这句"))
+            await clock.advance(7.0)
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is handle
+            assert done.status is link.ReplyStatus.CANCELLED
+            await asyncio.wait_for(duplex.request_reply(link.ReplySpec(text="下一条")), timeout=1.0)
+        finally:
+            await duplex.aclose()
+
+
+async def test_her_own_turn_takes_the_slot_from_a_reply_that_never_started() -> None:
+    """She is audibly talking; ours is hypothetical. Holding the slot for the
+    hypothetical one is what muted her."""
+    async with MockDuplexServer(deaf_to_tts=True) as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            ours = await duplex.request_reply(link.ReplySpec(text="她永远不会念这句"))
+            await server.say("我先说了啊", ours=False)
+            gone = await _next(events, link.ReplyDone)
+            assert gone.handle is ours, "没开口的那条要让位"
+            assert gone.status is link.ReplyStatus.CANCELLED
+            started = await _next(events, link.ReplyStarted)
+            assert started.handle.implicit, "她自己的轮次要booked得上"
+        finally:
+            await duplex.aclose()
+
+
 async def test_asking_for_a_reply_without_words_is_refused_not_guessed() -> None:
     """A spec with no text is a wiring bug in L3. Making something up would
     put words in her mouth that nobody wrote, so it raises instead."""
