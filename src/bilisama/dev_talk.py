@@ -51,6 +51,7 @@ import websockets
 
 from bilisama.config.derive import DerivedThresholds, effective_thresholds
 from bilisama.config.enums import Chattiness, ProviderName, VoiceReplyMode
+from bilisama.config.schema import Settings
 from bilisama.director.voice_turn import VoiceTurnGate
 from bilisama.event_pacing import EventPacingSnapshot
 from bilisama.ingest.events import EventKind, Gift, LiveEvent, Viewer
@@ -1639,6 +1640,44 @@ def _apply_panic(mute: bool, panics: _Panics, say: Callable[[str], None]) -> Non
         say("恢复说话（终端）")
 
 
+def event_reply_route(provider: ProviderName, settings: Settings, *, side_available: bool) -> bool:
+    """Who answers a danmaku on this backend. True when SHE pulls it herself.
+
+    Three of the four providers compose their own replies and never reach any
+    of this. The duplex protocol cannot be made to start a turn at all, so it
+    has the choice — and one arm of that choice is a measured dead end.
+
+    With a microphone running, `speech_text_buffer.replacement` is never
+    spoken: forty commits across eight live sessions on 2026-09-16/17, zero
+    audio frames, in the healthy stretches of a session as much as the sick
+    ones. Refusing to start beats running a backend that drops every danmaku
+    answer in silence — which is exactly how this went unnoticed for two days.
+
+    A function rather than a few lines inside `run_director` so the rule can
+    be tested without a microphone. The first version of this refusal was
+    written, lost to a string replace that silently matched nothing, and
+    committed as a message nobody ran.
+    """
+    if profile_for(provider).caps.composes_on_demand:
+        return False
+    pulls: bool = settings.speech.volcano_duplex.event_replies == "tool"
+    if provider is ProviderName.VOLCANO_DUPLEX and not pulls:
+        raise SystemExit(
+            '[speech.volcano_duplex] event_replies = "ghostwriter" 在这个后端上走不通。\n'
+            "实测（2026-09-16/17，八场实盘共 40 次）：麦克风开着的时候发 TTS 稿子，"
+            "一次都没有被念出来过——不报错、不拒绝，就是没有声音。\n"
+            '改成 event_replies = "tool"：她在跟主播说话时自己把没回的弹幕捎带答了，'
+            "用她自己的话，也不需要侧路模型。\n"
+            "厂商哪天修好了，tests/integration/test_duplex_contract.py 里那条会变红。"
+        )
+    if not pulls and not side_available:
+        raise SystemExit(
+            f"{provider.value} 起不了自己的轮次，弹幕/礼物的回复需要一个侧路模型替她写。\n"
+            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。"
+        )
+    return pulls
+
+
 async def run_director(args: argparse.Namespace) -> int:
     """The whole stage-3 assembly behind the mic, before Electron exists.
 
@@ -2054,14 +2093,7 @@ async def run_director(args: argparse.Namespace) -> int:
     # Which of the two routes a backend that cannot start a turn should take.
     # Only the duplex protocol has the choice, so only its config carries it;
     # everywhere else `composes` is True and none of this is consulted.
-    pulls_events = not composes and settings.speech.volcano_duplex.event_replies == "tool"
-    if not composes and not pulls_events and side is None:
-        raise SystemExit(
-            f"{provider.value} 起不了自己的轮次，弹幕/礼物的回复需要一个侧路模型替她写。\n"
-            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。\n"
-            '也可以把 [speech.volcano_duplex] event_replies 改成 "tool"，'
-            "让她在跟主播说话时自己把弹幕捎带答了（不用侧路模型，但要等主播开口）。"
-        )
+    pulls_events = event_reply_route(provider, settings, side_available=side is not None)
 
     async def ghostwrite(intent: Intent) -> str | None:
         """Write one event reply for a link that cannot start its own turn.

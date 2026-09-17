@@ -388,3 +388,45 @@ def test_the_ownership_table_still_describes_real_fields() -> None:
     """A table naming a field that no longer exists guards nothing."""
     for field in _FIELD_OWNERS:
         assert field in LinkRequest.__dataclass_fields__, field
+
+
+# ------------------------------------------------ who answers a danmaku
+
+
+def test_three_providers_never_reach_the_event_reply_choice() -> None:
+    """They compose their own lines, so neither route is consulted for them —
+    not even to read the duplex section's value."""
+    from bilisama.dev_talk import event_reply_route
+
+    settings = Settings()
+    settings.speech.volcano_duplex.event_replies = "ghostwriter"
+    for provider in (ProviderName.S2S, ProviderName.DASHSCOPE, ProviderName.VOLCANO):
+        assert event_reply_route(provider, settings, side_available=False) is False
+
+
+def test_the_duplex_tool_route_needs_no_side_model() -> None:
+    from bilisama.dev_talk import event_reply_route
+
+    settings = Settings()
+    settings.speech.volcano_duplex.event_replies = "tool"
+    assert event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=False) is True
+
+
+def test_the_duplex_ghostwriter_route_refuses_to_start() -> None:
+    """Forty commits across eight live sessions, zero audio frames. Starting
+    anyway ships a backend that drops every danmaku answer in silence, which
+    is how it went unnoticed for two days."""
+    from bilisama.dev_talk import event_reply_route
+
+    settings = Settings()
+    settings.speech.volcano_duplex.event_replies = "ghostwriter"
+    with pytest.raises(SystemExit, match="走不通"):
+        event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=True)
+
+
+def test_the_shipped_default_is_the_route_that_works() -> None:
+    """A default nobody can start on would be worse than no default."""
+    from bilisama.dev_talk import event_reply_route
+
+    assert Settings().speech.volcano_duplex.event_replies == "tool"
+    assert event_reply_route(ProviderName.VOLCANO_DUPLEX, Settings(), side_available=False) is True
