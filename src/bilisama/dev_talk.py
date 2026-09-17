@@ -3441,12 +3441,36 @@ async def run_director(args: argparse.Namespace) -> int:
         local_pair.start_mic = start_mic
 
         await assembly.refresh_context()
+        # Proactive topics need a turn nobody asked for, and the duplex
+        # protocol has no way to start one — only the streamer's microphone
+        # does. Running the loop there is worse than useless: the topic text
+        # rides ReplySpec.instructions and the pull route only ever files
+        # `item_text`, so she never sees the topic at all; what she DOES get
+        # filed, into a queue whose tool description says 「观众消息」, is the
+        # dead-air marker 「[本场] 这会儿没人说话」 — which she then reads back
+        # as a viewer line while the streamer is mid-sentence. And every
+        # attempt spends two side-model calls, measured at 25-45 seconds each.
+        # So it is switched off rather than left to churn, and said out loud
+        # instead of discovered.
+        if pulls_events:
+            log.info(
+                "dev_talk.proactive_unavailable",
+                provider=provider.value,
+                error_text=(
+                    "这个后端起不了自己的轮次，主动话题（冷场时开口）用不了，本场关掉。"
+                    "她对主播说话的回应不受影响。"
+                ),
+            )
         # _watch on every one: this list is started and then left alone while
         # the main flow waits on `stop`, so without it a task that raises just
         # vanishes. See _watch.
         tasks = [
             asyncio.create_task(scheduler.run(), name="director:scheduler"),
-            asyncio.create_task(proactive.run(), name="director:proactive"),
+            *(
+                []
+                if pulls_events
+                else [asyncio.create_task(proactive.run(), name="director:proactive")]
+            ),
             asyncio.create_task(
                 assembly.run(
                     [console, tests_source] + ([bili_source] if bili_source is not None else [])

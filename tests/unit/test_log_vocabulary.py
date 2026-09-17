@@ -57,6 +57,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "dev_talk.memory_close_failed",
         "dev_talk.memory_finalize_failed",
         "dev_talk.pet_not_installed",
+        "dev_talk.proactive_unavailable",
         "dev_talk.pet_spawn_failed",
         "dev_talk.pet_started",
         "dev_talk.playback_cleared",

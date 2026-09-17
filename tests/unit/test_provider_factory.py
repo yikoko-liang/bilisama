@@ -8,6 +8,7 @@ wrong, and a message that names the wrong fix costs more than no message.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -430,3 +431,28 @@ def test_the_shipped_default_is_the_route_that_works() -> None:
 
     assert Settings().speech.volcano_duplex.event_replies == "tool"
     assert event_reply_route(ProviderName.VOLCANO_DUPLEX, Settings(), side_available=False) is True
+
+
+def test_the_pull_route_is_also_the_no_proactive_route() -> None:
+    """A backend that cannot start a turn cannot open a topic into dead air.
+
+    Left running, the loop is worse than idle: the topic text rides
+    `ReplySpec.instructions` and the pull route only files `item_text`, so she
+    never sees the topic — what she does get filed is the dead-air marker
+    「[本场] 这会儿没人说话」, into a queue whose tool description promises
+    viewer messages, which she then reads back while the streamer is talking.
+    Each attempt also spends two side-model calls, measured at 25-45 s.
+
+    `event_reply_route` returning True is the one signal dev_talk keys the
+    loop off, so this pins the two together: they must not drift apart.
+    """
+    from bilisama.dev_talk import event_reply_route
+
+    settings = Settings()
+    assert event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=False) is True
+    source = (Path(__file__).resolve().parents[2] / "src/bilisama/dev_talk.py").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "if pulls_events" in source and "director:proactive" in source
+    ), "主动话题必须跟着 pulls_events 一起关掉"
