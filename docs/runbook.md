@@ -383,6 +383,28 @@ grep -E "speech_edge_missing|reply_never_spoken|turn_overlapped|cancel_before_st
 
 **`reply_never_spoken` 反复出现说明端点在吞我们的 TTS**，那是厂商侧的事，不是这边卡住。
 
+#### 桌宠一直显示「想一想」＝ 在等侧路模型
+
+面板那个状态是 `dispatching or active or implicit`（[hub.py:81](../src/bilisama/ui/hub.py:81)），
+而 `_dispatching` 从派发开始一直挂到**代笔函数返回**——也就是侧路模型返回。
+
+2026-09-17 实盘量到的侧路模型耗时：**最快 24.8 秒，中位 30.7 秒，最慢 44.5 秒，外加一次 45 秒超时**，
+而 `max_tokens` 只有 45。一条主动话题要两次这样的调用（挑话题一次、写词一次），所以桌宠大半时间
+停在「想一想」上，而且等词写完，那个时刻早过去了——同一场日志里是一整列
+`proactive → cancelled@speaking`。
+
+**怀疑是思考模式没关掉。** `[speech.side] thinking` 出厂就是 `"off"`，但
+[side.py:44-48](../src/bilisama/side.py:44) 自己写着这一条「只进提示词，没有线上字段」。
+一句话是请求，一个字段才是规矩。量一下：
+
+```bash
+source path.sh && .venv/bin/python tools/side_latency.py
+```
+
+它拿你实际在用的端点和同量级的提示词，把四种可能的发法各跑三轮，打出中位耗时和
+`completion_tokens`。**某一种明显更快就说明确实在烧思考**，那时候再把字段发到线上。
+在量出来之前不要改——这是全仓唯一按次计费的路径。
+
 #### 另外三条实测
 
 - **人设中途能改。** `session.update` 改 `instructions` 当场生效（改前答「豆腐」、改后答「小明」），
