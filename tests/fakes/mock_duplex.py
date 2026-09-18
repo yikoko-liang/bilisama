@@ -376,6 +376,16 @@ class MockDuplexServer:
             {"type": "conversation.item.input_audio_transcription.delta", "delta": so_far},
         )
 
+    async def hear_tail(self, transcript: str) -> None:
+        """Close a turn the client may already have given up on. The endpoint
+        has no idea we timed out, so the ending looks entirely ordinary."""
+        ws = self._ws
+        assert ws is not None
+        await self._send(
+            ws,
+            {"type": "conversation.item.input_audio_transcription.completed", "transcript": ""},
+        )
+
     async def fail(self, code: str = "50000000", message: str = "模型推理出错") -> None:
         ws = self._ws
         assert ws is not None

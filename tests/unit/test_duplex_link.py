@@ -672,3 +672,40 @@ async def test_a_long_sentence_keeps_pushing_the_backstop_out() -> None:
             await _next(events, link.SpeechStopped)
         finally:
             await duplex.aclose()
+
+
+async def test_talking_on_past_the_backstop_reopens_the_turn() -> None:
+    """The ending was late, not lost — and he is still going.
+
+    Without reopening, the rest of the sentence falls outside any turn: the
+    floor stays open while he speaks, and the `completed` that finally does
+    arrive finds the turn closed and reports nothing, so everything after the
+    timeout never reaches the chat page or memory. The two halves must also
+    not overlap: the transcriber's deltas are cumulative from the start of the
+    utterance and it does not know we gave up.
+    """
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=3.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("今天我们打")
+            await _next(events, link.SpeechStarted)
+            await clock.advance(4.0)
+            first = await _next(events, link.UserTranscriptDone)
+            assert first.text == "今天我们打"
+
+            # He never stopped; the transcriber picks up where it was, still
+            # cumulative, and then finally closes.
+            await server.still_hearing("今天我们打算打几把游戏")
+            # Still talking, so the turn must be open again.
+            await _next(events, link.SpeechStarted)
+            await server.hear_tail("今天我们打算打几把游戏")
+            second = await _next(events, link.UserTranscriptDone)
+            assert second.text == "算打几把游戏", "只报没报过的那一截，开头不能重复"
+            await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()

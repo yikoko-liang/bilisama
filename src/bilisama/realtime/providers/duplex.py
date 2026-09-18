@@ -335,6 +335,10 @@ class DuplexLink:
         # When the transcriber last said anything about this turn. The backstop
         # measures quiet from here, not from the start.
         self._asr_at = 0.0
+        # How much of this utterance has already gone out in a done. Only
+        # moves when a timeout splits one sentence across two turns, and the
+        # continuation's cumulative deltas would otherwise repeat the opening.
+        self._asr_reported = ""
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -615,8 +619,15 @@ class DuplexLink:
         if self._speech_edge is not None:
             self._speech_edge.cancel()
             self._speech_edge = None
-        if self._asr_text:
-            self._events.put_nowait(link.UserTranscriptDone(self._asr_text))
+        # Only the part no earlier done has carried. The transcriber's deltas
+        # are cumulative from the start of the utterance and it does not know
+        # we gave up, so after a timeout the continuation still arrives with
+        # the whole thing — reporting that verbatim would put the opening of
+        # the sentence into the chat page twice.
+        fresh = self._asr_text[len(self._asr_reported) :]
+        if fresh:
+            self._events.put_nowait(link.UserTranscriptDone(fresh))
+            self._asr_reported = self._asr_text
         self._asr_text = ""
         self._asr_sent = ""
         if timed_out:
@@ -758,6 +769,7 @@ class DuplexLink:
             # transcriber's first word is the earliest edge it offers.
             self._asr_text = ""
             self._asr_sent = ""
+            self._asr_reported = ""  # a genuinely new utterance
             self._arm_speech_edge()
             self._events.put_nowait(link.SpeechStarted())
             return
@@ -774,6 +786,16 @@ class DuplexLink:
             # settles. Every delta is a prefix of the last one, so nothing is
             # lost by waiting.
             whole = str(frame.get("delta") or "")
+            if not self._speech_open:
+                # We gave up on this turn and he is still talking, so the
+                # ending was late rather than lost. Without this the rest of
+                # the sentence falls outside any turn: the floor stays open
+                # while he speaks, and the `completed` that eventually does
+                # arrive finds the turn already closed and reports nothing —
+                # so everything after the timeout never reaches the chat page
+                # or memory at all.
+                self._arm_speech_edge()
+                self._events.put_nowait(link.SpeechStarted())
             self._asr_text = whole
             self._asr_at = self._clock.monotonic()  # the turn is still going
             if whole.startswith(self._asr_sent) and len(whole) > len(self._asr_sent):
