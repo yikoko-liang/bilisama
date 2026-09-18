@@ -55,7 +55,7 @@ class ReplySpec:
     base_instructions: str | None = None
     max_tokens: int | None = None
     # Finished words, to be said as they stand. Only for endpoints that cannot
-    # compose (capabilities.composes_on_demand False); everywhere else it is
+    # compose (capabilities.composes_on_demand False); on the other four it is
     # None and `instructions` is what the model works from. Filled by L3 —
     # who ghostwrites for her, and in whose voice, is a product decision and
     # never an adapter's.

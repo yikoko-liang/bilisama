@@ -1643,7 +1643,7 @@ def _apply_panic(mute: bool, panics: _Panics, say: Callable[[str], None]) -> Non
 def event_reply_route(provider: ProviderName, settings: Settings, *, side_available: bool) -> bool:
     """Who answers a danmaku on this backend. True when SHE pulls it herself.
 
-    Three of the four providers compose their own replies and never reach any
+    Four of the five providers compose their own replies and never reach any
     of this. The duplex protocol cannot be made to start a turn at all, so it
     has the choice — and one arm of that choice is a measured dead end.
 
