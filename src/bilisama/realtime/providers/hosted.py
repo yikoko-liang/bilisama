@@ -308,8 +308,11 @@ class HostedLink:
                 error_text="这个语音后端还不支持付费保护：SC 答谢仍会被主播开口打断。",
             )
         # Out-of-band only where it does not cost the slot: on GA it runs in
-        # parallel; on the beta dialect the bit is a guess pending the real
-        # endpoint test, so stay in-band there rather than assume.
+        # parallel; on the beta dialect it does NOT, which stopped being a
+        # guess on 2026-08-10 — a live probe drew "Conversation already has an
+        # active response" for conversation="none" too (capabilities.py's
+        # DASHSCOPE note). Same behaviour either way; this comment was the one
+        # still calling it unmeasured.
         # A reply-scoped base replaces the session's persona ON THE WIRE for
         # this response only — the session itself is untouched, so the next
         # implicit microphone turn still speaks under voice rules.

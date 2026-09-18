@@ -1,6 +1,6 @@
 """The scheduler: one reply slot, seven claimants, no exceptions.
 
-Every provider turned out single-slot (capabilities.py, all three verified),
+Every provider turned out single-slot (capabilities.py, all five of them),
 so this module is load-bearing for the whole product: without it, concurrent
 sources race the slot and the audience watches a paid Super Chat go
 unanswered. The reference repos have nothing like it — qwen-audio-agent faces

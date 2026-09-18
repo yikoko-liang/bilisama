@@ -274,7 +274,7 @@ class ProviderProfile:
     socket_path: str = ""
     """Path to staple onto a bare host. DashScope serves Realtime on its own
     path while OpenAI GA uses /v1/realtime — the same path our s2s server
-    answers on (config/schema.py:51), because both speak GA. Stapling
+    answers on (config/schema.py:56), because both speak GA. Stapling
     DashScope's path onto an OpenAI host dials a 404 and reports it as a
     refused handshake, which sends people checking a key that was never the
     problem. Empty means addresses arrive complete (s2s)."""
@@ -295,7 +295,7 @@ class ProviderProfile:
     uplink_rate: int = 16000
     """What this endpoint wants the microphone at.
 
-    16 kHz is what our capture worklet produces and what three of the four
+    16 kHz is what our capture worklet produces and what four of the five
     providers take. OpenAI GA is the exception at 24 kHz, and the mismatch was
     what kept it refused: its DOWNLINK is 24 kHz too, which already matches
     our playback, so only the uplink ever needed converting — plan section 3.1

@@ -168,8 +168,10 @@ def build_link(request: LinkRequest) -> BuiltLink:
 
     Raises:
         SystemExit: The provider needs something this machine has not got —
-            a credential, a supported turn type, or, for openai_ga, code that
-            does not exist yet. Every message names the fix.
+            a credential, a supported turn type, or a route this backend
+            cannot serve. Every message names the fix. (It used to say
+            "for openai_ga, code that does not exist yet"; that arm has
+            existed since 2026-08-27, see the comment on it below.)
     """
     provider = request.endpoint.provider
 

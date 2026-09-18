@@ -10,7 +10,11 @@ Folding all three back into one dataclass would be inventing complexity rather
 than inheriting their experience, so we keep the same split.
 
 Every field below makes either the client or the scheduler grow a branch. That is
-what earns it a place here.
+what earns it a place here — with two admitted exceptions, both marked at their
+field: `item_truncate` has no reader anywhere in src/, and `owns_tts` is read
+only by config/validate.py, which recomputes it from the s2s patch list rather
+than reading this table. Saying so beats letting the paragraph above claim more
+than the file delivers.
 """
 
 from __future__ import annotations
@@ -104,10 +108,12 @@ OPENAI_GA = Capabilities(
     # Required over WebSocket, and supported here. Nothing in src/ reads this
     # flag yet, and the honest reason is not laziness: truncating the model's
     # own history takes the played_ms the browser reports on playback.cancelled
-    # (ui/events.py:71) carried from L4 through L3 down to a client method that
-    # does not exist — and the only provider declaring True is the one dev-talk
-    # refuses to dial (dev_talk.py:1066). Until both land, a barge-in trims our
-    # memory and leaves the model still holding what the audience never heard.
+    # (ui/events.py:71) carried from L4 through L3 down to a client method
+    # that does not exist. (This used to add "and the only provider declaring
+    # True is the one dev-talk refuses to dial" — stale twice over: openai_ga
+    # was unblocked 2026-08-27, and the line it cited has since moved.) Until
+    # the client method lands, a barge-in trims our memory and leaves the
+    # model still holding what the audience never heard.
     item_truncate=True,
     acknowledges_session_update=True,
     turn_detection_types=frozenset({"server_vad", "semantic_vad"}),

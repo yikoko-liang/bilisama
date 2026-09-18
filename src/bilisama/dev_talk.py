@@ -3922,7 +3922,7 @@ def _refuse_if_wire_mode_cannot_drive(provider: ProviderName, profile: ProviderP
     """Say no in Chinese, before the banner, to a backend this path cannot dial.
 
     Bare-link mode drives RealtimeClient directly: one OpenAI dialect, one
-    uplink rate, no adapter in between. Two of the four providers do not fit
+    uplink rate, no adapter in between. Three of the five providers do not fit
     through it, and until now argparse was what said so — `--provider` listed
     exactly the two that worked. Widening it to the whole enum (so it stops
     being a fourth place that has to learn a new provider's name) turned that
