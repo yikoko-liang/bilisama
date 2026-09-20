@@ -274,7 +274,37 @@ class HostedLink:
             return
         await self._client.push_audio(converted)
 
+    @property
+    def _replies_out_of_band(self) -> bool:
+        """Whether request_reply sends conversation="none" on this provider.
+
+        One reading of the capability bit, named once, because two call sites
+        now depend on the same fact: the frame builder below in request_reply,
+        and the write-back guard in add_context_item. Plan section 15 already
+        objects that this adapter decides the wire shape on a SLOT question;
+        that objection stands, and when it is addressed there is one place to
+        change rather than two.
+        """
+        return self._caps.out_of_band_exempt_from_slot
+
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        if role == "assistant" and not self._replies_out_of_band:
+            # Dropped deliberately, the same way volcano.py:867-879 drops it and
+            # for the same reason: this endpoint already remembers. Our replies
+            # go in-band here, and an in-band reply commits its own words into
+            # the conversation, so mirroring puts the sentence in front of her a
+            # SECOND time — she then reads herself as having said it twice, the
+            # failure the requeue guard describes at scheduler.py:1193-1200.
+            #
+            # Measured on the real DashScope endpoint 2026-09-20: with no
+            # mirroring at all she still quoted her previous sentence back on
+            # the next turn, and with mirroring she quoted it doubled. L3 asks
+            # for write_history meaning "make sure she remembers"; on this
+            # backend that is already true, so the honest answer is to send
+            # nothing. Reproduced twice; probe kept as test_hosted_contract.py's
+            # in-band history case.
+            log.debug("hosted.write_back_skipped", provider=self._provider.value)
+            return
         # Content types are role-matched in the Realtime item schema: assistant
         # text is output_text, everyone else's is input_text.
         content_type = "output_text" if role == "assistant" else "input_text"
@@ -318,7 +348,7 @@ class HostedLink:
         # implicit microphone turn still speaks under voice rules.
         base = spec.base_instructions if spec.base_instructions is not None else self._context
         frame = self._codec.response_create(
-            out_of_band=self._caps.out_of_band_exempt_from_slot,
+            out_of_band=self._replies_out_of_band,
             text_only=False,
             instructions=compose_instructions(base, spec.instructions),
             max_output_tokens=spec.max_tokens,

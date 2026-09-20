@@ -439,11 +439,17 @@ async def test_an_assistant_history_item_uses_the_output_content_type() -> None:
     history with the user's type is a protocol error a strict endpoint
     rejects — and a lenient one records the assistant's own words as a
     viewer's, which is worse. Both adapters share the shape, so both are
-    pinned here."""
+    pinned here.
+
+    On OPENAI_GA rather than DashScope, because the hosted adapter now drops the
+    write-back entirely where its replies go in-band — DashScope remembers its
+    own in-band reply and a mirror would be a second copy (see
+    test_dashscope_does_not_hear_its_own_reply_twice). GA runs out-of-band, so
+    it is the hosted provider that still sends one."""
     from bilisama.realtime.providers.s2s import S2SLink
 
-    async with MockRealtimeServer(caps=caps_mod.DASHSCOPE, codec=dia.BETA) as server:
-        hosted = HostedLink(server.url, ProviderName.DASHSCOPE, session_cap_min=0)
+    async with MockRealtimeServer(caps=caps_mod.OPENAI_GA, codec=dia.GA) as server:
+        hosted = HostedLink(server.url, ProviderName.OPENAI_GA, session_cap_min=0)
         await hosted.connect()
         try:
             await hosted.add_context_item("[弹幕] 阿强: 你好")
@@ -603,3 +609,56 @@ async def test_reconfigure_while_suspended_stores_the_voice_without_reconnecting
             assert frames[-1]["session"]["voice"] == "longanlufeng"
         finally:
             await hosted.aclose()
+
+
+async def _one_reply_then_mirror(provider: ProviderName) -> list[dict[str, str]]:
+    """Drive the scheduler's shape by hand: ask, let it finish, write it back.
+
+    Returns what the model would read afterwards. The write-back is the literal
+    call scheduler._write_history makes (scheduler.py:286-288).
+    """
+    from bilisama.realtime.providers import profile_for
+
+    async with MockRealtimeServer(caps=profile_for(provider).caps, script=Script()) as server:
+        hosted = HostedLink(server.url, provider, session_cap_min=0)
+        await hosted.connect()
+        try:
+            await hosted.add_context_item("[弹幕] 阿强: 你好")
+            await hosted.request_reply(link.ReplySpec(instructions="回一句", write_history=True))
+            async for event in hosted.events():
+                if isinstance(event, link.ReplyDone):
+                    break
+            await hosted.add_context_item(Script().reply_text, role="assistant")
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if sum(1 for i in server.conversation if i["role"] == "assistant") >= 2:
+                    break
+            return list(server.conversation)
+        finally:
+            await hosted.aclose()
+
+
+async def test_dashscope_does_not_hear_its_own_reply_twice() -> None:
+    """The reply goes IN-BAND on DashScope (hosted.py:320-321 reads
+    out_of_band_exempt_from_slot, False at capabilities.py:89), and an in-band
+    reply is committed by the server itself — measured against the real endpoint
+    2026-09-20, where she could quote her own previous sentence back with no
+    mirroring from us at all.
+
+    So mirroring it a second time puts the same sentence in front of her twice.
+    Same class as the requeue bug scheduler.py:1193-1200 already guards: one
+    Super Chat talked over three times became four identical lines.
+    """
+    items = await _one_reply_then_mirror(ProviderName.DASHSCOPE)
+    said = [i["text"] for i in items if i["role"] == "assistant"]
+    assert said == [Script().reply_text], f"她自己的话进了 {len(said)} 遍：{items}"
+
+
+async def test_openai_ga_still_needs_the_mirror() -> None:
+    """The other half of the same bit: GA runs the reply out-of-band
+    (capabilities.py:107), so the server never writes it back and the mirror is
+    the only thing that keeps her from repeating herself. Dropping the write-back
+    for every hosted provider would break this one."""
+    items = await _one_reply_then_mirror(ProviderName.OPENAI_GA)
+    said = [i["text"] for i in items if i["role"] == "assistant"]
+    assert said == [Script().reply_text], f"旁路回复没有被镜像回历史：{items}"

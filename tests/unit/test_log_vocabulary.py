@@ -119,6 +119,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "hosted.suspended",
         "hosted.resumed",
         "hosted.reconfigure_deferred",
+        "hosted.write_back_skipped",
         "intents.built",
         "intents.no_speaking_path",
         "link.fatal",

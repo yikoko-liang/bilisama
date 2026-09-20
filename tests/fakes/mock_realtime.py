@@ -235,6 +235,11 @@ class _Reply:
     # Held closed while the reply is merely pending. Per reply rather than per
     # connection, so a second implicit reply cannot steal the first one's wakeup.
     first_token: asyncio.Event = field(default_factory=asyncio.Event)
+    # Whether this reply was asked for with conversation="none". An in-band
+    # reply commits its own output into the conversation when it completes; an
+    # out-of-band one never does. The implicit VAD turn is in-band like any
+    # other. See MockRealtimeServer.conversation for why this is modelled.
+    out_of_band: bool = False
 
 
 @dataclass(slots=True)
@@ -297,6 +302,14 @@ class MockRealtimeServer:
         # Whether anything has been written into the conversation. Only
         # consulted when the script asks for it; see Script.requires_user_message.
         self._seen_user_item = False
+        # What the model would actually read back, in order. Until 2026-09-20
+        # the fake had only the boolean above, so it could not tell "the reply
+        # is in the history once" from "twice" — and that blindness is exactly
+        # what let the DashScope double-write ship (a reply goes in-band there,
+        # the server commits it, and L3 mirrored a second copy on top).
+        # Public on purpose: a test asserting what she ends up reading is the
+        # only kind that catches this class of bug.
+        self.conversation: list[dict[str, str]] = []
         self._speculative_open = False
         self._interrupt_response = True  # rule 6: session.update can turn the axe off
         self._appended_since_stop_ms: int | None = None
@@ -330,9 +343,19 @@ class MockRealtimeServer:
     # ------------------------------------------------------------ response bookkeeping
 
     def _start_reply(
-        self, *, holds_slot: bool, started: bool = True, text_reply: bool = False
+        self,
+        *,
+        holds_slot: bool,
+        started: bool = True,
+        text_reply: bool = False,
+        out_of_band: bool = False,
     ) -> _Reply:
-        reply = _Reply(holds_slot=holds_slot, started=started, text_reply=text_reply)
+        reply = _Reply(
+            holds_slot=holds_slot,
+            started=started,
+            text_reply=text_reply,
+            out_of_band=out_of_band,
+        )
         self._replies.append(reply)
         return reply
 
@@ -718,6 +741,11 @@ class MockRealtimeServer:
         broken client.
         """
         self._seen_user_item = True
+        item = event.get("item") or {}
+        content = (item.get("content") or [{}])[0]
+        self.conversation.append(
+            {"role": str(item.get("role") or ""), "text": str(content.get("text") or "")}
+        )
         if self.script.has(Fault.NEVER_ACK):
             # Accepted, just never announced: the item still counts as a user
             # message, so a create that depends on one (requires_user_message)
@@ -757,7 +785,9 @@ class MockRealtimeServer:
         # anything else — including absent — means audio. Patch A only fills
         # the default for the implicit turn; it does not touch this path.
         modalities = (event.get("response") or {}).get("output_modalities")
-        reply = self._start_reply(holds_slot=holds_slot, text_reply=modalities == ["text"])
+        reply = self._start_reply(
+            holds_slot=holds_slot, text_reply=modalities == ["text"], out_of_band=out_of_band
+        )
         rid = self._ensure_response_id(reply)
         await self.send(dia.ServerEvent.RESPONSE_CREATED, response={"id": rid})
 
@@ -891,6 +921,14 @@ class MockRealtimeServer:
         if not reply.is_open:
             return
         rid = self._ensure_response_id(reply)  # finish_response mints one too, response.py:275
+        # An in-band reply that ran to completion commits its own words into the
+        # conversation; an out-of-band one generated against a throwaway copy and
+        # never writes back (LLM/base_openai_compatible_language_model.py:644-651).
+        # Confirmed against the real DashScope endpoint 2026-09-20: with no
+        # mirroring from us at all, she could still quote her previous sentence
+        # back on the next turn.
+        if status == "completed" and not reply.out_of_band:
+            self.conversation.append({"role": "assistant", "text": self.script.reply_text})
         self._close_reply(reply)
 
         payload: dict[str, Any] = {"response": {"id": rid, "status": status}}

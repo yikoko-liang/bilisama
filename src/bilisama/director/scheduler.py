@@ -970,9 +970,15 @@ class Scheduler:
             if self._spoken_sink is not None and event.text:
                 self._spoken_sink(event.text)
             if active.intent.injection.reply.write_history and event.text:
-                # Out-of-band replies never enter the provider's own history,
-                # so without this she cannot remember what she just said — the
-                # root of every "same opening three welcomes in a row".
+                # "Make sure she remembers this one" — the root fix for every
+                # "same opening three welcomes in a row". Whether anything has
+                # to go on the wire to achieve it is the adapter's call, not
+                # ours: a backend whose reply already entered its own history
+                # drops this write rather than duplicating the sentence
+                # (hosted.py's _replies_out_of_band guard, volcano.py:867-879).
+                # This comment used to assert that out-of-band replies never
+                # write back, full stop. True on s2s, false on DashScope, and
+                # stating it here is what hid the double write until 2026-09-20.
                 # Spawned like every other send here (the event loop must not
                 # stall), and a failure is one warning, not a dead loop.
                 self._spawn(self._write_history(event.text), name="scheduler:write-history")

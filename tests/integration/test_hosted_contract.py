@@ -237,3 +237,53 @@ async def test_protection_does_not_survive_being_talked_over(tmp_path: Path) -> 
     assert (
         protected == "cancelled"
     ), f"关掉打断之后回复活下来了——#45 有救了，去接 end_protection：{protected}"
+
+
+async def _text_reply(session: _Session, ask: str, *, mark: int) -> str:
+    """One in-band round: put a user item in, ask for text, return what she said."""
+    await session.send(
+        type="conversation.item.create",
+        item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": ask}]},
+    )
+    await session.settle(0.6)
+    await session.send(
+        type="response.create", response={"modalities": ["text"], "max_output_tokens": 64}
+    )
+    await session.settle(8)
+    done = [f for f in session.frames[mark:] if f.get("type") == "response.text.done"]
+    return str(done[-1].get("text") or "") if done else ""
+
+
+async def test_an_in_band_reply_enters_the_conversation_by_itself(session: _Session) -> None:
+    """Why HostedLink drops the assistant write-back on DashScope.
+
+    Measured 2026-09-20, reproduced twice. We send NO mirror here at all — no
+    `conversation.item.create` with role=assistant anywhere in this test — and
+    she can still quote her own previous sentence back on the next turn. So the
+    endpoint commits an in-band response's output into its own conversation,
+    the ordinary OpenAI Realtime semantics, and scheduler.py's write-back would
+    be a second copy of the same sentence rather than the repair it is on s2s.
+
+    If this ever goes red, hosted.py's `_replies_out_of_band` guard is the thing
+    to revisit: the mirror would be load-bearing again.
+    """
+    line = "今天天气很好"
+    await session.send(
+        type="session.update",
+        session={
+            "instructions": "你是测试助手，严格按要求回答，不要多说。",
+            "modalities": ["text"],
+        },
+    )
+    await session.settle(1.0)
+
+    mark = len(session.frames)
+    said = await _text_reply(session, f"请一字不差地只输出这六个字：{line}", mark=mark)
+    assert line in said, f"第一轮她没按要求说那六个字，后面就无从判断了：{said!r}"
+
+    mark = len(session.frames)
+    echo = await _text_reply(session, "把你上一句原话一字不差地再说一遍，只输出那句话。", mark=mark)
+    assert line in echo, (
+        "她复述不出自己刚说过的话——in-band 回复没有进服务端历史，"
+        f"HostedLink 丢掉 assistant 写回的前提不成立了：{echo!r}"
+    )
