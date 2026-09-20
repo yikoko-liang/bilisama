@@ -5,9 +5,20 @@ event names, never on a provider module. The eight provider rules from plan
 section 3.3 live inside the adapters; if one of them leaks upward, the
 dependency gate (tests/unit/test_dependency_direction.py) goes red.
 
-ReplySpec describes intent, not protocol: the s2s adapter turns write_history
-into the two-step inject (item in-band, reply out-of-band), a hosted adapter
-may do it differently, and L3 cannot tell.
+ReplySpec describes intent, not protocol. The two-step inject is NOT hidden
+from L3, though — this paragraph said it was until 2026-09-20, describing an
+intention that b3025df superseded and nobody came back to correct. L3 sends
+both halves itself (director/scheduler.py's _dispatch) and mirrors her
+finished words back with a third call (_write_history); write_history is
+honoured there, and no adapter reads the field.
+
+What the adapters do hide is what those two calls BECOME: two frames on the
+OpenAI-realtime dialects, one combined query on volcano, and nothing on the
+wire at all on duplex, whose add_context_item only stashes for the next
+session. Exactly one capability reaches L3 on purpose — composes_on_demand,
+because a backend that cannot be made to start a turn needs its words written
+before the ask (capabilities.py says why that is a product fact rather than a
+wire detail).
 """
 
 from __future__ import annotations
