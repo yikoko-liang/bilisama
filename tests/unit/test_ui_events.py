@@ -158,3 +158,36 @@ def test_live_event_payload_carries_identity_and_battery_but_no_raw() -> None:
     assert payload["gift"]["total_battery"] == 150
     assert payload["identity"] == "uid:9"
     assert "raw" not in payload
+
+
+def test_the_room_event_payload_alone_can_draw_a_chat_row() -> None:
+    """What made it safe to delete dev-talk's own console echo.
+
+    A console injection used to broadcast TWO event.feed frames: one written by
+    hand in `handle_line`, and one from the general `event_observer` that every
+    room event goes through. The chat page drew both, so a single injected
+    danmaku appeared twice, stamped the same second (seen live 2026-09-21).
+
+    The hand-written one went, because the observer's payload is a superset.
+    That is the claim under test: for each kind the chat timeline renders, this
+    payload carries every field `feedEntry` reads — `kind`, `name`, `text`, and
+    `value_cny` for the money line. If a field ever stops coming through here,
+    the row silently loses part of itself and nothing else is left to supply it.
+
+    Super Chat is not exercised here only because tests/fakes/bili.py has no
+    builder for one; the page's own normalisation is what mattered there and it
+    predates the echo (`super_chat` -> `sc`, panel.js:1587), so the echo's
+    shorter spelling was never load-bearing.
+    """
+    from bilisama.ui.events import live_event_payload
+    from tests.fakes.bili import danmaku_event, gift_event
+
+    for event, kind in (
+        (danmaku_event("这是什么主播", uid=1), "danmaku"),
+        (gift_event(uid=2, coin=15_000, num=1), "gift"),
+    ):
+        payload = live_event_payload(event)
+        assert payload["kind"] == kind
+        assert payload["name"], f"{kind} 没有名字，聊天行画不出「弹幕·某人」"
+        assert "text" in payload, f"{kind} 没有正文字段"
+        assert "value_cny" in payload, f"{kind} 没有金额字段，SC 那行的钱就没了"

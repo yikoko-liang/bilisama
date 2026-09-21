@@ -2650,7 +2650,6 @@ async def run_director(args: argparse.Namespace) -> int:
         "弹幕：直接打字；指定人：`阿强:内容`；/sc 名字 金额 内容；/gift 名字 电池数；"
         "/mute 紧急叫停（让她住嘴，不碰麦克风），/unmute 恢复"
     )
-    _FEED_KIND = {EventKind.SUPER_CHAT: "sc", EventKind.GIFT: "gift"}
 
     def _no_panel() -> None:
         """Nothing to keep in step when there is no page (--no-ui, or a taken
@@ -2698,17 +2697,17 @@ async def run_director(args: argparse.Namespace) -> int:
             text=event.text,
             value_cny=event.value_cny,
         )
-        if hub is not None:
-            hub.broadcast(
-                ServerEvent.EVENT_FEED,
-                {
-                    "kind": _FEED_KIND.get(event.kind, "danmaku"),
-                    "name": event.viewer.name,
-                    "text": event.text,
-                    "value_cny": event.value_cny,
-                    "injected": True,
-                },
-            )
+        # No panel broadcast here. It used to write its own event.feed row, and
+        # then the push below sent the same event through the assembly, whose
+        # event_observer broadcasts one too (app.py:195-200 → publish_room_event)
+        # — so every console injection drew TWO identical chat rows, stamped the
+        # same second. Seen live 2026-09-21; the echo dates from 2026-08-14 and
+        # the general observer from 2026-08-28, which never retired it.
+        #
+        # The observer is the one that stays: it serves real room events, test
+        # cards and console injections alike, it has tests, and its payload is a
+        # superset (uid, medal, guard, mock). The echo's only extra field,
+        # `injected`, has no reader anywhere in ui/web.
         await console.push(event)
 
     # Resources acquired below (UI server, endpoint file, the pet shell) must

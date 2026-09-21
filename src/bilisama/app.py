@@ -215,6 +215,18 @@ class Assembly:
         if event.kind is EventKind.ENTRY:
             event = self._promote_entry(event)
         if not self._speak_enabled(event.kind.value):
+            # Said out loud rather than dropped in silence. This gate produces
+            # no Intent, so it produces no Verdict either — which is correct
+            # (no intent, no verdict) but left the panel unable to answer
+            # 「她为什么不理我」 for the commonest reason of all. A live duplex
+            # session on 2026-09-21 spent its danmaku arm proving the backend
+            # was broken; the switch was simply off, and nothing anywhere said
+            # so per event.
+            log.info(
+                "assembly.speak_disabled",
+                kind=event.kind.value,
+                event_id=event.event_id,
+            )
             return
         if event.kind is EventKind.ENTRY:
             if self._entries is not None:
@@ -313,6 +325,11 @@ class Assembly:
         # Re-checked here because selector winners arrive up to a window
         # later: a switch flipped mid-window must silence the delivery too.
         if not self._speak_enabled(event.kind.value):
+            log.info(
+                "assembly.speak_disabled",
+                kind=event.kind.value,
+                event_id=event.event_id,
+            )
             return
         now = self._clock.monotonic()
         if event.dedup_key and self._direct_ring.contains(event.dedup_key, now):
