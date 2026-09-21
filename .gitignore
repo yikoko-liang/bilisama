@@ -24,3 +24,9 @@ path.sh
 # Claude Code 本地工具配置（launch.json 端口是本机偏好，不进库）
 .claude/
 desktop/preview/node_modules/
+
+# 本机产物：探测输出、回滚备份、桌面端导出目录、推送脚本日志，都不入库
+outputs/
+Claude outputs/
+bilisama-rollback-*/
+push_*.log
