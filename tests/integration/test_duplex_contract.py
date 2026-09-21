@@ -10,19 +10,24 @@ instead of from a stream where she has stopped answering danmaku.
 
 The three facts everything else rests on, and how each one bit:
 
-1. **She composes, she cannot start.** Text we supply reaches her by two
+1. **She composes, but not on demand.** Text we supply reaches her by two
    routes (dialog_context at create, a function-call result mid-session) and
-   she answers it in her own words. Nothing we can send starts a turn. The
-   first two rounds of probes concluded "she cannot compose" — both had fed
-   her through channels she never reads.
+   she answers it in her own words. Nothing we can send makes her compose at
+   a moment of our choosing. The first two rounds of probes concluded "she
+   cannot compose" — both had fed her through channels she never reads.
+   A third correction landed 2026-09-21: "nothing we can send starts a turn"
+   was also wrong. `speech_text_buffer.commit` starts one, reading words we
+   supply; the sweep had guessed `.append` and never sent `.commit`.
 2. **dialog_context must be even in length.** The endpoint pairs it
    positionally and ignores `role`; an odd array is discarded whole while
    `session.created` comes back unchanged. The adapter's `add_context_item`
    used to stash danmaku as a run of lone user turns, i.e. the exact shape
    that wipes the history, with nothing on the wire to say so.
-3. **The uplink vocabulary is closed.** An unknown event name is a 1006, not
-   an error frame. `response.create` is not specially refused; it simply does
-   not exist here.
+3. **The uplink vocabulary is closed.** An unknown event name draws
+   `45000000 unknown event name:<name>` and THEN the hang-up, 0.0-0.1 s
+   later. `response.create` is not specially refused; it simply does not
+   exist here. (This said "a 1006, not an error frame" until 2026-09-21 —
+   both happen, in that order.)
 
 Nothing here opens an audio device. The credential comes from the environment
 (path.sh supplies it locally) and every test skips with a plain reason when it
@@ -300,7 +305,12 @@ async def test_nothing_but_the_microphone_starts_a_turn(
 ) -> None:
     """Why ReplySpec.text is required on this provider rather than merely
     supported. The danmaku is in a context she demonstrably reads (the test
-    above proves it), and still nothing comes back until a voice does."""
+    above proves it), and still nothing comes back until a voice does.
+
+    Narrower than it reads, and the name is a leftover. These three nudges do
+    not start a turn; `speech_text_buffer.commit` does, and the test below
+    pins it. What stays true is the thing this file needs: she will not
+    COMPOSE on demand, so the words have to arrive already written."""
     frame = _create(
         history=[
             {"role": "user", "text": "[弹幕] 观众小王：豆腐你今天播到几点呀？"},
@@ -381,13 +391,25 @@ async def test_dialog_context_keeps_even_arrays_and_discards_odd_ones(
     "name",
     ["response.create", "chat.text.query", "ChatTextQuery", "input_text_buffer.commit"],
 )
-async def test_an_event_outside_the_vocabulary_hangs_up(tmp_path: Path, name: str) -> None:
-    """A 1006, not an error frame. Worth pinning because it decides how the
-    adapter may probe: there is no cheap way to ask "do you support X"."""
+async def test_an_event_outside_the_vocabulary_errors_then_hangs_up(
+    tmp_path: Path, name: str
+) -> None:
+    """An error frame AND the hang-up, in that order, 0.0-0.1 s apart.
+
+    This used to say "a 1006, not an error frame", and half of that was wrong:
+    the endpoint does name the offending event —
+    `45000000 unknown event name:<name>` — before it drops the socket
+    (measured 2026-09-21, polled once a second for 25 s, with and without
+    uplink keep-alive). Both halves matter. The frame is why a client can log
+    which name it got wrong; the close is why sweeping for names still costs a
+    session per guess, so a name should come from the vendor's event reference
+    rather than from a hunch."""
     async for s in _open(tmp_path):
         await s.send({"type": name, "event_id": "unknown"})
         await s.collect(6)
         assert s.closed, f"{name} 居然没把连接掐了：{dict(s.kinds)}"
+        named = [e for e in s.errors if name in str(e.get("message") or "")]
+        assert named, f"掐断之前没说是哪个名字错了：{s.errors}"
 
 
 async def test_instructions_apply_mid_session(tmp_path: Path) -> None:
@@ -640,3 +662,53 @@ async def test_a_tts_replacement_is_never_spoken_while_the_uplink_runs(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await ws.close()
+
+
+@pytest.mark.parametrize("push_audio", [False, True], ids=["no-uplink", "uplink-running"])
+async def test_the_greeting_event_starts_a_turn(tmp_path: Path, push_audio: bool) -> None:
+    """`speech_text_buffer.commit` — 打招呼, the vendor's mapping of the legacy
+    SayHello(300) — starts a turn on demand. This is the event the 2026-09-16
+    sweep missed.
+
+    That sweep sent `speech_text_buffer.append`, a guessed name, and concluded
+    "nothing we can send starts a turn". The `.commit` spelling was never sent
+    to the endpoint at all; the only place the string appeared in this repo was
+    our own fake, where it had been assumed into the vocabulary and modelled as
+    a silent no-op.
+
+    Measured 2026-09-21 in four conditions: no uplink ever pushed (332 ms to
+    first audio), silent uplink (440 ms), and twice after the streamer really
+    spoke and she really answered. Audio every time. Both parametrised arms are
+    here because the uplink is exactly what kills the sibling channel — see
+    test_a_tts_replacement_is_never_spoken_while_the_uplink_runs, which stays
+    red-worthy for its own reasons.
+
+    If this ever fails, `request_reply` has lost its only working channel and
+    the duplex backend goes mute for every event reply.
+    """
+    async for s in _open(tmp_path):
+        if push_audio:
+            await _push_silence(s, 2.0)
+        await s.send(
+            {"event_id": "greet", "type": "speech_text_buffer.commit", "text": "大家好，我是豆腐。"}
+        )
+        if push_audio:
+            # Keep the uplink flowing while she answers, then read. The push
+            # loop does not read the socket, so the collect has to follow it —
+            # the frames are buffered, but nothing moves them into `s` until
+            # somebody asks.
+            await _push_silence(s, 6.0)
+        await s.collect(10)
+        assert s.audio, "打招呼没出声——这是 request_reply 在这个后端上唯一能用的通道"
+        assert s.tts_types == ["chat_tts_text"], (
+            f"tts_type 变了：{s.tts_types}。_book_her_turn 按这个字段分辨我们的轮次和她的，"
+            "变了就会把我们点的回复当成她自起的轮送进语音门"
+        )
+
+
+async def _push_silence(s: _Session, seconds: float) -> None:
+    """The streamer present but quiet. The uplink contract is never to stop."""
+    packet = base64.b64encode(b"\x00" * 640).decode()
+    for _ in range(int(seconds * 50)):
+        await s.send({"type": "input_audio_buffer.append", "audio": packet})
+        await asyncio.sleep(0.02)

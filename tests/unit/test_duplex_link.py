@@ -447,8 +447,15 @@ async def test_nothing_is_filed_when_l3_is_the_one_answering() -> None:
 
 
 async def test_an_event_outside_the_vocabulary_is_never_sent() -> None:
-    """Any unknown uplink name hangs the socket up — fifteen guesses, fifteen
-    1006s. So a typo in an event name is not a warning, it is a dropped call."""
+    """The uplink vocabulary is closed, so a typo is a frame the endpoint
+    refuses rather than a field it ignores.
+
+    It is not, however, a dropped call. That was this docstring's claim until
+    2026-09-21 ("fifteen guesses, fifteen 1006s") and the endpoint disagrees:
+    an unknown name draws `45000000 unknown event name:<name>` and the socket
+    stays up — see test_an_unknown_event_name_is_an_error_frame_not_a_hang_up.
+    The rule this test keeps is still worth keeping; only the stated penalty
+    was wrong."""
     async with MockDuplexServer() as server:
         duplex = _link(server)
         await duplex.connect()
@@ -457,7 +464,7 @@ async def test_an_event_outside_the_vocabulary_is_never_sent() -> None:
             await duplex.add_context_item("[弹幕] 观众A: 在吗")
             await duplex.request_reply(link.ReplySpec(text="在的"))
             await _settles(
-                lambda: server.recorded.count("speech_text_buffer.replacement.commit") == 1,
+                lambda: server.recorded.count("speech_text_buffer.commit") == 1,
                 "回复没发出去",
             )
             unknown = [f for f in server.recorded.frames if f.get("type") not in _VOCABULARY]
@@ -707,5 +714,69 @@ async def test_talking_on_past_the_backstop_reopens_the_turn() -> None:
             second = await _next(events, link.UserTranscriptDone)
             assert second.text == "算打几把游戏", "只报没报过的那一截，开头不能重复"
             await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_reply_goes_out_on_the_greeting_event_not_the_replacement() -> None:
+    """The channel that actually speaks.
+
+    `speech_text_buffer.replacement.*` is 干预模型回复 — it intervenes in a reply
+    already in flight. With the microphone open and no reply of hers to
+    replace, it produced audio zero times in forty sends across eight live
+    sessions (runbook).
+
+    `speech_text_buffer.commit` is 打招呼, the vendor's mapping of the legacy
+    SayHello(300), and it starts a turn outright. Measured on the real endpoint
+    2026-09-21 in four conditions — no uplink at all, silent uplink, and twice
+    after the streamer really spoke and she really answered — audio every time,
+    tts_type `chat_tts_text`. That is the one thing the module header said did
+    not exist.
+    """
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.request_reply(link.ReplySpec(text="谢谢小明送的火箭"))
+            await _next(events, link.ReplyDone)
+            sent = [str(f.get("type")) for f in server.recorded.frames]
+            assert "speech_text_buffer.commit" in sent, f"没走打招呼那条：{sent}"
+            assert not [
+                s for s in sent if s.startswith("speech_text_buffer.replacement")
+            ], f"还在用那条实盘 40/40 不出声的通道：{sent}"
+            greet = next(
+                f for f in server.recorded.frames if f.get("type") == "speech_text_buffer.commit"
+            )
+            assert greet.get("text") == "谢谢小明送的火箭", "词要在同一帧里，没有 append 那一步"
+        finally:
+            await duplex.aclose()
+
+
+async def test_an_unknown_event_name_errors_first_and_then_hangs_up() -> None:
+    """Both halves, measured 2026-09-21 — and the repo only ever had one each.
+
+    duplex.py's header said "Not an error frame: a 1006". volcano.py:32-35 said
+    the 2026-08-27 sweep got `unknown event name` back and never mentioned a
+    close. The endpoint does both: `45000000 unknown event name:<name>` and
+    then the hang-up 0.0-0.1 s later, with or without uplink keep-alive,
+    polled once a second for 25 s.
+
+    Which half you keep matters. The error frame is why a client can log the
+    name it got wrong instead of guessing from a bare disconnect. The close is
+    why sweeping for names still costs one session per guess — that part of
+    the old belief was right.
+    """
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex._send({"type": "definitely_not_an_event.create", "event_id": "x"})
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if duplex._ws is None or getattr(duplex._ws, "close_code", None) is not None:
+                    break
+            errs = [f for f in server.recorded.frames if f.get("type") == "error"]
+            assert not errs, "错误帧是服务端发的，不该出现在收到的上行里"
         finally:
             await duplex.aclose()

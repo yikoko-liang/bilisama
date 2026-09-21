@@ -227,7 +227,17 @@ class MockDuplexServer:
                 self.tool_results.append(str((first.get("content") or [{}])[0].get("text") or ""))
                 return
             await self._send(ws, {"type": "conversation.item.added", "items": items})
-        elif kind in ("speech_text_buffer.replacement.append", "speech_text_buffer.commit"):
+        elif kind == "speech_text_buffer.commit":
+            # 打招呼 — the vendor's turn-start primitive, mapped from the legacy
+            # SayHello(300). It speaks on its own frame, no append needed, and
+            # it speaks whatever the uplink is doing: measured on the real
+            # endpoint 2026-09-21 in four conditions (no uplink, silent uplink,
+            # and twice after a real exchange), audio every time with
+            # tts_type chat_tts_text. Deliberately NOT gated on _deaf_to_tts:
+            # that fault models the replacement channel, which is a different
+            # event with a different failure.
+            await self.say(str(frame.get("text") or ""), ours=True)
+        elif kind == "speech_text_buffer.replacement.append":
             self._pending = str(frame.get("text") or "")
         elif kind == "speech_text_buffer.replacement.commit":
             if not self._deaf_to_tts:
@@ -237,8 +247,26 @@ class MockDuplexServer:
         elif kind == "session.close":
             await self._send(ws, {"type": "session.closed"})
         elif kind not in _KNOWN:
-            # Outside the vocabulary. The real endpoint does not answer and
-            # does not complain — it hangs up.
+            # Outside the vocabulary: an error frame, and then the hang-up,
+            # 0.0-0.1 s later (measured 2026-09-21, polling once a second for
+            # 25 s with and without uplink keep-alive). Both halves are real
+            # and the repo only ever recorded one each: duplex.py's header said
+            # "Not an error frame: a 1006", volcano.py:32-35 said the names all
+            # answered `unknown event name` and said nothing about the close.
+            # The error frame is why a client can log WHICH name it got wrong;
+            # the close is why it still costs the session.
+            await self._send(
+                ws,
+                {
+                    "type": "error",
+                    "event_id": str(frame.get("event_id") or ""),
+                    "error": {
+                        "type": "Bad Request",
+                        "code": "45000000",
+                        "message": f"unknown event name:{kind}",
+                    },
+                },
+            )
             await ws.close(code=1006)
 
     async def _on_create(self, ws: ServerConnection, frame: dict[str, Any]) -> None:

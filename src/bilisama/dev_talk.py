@@ -1644,32 +1644,32 @@ def event_reply_route(provider: ProviderName, settings: Settings, *, side_availa
     """Who answers a danmaku on this backend. True when SHE pulls it herself.
 
     Four of the five providers compose their own replies and never reach any
-    of this. The duplex protocol cannot be made to start a turn at all, so it
-    has the choice — and one arm of that choice is a measured dead end.
+    of this. The duplex protocol will not compose one on demand, so it has the
+    choice: she pulls the event herself on her next turn, or L3 ghostwrites
+    the words and the adapter has her speak them.
 
-    With a microphone running, `speech_text_buffer.replacement` is never
-    spoken: forty commits across eight live sessions on 2026-09-16/17, zero
-    audio frames, in the healthy stretches of a session as much as the sick
-    ones. Refusing to start beats running a backend that drops every danmaku
-    answer in silence — which is exactly how this went unnoticed for two days.
+    Until 2026-09-21 the ghostwriter arm raised SystemExit here. The reason
+    was real at the time — `request_reply` pushed its words through
+    `speech_text_buffer.replacement`, which with a microphone running spoke
+    zero times in forty sends across eight live sessions — but it was a
+    symptom of the wrong channel, not of the protocol. The adapter now sends
+    `speech_text_buffer.commit` (打招呼), measured speaking in four conditions
+    including twice after a real exchange. So the arm is open again, and with
+    it the proactive topic and the poke, which the refusal had taken down as
+    collateral: neither was ever the broken part.
+
+    What is still unmeasured is a whole live session on this route. The
+    shipped default therefore stays "tool" — that one needs no side model and
+    costs no round trip — and switching is a deliberate act.
 
     A function rather than a few lines inside `run_director` so the rule can
-    be tested without a microphone. The first version of this refusal was
+    be tested without a microphone. The first version of the old refusal was
     written, lost to a string replace that silently matched nothing, and
     committed as a message nobody ran.
     """
     if profile_for(provider).caps.composes_on_demand:
         return False
     pulls: bool = settings.speech.volcano_duplex.event_replies == "tool"
-    if provider is ProviderName.VOLCANO_DUPLEX and not pulls:
-        raise SystemExit(
-            '[speech.volcano_duplex] event_replies = "ghostwriter" 在这个后端上走不通。\n'
-            "实测（2026-09-16/17，八场实盘共 40 次）：麦克风开着的时候发 TTS 稿子，"
-            "一次都没有被念出来过——不报错、不拒绝，就是没有声音。\n"
-            '改成 event_replies = "tool"：她在跟主播说话时自己把没回的弹幕捎带答了，'
-            "用她自己的话，也不需要侧路模型。\n"
-            "厂商哪天修好了，tests/integration/test_duplex_contract.py 里那条会变红。"
-        )
     if not pulls and not side_available:
         raise SystemExit(
             f"{provider.value} 起不了自己的轮次，弹幕/礼物的回复需要一个侧路模型替她写。\n"
@@ -2879,17 +2879,21 @@ async def run_director(args: argparse.Namespace) -> int:
 
             async def on_poke(_data: dict[str, Any]) -> None:
                 if pulls_events:
-                    # A poke means 「说句话，现在」, which is precisely the one
-                    # thing this backend cannot do. Filing it would be worse
-                    # than refusing: the poke's real ask lives in
+                    # Not "this backend cannot speak on demand" — since
+                    # 2026-09-21 it can, on the greeting event. This is about
+                    # the PULL route specifically: the poke's real ask lives in
                     # ReplySpec.instructions and the pull route only files
                     # item_text, so all she would ever receive is the marker
                     # 「[面板] 主播戳了你一下」 — read back later as a viewer
-                    # line, with the ask itself gone.
+                    # line, with the ask itself gone. The ghostwriter route
+                    # carries the ask and the poke works there.
                     log.info(
                         "dev_talk.poke_unavailable",
                         provider=provider.value,
-                        error_text="这个后端起不了自己的轮次，戳一下没法让她开口。跟她说句话就行。",
+                        error_text=(
+                            '归档路线（event_replies = "tool"）只存弹幕原文，戳一下的要求带不过去。'
+                            '想用戳一戳就切 event_replies = "ghostwriter"。'
+                        ),
                     )
                     return
                 poke.poke()  # False = cooldown; the page animates either way
@@ -3471,7 +3475,8 @@ async def run_director(args: argparse.Namespace) -> int:
                 "dev_talk.proactive_unavailable",
                 provider=provider.value,
                 error_text=(
-                    "这个后端起不了自己的轮次，主动话题（冷场时开口）用不了，本场关掉。"
+                    '归档路线（event_replies = "tool"）只存弹幕原文，主动话题的稿子带不过去，'
+                    '本场关掉。想要冷场开口就切 event_replies = "ghostwriter"。'
                     "她对主播说话的回应不受影响。"
                 ),
             )

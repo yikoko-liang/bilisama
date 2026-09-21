@@ -413,16 +413,26 @@ def test_the_duplex_tool_route_needs_no_side_model() -> None:
     assert event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=False) is True
 
 
-def test_the_duplex_ghostwriter_route_refuses_to_start() -> None:
-    """Forty commits across eight live sessions, zero audio frames. Starting
-    anyway ships a backend that drops every danmaku answer in silence, which
-    is how it went unnoticed for two days."""
+def test_the_duplex_ghostwriter_route_starts_again() -> None:
+    """The refusal is lifted, because the thing it was protecting against is
+    fixed rather than still true.
+
+    It existed because `request_reply` pushed words through
+    `speech_text_buffer.replacement` — 干预模型回复 — which with a microphone
+    running produced audio zero times in forty sends across eight live
+    sessions. The adapter now sends `speech_text_buffer.commit` instead, the
+    vendor's 打招呼 event, measured speaking in four conditions on 2026-09-21
+    including twice after a real exchange (test_duplex_contract.py pins it).
+
+    Still unmeasured: a whole live session on this route. The refusal was the
+    wrong instrument for that residual risk — it also took proactive topics
+    and the poke down with it, neither of which was ever the broken part.
+    """
     from bilisama.dev_talk import event_reply_route
 
     settings = Settings()
     settings.speech.volcano_duplex.event_replies = "ghostwriter"
-    with pytest.raises(SystemExit, match="走不通"):
-        event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=True)
+    assert event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=True) is False
 
 
 def test_the_shipped_default_is_the_route_that_works() -> None:

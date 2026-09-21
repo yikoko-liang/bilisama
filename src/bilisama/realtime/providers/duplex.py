@@ -18,17 +18,25 @@ scripts are recorded in docs/runbook.md.
 3. **Speech edges ride the transcriber.** No `input_audio_buffer.speech_*`
    here; the streamer's first word arrives as
    `conversation.item.input_audio_transcription.started`.
-4. **The uplink vocabulary is closed, and stepping outside it is a
-   disconnect.** Not an error frame: a 1006. `response.create` is not
-   specially rejected — it simply is not in the protocol, and fifteen guessed
-   names (`chat.text.query`, `ChatTextQuery`, `input_text_buffer.commit`, …)
-   all hang up identically. So a wrong event name costs the session.
+4. **The uplink vocabulary is closed, and stepping outside it costs the
+   session.** The endpoint names the offence and then drops the socket:
+   `45000000 unknown event name:<name>` followed 0.0-0.1 s later by the
+   hang-up (measured 2026-09-21, polled for 25 s with and without uplink
+   keep-alive). This used to say "Not an error frame: a 1006", which was half
+   right and hid the useful half — the frame tells you WHICH name was wrong.
+   `response.create` draws it like any other unknown name, with or without a
+   legal body, so it is absent rather than specially refused.
+
+   The expensive half still holds, so names must come from the vendor's event
+   reference, not from a hunch. The 2026-09-16 sweep guessed fifteen and
+   recorded four; the eleven it did not write down are not evidence of
+   anything, and one of the names it never tried is the subject of fact 5.
 
 And the one that shapes the product rather than the file:
 
-5. **She composes. She cannot be made to START.** The distinction took three
-   rounds of probes to get right, and the first two readings of it were wrong,
-   so it is worth stating precisely.
+5. **She composes, but not on demand — and a turn CAN be started.** The
+   distinction took four rounds of probes to get right and three of them were
+   wrong, so it is worth stating precisely.
 
    She composes: a danmaku sitting in a legal `dialog_context` is answered in
    her own words the next time the streamer says anything at all — 「欢迎回来呀，
@@ -42,28 +50,43 @@ And the one that shapes the product rather than the file:
    unforgiving: five near-misses were dropped whole, with no ack and no error,
    and one drew `45000000 invalid event payload`.
 
-   What does not exist is a way to START a turn. ChatTextQuery is gone from
-   the vendor's own old-to-new table and `response.create` is outside the
-   uplink vocabulary (fact 4). Measured, each on its own socket: a legal
-   context and 25 s of nothing → silence; an empty assistant placeholder so
-   the last turn looks unanswered → silence; `input_audio_buffer.commit` →
-   silence; two seconds of pushed silence → silence;
-   `extension.dialog.extra.input_mod` `"text"`, the old protocol's text-input
-   mode → accepted, then silence; `input_audio_mute.commit` /
+   What does not exist is a way to make her COMPOSE one on demand.
+   ChatTextQuery is gone from the vendor's own old-to-new table, and
+   `response.create` is absent from the uplink vocabulary (fact 4). Measured,
+   each on its own socket: a legal context and 25 s of nothing → silence; an
+   empty assistant placeholder so the last turn looks unanswered → silence;
+   `input_audio_buffer.commit` → silence; two seconds of pushed silence →
+   silence; `extension.dialog.extra.input_mod` `"text"`, the old protocol's
+   text-input mode → accepted, then silence; `input_audio_mute.commit` /
    `input_audio_unmute.commit`, which do exist → silence.
-   `speech_text_buffer.append`, the one guessed name in the sweep that did
-   not hang up, answers with `tts_type` `chat_tts_text` — it reads, it does
-   not write.
 
-   The function-call channel does not get around this, and the reason is
-   worth keeping: the pending call has to be one SHE issued. A fabricated
-   `call_id` draws nothing, and the pushed audio that finally flushed the
-   real one moves nothing on its own (control: same silence, empty context,
-   no reply). So the sequence always starts with the streamer's microphone.
+   STARTING a turn, though, is a thing we CAN do, and this header said
+   otherwise until 2026-09-21. `speech_text_buffer.commit` — 打招呼, the
+   vendor's mapping of the legacy SayHello(300) — carries text in one frame
+   and makes her speak it. Measured in four conditions: no uplink ever pushed
+   (332 ms to first audio), silent uplink (440 ms), and twice after the
+   streamer really spoke and she really answered. `tts_type` is
+   `chat_tts_text`, the same value `_book_her_turn` already keys on.
+
+   Why it was missed: the sweep tried `speech_text_buffer.APPEND`, a guessed
+   name (it answers `chat_tts_text` too — it reads, it does not write), and
+   never tried `.commit`. The only place that string existed in this repo was
+   the fake, which had assumed it into the vocabulary and modelled it as a
+   silent no-op, so no test could have caught the gap.
+
+   The function-call channel still does not get around the COMPOSE limit, and
+   the reason is worth keeping: the pending call has to be one SHE issued. A
+   fabricated `call_id` draws nothing, and the pushed audio that finally
+   flushed the real one moves nothing on its own (control: same silence,
+   empty context, no reply).
 
    So a reply that has to go out at a moment of OUR choosing arrives with its
    words already written: `request_reply` needs `ReplySpec.text`, L3 fills it,
-   and `composes_on_demand=False` is how L3 knows to. Nothing here calls a
+   and `composes_on_demand=False` is how L3 knows to. What changed is only
+   the delivery: those words now go out on the greeting event instead of
+   `speech_text_buffer.replacement`, which is 干预模型回复 — it edits a reply
+   already in flight, and with the microphone open there is rarely one to
+   edit (forty sends, zero audio, eight live sessions). Nothing here calls a
    model to write her lines — whose words come out of her mouth is a product
    decision, and an adapter that quietly made it would be the wrong place to
    discover it.
@@ -530,10 +553,26 @@ class DuplexLink:
             self._take_slot(handle, ours=True)
             self._pending_text = spec.text
             try:
-                await self._send(
-                    {"type": "speech_text_buffer.replacement.append", "text": spec.text}
-                )
-                await self._send({"type": "speech_text_buffer.replacement.commit"})
+                # 打招呼, one frame carrying the words. The vendor maps it from
+                # the legacy SayHello(300), and it STARTS a turn rather than
+                # editing one in flight.
+                #
+                # This used to send speech_text_buffer.replacement.append +
+                # .commit, which is 干预模型回复 — it rewrites a reply already
+                # being generated. With the microphone open there is usually no
+                # such reply, and it produced audio zero times in forty sends
+                # across eight live sessions. The sweep that concluded "nothing
+                # starts a turn" tried speech_text_buffer.APPEND, a guessed
+                # name, and never tried .commit; the only place that string
+                # appeared in this repo was our own fake.
+                #
+                # Measured on the real endpoint 2026-09-21, four conditions:
+                # no uplink (332 ms to first audio), silent uplink (440 ms),
+                # and twice after the streamer really spoke and she really
+                # answered. Audio every time, tts_type chat_tts_text — which is
+                # what _book_her_turn already keys on, so the gate needs no
+                # change.
+                await self._send({"type": "speech_text_buffer.commit", "text": spec.text})
             except Exception:
                 self._release_slot()
                 raise

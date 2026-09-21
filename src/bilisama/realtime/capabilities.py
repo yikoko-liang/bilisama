@@ -181,16 +181,23 @@ VOLCANO_DUPLEX = Capabilities(
     # No per-response instruction channel: the only per-turn text this
     # protocol takes is the TTS body, which is content, not instruction.
     per_reply_base_instructions=False,
-    # The one that decides the product shape — and the one whose first reading
-    # was wrong. She composes from text fine, by two routes: a danmaku in a
-    # legal dialog_context is answered in her own words the next time the
-    # streamer says anything, and a function-call result in the vendor's
-    # published shape is answered too. What is missing is the TRIGGER.
-    # ChatTextQuery is gone, response.create is outside the uplink vocabulary,
-    # and nothing starts a turn — not a commit, not silence, not mute/unmute,
-    # not input_mod="text", not a fabricated call_id. Every turn begins at the
-    # streamer's microphone. So a reply that must go out at a moment of OUR
-    # choosing has to arrive with its words already written.
+    # The one that decides the product shape — and the one whose reading has
+    # been corrected twice. She composes from text fine, by two routes: a
+    # danmaku in a legal dialog_context is answered in her own words the next
+    # time the streamer says anything, and a function-call result in the
+    # vendor's published shape is answered too. What is missing is a way to
+    # make her compose ON DEMAND: ChatTextQuery is gone from the vendor's
+    # old-to-new table, response.create is absent from the uplink vocabulary,
+    # and none of silence, commit, mute/unmute, input_mod="text" or a
+    # fabricated call_id draws a composed reply.
+    #
+    # It is NOT that no turn can be started. This comment said "nothing starts
+    # a turn — every turn begins at the streamer's microphone" until
+    # 2026-09-21, when speech_text_buffer.commit (打招呼, the vendor's mapping
+    # of the legacy SayHello) was finally sent and spoke in all four measured
+    # conditions. That fixes the delivery of a reply, not the authorship of
+    # one: the greeting reads text we supply, so this bit stays False and L3
+    # still fills ReplySpec.text.
     # See providers/duplex.py's header for the probe table.
     composes_on_demand=False,
 )
