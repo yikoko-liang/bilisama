@@ -44,10 +44,18 @@ class OpenAICompatSideModel:
         # Plan section 4.7 pins both off for every background call. The prompt
         # says so too (distill.py:44), but a sentence is a request and a field
         # is a rule — a model that ignores the sentence still cannot answer with
-        # a tool call it was never offered. `thinking` has no field in the
-        # OpenAI shape and differs per vendor, so it stays prompt-side; the
-        # config value is kept honest by its Literal["off"].
+        # a tool call it was never offered.
+        #
+        # `thinking` used to be the exception, on the grounds that it "has no
+        # field in the OpenAI shape and differs per vendor, so it stays
+        # prompt-side". Measured 2026-09-21 against the endpoint the product
+        # dials, three rounds each, and the exception cost 23 seconds a call:
+        # sending nothing gave a 23927 ms median and billed 1692 completion
+        # tokens on a max_tokens=45 request, while `enable_thinking: false` at
+        # the top level gave 861 ms and 15 tokens. The sentence was being read
+        # and ignored, which is exactly what the two lines above predict.
         self._tool_choice = cfg.tool_choice
+        self._thinking = cfg.thinking
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
         self._session: aiohttp.ClientSession | None = None
 
@@ -65,6 +73,13 @@ class OpenAICompatSideModel:
             "stream": False,
             "tool_choice": self._tool_choice,
         }
+        if self._thinking == "off":
+            # Top level, not extra_body: that spelling measured no faster than
+            # sending nothing at all (28382 ms), so it is not reaching the same
+            # switch. chat_template_kwargs works too and within noise of this
+            # one; this is the spelling Aliyun documents for Qwen3 in
+            # compatible mode, and the one measured fastest.
+            payload["enable_thinking"] = False
         # The only path in the product that spends money per call, and until now
         # the only one with no log line at all: a background job whose side model
         # had been 503-ing for an hour looked exactly like a background job with

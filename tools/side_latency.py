@@ -40,9 +40,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bilisama import secrets
 from bilisama.config import load
 
-# The ghostwriter's prompt is the public persona prefix plus the event rules,
-# and the log says that lands around 5000 characters with a 500-character ask.
+# The ghostwriter's prompt is the public persona prefix plus the event rules.
+# 5040 is not a guess: side.call_started logs system_len, and a live duplex
+# session on 2026-09-21 shows exactly 5040 for the ghostwriter's calls (the
+# 404s in the same log are the proactive topic picker, a different prompt).
+#
+# Counted in CHARACTERS, and the filler is three characters wide — which this
+# script got wrong until 2026-09-21, multiplying the count by the filler and
+# sending a prompt three times too long. A latency measurement whose input is
+# 15k characters cannot be compared with a production call that sends 5k.
 _SYSTEM_CHARS = 5040
+_FILLER = "设定。"
 _USER = "有观众问你今天播到几点。用她的口吻回一句，别超过三十个字。"
 _MAX_TOKENS = 45
 _ROUNDS = 3
@@ -61,16 +69,32 @@ _SHAPES: list[tuple[str, dict[str, Any]]] = [
 ]
 
 
+def _system_prompt() -> str:
+    """A system prompt the same LENGTH as the ghostwriter's, not three times it."""
+    head = "你叫豆腐，是个直播陪播。"
+    return head + _FILLER * ((_SYSTEM_CHARS - len(head)) // len(_FILLER))
+
+
 def _endpoint() -> tuple[str, str, str]:
     """Address, model and key, resolved the way dev-talk resolves them."""
     settings = load(Path("config/bilisama.toml"))
     cfg = settings.speech.side
-    base = cfg.base_url or os.environ.get("openai_compatible_url", "")  # noqa: SIM112
+    compat = os.environ.get("openai_compatible_url", "")  # noqa: SIM112
+    base = cfg.base_url or compat
     # Lower case on purpose: path.sh names them that way, and matching the
     # file people actually edit beats matching the shell convention.
-    named = os.environ.get("openai_compatible_model", "")  # noqa: SIM112
+    named = os.environ.get("side_model_name", "")  # noqa: SIM112
     model = cfg.model or named or "qwen3.7-flash"
-    key = secrets.resolve(cfg.api_key_ref) or os.environ.get("OPENAI_API_KEY", "")
+    # Mirrors dev_talk.py:1924-1936 branch for branch, which is the whole point
+    # of this script: measuring an endpoint the product does not dial answers
+    # nothing. [speech.side] wins when it is filled in; otherwise the Aliyun
+    # compatible-mode fallback, whose key is `ali_api_key` — NOT OPENAI_API_KEY,
+    # which is what this read before 2026-09-21 and why it could not find a
+    # credential on a machine that had just run a session with one.
+    if cfg.base_url:
+        key = secrets.resolve(cfg.api_key_ref) or os.environ.get("OPENAI_API_KEY", "")
+    else:
+        key = os.environ.get("ali_api_key", "")  # noqa: SIM112
     if not base:
         raise SystemExit(
             "没有侧路模型地址。填 [speech.side] base_url，"
@@ -78,8 +102,8 @@ def _endpoint() -> tuple[str, str, str]:
         )
     if not key:
         raise SystemExit(
-            f"没有侧路模型凭据。export {cfg.api_key_ref}=... "
-            "（或 BILISAMA_KEY_SIDE / OPENAI_API_KEY），再 source path.sh。"
+            "没有侧路模型凭据。填 [speech.side] 就 export "
+            f"{cfg.api_key_ref}=...；走 path.sh 的兼容模式就要 ali_api_key。"
         )
     return base.rstrip("/"), model, key
 
@@ -90,11 +114,16 @@ async def _once(
     body: dict[str, Any] = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "你叫豆腐，是个直播陪播。" + "设定。" * _SYSTEM_CHARS},
+            {"role": "system", "content": _system_prompt()},
             {"role": "user", "content": _USER},
         ],
         "max_tokens": _MAX_TOKENS,
         "stream": False,
+        # The real call sends it on every request (side.py:66, pinned to "none"
+        # by SideModelConfig). Leaving it off the baseline would compare a
+        # request the product never makes against three that differ from it in
+        # two ways at once.
+        "tool_choice": "none",
         **extra,
     }
     started = time.monotonic()
@@ -113,7 +142,8 @@ async def _once(
 async def main() -> None:
     url, model, key = _endpoint()
     print(
-        f"端点 {url}\n模型 {model}   系统提示约 {_SYSTEM_CHARS * 3} 字   max_tokens={_MAX_TOKENS}"
+        f"端点 {url}\n模型 {model}   系统提示 {len(_system_prompt())} 字"
+        f"（实盘量到 {_SYSTEM_CHARS}）   max_tokens={_MAX_TOKENS}"
     )
     print(f"每种发法跑 {_ROUNDS} 轮\n")
     baseline: float | None = None

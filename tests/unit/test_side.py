@@ -216,3 +216,49 @@ async def test_a_failing_call_warns_with_the_reason_intact() -> None:
     assert fields["status"] == 503
     assert "upstream quota exhausted" in fields["error_text"]
     assert not [event for event, _, _ in seen if event == "side.call_finished"]
+
+
+async def test_thinking_off_reaches_the_wire_instead_of_only_the_prompt() -> None:
+    """The one field that was costing 23 seconds a call.
+
+    `SideModelConfig.thinking` is pinned "off", and until 2026-09-21 that was
+    honoured in the PROMPT only — this class's own comment said the field "has
+    no field in the OpenAI shape and differs per vendor, so it stays
+    prompt-side". Measured against the endpoint the product actually dials
+    (Aliyun compatible-mode, qwen3.7-flash, a 5040-character system prompt and
+    max_tokens=45, three rounds each):
+
+        nothing sent                      median 23927 ms, completion_tokens 1692
+        enable_thinking=false (top level) median   861 ms, completion_tokens   15
+        extra_body.enable_thinking        median 28382 ms, completion_tokens 2028
+        chat_template_kwargs...           median   932 ms, completion_tokens   18
+
+    A request capped at 45 output tokens was billing 1692. The sentence asking
+    it not to think was being read and ignored, exactly as the tool_choice
+    comment two lines up predicts — "a sentence is a request and a field is a
+    rule".
+
+    Top level rather than chat_template_kwargs: both work and the difference
+    between 861 ms and 932 ms is noise, but the top-level spelling is the one
+    Aliyun documents for Qwen3 in compatible mode, and it is the one measured
+    fastest.
+    """
+    seen: dict[str, Any] = {}
+
+    async def echo(request: web.Request) -> web.StreamResponse:
+        seen.update(await request.json())
+        return web.json_response({"choices": [{"message": {"content": "好"}}]})
+
+    async with _serving(echo) as base_url:
+        model = _model(base_url)
+        try:
+            await model.complete(system="s", user="u", max_tokens=45)
+        finally:
+            await model.aclose()
+
+    assert (
+        seen.get("enable_thinking") is False
+    ), f"没把 enable_thinking 发上线，实测这会让每次调用慢 27 倍：{sorted(seen)}"
+    # The neighbour it now sits next to, so a future edit cannot drop one while
+    # keeping the other: both are "pinned off by config, enforced on the wire".
+    assert seen.get("tool_choice") == "none"
