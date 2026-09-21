@@ -198,8 +198,10 @@ class VolcanoDuplexConfig(BaseModel):
     speed: int = Field(0, ge=-50, le=100)
     loudness: int = Field(0, ge=-50, le=100)
     # Who answers a danmaku on this protocol, and it is a real fork rather
-    # than a tuning knob, because this endpoint cannot start a turn (probed
-    # 2026-09-16, see providers/duplex.py).
+    # than a tuning knob, because this endpoint will not compose a reply on
+    # demand (probed 2026-09-16; corrected 2026-09-21 — it WILL start a turn
+    # on the greeting event, it just reads words we supply. See
+    # providers/duplex.py's fact 5).
     #
     # "tool": the danmaku is filed, and she pulls it herself through a
     #   function call the next time the streamer's voice starts a turn. Her

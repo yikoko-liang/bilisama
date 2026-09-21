@@ -2090,7 +2090,7 @@ async def run_director(args: argparse.Namespace) -> int:
         note_recent_line(text)
 
     composes = profile_for(provider).caps.composes_on_demand
-    # Which of the two routes a backend that cannot start a turn should take.
+    # Which of the two routes a backend that will not compose on demand takes.
     # Only the duplex protocol has the choice, so only its config carries it;
     # everywhere else `composes` is True and none of this is consulted.
     pulls_events = event_reply_route(provider, settings, side_available=side is not None)

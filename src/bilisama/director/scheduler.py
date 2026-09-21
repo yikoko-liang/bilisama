@@ -221,7 +221,7 @@ class Scheduler:
         # Separate from spoken_sink so an entry point can wire one and not
         # the other; dev-talk wires both to the same line.
         self._implicit_spoken_sink = implicit_spoken_sink
-        # Writes her lines for an endpoint that cannot start a turn of its
+        # Writes her lines for an endpoint that will not compose one of its
         # own (capabilities.composes_on_demand False). The scheduler knows
         # only that finished words are required before it may dispatch; who
         # supplies them, in whose voice, or that this one should wait for her

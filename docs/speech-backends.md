@@ -99,7 +99,7 @@ L1  ui/                    桌宠和面板                     ← 和 L3 双向
 
 adapter 藏起来的是这两次调用**变成什么**：OpenAI-realtime 那三家是两帧，火山拼成一条，
 duplex 上线上一帧都没有 —— 它的 `add_context_item` 只是攒着等下次建会话。只有一个能力位
-是**故意**给 L3 看的：`composes_on_demand`，因为起不了自己轮次的后端，必须在开口前就有词。
+是**故意**给 L3 看的：`composes_on_demand`，因为不会现场组织的后端，必须在开口前就有词。
 
 ### 它往上报的（12 种事件，全是读数）
 
@@ -163,7 +163,7 @@ duplex 上线上一帧都没有 —— 它的 `add_context_item` 只是攒着等
 | `set_context` | `session.update` | `UpdateConfig`（SC2.0 改不了，只能换会话） | `session.update` |
 | `push_audio` | `input_audio_buffer.append` | 二进制音频帧 | `input_audio_buffer.append` |
 | `add_context_item` | `conversation.item.create` | **本地攒着** | **本地攒着** |
-| `request_reply` | `response.create` | `ChatTextQuery` **501** | `speech_text_buffer.replacement` ⚠️ |
+| `request_reply` | `response.create` | `ChatTextQuery` **501** | `speech_text_buffer.commit`（打招呼） |
 | `cancel` | `response.cancel` | `ClientInterrupt` **515** | `response.cancel` |
 | `end_protection` | 只打一条警告 | 空操作 | 空操作 |
 | `aclose` | 关 socket | `FinishSession` **102** | `session.close` |
@@ -178,10 +178,20 @@ duplex 上线上一帧都没有 —— 它的 `add_context_item` 只是攒着等
 duplex 上什么都不发：火山是要和 `request_reply` 拼在一起；duplex 是中途发了服务端会收，
 **但她看不见** —— 只有建会话那一刻的 `dialog_context` 进得去。
 
-**③ duplex 的 `request_reply` 不是「请她说」。** `speech_text_buffer.replacement` 的意思是
-「照这段文字念」，没有「基于这段文字组织一句话」这个动作。而且**这一帧在麦克风开着时从来
-没被念出来过**（八场实盘 40 次，零音频帧），所以这条路今天在装配层被拒绝 ——
-详见 runbook 的「火山引擎（全双工）」一节。duplex 上唯一活着的事件回复路是工具拉取。
+**③ duplex 的 `request_reply` 是「照这句念」，不是「请她说」。** 走的是
+`speech_text_buffer.commit`（厂商文档的「打招呼」，从旧协议 `SayHello` 映射过来），一帧带着
+文字发过去她就念。**它起得了轮次，但组织不了内容** —— 没有「基于这段文字自己组织一句」
+这个动作，所以 `composes_on_demand=False`，词得由 L3 先写好。
+
+**这一条在 2026-09-21 之前是错的**，错法值得记：原先发的是 `speech_text_buffer.replacement`，
+那是「干预模型回复」——改写一条**正在生成中**的回复。麦克风开着时通常没有这么一条可改，
+于是八场实盘 40 次、零音频帧，当时的结论写成了「这个后端起不了轮次」，还据此在装配层
+拒绝了代笔路线、连带关掉了主动话题和戳一戳。真正的原因是**用错了通道**：`.commit` 从没往
+真端点发过，而它在四种条件下实测全部出声（含主播真说话她真回答之后）。现在代笔路线不再被
+拒绝，主动和戳一戳也跟着回来了。
+
+**所以 duplex 上「谁来写词」仍然只有两条路**，打招呼修的是「怎么把写好的词送出去」：
+代笔（侧路模型写）或工具拉取（她自己在下一轮里组织）。没有第三条。
 
 **④ `end_protection` 三家各有各的不做。** s2s 是真的在受保护回复期间关掉后端的打断开关、
 结束再打开；托管两家只打一条警告（这个字段真端点没探过）；火山两条是明写的空操作 ——

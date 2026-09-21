@@ -444,7 +444,7 @@ def test_the_shipped_default_is_the_route_that_works() -> None:
 
 
 def test_the_pull_route_is_also_the_no_proactive_route() -> None:
-    """A backend that cannot start a turn cannot open a topic into dead air.
+    """The PULL route cannot open a topic into dead air.
 
     Left running, the loop is worse than idle: the topic text rides
     `ReplySpec.instructions` and the pull route only files `item_text`, so she
