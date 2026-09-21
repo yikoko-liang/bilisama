@@ -712,3 +712,67 @@ async def _push_silence(s: _Session, seconds: float) -> None:
     for _ in range(int(seconds * 50)):
         await s.send({"type": "input_audio_buffer.append", "audio": packet})
         await asyncio.sleep(0.02)
+
+
+@pytest.mark.parametrize(
+    ("shape", "items"),
+    [
+        ("lone-user", [{"role": "user", "text": "暗号是青色菠萝八十一号"}]),
+        (
+            "documented-pair",
+            [
+                {"role": "user", "text": "暗号是青色菠萝八十一号"},
+                {"role": "assistant", "text": "好的，记住了，青色菠萝八十一号"},
+            ],
+        ),
+    ],
+    ids=["lone-user", "documented-pair"],
+)
+async def test_a_mid_session_context_item_never_reaches_the_model(
+    tmp_path: Path, shape: str, items: list[dict[str, str]]
+) -> None:
+    """Why `add_context_item` stashes instead of sending, pinned at last.
+
+    The adapter has said since 2026-09-16 that a mid-session
+    `conversation.item.create` is accepted and ignored, and that history only
+    reaches the model at `session.create`. That claim had no test: the two
+    contract tests that send this event both use the FUNCTION-CALL shape
+    (`role: "tool"`), which is a different thing entirely.
+
+    Leaving it untested was a risk worth closing, because the vendor's 接入必读
+    says the opposite in as many words — 「初始化历史：通过
+    conversation.item.create 注入历史问答对」 — and this protocol has already
+    punished us twice for sending a legal-looking shape that gets dropped whole
+    (odd-length dialog_context, and five near-miss function-call payloads).
+
+    Measured 2026-09-21, both shapes, one socket each. The documented even
+    user/assistant pair IS accepted — `conversation.item.added` comes back,
+    where a lone user item draws no ack at all — and she still answers 「你没
+    说过具体暗号内容」. So the shape decides acceptance and neither decides
+    what she knows.
+
+    If this ever goes red the stash in `add_context_item` can go, and with it
+    debt #105: history would stop having to ride a reconnect.
+    """
+    async for s in _open(tmp_path):
+        await s.send(
+            {
+                "type": "conversation.item.create",
+                "event_id": "hist",
+                "items": [
+                    {
+                        "type": "message",
+                        "role": i["role"],
+                        "content": [{"type": "input_text", "text": i["text"]}],
+                    }
+                    for i in items
+                ],
+            }
+        )
+        await s.collect(2)
+        await s.speak("刚才提到的暗号是什么？只说暗号")
+        await s.collect(12)
+        assert "菠萝" not in s.said and "八十一" not in s.said, (
+            f"她居然读到了中途注入的上下文（{shape}）：{s.said!r}。"
+            "那 add_context_item 就不必再攒着了，欠账 #105 也跟着消失。"
+        )
