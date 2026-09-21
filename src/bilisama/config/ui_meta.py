@@ -608,10 +608,11 @@ UI_META: dict[str, FieldMeta] = {
     "speech.volcano_duplex.event_replies": FieldMeta(
         label="弹幕由谁来回",
         hint=(
-            "这条协议起不了自己的轮次。ghostwriter：侧路模型写词、她照着念，"
-            "弹幕一到立刻回，但那是另一个模型的文风。"
-            "tool：她在跟主播说话时自己把没回的弹幕捎带答了，是她自己的话，"
-            "但要等主播下次开口，冷场时那条弹幕就一直等着"
+            "这条协议不会现场组织回复，所以词要么现写要么等她自己拿。"
+            "tool（出厂）：她在跟主播说话时自己把没回的弹幕捎带答了，是她自己的话，"
+            "但要等主播下次开口，冷场时那条弹幕就一直等着。"
+            "ghostwriter：侧路模型写词、她照着念，冷场也能回，"
+            "但那是另一个模型的文风，而且要先配好侧路模型。还没跑过完整实盘"
         ),
         provider_scoped="volcano_duplex",
         audience=Audience.STREAMER,

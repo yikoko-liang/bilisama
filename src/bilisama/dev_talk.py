@@ -1672,7 +1672,7 @@ def event_reply_route(provider: ProviderName, settings: Settings, *, side_availa
     pulls: bool = settings.speech.volcano_duplex.event_replies == "tool"
     if not pulls and not side_available:
         raise SystemExit(
-            f"{provider.value} 起不了自己的轮次，弹幕/礼物的回复需要一个侧路模型替她写。\n"
+            f"{provider.value} 不会现场组织回复，弹幕/礼物的回复需要一个侧路模型替她写。\n"
             "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。"
         )
     return pulls
