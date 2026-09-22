@@ -938,3 +938,84 @@ async def test_the_hold_can_be_changed_live_and_the_next_turn_uses_it() -> None:
             await _next(events, link.ReplyStarted)
         finally:
             await duplex.aclose()
+
+
+@pytest.mark.parametrize(
+    ("hold_ms", "marker_at_s", "expect_decided_at_s"),
+    [
+        (500, 0.35, 0.50),  # hold outlasts the streaming: decided when the hold lets go
+        (200, 0.35, 0.35),  # streaming outlasts the hold: decided when the marker lands
+    ],
+    ids=["hold-longer", "stream-longer"],
+)
+async def test_the_hold_and_the_gates_wait_overlap_rather_than_add(
+    hold_ms: int, marker_at_s: float, expect_decided_at_s: float
+) -> None:
+    """Does reply_hold_ms stack on top of the voice gate's wait, or run
+    alongside it? The claim under test: total ≈ max(hold, time-for-the-marker-
+    to-stream), NOT hold + that time. Measured with the real gate and the real
+    adapter on one fake clock, not reasoned.
+
+    Why it should be max: the gate's "wait" is not computation, it is waiting
+    for the marker's closing bracket to arrive from the server. During the
+    hold the server keeps streaming into the adapter's buffer, so by the time
+    the hold releases the bracket is already there, and the gate — whose feed()
+    is synchronous — reads the whole burst and sets `muted` in the same tick.
+
+    `muted` is the decision instant (turn_protocol: the decision lands on the
+    closing bracket). on_skip is NOT — it waits out the note window first.
+    """
+    from bilisama.clock import FakeClock
+    from bilisama.config.enums import VoiceReplyMode
+    from bilisama.director.turn_protocol import TurnPolicy
+    from bilisama.director.voice_turn import VoiceTurnGate
+
+    clock = FakeClock()
+    gate = VoiceTurnGate(
+        clock, policy=TurnPolicy(), mode=VoiceReplyMode.WHEN_ADDRESSED, on_skip=lambda s: None
+    )
+    gate.attach(lambda e: None)
+
+    def decided() -> bool:
+        return any(t.muted for t in gate._turns.values())
+
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, reply_hold_ms=hold_ms)
+        await duplex.connect()
+        events = duplex.events()
+
+        async def pump() -> None:
+            async for event in events:
+                gate.feed(event)
+
+        pumping = asyncio.create_task(pump())
+        try:
+            ws = server._ws
+            assert ws is not None
+            t0 = clock.monotonic()
+            # t=0: first half of the marker. Books her turn; the hold begins.
+            await server._send(ws, {"type": "response.output_text.delta", "delta": "[SK"})
+            await _settles(lambda: duplex._active is not None, "她的轮次没登记")
+            assert not decided()
+
+            # t=marker_at: the closing bracket streams in. Without any hold the
+            # gate would decide right here.
+            await clock.advance(marker_at_s)
+            await server._send(ws, {"type": "response.output_text.delta", "delta": "IP] 在念弹幕"})
+            await asyncio.sleep(0.05)  # let the socket deliver and the pump run
+            if hold_ms / 1000 > marker_at_s:
+                assert not decided(), "hold 还没到点，门不该看见任何帧"
+
+            # advance to exactly the expected decision instant and check
+            remaining = expect_decided_at_s - (clock.monotonic() - t0)
+            if remaining > 0:
+                await clock.advance(remaining)
+            await _settles(decided, f"到 {expect_decided_at_s}s 了门还没判")
+            decided_at = clock.monotonic() - t0
+            assert abs(decided_at - expect_decided_at_s) < 0.02, (
+                f"判在 {decided_at:.2f}s，期望 {expect_decided_at_s}s"
+                f"（相加会是 {hold_ms / 1000 + marker_at_s:.2f}s）"
+            )
+        finally:
+            pumping.cancel()
+            await duplex.aclose()
