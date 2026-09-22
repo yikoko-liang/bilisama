@@ -633,6 +633,19 @@ UI_META: dict[str, FieldMeta] = {
         group="火山全双工",
         order=5,
     ),
+    "speech.volcano_duplex.speech_edge_s": FieldMeta(
+        label="转写静默多久算说完（秒）",
+        hint=(
+            "端点偶尔漏发「主播说完了」那一帧，漏了她就一直不接话；这个数是等多久之后"
+            "我们自己替她判说完。小了接得快，但主播想事情停顿超过这个数就会被切成两句、"
+            "她可能只答前半句。出厂 1 秒"
+        ),
+        provider_scoped="volcano_duplex",
+        audience=Audience.OPERATOR,
+        reload=Reload.RECONNECT,
+        group="火山全双工",
+        order=7,
+    ),
     "speech.volcano_duplex.loudness": FieldMeta(
         label="音量",
         hint="0 是原音量；-50 约一半，100 约两倍",

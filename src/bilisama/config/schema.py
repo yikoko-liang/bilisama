@@ -197,6 +197,19 @@ class VolcanoDuplexConfig(BaseModel):
     voice: str = Field("zh_female_vv_uranus_bigtts")
     speed: int = Field(0, ge=-50, le=100)
     loudness: int = Field(0, ge=-50, le=100)
+    # How long the transcriber may go quiet on an open turn before the adapter
+    # closes it on the streamer's behalf. The endpoint drops the turn-ended
+    # frame now and then (about fifteen an hour of talking on 2026-09-16/17;
+    # 32% of all turn ends in a 25-minute mock on 2026-09-22, because a shared
+    # tab never falls silent), and without a backstop the floor stays shut and
+    # she ignores him until the next utterance. Counted from the LAST
+    # transcript delta, not from the start, so a long sentence keeps resetting
+    # it. The trade: lower means she can answer sooner after a lost frame;
+    # lower also means a thinking pause longer than this splits one sentence
+    # into two turns, and she may answer the first half. 1.0 was chosen
+    # 2026-09-22 over the original 3.0 on the mock's numbers; a real
+    # microphone's pause distribution has not been measured against it.
+    speech_edge_s: float = Field(1.0, ge=0.3, le=10.0)
     # Who answers a danmaku on this protocol, and it is a real fork rather
     # than a tuning knob, because this endpoint will not compose a reply on
     # demand (probed 2026-09-16; corrected 2026-09-21 — it WILL start a turn

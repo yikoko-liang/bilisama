@@ -466,3 +466,31 @@ def test_the_pull_route_is_also_the_no_proactive_route() -> None:
     assert (
         "if pulls_events" in source and "director:proactive" in source
     ), "主动话题必须跟着 pulls_events 一起关掉"
+
+
+def test_the_duplex_speech_edge_comes_from_config() -> None:
+    """The backstop that closes a turn whose ending frame never came was a
+    module constant, 3.0 s, and a 25-minute mock on 2026-09-22 showed 32% of
+    turn ends going through it — every one a three-second wait before she
+    could answer. It is a config field now, shipped at 1.0, and the factory
+    has to actually hand it to the link or the panel control edits nothing."""
+    settings = _settings(provider=ProviderName.VOLCANO_DUPLEX)
+    settings.speech.volcano_duplex.speech_edge_s = 2.5
+    built = build_link(
+        _request(ProviderName.VOLCANO_DUPLEX, settings=settings, env={"volcano_api_key": "k"})
+    )
+    assert isinstance(built.link, DuplexLink)
+    assert built.link._speech_edge_s == 2.5, "配置里的值没传到 adapter"
+
+
+def test_the_duplex_speech_edge_default_is_the_documented_one() -> None:
+    """Schema default, the toml, the panel hint and the adapter's fallback
+    constant all name 1.0. Pin the schema so a drift shows up here rather than
+    as a streamer noticing she got slower."""
+    from bilisama.config.schema import VolcanoDuplexConfig
+    from bilisama.realtime.providers.duplex import _SPEECH_EDGE_S
+
+    assert VolcanoDuplexConfig().speech_edge_s == 1.0
+    assert (
+        VolcanoDuplexConfig().speech_edge_s == _SPEECH_EDGE_S
+    ), "adapter 的兜底常量和配置默认值分叉了，直接建的 link 和配置建的行为会不一样"

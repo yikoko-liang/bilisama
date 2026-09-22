@@ -147,12 +147,18 @@ _WATCHDOG_S = 25.0
 _FRAME_MS = 20
 # How long the transcriber may say NOTHING about an open turn before we call
 # it over ourselves. Quiet since the last delta, not elapsed since the start:
-# a long sentence keeps producing deltas and keeps resetting this, so three
-# seconds cannot cut anyone off mid-thought — it only catches the ending that
-# never arrives. Measured 2026-09-16/17: the endings go missing about fifteen
-# times across an hour of talking, in healthy stretches as much as sick ones,
-# and each one costs the streamer a window of her ignoring him completely.
-_SPEECH_EDGE_S = 3.0
+# a long sentence keeps producing deltas and keeps resetting this — it only
+# catches the ending that never arrives. Measured 2026-09-16/17: the endings
+# go missing about fifteen times across an hour of talking, in healthy
+# stretches as much as sick ones, and each one costs the streamer a window of
+# her ignoring him completely.
+#
+# The shipped value lives in VolcanoDuplexConfig.speech_edge_s (1.0 since
+# 2026-09-22; it was 3.0 here). This constant is only the default for a link
+# built without a config — tests, mostly — and tracks the config's default so
+# the two cannot silently disagree. At 1.0 a mid-sentence pause longer than a
+# second splits the turn; the config comment spells out that trade.
+_SPEECH_EDGE_S = 1.0
 # How long a reply we asked for may stay silent before we give up on it. The
 # endpoint answers a replacement in about 84 ms when it is going to answer at
 # all, so six seconds is not a race — it is the gap between "slow" and "never",
