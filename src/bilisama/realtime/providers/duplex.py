@@ -301,6 +301,7 @@ class DuplexLink:
         watchdog_s: float = _WATCHDOG_S,
         unspoken_s: float = _UNSPOKEN_S,
         speech_edge_s: float = _SPEECH_EDGE_S,
+        reply_hold_ms: int = 0,
         auto_reconnect: bool = True,
         reconnect_backoff_s: float = 1.0,
         max_reconnect_attempts: int = 6,
@@ -315,6 +316,13 @@ class DuplexLink:
         self._watchdog_s = watchdog_s
         self._unspoken_s = min(unspoken_s, watchdog_s)
         self._speech_edge_s = speech_edge_s
+        # How long a reply's frames wait before L3 hears about them, so that a
+        # barge-in landing inside that window throws away sound nobody has
+        # heard yet. See _begin_hold for what it buys and what it costs.
+        self._reply_hold_ms = max(0, int(reply_hold_ms))
+        self._held: list[link.LinkEvent] = []
+        self._hold_handle: link.ReplyHandle | None = None
+        self._hold_task: asyncio.Task[None] | None = None
         self._auto_reconnect = auto_reconnect
         self._reconnect_backoff_s = reconnect_backoff_s
         self._max_reconnect_attempts = max_reconnect_attempts
@@ -435,6 +443,7 @@ class DuplexLink:
         self._recv_task = asyncio.create_task(self._recv_loop(), name="duplex:recv")
 
     async def aclose(self) -> None:
+        self._flush_hold()
         self._closing = True
         # The vendor is explicit: dropping the socket without session.close
         # draws ContextCanceled (55000001). Best effort — a dead socket is
@@ -474,6 +483,82 @@ class DuplexLink:
             raise ConnectionError("还没连接")
         async with self._send_lock:
             await self._ws.send(json.dumps(frame))
+
+    def set_reply_hold_ms(self, ms: int) -> None:
+        """Live: the next turn uses it; a hold already running keeps its own.
+
+        Read at turn start rather than snapshotted, which is what lets the
+        panel promise Reload.LIVE for it.
+        """
+        self._reply_hold_ms = max(0, int(ms))
+
+    # ------------------------------------------------------------ the hold
+
+    def _emit(self, event: link.LinkEvent) -> None:
+        """Every event to L3 goes out through here, so a hold can catch a
+        turn's frames without the emit sites knowing."""
+        if self._hold_handle is not None and getattr(event, "handle", None) is self._hold_handle:
+            self._held.append(event)
+            return
+        self._events.put_nowait(event)
+
+    def _begin_hold(self, handle: link.ReplyHandle) -> None:
+        """Start buffering this turn's frames for reply_hold_ms.
+
+        What it buys: on this protocol 「主播开口了」 reaches us about 850 ms
+        after the streamer starts (the transcriber has to recognise a word;
+        DashScope's VAD says so at ~330 ms), and for all of that she keeps
+        playing over him. A hold makes the first N ms of a reply unplayable,
+        so a barge-in landing inside that window discards sound nobody heard —
+        the 「她刚开口就被打断」 case. It cannot help once she is audibly
+        playing: what has left the speaker is gone, and the clear still lands
+        when the frame does.
+
+        What it costs: every reply starts N ms later. Shipped at 0.
+
+        EVERYTHING for the turn is held, ReplyStarted included, not just the
+        content. The voice gate opens on ReplyStarted and gives up waiting for
+        frames after 0.6 s (voice_turn._HOLD_MAX_S); a hold that let the start
+        through and kept the words back would time the gate out before it saw
+        a marker, and her turn would play unjudged. Held whole, the gate sees
+        the burst and decides at once.
+        """
+        self._flush_hold()  # a previous turn's, if any — never two at once
+        if self._reply_hold_ms <= 0:
+            return
+        self._hold_handle = handle
+        self._held = []
+        self._hold_task = asyncio.create_task(self._hold_expires(), name="duplex:reply-hold")
+
+    async def _hold_expires(self) -> None:
+        await self._clock.sleep(self._reply_hold_ms / 1000.0)
+        self._hold_task = None
+        self._flush_hold()
+
+    def _flush_hold(self) -> None:
+        """Release the hold: forward what was held, in order.
+
+        A turn that went stale while held loses its CONTENT — text and audio —
+        but keeps its lifecycle: ReplyStarted and ReplyDone still go up, so L3's
+        books close the way they do for a cancel that landed before the first
+        frame. Dropping the lifecycle too would leave the scheduler holding a
+        handle nothing ever settles.
+        """
+        handle, held = self._hold_handle, self._held
+        self._hold_handle, self._held = None, []
+        task, self._hold_task = self._hold_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        if handle is None:
+            return
+        dropped = 0
+        for event in held:
+            if handle.stale and isinstance(event, link.ReplyTextDelta | link.ReplyAudioDelta):
+                dropped += 1
+                continue
+            self._events.put_nowait(event)
+        if dropped:
+            log.info("duplex.reply_hold_dropped", handle_id=handle.handle_id, frames=dropped)
 
     async def set_context(self, instructions: str) -> None:
         """Push the persona.
@@ -772,8 +857,12 @@ class DuplexLink:
             return
         if status is not link.ReplyStatus.COMPLETED:
             handle.stale = True
+        # Whatever the hold still has goes out (or is dropped, if stale)
+        # BEFORE the done, so a reply that finished inside its own hold does
+        # not arrive at L3 as done-then-words.
+        self._flush_hold()
         self._release_slot()
-        self._events.put_nowait(link.ReplyDone(handle, status, text))
+        self._emit(link.ReplyDone(handle, status, text))
 
     # ------------------------------------------------------------ receiving
 
@@ -873,7 +962,7 @@ class DuplexLink:
                 return
             text = str(frame.get("delta") or "")
             self._heard.append(text)
-            self._events.put_nowait(link.ReplyTextDelta(handle, text))
+            self._emit(link.ReplyTextDelta(handle, text))
             return
         if kind == "response.output_text.done":
             # Carries the whole turn, byte-identical to the deltas joined.
@@ -888,7 +977,7 @@ class DuplexLink:
             audio = frame.get("delta")
             if handle is not None and isinstance(audio, str):
                 with contextlib.suppress(ValueError):
-                    self._events.put_nowait(link.ReplyAudioDelta(handle, base64.b64decode(audio)))
+                    self._emit(link.ReplyAudioDelta(handle, base64.b64decode(audio)))
             return
         if kind in ("response.done", "response.canceled"):
             status = (
@@ -963,12 +1052,13 @@ class DuplexLink:
         if ours and self._pending_ours is not None:
             self._active = self._pending_ours
             self._pending_ours = None
-            self._events.put_nowait(link.ReplyStarted(self._active))
+            self._begin_hold(self._active)
+            self._emit(link.ReplyStarted(self._active))
             # The TTS path streams no text, so the words we supplied are the
             # only record of what was said. Downstream (the chat page, the
             # memory layer) reads them here rather than nowhere.
             if self._pending_text:
-                self._events.put_nowait(link.ReplyTextDelta(self._active, self._pending_text))
+                self._emit(link.ReplyTextDelta(self._active, self._pending_text))
             return
         if self._active is not None:
             return  # already booked — by a text delta, or a second sentence
@@ -992,7 +1082,8 @@ class DuplexLink:
             self._settle(link.ReplyStatus.CANCELLED)
         handle = link.ReplyHandle(implicit=True)
         self._take_slot(handle, ours=False)
-        self._events.put_nowait(link.ReplyStarted(handle))
+        self._begin_hold(handle)
+        self._emit(link.ReplyStarted(handle))
         return handle
 
     def _spoken_text(self) -> str:

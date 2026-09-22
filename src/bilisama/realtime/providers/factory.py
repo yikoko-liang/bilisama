@@ -233,6 +233,7 @@ def build_link(request: LinkRequest) -> BuiltLink:
                     # so it is a construction-time fact rather than a toggle.
                     pull_tool=duplex_cfg.event_replies == "tool",
                     speech_edge_s=duplex_cfg.speech_edge_s,
+                    reply_hold_ms=duplex_cfg.reply_hold_ms,
                     quiet_window_s=quiet_window_s(request.settings, provider),
                 ),
                 request.endpoint.url,

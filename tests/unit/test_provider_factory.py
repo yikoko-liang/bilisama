@@ -503,3 +503,14 @@ def test_the_duplex_speech_edge_default_is_the_documented_one() -> None:
     assert (
         VolcanoDuplexConfig().speech_edge_s == _SPEECH_EDGE_S
     ), "adapter 的兜底常量和配置默认值分叉了，直接建的 link 和配置建的行为会不一样"
+
+
+def test_the_duplex_reply_hold_comes_from_config() -> None:
+    """The knob only exists on the panel if the factory hands it to the link."""
+    settings = _settings(provider=ProviderName.VOLCANO_DUPLEX)
+    settings.speech.volcano_duplex.reply_hold_ms = 350
+    built = build_link(
+        _request(ProviderName.VOLCANO_DUPLEX, settings=settings, env={"volcano_api_key": "k"})
+    )
+    assert isinstance(built.link, DuplexLink)
+    assert built.link._reply_hold_ms == 350

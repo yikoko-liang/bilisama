@@ -80,6 +80,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "duplex.cancel_before_start",
         "duplex.context_pushed",
         "duplex.context_unpaired",
+        "duplex.reply_hold_dropped",
         "duplex.events_pulled",
         "duplex.frame_handler_failed",
         "duplex.pull_without_call_id",

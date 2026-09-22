@@ -210,6 +210,15 @@ class VolcanoDuplexConfig(BaseModel):
     # 2026-09-22 over the original 3.0 on the mock's numbers; a real
     # microphone's pause distribution has not been measured against it.
     speech_edge_s: float = Field(1.0, ge=0.3, le=10.0)
+    # How long a reply's frames wait in the adapter before they may play. On
+    # this protocol 「主播开口了」 arrives ~850 ms after the streamer starts
+    # (the transcriber has to recognise a word; DashScope's VAD is ~330 ms), and
+    # she keeps playing over him for all of it. A hold makes the first N ms of
+    # a reply unplayable, so a barge-in inside that window throws away sound
+    # nobody heard yet — the 「她刚开口就被打断」 case. It does nothing for a
+    # reply already audibly playing: what left the speaker is gone. Every reply
+    # starts N ms later. 0 is today's behaviour. Live: the next turn uses it.
+    reply_hold_ms: int = Field(0, ge=0, le=2000)
     # Who answers a danmaku on this protocol, and it is a real fork rather
     # than a tuning knob, because this endpoint will not compose a reply on
     # demand (probed 2026-09-16; corrected 2026-09-21 — it WILL start a turn

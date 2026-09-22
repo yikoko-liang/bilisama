@@ -1724,6 +1724,7 @@ async def run_director(args: argparse.Namespace) -> int:
     )
     from bilisama.persona.prompt import assemble_scoped
     from bilisama.proactive import ProactiveTopicLoop
+    from bilisama.realtime.providers.duplex import DuplexLink
     from bilisama.realtime.providers.volcano import VolcanoLink
     from bilisama.side import OpenAICompatSideModel, SideModel
     from bilisama.ui.audio import AudioBroker, EchoProbe, PlaybackTally
@@ -2439,6 +2440,11 @@ async def run_director(args: argparse.Namespace) -> int:
                 with contextlib.suppress(NameError):
                     if broker is not None:
                         broker.flush()
+            return True
+        if path == "speech.volcano_duplex.reply_hold_ms" and isinstance(inner, DuplexLink):
+            # Read at each turn start inside the adapter, so a setter is the
+            # whole hook. Same shape as the volcano speaker arm below.
+            inner.set_reply_hold_ms(settings.speech.volcano_duplex.reply_hold_ms)
             return True
         if path == "speech.volcano.speaker" and isinstance(inner, VolcanoLink):
             # EXACT match on purpose — a speech.volcano. prefix would unlock

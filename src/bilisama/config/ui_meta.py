@@ -646,6 +646,19 @@ UI_META: dict[str, FieldMeta] = {
         group="火山全双工",
         order=7,
     ),
+    "speech.volcano_duplex.reply_hold_ms": FieldMeta(
+        label="回复先扣多少毫秒再放",
+        hint=(
+            "这条协议要 850 毫秒才知道主播开口了（转写器得听出一个字），这期间她一直在放。"
+            "扣住回复的前 N 毫秒不放，主播在这个窗口里插话就一个字都听不到她的。"
+            "她已经放出来的部分拦不住。代价是每条回复都晚 N 毫秒开口。0 是现在的样子"
+        ),
+        provider_scoped="volcano_duplex",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="火山全双工",
+        order=8,
+    ),
     "speech.volcano_duplex.loudness": FieldMeta(
         label="音量",
         hint="0 是原音量；-50 约一半，100 约两倍",

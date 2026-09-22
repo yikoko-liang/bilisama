@@ -780,3 +780,161 @@ async def test_an_unknown_event_name_errors_first_and_then_hangs_up() -> None:
             assert not errs, "错误帧是服务端发的，不该出现在收到的上行里"
         finally:
             await duplex.aclose()
+
+
+# ------------------------------------------------------------ the reply hold
+
+
+async def _drain_until(
+    events: AsyncIterator[link.LinkEvent], stop: type[link.LinkEvent], timeout: float = 2.0
+) -> list[link.LinkEvent]:
+    """Everything up to and including the first `stop`."""
+    got: list[link.LinkEvent] = []
+
+    async def pump() -> None:
+        async for event in events:
+            got.append(event)
+            if isinstance(event, stop):
+                return
+
+    await asyncio.wait_for(pump(), timeout=timeout)
+    return got
+
+
+async def test_a_reply_hold_of_zero_is_todays_behaviour() -> None:
+    """Shipped default. Nothing waits, nothing is buffered, the old tests above
+    keep meaning what they meant."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)  # reply_hold_ms defaults to 0
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.request_reply(link.ReplySpec(text="谢谢"))
+            got = await _drain_until(events, link.ReplyDone)
+            kinds = [type(e).__name__ for e in got]
+            assert kinds[0] == "ReplyStarted" and kinds[-1] == "ReplyDone"
+            assert duplex._hold_handle is None
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_held_reply_arrives_all_at_once_when_the_hold_expires() -> None:
+    """The timer path. With a 500 ms hold, NOTHING reaches L3 for 500 ms —
+    not the start, not the words, not the audio — and then all of it does, in
+    the order it arrived. ReplyStarted is held too, on purpose: the voice gate
+    opens on it and gives up on a silent turn after 0.6 s, so letting the
+    start through early would time the gate out before the words came."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        server.finish_ours = False
+        duplex = _link(server, clock=clock, reply_hold_ms=500)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.request_reply(link.ReplySpec(text="谢谢小明"))
+            await _settles(lambda: len(duplex._held) >= 3, "帧没进 hold 缓冲")
+            assert duplex._events.qsize() == 0, "hold 期间不该有任何帧上去"
+            await clock.advance(0.5)
+            got = await _drain_until(events, link.ReplyAudioDelta)
+            kinds = [type(e).__name__ for e in got]
+            assert kinds[0] == "ReplyStarted", kinds
+            assert "ReplyTextDelta" in kinds and "ReplyAudioDelta" in kinds
+            assert duplex._hold_handle is None, "到点之后 hold 该清掉"
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_reply_cancelled_inside_its_hold_never_makes_a_sound() -> None:
+    """The case the hold exists for: 「她刚开口就被打断」. Cancel lands while
+    the frames are still held. The words and audio are dropped — the audience
+    heard none of it, so nothing should reach the chat page or the speaker —
+    but the lifecycle survives: ReplyStarted and ReplyDone(CANCELLED) still go
+    up, so the scheduler's books close the way they do for any cancel that
+    landed before the first frame."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        server.finish_ours = False
+        duplex = _link(server, clock=clock, reply_hold_ms=500)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await duplex.request_reply(link.ReplySpec(text="谢谢小明"))
+            await _settles(lambda: len(duplex._held) >= 3, "帧没进 hold 缓冲")
+            await duplex.cancel(handle)
+            got = await _drain_until(events, link.ReplyDone)
+            kinds = [type(e).__name__ for e in got]
+            assert kinds == ["ReplyStarted", "ReplyDone"], f"内容不该上去：{kinds}"
+            assert got[-1].status is link.ReplyStatus.CANCELLED  # type: ignore[union-attr]
+            assert not any(isinstance(e, link.ReplyAudioDelta) for e in got)
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_reply_that_finishes_inside_its_hold_flushes_at_once() -> None:
+    """A short reply that completes before the timer must not wait the timer
+    out — and its done must come AFTER its words, not before them."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, reply_hold_ms=2000)  # long; must not matter
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.request_reply(link.ReplySpec(text="好"))
+            got = await _drain_until(events, link.ReplyDone)  # no clock.advance at all
+            kinds = [type(e).__name__ for e in got]
+            assert kinds[0] == "ReplyStarted" and kinds[-1] == "ReplyDone", kinds
+            assert kinds.index("ReplyAudioDelta") < kinds.index("ReplyDone")
+            assert got[-1].status is link.ReplyStatus.COMPLETED  # type: ignore[union-attr]
+        finally:
+            await duplex.aclose()
+
+
+async def test_her_own_turn_is_held_whole_too() -> None:
+    """Hers are the turns the barge-in case is really about (she answers the
+    streamer, the streamer talks on). Same hold, same all-at-once release."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, reply_hold_ms=300)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.say("我在呢", ours=False, finish=False)
+            await _settles(lambda: len(duplex._held) >= 2, "她的帧没进 hold")
+            assert duplex._events.qsize() == 0
+            await clock.advance(0.3)
+            started = await _next(events, link.ReplyStarted)
+            assert started.handle.implicit
+        finally:
+            await duplex.aclose()
+
+
+async def test_the_hold_can_be_changed_live_and_the_next_turn_uses_it() -> None:
+    """What lets the panel promise Reload.LIVE: the value is read when a turn
+    starts, not when the link is built."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, reply_hold_ms=0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.request_reply(link.ReplySpec(text="一"))
+            await _drain_until(events, link.ReplyDone)  # immediate at 0
+            duplex.set_reply_hold_ms(400)
+            server.finish_ours = False
+            await duplex.request_reply(link.ReplySpec(text="二"))
+            await _settles(lambda: len(duplex._held) >= 3, "改成 400 之后这一轮没被扣住")
+            assert duplex._events.qsize() == 0
+            await clock.advance(0.4)
+            await _next(events, link.ReplyStarted)
+        finally:
+            await duplex.aclose()

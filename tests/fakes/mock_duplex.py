@@ -137,6 +137,9 @@ class MockDuplexServer:
         # no refusal, no frames. Seen live on 2026-09-17, twice in a row, and
         # the slot it holds is the one her own turns need.
         self._deaf_to_tts = deaf_to_tts
+        # Whether a greeting we send is played to completion. False leaves it
+        # streaming with no done, for tests of the adapter's timed reply hold.
+        self.finish_ours = True
         self._server: Any = None
         self._ws: ServerConnection | None = None
         self._ready = asyncio.Event()
@@ -236,7 +239,7 @@ class MockDuplexServer:
             # tts_type chat_tts_text. Deliberately NOT gated on _deaf_to_tts:
             # that fault models the replacement channel, which is a different
             # event with a different failure.
-            await self.say(str(frame.get("text") or ""), ours=True)
+            await self.say(str(frame.get("text") or ""), ours=True, finish=self.finish_ours)
         elif kind == "speech_text_buffer.replacement.append":
             self._pending = str(frame.get("text") or "")
         elif kind == "speech_text_buffer.replacement.commit":
@@ -299,7 +302,9 @@ class MockDuplexServer:
 
     # ------------------------------------------------------------ scripting
 
-    async def say(self, text: str, *, ours: bool, audio: bytes = b"\x01\x02") -> None:
+    async def say(
+        self, text: str, *, ours: bool, audio: bytes = b"\x01\x02", finish: bool = True
+    ) -> None:
         """One reply. `ours` decides the tts_type, which is the whole game.
 
         On her own turns the first characters arrive BEFORE
@@ -326,6 +331,11 @@ class MockDuplexServer:
             ws,
             {"type": "response.output_audio.delta", "delta": base64.b64encode(audio).decode()},
         )
+        if not finish:
+            # Left open on purpose: the adapter's reply hold is timed, and a
+            # reply that finishes inside its own hold flushes at once — so a
+            # test of the TIMER needs a reply that has not finished yet.
+            return
         await self._send(ws, {"type": "response.output_audio.done"})
         await self._send(ws, {"type": "response.done"})
 
