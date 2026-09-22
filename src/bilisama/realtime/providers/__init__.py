@@ -29,6 +29,7 @@ __all__ = [
     "PROFILES",
     "Endpoint",
     "ProviderProfile",
+    "adopt_endpoint",
     "codec_for",
     "compose_instructions",
     "profile_for",
@@ -70,6 +71,26 @@ def _hosted_url(raw: str, provider: ProviderName) -> str:
         return raw
     host = raw.replace("https://", "").replace("http://", "").split("/")[0]
     return f"wss://{host}{PROFILES[provider].socket_path}"
+
+
+def adopt_endpoint(settings: Settings, endpoint: Endpoint) -> None:
+    """Make `settings.speech.provider` name the provider actually dialled.
+
+    resolve_endpoint is pure by contract and must not do this itself. But the
+    provider it picks — from --provider, ahead of the config file — is the one
+    the session runs on, and three readers consult `settings.speech.provider`
+    as if it were that: the panel's provider-scoped field filter
+    (ui/server.py), the voice card (ui/voices.py) and the runtime validator.
+    Left unaligned, a session started with `--provider volcano_duplex` on a
+    config that says `s2s` shows every s2s field and not one duplex field —
+    fourteen provider-scoped declarations, invisible. Found 2026-09-23 looking
+    for a knob that had been shipped that morning.
+
+    Mutates in memory only. TomlConfigWriter writes one named field at a time,
+    so nothing here reaches the config file unless the streamer edits
+    `speech.provider` on purpose.
+    """
+    settings.speech.provider = endpoint.provider
 
 
 def resolve_endpoint(

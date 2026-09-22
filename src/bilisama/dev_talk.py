@@ -61,6 +61,7 @@ from bilisama.realtime import link
 from bilisama.realtime.client import RealtimeClient, SessionRefused
 from bilisama.realtime.providers import (
     ProviderProfile,
+    adopt_endpoint,
     codec_for,
     profile_for,
     resolve_endpoint,
@@ -1966,6 +1967,9 @@ async def run_director(args: argparse.Namespace) -> int:
         settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
     )
     provider = endpoint.provider
+    # The panel, the voice card and the validator all read settings.speech
+    # .provider as "what is running"; make that true when --provider won.
+    adopt_endpoint(settings, endpoint)
     # Which credential to look for, which turn types the endpoint honours, how
     # the model joins the address: all of it is the provider's business, and it
     # used to be spelled out right here as an if/elif whose `else` refused
@@ -3759,6 +3763,7 @@ async def run(args: argparse.Namespace) -> int:
         settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
     )
     provider = endpoint.provider
+    adopt_endpoint(settings, endpoint)
     profile = profile_for(provider)
     _refuse_if_wire_mode_cannot_drive(provider, profile)
     headers: dict[str, str] = {}

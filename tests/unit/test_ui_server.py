@@ -802,3 +802,25 @@ def test_the_panic_control_never_calls_itself_a_microphone_switch() -> None:
     assert "紧急叫停" in button, f"按钮文案变了：{button.strip()}"
     assert "闭麦" not in button, f"又叫回「闭麦」了，那是关麦克风的意思：{button.strip()}"
     assert "不碰麦克风" in button, "title 里没写清它不关麦克风"
+
+
+def test_a_cli_provider_override_reaches_the_panels_field_filter() -> None:
+    """Found 2026-09-23 looking for a knob shipped that morning: a session
+    started with `--provider volcano_duplex` on a config saying `s2s` served
+    25 s2s fields and zero duplex ones. The filter at config_snapshot reads
+    settings.speech.provider as "what is running", and resolve_endpoint —
+    pure by contract — never wrote the chosen provider back. Every one of the
+    fourteen provider-scoped declarations was invisible on any session that
+    picked its backend on the command line.
+
+    The composition under test is the real one: resolve, adopt, snapshot."""
+    from bilisama.realtime.providers import adopt_endpoint, resolve_endpoint
+
+    settings = _settings()
+    assert settings.speech.provider.value == "s2s", "前提：配置文件说的是 s2s"
+    endpoint = resolve_endpoint(settings, provider="volcano_duplex", url=None, model=None, env={})
+    adopt_endpoint(settings, endpoint)
+    paths = {row["path"] for row in config_snapshot(settings)}
+    assert "speech.volcano_duplex.reply_hold_ms" in paths, "命令行选的后端，面板看不见它的字段"
+    assert "speech.volcano_duplex.event_replies" in paths
+    assert "speech.s2s.endpoint" not in paths, "没在跑的后端的字段还铺在面板上"
