@@ -197,7 +197,7 @@ export volcano_api_key=...
 |---|---|
 | `model` | 固定 `1.2.6.1`，厂商升版本才改 |
 | `voice` | 走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表。**和上面那套火山的音色表不通用**（探针里 `jupiter` 的 `zh_female_vv_jupiter_bigtts` 也能连上，但别指望通用） |
-| `event_replies` | 弹幕由谁来回：`tool`（**出厂**，她自己拉、自己答）或 `ghostwriter`（侧路模型写词她念，冷场也能回）。两条的差别见下面那张表 |
+| `event_replies` | 弹幕由谁来回：`ghostwriter`（**出厂**，侧路模型写词她念，弹幕立刻回、冷场也能开口；要先配侧路模型）或 `tool`（她自己拉、自己答，不用侧路模型，但要等主播开口）。两条的差别见下面那张表 |
 | `speed` / `loudness` | 0 是原速原音量，范围 -50~100 |
 
 **选 `ghostwriter` 就得先有侧路模型，否则启动阶段直接退出**——不会等到第一条弹幕进来
@@ -361,9 +361,9 @@ export volcano_api_key=...
 
 #### 所以弹幕回复有两条路，配置里选
 
-`[speech.volcano_duplex] event_replies`，出厂是 `tool`：
+`[speech.volcano_duplex] event_replies`，出厂是 `ghostwriter`（2026-09-22 起）：
 
-| | `ghostwriter`（2026-09-21 起可用，未实盘验收） | `tool`（出厂） |
+| | `ghostwriter`（**出厂**，2026-09-22 起） | `tool` |
 |---|---|---|
 | 谁写这句话 | 侧路模型（`qwen3.7-flash`） | **她自己** |
 | 观众多久等到 | 一秒上下 | 等主播下次开口，冷场时一直等 |

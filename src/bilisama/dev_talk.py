@@ -1658,9 +1658,12 @@ def event_reply_route(provider: ProviderName, settings: Settings, *, side_availa
     it the proactive topic and the poke, which the refusal had taken down as
     collateral: neither was ever the broken part.
 
-    What is still unmeasured is a whole live session on this route. The
-    shipped default therefore stays "tool" — that one needs no side model and
-    costs no round trip — and switching is a deliberate act.
+    Shipped default is "ghostwriter" as of 2026-09-22, after two live sessions
+    on it (the evening of 09-21 and a 25-minute mock the next day: every
+    ghostwritten reply spoke, side model at about a second once thinking was
+    switched off on the wire). The cost it carries is a side model; a machine
+    without one exits at startup with the other route named, rather than
+    opening a session that answers no danmaku.
 
     A function rather than a few lines inside `run_director` so the rule can
     be tested without a microphone. The first version of the old refusal was
@@ -1673,7 +1676,9 @@ def event_reply_route(provider: ProviderName, settings: Settings, *, side_availa
     if not pulls and not side_available:
         raise SystemExit(
             f"{provider.value} 不会现场组织回复，弹幕/礼物的回复需要一个侧路模型替她写。\n"
-            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。"
+            "配 [speech.side]，或者 source path.sh 让它读到 openai_compatible_url。\n"
+            '不想配侧路模型就把 [speech.volcano_duplex] event_replies 改成 "tool"：'
+            "她跟主播说话时自己把没回的弹幕捎带答了，但主动话题和戳一下会关掉。"
         )
     return pulls
 

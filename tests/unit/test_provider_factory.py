@@ -435,12 +435,18 @@ def test_the_duplex_ghostwriter_route_starts_again() -> None:
     assert event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=True) is False
 
 
-def test_the_shipped_default_is_the_route_that_works() -> None:
-    """A default nobody can start on would be worse than no default."""
+def test_the_shipped_default_is_ghostwriter_and_says_so_without_a_side_model() -> None:
+    """Shipped default flipped to ghostwriter 2026-09-22 after two live
+    sessions on it. It needs a side model, so a machine without one must fail
+    at startup with the alternative NAMED — a session that opens and answers no
+    danmaku is the failure this refusal exists to prevent. With a side model it
+    is the compose-by-L3 route (returns False: she does not pull)."""
     from bilisama.dev_talk import event_reply_route
 
-    assert Settings().speech.volcano_duplex.event_replies == "tool"
-    assert event_reply_route(ProviderName.VOLCANO_DUPLEX, Settings(), side_available=False) is True
+    assert Settings().speech.volcano_duplex.event_replies == "ghostwriter"
+    with pytest.raises(SystemExit, match='event_replies 改成 "tool"'):
+        event_reply_route(ProviderName.VOLCANO_DUPLEX, Settings(), side_available=False)
+    assert event_reply_route(ProviderName.VOLCANO_DUPLEX, Settings(), side_available=True) is False
 
 
 def test_the_pull_route_is_also_the_no_proactive_route() -> None:
@@ -459,6 +465,9 @@ def test_the_pull_route_is_also_the_no_proactive_route() -> None:
     from bilisama.dev_talk import event_reply_route
 
     settings = Settings()
+    # Said explicitly: the shipped default is ghostwriter now, and this test
+    # is about what the OTHER route switches off.
+    settings.speech.volcano_duplex.event_replies = "tool"
     assert event_reply_route(ProviderName.VOLCANO_DUPLEX, settings, side_available=False) is True
     source = (Path(__file__).resolve().parents[2] / "src/bilisama/dev_talk.py").read_text(
         encoding="utf-8"

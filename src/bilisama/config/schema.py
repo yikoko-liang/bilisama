@@ -231,7 +231,7 @@ class VolcanoDuplexConfig(BaseModel):
     #   (tests/integration/test_duplex_contract.py pins it). Kept as a value
     #   rather than deleted so the day the vendor fixes it there is something
     #   to turn back on.
-    event_replies: Literal["ghostwriter", "tool"] = Field("tool")
+    event_replies: Literal["ghostwriter", "tool"] = Field("ghostwriter")
 
 
 class SpeechConfig(BaseModel):
