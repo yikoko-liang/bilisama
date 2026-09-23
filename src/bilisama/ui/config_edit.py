@@ -16,8 +16,9 @@ is actually read at call time — the panel never lies about an edit working.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal, get_args, get_origin
 
 import annotated_types
@@ -27,12 +28,14 @@ from pydantic.fields import FieldInfo
 from bilisama.config._ui import Reload
 from bilisama.config.schema import Settings
 from bilisama.config.ui_meta import UI_META, FieldMeta
+from bilisama.config.validate import ConfigProblem, check
 from bilisama.obs.logging import get_logger
 
 log = get_logger(__name__)
 
 __all__ = [
     "ConfigEditError",
+    "apply_checked_runtime_edit",
     "apply_config_edit",
     "apply_panel_edits",
     "apply_runtime_config_edit",
@@ -169,6 +172,90 @@ def apply_runtime_config_edit(settings: Settings, path: Any, value: Any) -> tupl
     )
 
 
+def introduced_fatal_problems(
+    before: Iterable[ConfigProblem], after: Iterable[ConfigProblem]
+) -> list[ConfigProblem]:
+    """The fatal problems in `after` on fields that had none in `before`.
+
+    Keyed on the field alone, not the message: three rules embed live values
+    in their sentence (gift tiers, the volcano speaker, the wordlist path), so
+    a standing problem would read as new every time an edit moved the number
+    without clearing it — and the refusal would blame this edit for a mess
+    that predates it. A field already broken before the edit stays the
+    streamer's standing problem; only a field the edit newly breaks counts.
+    """
+    standing = {p.field for p in before if p.fatal}
+    return [p for p in after if p.fatal and p.field not in standing]
+
+
+def apply_checked_runtime_edit(
+    settings: Settings, path: Any, value: Any, *, config_dir: Path | None
+) -> tuple[FieldMeta, Any]:
+    """apply_runtime_config_edit, refused when the edit would BREAK the config.
+
+    Only problems the edit introduces count. The gate used to be 「整份配置
+    有没有致命问题」, which refused every edit while any fatal problem stood —
+    including one on a field the streamer was not touching and had never been
+    told about. 2026-09-23: 「回复先扣多少毫秒再放」bounced three times off a
+    rule about the avatar's expression tags, with a sentence that named
+    neither the knob nor the connection. Now a standing problem stays standing
+    and the edit goes through; an edit that makes a NEW fatal problem is
+    rolled back and refused with the knob, the value, and the rule it would
+    break.
+
+    Args:
+        settings: The live Settings object consumers read at call time.
+        path: Dotted field path.
+        value: The client-supplied value.
+        config_dir: Where relative config paths resolve (the base file's
+            directory), as `check` wants it.
+
+    Returns:
+        (meta, applied value), as apply_runtime_config_edit.
+
+    Raises:
+        ConfigEditError: any refusal apply_runtime_config_edit raises, or the
+            edit introducing a fatal cross-field problem.
+    """
+    before = list(check(settings, config_dir=config_dir))
+    resolved = _resolve(settings, path) if isinstance(path, str) else None
+    old = getattr(resolved[0], resolved[1]) if resolved is not None else None
+    meta, applied = apply_runtime_config_edit(settings, path, value)
+    if resolved is None:  # apply_ refuses such a path before this line; belt and braces
+        raise ConfigEditError(f"「{meta.label}」是一个分组，不是可改的字段")
+    introduced = introduced_fatal_problems(before, check(settings, config_dir=config_dir))
+    if introduced:
+        setattr(resolved[0], resolved[1], old)
+        raise ConfigEditError(_breaks_config_reason(meta, str(path), applied, introduced[0]))
+    return meta, applied
+
+
+def _breaks_config_reason(meta: FieldMeta, path: str, applied: Any, problem: ConfigProblem) -> str:
+    """Name the knob, the value, and the rule it would break — and, when the
+    rule reports on ANOTHER field, that field too, so the sentence explains
+    the connection instead of leaving the streamer to guess it."""
+    other = UI_META.get(problem.field)
+    dragged = (
+        ""
+        if problem.field == path
+        else f"，会连累「{other.label if other is not None else problem.field}」"
+    )
+    message = problem.message
+    if message and message[-1] not in "。！？":
+        message += "。"
+    fix = f"怎么改：{problem.fix}" if problem.fix else ""
+    return f"「{meta.label}」改不成 {shown_value(applied)}{dragged}：{message}{fix}"
+
+
+def shown_value(applied: Any) -> str:
+    """How a receipt line spells a value: 开/关 for switches, else as-is."""
+    if applied is True:
+        return "开"
+    if applied is False:
+        return "关"
+    return str(applied.value) if hasattr(applied, "value") else str(applied)
+
+
 def speak_paths(settings: Settings) -> dict[str, str]:
     """Speak-switch name → its config path, so the live matrix and the config
     tab write through the SAME channel instead of two with different gates."""
@@ -245,8 +332,7 @@ def apply_panel_edits(
             # verbatim; the scrubber leaves that field alone).
             log.info("ui.config_edit_refused", path=str(path), error_text=str(exc))
             continue
-        shown = "开" if applied is True else "关" if applied is False else str(applied)
-        announce(f"配置已改：{meta.label} → {shown}（本场生效，重启还原）")
+        announce(f"配置已改：{meta.label} → {shown_value(applied)}（本场生效，重启还原）")
         # The value is safe to log verbatim: secrets are refused by
         # apply_config_edit before they reach here (meta.secret).
         log.info("ui.config_edit_applied", path=str(path), applied=str(applied))

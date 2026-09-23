@@ -362,9 +362,12 @@ write_history=True。没配侧路模型时不闭嘴，改让实时模型自己�
 - 上行音频只有一条路，全经 `AudioInputSwitch`（`ui/audio.py:594-729`）：本机麦克风、页面 socket、
   直播 Mock 的标签页音轨三个来源进同一组闸——暂停门 → 噪声门（计量在前）→ 输入开关（替换成静音）
   → 送链路。被挡下时发等长静音，不是丢帧，provider 的音频时钟才不会冻住。
-- 面板改配置走 `apply_runtime_edit`（`dev_talk.py:2217-2252`）：校验 → 内存生效 → 跑热更新钩子
-  （`run_reload_hook`，:2154-2215）→ 落盘 → 任一失败回滚并重跑钩子；没有钩子的非 LIVE 字段直接拒。
-  音频双开关、房间号、主播昵称四项是会话级、不落盘（:121-128）。
+- 面板改配置走 `apply_runtime_edit`（`dev_talk.py:2472-2519`）：校验 → 内存生效 → 只拦这一次修改
+  **新引入**的致命问题（改前改后各跑一遍 `check()` 做差，`ui/config_edit.py:179-254`；2026-09-23 之前
+  是整份配置有任何致命问题就拒，一条无关的既有问题就能让所有旋钮弹回，§16.8 第 106 条）→ 跑热更新钩子
+  （`run_reload_hook`，:2391-2470）→ 落盘 → 任一失败回滚并重跑钩子；没有钩子的非 LIVE 字段直接拒；
+  成败都记 `ui.config_edit_applied` / `ui.config_edit_refused`。
+  音频双开关、房间号、主播昵称四项是会话级、不落盘（:130-137）。
 - 暂停序列（`on_panel_set`，:2645-2684）：关事件闸（记忆照记）→ 关麦 → panic → `speech.suspend()`，
   恢复严格反序，resume 失败就保持暂停并广播错误。
 - 收尾链（:3334-3446）七步各自 try：先锁住本机设备不再复活，再 cancel 全部任务，关 hub 再关 uvicorn
@@ -487,8 +490,8 @@ chattiness 只是乘在上面的系数 1.35 / 1.0 / 0.7，另定普通车道令�
 
 `ui_meta.py` 125 条元数据（113 个叶子字段加 12 个分组头），reload 分 live 35 / reconnect 25 /
 engine 22 / restart 43；`widget`、`wizard_step`、`aliases` 三个键没有读者（:16-19 自己记着）。面板写
-配置三道闸在 `ui/config_edit.py:128-135`：路径必须在 UI_META 里、secret 一律拒、reload 类必须在允许
-集合。`persist.py` 保注释定点替换加 tmp + fsync + rename 原子写，落到数据目录的用户层 profile
+配置三道闸在 `ui/config_edit.py:133-138`：路径必须在 UI_META 里、secret 一律拒、reload 类必须在允许
+集合；面板热改还有第四道（:191-254）：这次修改新引入了致命的跨字段问题才拒，既有问题不拦别的修改。`persist.py` 保注释定点替换加 tmp + fsync + rename 原子写，落到数据目录的用户层 profile
 （:126-137），`active_profile` 本身仍写基底文件。密钥只有环境变量一个后端（`secrets.py:22-40`，
 先 `BILISAMA_KEY_<NAME>` 再 `NAME`）。
 

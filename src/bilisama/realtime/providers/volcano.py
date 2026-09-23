@@ -587,8 +587,8 @@ class VolcanoLink:
         The pairing self-check mirrors the factory's: a wrong pairing is
         silent on the wire (she becomes someone else, or goes mute), so a
         direct caller gets a refusal here. The panel path never reaches it
-        — apply_runtime_edit runs check() before any hook and rolls a
-        fatal pairing back first.
+        — ui/config_edit.apply_checked_runtime_edit runs check() before any
+        hook and rolls back an edit that INTRODUCES a fatal pairing.
         """
         if speaker == self._speaker:
             return

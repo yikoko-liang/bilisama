@@ -1732,7 +1732,8 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.ui.config_edit import (
         AUDIO_PANEL_PATHS,
         ConfigEditError,
-        apply_runtime_config_edit,
+        apply_checked_runtime_edit,
+        shown_value,
         speak_paths,
     )
     from bilisama.ui.events import ClientEvent, ServerEvent, link_frames, live_event_payload
@@ -1778,6 +1779,18 @@ async def run_director(args: argparse.Namespace) -> int:
         print("配置读不了：", file=sys.stderr)
         report_validation(exc, stream=sys.stderr)
         raise SystemExit(2) from exc
+    # Command line, then config, then environment — the order the key and the
+    # voice already follow. Until this call the flags' own defaults decided,
+    # so [speech] never got a vote. Resolved BEFORE the config check below:
+    # the panel, the voice card and the validator all read settings.speech
+    # .provider as "what is running", and a check run against the file's
+    # provider misses every rule the real one trips — which then ambushes the
+    # first panel edit instead of being said at startup (2026-09-23).
+    endpoint = resolve_endpoint(
+        settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
+    )
+    provider = endpoint.provider
+    adopt_endpoint(settings, endpoint)
     # strict=False keeps a half-configured dev box usable, but the problems
     # still get said out loud instead of silently shaping behaviour (D6).
     # Kept as a list: the same problems are logged once logging exists, a few
@@ -1960,16 +1973,6 @@ async def run_director(args: argparse.Namespace) -> int:
     else:
         print(f"[侧路] {side_desc}")
 
-    # Command line, then config, then environment — the order the key and the
-    # voice already follow. Until this call the flags' own defaults decided,
-    # so [speech] never got a vote.
-    endpoint = resolve_endpoint(
-        settings, provider=args.provider, url=args.url, model=args.model, env=os.environ
-    )
-    provider = endpoint.provider
-    # The panel, the voice card and the validator all read settings.speech
-    # .provider as "what is running"; make that true when --provider won.
-    adopt_endpoint(settings, endpoint)
     # Which credential to look for, which turn types the endpoint honours, how
     # the model joins the address: all of it is the provider's business, and it
     # used to be spelled out right here as an if/elif whose `else` refused
@@ -2327,10 +2330,11 @@ async def run_director(args: argparse.Namespace) -> int:
 
     # ------------------------------------------------------------ panel edits
     # The write channel the control centre uses: validate -> apply in memory
-    # -> run the reload hook -> persist (unless session-only) -> roll back on
-    # any failure. apply_runtime_config_edit widened the gate, so every path
-    # it admits MUST have a hook here — a missing branch is the "面板说改好了
-    # 但没生效" bug.
+    # -> refuse if the edit broke a cross-field rule -> run the reload hook
+    # -> persist (unless session-only) -> roll back on any failure.
+    # apply_runtime_config_edit widened the gate, so every path it admits
+    # MUST have a hook here — a missing branch is the "面板说改好了但没生效"
+    # bug.
     config_writer = TomlConfigWriter(config_path, settings)
 
     def refresh_interaction_settings() -> None:
@@ -2470,18 +2474,28 @@ async def run_director(args: argparse.Namespace) -> int:
 
         Raises ConfigEditError with a human sentence on any refusal; a hook
         or persist failure rolls the in-memory value back and re-runs the
-        hook so consumers see the old value again.
+        hook so consumers see the old value again. Both outcomes are logged
+        here, so 「我在面板上改了为什么没用」 has an answer in the file and
+        not only in a chat feed that has since scrolled away.
         """
+        try:
+            return await _apply_runtime_edit(path, value)
+        except ConfigEditError as exc:
+            log.info("ui.config_edit_refused", path=path, error_text=str(exc))
+            raise
+
+    async def _apply_runtime_edit(path: str, value: Any) -> str:
         resolved_parent = settings
         for part in path.split(".")[:-1]:
             resolved_parent = getattr(resolved_parent, part)
         leaf = path.split(".")[-1]
         old = getattr(resolved_parent, leaf)
-        meta, applied = apply_runtime_config_edit(settings, path, value)
-        problems = [p for p in check(settings, config_dir=config_path.parent) if p.fatal]
-        if problems:
-            setattr(resolved_parent, leaf, old)
-            raise ConfigEditError(problems[0].message + (problems[0].fix or ""))
+        # Refuses only an edit that BREAKS the config; a problem already
+        # standing on some other field is not this edit's fault and no longer
+        # blocks it (ui/config_edit.apply_checked_runtime_edit).
+        meta, applied = apply_checked_runtime_edit(
+            settings, path, value, config_dir=config_path.parent
+        )
         try:
             handled = await run_reload_hook(path)
             if not handled and meta.reload is not Reload.LIVE:
@@ -2496,8 +2510,11 @@ async def run_director(args: argparse.Namespace) -> int:
             with contextlib.suppress(Exception):
                 await run_reload_hook(path)
             raise ConfigEditError(f"「{meta.label}」没改成：{exc}") from exc
-        shown_old = old.value if hasattr(old, "value") else old
-        shown_new = applied.value if hasattr(applied, "value") else applied
+        shown_old = shown_value(old)
+        shown_new = shown_value(applied)
+        # Bare values, the shape config_edit.apply_panel_edits logs under the
+        # same event name; the receipt sentence is for the feed, not the file.
+        log.info("ui.config_edit_applied", path=path, applied=shown_new, previous=shown_old)
         if path in _SESSION_ONLY_PANEL_PATHS:
             return f"{meta.label}：{shown_old} → {shown_new}（本场已生效，重启恢复默认）"
         return f"{meta.label}：{shown_old} → {shown_new}（已保存并生效）"

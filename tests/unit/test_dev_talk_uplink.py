@@ -33,8 +33,10 @@ from bilisama.config.enums import ProviderName
 from bilisama.obs.health import LinkHealth
 from bilisama.obs.logging import setup
 from bilisama.realtime import link
+from bilisama.realtime.providers import duplex as duplex_module
 from bilisama.realtime.providers import s2s as s2s_module
 from bilisama.realtime.providers import with_model
+from bilisama.ui import server as server_module
 
 _DEV_TALK_PY = Path(dev_talk.__file__)
 
@@ -769,7 +771,7 @@ class _SilentSpeaker:
         self.closed = True
 
 
-def _director_args(config: Path) -> argparse.Namespace:
+def _director_args(config: Path, *, provider: str = "s2s") -> argparse.Namespace:
     """The real flag parser, driven the way the runbook drives it.
 
     Through `build_parser` rather than a hand-built Namespace: a Namespace
@@ -783,7 +785,7 @@ def _director_args(config: Path) -> argparse.Namespace:
             "--no-pet",
             "--plain-console",
             "--provider",
-            "s2s",
+            provider,
             "--config",
             str(config),
         ]
@@ -1041,6 +1043,38 @@ async def test_a_missing_wordlist_stops_the_director_with_a_sentence(
     assert "敏感词表文件不存在" in printed  # the validate line, before the refusal
     assert "词表是上线硬门槛" in str(exc_info.value)
     assert "Traceback" not in str(exc_info.value)
+
+
+async def test_a_problem_only_the_command_line_provider_trips_is_said_at_startup(
+    director_box: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The startup check must judge the provider that RUNS, not the one in the file.
+
+    --provider wins over [speech] (providers.resolve_endpoint) and the validator
+    reads settings.speech.provider as "what is running" (providers.adopt_endpoint).
+    Until 2026-09-23 the check ran before the two were aligned, so a rule only
+    the dialled provider trips was never printed — and then ambushed every
+    panel edit instead, which is the 「旋钮不起作用」 report. The rule here:
+    avatar.expression_source = "tag" on a backend that speaks for itself
+    (config/validate.py). The file says s2s, whose default patches keep the
+    text on our side; the flag says volcano_duplex, which has no such patch.
+
+    The run stops at the credential the factory looks for AFTER the check
+    (providers/factory.py), so nothing is dialled; only the startup line is
+    asserted, plus that the exit really was that credential and not something
+    earlier.
+    """
+    with director_box.open("a", encoding="utf-8") as handle:
+        handle.write('[avatar]\nexpression_source = "tag"\n')
+    for name in ("volcano_api_key", "BILISAMA_KEY_VOLCANO_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await dev_talk.run_director(_director_args(director_box, provider="volcano_duplex"))
+
+    printed = capsys.readouterr().out
+    assert "[配置提醒] avatar.expression_source：表情驱动方式选了 tag" in printed
+    assert "缺火山凭据" in str(exc_info.value)  # stopped after the check, before any dial
 
 
 async def test_a_broken_config_file_is_a_sentence_too(
@@ -1345,3 +1379,211 @@ def test_a_fractional_reading_is_rounded_not_refused(
     caplog.set_level(logging.INFO, logger="bilisama.dev_talk")
     assert dev_talk.note_playback_cut({"played_ms": 41.6}) == 42
     assert _lines(caplog, "playback.cut_while_audible") == [{"audible_ms": 42}]
+
+
+# ------------------------------------------------------------ the panel write path, live
+#
+# 2026-09-23: 「回复延迟」 changed on the panel bounced three times, with a
+# sentence about the avatar's expression tags. The refusal came from a fatal
+# ConfigProblem that stood on avatar.expression_source from the moment the run
+# adopted --provider volcano_duplex — a field nobody was touching — and the old
+# gate in apply_runtime_edit refused every edit while ANY fatal problem stood.
+# tests/unit/test_config_edit.py pins the new gate in isolation; this one drives
+# the real run_director closure through the real panel.set handler, with the
+# standing problem in place, and checks the knob reaches the link.
+
+
+class _OfflineDuplex(duplex_module.DuplexLink):
+    """The real DuplexLink with its socket removed.
+
+    A subclass rather than a stand-in so `isinstance(inner, DuplexLink)` in
+    dev_talk's reload hook (the arm that calls set_reply_hold_ms) stays true.
+    Every method that would touch the wire is a no-op; the hold setter is
+    the one thing recorded, because it is what the test is about.
+    """
+
+    instances: ClassVar[list[_OfflineDuplex]] = []
+
+    def __init__(self, url: str, **kwargs: Any) -> None:
+        super().__init__(url, **kwargs)
+        _OfflineDuplex.instances.append(self)
+        self.contexts: list[str] = []
+        self.hold_calls: list[int] = []
+        self.closed = False
+
+    async def connect(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    async def suspend(self) -> None:
+        return None
+
+    async def resume(self) -> None:
+        return None
+
+    async def set_context(self, instructions: str) -> None:
+        self.contexts.append(instructions)
+
+    async def push_audio(self, pcm: bytes) -> None:
+        return None
+
+    async def add_context_item(self, text: str, *, role: str = "user") -> None:
+        return None
+
+    async def request_reply(self, spec: Any) -> Any:
+        return link.ReplyHandle()
+
+    async def cancel(self, handle: Any) -> None:
+        return None
+
+    async def end_protection(self) -> None:
+        return None
+
+    def set_reply_hold_ms(self, ms: int) -> None:
+        self.hold_calls.append(ms)
+        super().set_reply_hold_ms(ms)
+
+
+class _NoUvicorn:
+    """ui/server.UiServer without the server: holds the bound socket so the
+    teardown's stop() has something to close, serves nothing."""
+
+    def __init__(self, app: Any, sock: Any) -> None:
+        self._sock = sock
+
+    @property
+    def port(self) -> int:
+        return int(self._sock.getsockname()[1])
+
+    @property
+    def started(self) -> bool:
+        return True
+
+    def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        self._sock.close()
+
+
+@pytest.fixture
+def duplex_panel_box(
+    director_box: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, dict[str, Any]]:
+    """director_box, re-pointed at volcano_duplex with the panel wired.
+
+    The config carries two standing problems on purpose, on fields no edit
+    here touches: the gift tiers are inverted (fatal — validate.py's
+    gift_battery rule), and avatar.expression_source = "tag" on a backend that
+    speaks for itself (advisory since 2026-09-23; it was the fatal one that
+    bounced the knob). The panel handlers are caught on their way into
+    create_ui_app; nothing listens on the port.
+    """
+    director_box.write_text(
+        "config_version = 1\n" '[speech]\nprovider = "volcano_duplex"\n'
+        # "tool" so the run needs no side model (the fixture stripped every
+        # credential); reply_hold_ms starts at 0, the shipped default.
+        '[speech.volcano_duplex]\nevent_replies = "tool"\nreply_hold_ms = 0\n'
+        '[avatar]\nexpression_source = "tag"\n'
+        '[interaction]\nchattiness = "low"\n'
+        "gift_battery_medium = 1000\ngift_battery_high = 500\n"
+        '[persona]\nid = "tofu"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("volcano_api_key", "test-key-not-real")
+    _OfflineDuplex.instances.clear()
+    monkeypatch.setattr(duplex_module, "DuplexLink", _OfflineDuplex)
+    caught: dict[str, Any] = {}
+
+    def _catch_app(**kwargs: Any) -> object:
+        caught["handlers"] = kwargs["handlers"]
+        caught["settings"] = kwargs["settings"]
+        return object()
+
+    monkeypatch.setattr(server_module, "create_ui_app", _catch_app)
+    monkeypatch.setattr(server_module, "UiServer", _NoUvicorn)
+    return director_box, caught
+
+
+def _duplex_panel_args(config: Path) -> argparse.Namespace:
+    """As _director_args, minus --no-ui: the panel handlers only exist with a hub."""
+    return dev_talk.build_parser().parse_args(
+        [
+            "--director",
+            "--no-pet",
+            "--plain-console",
+            "--provider",
+            "volcano_duplex",
+            "--config",
+            str(config),
+        ]
+    )
+
+
+async def test_a_panel_knob_lands_on_the_link_despite_an_unrelated_standing_problem(
+    duplex_panel_box: tuple[Path, dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One panel.set of speech.volcano_duplex.reply_hold_ms → 300, end to end.
+
+    Three things, in the order the streamer would notice them: the receipt
+    says 已保存并生效, the live Settings carries 300, and the DuplexLink's
+    set_reply_hold_ms was called with 300 — the only consumer of the knob.
+    The standing problem is asserted first, so a green here cannot be a run
+    in which the rule simply never fired.
+    """
+    config_path, caught = duplex_panel_box
+    task = asyncio.create_task(
+        dev_talk.run_director(_duplex_panel_args(config_path)), name="test:director"
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline:
+        if (
+            "handlers" in caught
+            and _OfflineDuplex.instances
+            and _OfflineDuplex.instances[-1].contexts
+        ):
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover - only on a hang, and then the assert says so
+        task.cancel()
+        raise AssertionError("run_director 没在预期时间内把面板挂上")
+    await asyncio.sleep(0.05)
+    duplex = _OfflineDuplex.instances[-1]
+    from bilisama.ui.events import ClientEvent
+
+    try:
+        printed_before = capsys.readouterr().out
+        # Both standing problems, said at startup — the fatal one, and the
+        # advisory one judged on the provider that is running, not the file's.
+        assert "[配置错误] interaction.gift_battery_medium：" in printed_before
+        assert "[配置提醒] avatar.expression_source：表情驱动方式选了 tag" in printed_before
+        assert duplex.hold_calls == []
+
+        await caught["handlers"][ClientEvent.PANEL_SET](
+            {"config": {"path": "speech.volcano_duplex.reply_hold_ms", "value": 300}}
+        )
+        printed = capsys.readouterr().out
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    receipts = [line for line in printed.splitlines() if line.startswith("[面板] ")]
+    assert receipts, f"面板没有任何回执：{printed}"
+    assert "已保存并生效" in receipts[0], receipts
+    assert "0 → 300" in receipts[0], receipts
+    assert "礼物门槛" not in receipts[0] and "表情" not in receipts[0], receipts
+    assert caught["settings"].speech.volcano_duplex.reply_hold_ms == 300
+    assert duplex.hold_calls == [300]
+    assert duplex._reply_hold_ms == 300
+    # And it landed on disk, wherever the writer routes this field (the user
+    # layer of the active profile, under the box's XDG data home).
+    from bilisama.config.persist import TomlConfigWriter
+
+    written = TomlConfigWriter(config_path, caught["settings"]).target_for(
+        "speech.volcano_duplex.reply_hold_ms"
+    )
+    assert written != config_path  # the checkout stays clean: user layer, not base
+    assert "reply_hold_ms = 300" in written.read_text(encoding="utf-8")

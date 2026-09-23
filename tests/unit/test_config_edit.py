@@ -101,3 +101,104 @@ def test_field_control_shapes() -> None:
     assert port["kind"] == "number"
     assert (port["min"], port["max"]) == (0.0, 65535.0)
     assert field_control(Settings.model_fields["active_profile"])["kind"] == "text"
+
+
+# ------------------------------------------------------------ the checked gate
+
+
+def _duplex_settings(*, inverted_tiers: bool = False) -> Settings:
+    """A duplex session, as adopt_endpoint leaves it: the provider that is
+    running, not the one in the file. `inverted_tiers` plants a fatal problem
+    on the gift thresholds — a field no test here edits."""
+    from bilisama.config.enums import ProviderName
+
+    settings = Settings()
+    settings.speech.provider = ProviderName.VOLCANO_DUPLEX
+    if inverted_tiers:
+        settings.interaction.gift_battery_medium = 1000
+        settings.interaction.gift_battery_high = 500
+    return settings
+
+
+def test_a_problem_already_standing_on_another_field_does_not_block_an_edit() -> None:
+    """2026-09-23: the reply-hold knob bounced three times off the avatar's
+    expression-tag rule — a fatal problem that was there before the edit, on a
+    field the edit never touched, and that startup had not mentioned. The gate
+    is about what THIS edit breaks; a standing problem stays standing. (The
+    tag rule has since gone advisory; the inverted gift tiers stand in for it
+    as the unrelated fatal problem.)"""
+    from bilisama.config.validate import check
+    from bilisama.ui.config_edit import apply_checked_runtime_edit
+
+    settings = _duplex_settings(inverted_tiers=True)
+    assert [p.field for p in check(settings) if p.fatal] == ["interaction.gift_battery_medium"]
+
+    meta, applied = apply_checked_runtime_edit(
+        settings, "speech.volcano_duplex.reply_hold_ms", 300, config_dir=None
+    )
+
+    assert applied == 300
+    assert settings.speech.volcano_duplex.reply_hold_ms == 300
+    assert meta.label == "回复先扣多少毫秒再放"
+
+
+def test_an_edit_that_breaks_the_config_is_refused_and_rolled_back() -> None:
+    """The half the old gate got right, kept: an edit that introduces a fatal
+    rule is undone, and the refusal names the knob, the value and the rule —
+    and the OTHER field the rule reports on, so the connection is spelled out.
+    Here: switching the backend to s2s while its llm_model is blank."""
+    from bilisama.config.enums import ProviderName
+    from bilisama.ui.config_edit import apply_checked_runtime_edit
+
+    settings = _duplex_settings()
+    assert settings.speech.s2s.llm_model == ""  # the shipped default
+
+    with pytest.raises(ConfigEditError) as exc_info:
+        apply_checked_runtime_edit(settings, "speech.provider", "s2s", config_dir=None)
+
+    said = str(exc_info.value)
+    assert said.startswith("「语音后端」改不成 s2s，会连累「对话模型 id」：")
+    assert "自建语音服务需要指定对话模型 id。怎么改：" in said
+    assert settings.speech.provider is ProviderName.VOLCANO_DUPLEX
+
+
+def test_moving_an_already_broken_field_is_not_blamed_on_the_edit() -> None:
+    """The gift-tier rule embeds both numbers in its sentence. Keyed on the
+    message, a standing inversion read as NEW on every edit that moved a tier
+    without clearing it, and the refusal said 「会连累」 about a mess that
+    predates the edit. Keyed on the field, the edit goes through; the tiers
+    are still inverted, but that was true before and is not this edit's doing."""
+    from bilisama.ui.config_edit import apply_checked_runtime_edit
+
+    settings = _duplex_settings(inverted_tiers=True)  # medium 1000 > high 500
+
+    _meta, applied = apply_checked_runtime_edit(
+        settings, "interaction.gift_battery_high", 600, config_dir=None
+    )
+
+    assert applied == 600 and settings.interaction.gift_battery_high == 600
+
+
+def test_the_ordinary_refusals_still_come_first() -> None:
+    """Unknown paths, secrets and reload classes are apply_runtime_config_edit's
+    to refuse; the checked wrapper adds a rule, it does not replace the gate."""
+    from bilisama.ui.config_edit import apply_checked_runtime_edit
+
+    with pytest.raises(ConfigEditError, match="没有"):
+        apply_checked_runtime_edit(Settings(), "interaction.made_up", True, config_dir=None)
+    with pytest.raises(ConfigEditError, match="密钥"):
+        apply_checked_runtime_edit(Settings(), "speech.side.api_key_ref", "env:X", config_dir=None)
+
+
+def test_introduced_problems_are_keyed_on_the_field_alone() -> None:
+    from bilisama.config.validate import ConfigProblem
+    from bilisama.ui.config_edit import introduced_fatal_problems
+
+    standing = ConfigProblem(field="a", message="旧的")
+    reworded = ConfigProblem(field="a", message="同一个字段，句子里的数字变了")
+    fresh = ConfigProblem(field="b", message="新的")
+    advisory = ConfigProblem(field="c", message="提醒而已", fatal=False)
+
+    assert introduced_fatal_problems([standing], [reworded, fresh, advisory]) == [fresh]
+    assert introduced_fatal_problems([], [advisory]) == []
+    assert introduced_fatal_problems([standing], [standing]) == []

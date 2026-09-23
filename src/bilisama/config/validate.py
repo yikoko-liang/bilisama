@@ -211,12 +211,27 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     # synthesizer. When the provider speaks for us, the tag gets read aloud —
     # speech-to-speech's own SPEECHABLE_PATTERN (LLM/utils.py:18-20) whitelists
     # square brackets, so its filter does not save us either.
+    #
+    # Advisory, not fatal (2026-09-23): nothing in src/ reads expression_source
+    # at runtime yet — the tag path has no consumer — so this cannot break a
+    # stream today. Fatal, it refused every panel edit on a --provider
+    # volcano_duplex run (the shipped file says s2s + text_modality, so the
+    # rule only trips once the dialled provider is adopted) and printed
+    # 「配置错误」 for a fault that could not happen. Flip it back to fatal
+    # the day something reads the tags out of her text.
     if owns_tts and s.avatar.expression_source == "tag":
         problems.append(
             ConfigProblem(
                 field="avatar.expression_source",
-                message="当前语音后端自己出音频，内联表情标签会被念出来。",
-                fix="把表情驱动方式改成 lexicon 或 tool_call。",
+                message=(
+                    "表情驱动方式选了 tag，也就是把表情标记夹在回复文字里；"
+                    "现在的语音后端是服务端直接出声，这些标记拦不下来，她会把它们整个念出来。"
+                ),
+                fix=(
+                    "把「表情驱动方式」改成 lexicon（按词表配表情）"
+                    "或 tool_call（让模型单独发表情指令）。"
+                ),
+                fatal=False,
             )
         )
 
