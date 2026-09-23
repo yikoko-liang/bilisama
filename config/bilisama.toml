@@ -199,7 +199,11 @@ voice = "off"
 [avatar]
 renderer = "sprite"                     # 渲染机制：sprite 精灵图（含内置豆腐）；live2d 待接入
 model_id = ""                           # 留空 = 内置豆腐；填皮肤包目录名换肤（助手页也能点选）
-expression_source = "tag"               # 只在我们自己做 TTS 时安全
+# expression_source 说「靠什么知道她此刻的情绪、好换表情」：tag 让模型在回复里夹表情标记，lexicon 按她
+# 说出来的词匹配，tool_call 让模型单独发表情指令。形象层（阶段 4/5）还没做，这一项目前没有任何代码读，
+# 选什么都不生效。出厂选 lexicon：现在跑的后端都是自己出声，tag 的标记摘不下来、会被念出来，启动时还会
+# 多一行提醒；等形象层真落地，再按那时的后端重新定。
+expression_source = "lexicon"           # 形象层未实现，目前不生效
 
 [runtime]
 ui_port = 0

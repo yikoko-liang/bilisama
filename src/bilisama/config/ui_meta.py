@@ -220,7 +220,10 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "avatar.expression_source": FieldMeta(
         label="表情驱动方式",
-        hint="tag 只在我们自己做 TTS 时安全，否则标签会被念出来",
+        hint=(
+            "形象层还没做，这里选什么都不生效。将来生效时：tag 只在我们自己做 TTS 时安全，"
+            "后端自己出声会把标签念出来"
+        ),
         audience=Audience.DEVELOPER,
         reload=Reload.RESTART,
         group="形象",

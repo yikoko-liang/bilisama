@@ -498,8 +498,13 @@ engine 22 / restart 43；`widget`、`wizard_step`、`aliases` 三个键没有读
 ### 9.5 配了没人读的字段
 
 `speech.s2s.managed`、`audio` 的前四项、整节 `custom_tts`、`memory.db_path`、`interaction.burst_*`、
-`interaction.sc_protect_ms`、`avatar.renderer=live2d`、`room.platform`。这些字段在 ui_meta 的 hint 里
-大多已如实写明「这里选了不算数」。
+`interaction.sc_protect_ms`、`avatar.renderer=live2d`、`avatar.expression_source`、`room.platform`。
+这些字段在 ui_meta 的 hint 里大多已如实写明「这里选了不算数」。
+
+`avatar.expression_source` 是 2026-09-23 补进来的：它管「靠什么知道她的情绪来换表情」，可形象层
+（`src/bilisama/avatar/`）和 TTS（`src/bilisama/tts/`）都是 0 字节空包，摘标记的解析器、关键词匹配器
+都不存在，提示词里也没教她写标记。出厂值同日从 tag 改成 lexicon，行为不变，只是不再让
+`validate.py` 那条「标签会被念出来」的提醒在自己出声的后端上每次启动都响（§16.8 第 106 条）。
 
 ## 10. UI
 
