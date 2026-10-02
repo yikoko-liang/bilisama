@@ -64,7 +64,9 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/runbook.md](docs/runbook.md) | 操作手册：一键启动、起服务器、dev-talk、面板六页、直播 Mock、常见坑 |
 | [docs/speech-backends.md](docs/speech-backends.md) | 语音后端这一层是什么：四个功能域、SpeechLink 合同、五个后端的协议对照、两条主线走一遍。隔一阵子回来先看这份 |
 | [docs/architecture-status.md](docs/architecture-status.md) | 架构现状梳理（2026-09-03）：四个功能域逐模块实现到哪、接缝在哪、哪些字段有名无实；跟计划对着读 |
-| [docs/memory-map.md](docs/memory-map.md) | 记忆全景图（2026-09-23）：六层记忆各住哪、谁写谁读、活多久，设计 vs 落地逐条对，欠账和重构前要拍板的八个问题 |
+| [docs/memory-map.md](docs/memory-map.md) | 记忆全景图（2026-09-23）：记忆、人设、上下文一张图一张表；六层记忆各住哪、谁写谁读、活多久；设计 vs 落地逐条对；欠账和重构前要拍板的八个问题 |
+| [docs/reply-strategy.html](docs/reply-strategy.html) | 一条弹幕进来之后会发生什么（浏览器打开即看）：八步流程、可以自己点的模拟器、六个场景时间线、对照表和问题清单 |
+| [docs/reply-strategy-map.md](docs/reply-strategy-map.md) | 上面那个网页的文字版：每类事件的规则、五个后端的差别、数字表、问题和过时文档清单，全带代码出处 |
 | [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：四道门、测试卡、业务评分标准、历次回归记录 |
 | [docs/architecture.html](docs/architecture.html) | 架构展示页：进程全景、五条调用链、调度核心、模型清单（浏览器打开即看） |
 | [docs/latency-baseline.md](docs/latency-baseline.md) | 延迟测量设计（待实施，`branch_rate` 是第一个要量的数） |

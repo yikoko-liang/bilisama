@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BiliSama · 一条弹幕进来之后会发生什么</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --card: #ffffff;
+    --line: #e7e6e2;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-3: #8a8984;
+    --ok: #1a7f4b;   --ok-bg: #e8f5ee;
+    --wait: #a86400; --wait-bg: #fdf2e0;
+    --stop: #b3261e; --stop-bg: #fbeaea;
+    --info: #2a5fb0; --info-bg: #e9f0fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface); color: var(--ink);
+    font: 15px/1.7 -apple-system, "SF Pro SC", "PingFang SC", "Hiragino Sans GB",
+          "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 44px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  .sub { color: var(--ink-2); margin: 0 0 8px; }
+  section { margin-top: 48px; }
+  h2 { font-size: 20px; margin: 0 0 6px; }
+  .lede { color: var(--ink-2); margin: 0 0 18px; max-width: 72ch; }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f1f0ec; padding: 1px 5px; border-radius: 4px; }
+  .muted { color: var(--ink-3); font-size: 12.5px; }
+
+  /* three sentences */
+  .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .three div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .three b { display: block; font-size: 16px; margin-bottom: 4px; }
+  .three span { color: var(--ink-2); font-size: 14px; }
+
+  /* pipeline */
+  .flow { display: flex; flex-direction: column; gap: 0; }
+  .stage { display: grid; grid-template-columns: 150px 1fr 1fr; gap: 0; background: var(--card);
+           border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .stage > div { padding: 12px 16px; }
+  .stage .name { background: #f5f4f0; font-weight: 600; }
+  .stage .name small { display: block; font-weight: 400; color: var(--ink-2); font-size: 12.5px; margin-top: 2px; }
+  .stage .yes { border-left: 1px solid var(--line); }
+  .stage .no  { border-left: 1px solid var(--line); background: #fdfbf8; }
+  .stage .lab { font-size: 12px; color: var(--ink-3); display: block; margin-bottom: 2px; }
+  .down { text-align: center; color: var(--ink-3); font-size: 18px; line-height: 26px; height: 26px; }
+  .lanes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 6px; }
+  .lanes div { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13.5px; }
+  .lanes b { display: block; font-size: 13.5px; }
+
+  /* simulator */
+  .sim { display: grid; grid-template-columns: 330px 1fr; gap: 18px; align-items: start; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .panel h3 { font-size: 14px; margin: 0 0 8px; color: var(--ink-2); font-weight: 600; }
+  .panel + .panel { margin-top: 12px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .opts label { border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; font-size: 13.5px; cursor: pointer; user-select: none; }
+  .opts input { display: none; }
+  .opts label:has(input:checked) { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .checks label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; padding: 3px 0; cursor: pointer; }
+  .checks input { margin-top: 5px; }
+  select { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  .example { margin: 0 0 12px; font-size: 14px; color: var(--ink-2); }
+  .result { border-radius: 12px; padding: 14px 18px; font-size: 17px; font-weight: 600; margin-bottom: 12px; }
+  .result.ok { background: var(--ok-bg); color: var(--ok); }
+  .result.stop { background: var(--stop-bg); color: var(--stop); }
+  .result.wait { background: var(--wait-bg); color: var(--wait); }
+  .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .steps li { display: grid; grid-template-columns: 58px 1fr; gap: 12px; background: var(--card);
+              border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  .badge { font-size: 12px; font-weight: 600; border-radius: 6px; padding: 2px 0; text-align: center; height: fit-content; margin-top: 2px; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.wait { background: var(--wait-bg); color: var(--wait); }
+  .badge.stop { background: var(--stop-bg); color: var(--stop); }
+  .steps .t { font-weight: 600; }
+  .steps .b { color: var(--ink-2); font-size: 14px; }
+  .steps .w { font-size: 12px; color: var(--ink-3); }
+
+  /* scenarios */
+  .scen { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .scen article { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .scen h3 { font-size: 15.5px; margin: 0 0 8px; }
+  .tl { list-style: none; margin: 0; padding: 0; }
+  .tl li { display: grid; grid-template-columns: 62px 1fr; gap: 10px; padding: 5px 0; border-top: 1px dashed var(--line); font-size: 14px; }
+  .tl li:first-child { border-top: 0; }
+  .tl .at { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .tl .me { color: var(--info); }
+  .scen .moral { margin: 8px 0 0; font-size: 13.5px; color: var(--ink-2); background: #f5f4f0; border-radius: 8px; padding: 6px 10px; }
+
+  /* table */
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { background: #f5f4f0; font-weight: 600; font-size: 13px; color: var(--ink-2); border-top: 0; }
+  td.rank { white-space: nowrap; }
+  .pill { display: inline-block; font-size: 12px; border-radius: 6px; padding: 0 7px; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok); }
+  .pill.stop { background: var(--stop-bg); color: var(--stop); }
+
+  /* backends + problems */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .cards div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; font-size: 14px; }
+  .cards b { display: block; margin-bottom: 4px; font-size: 15px; }
+  .probs { counter-reset: p; list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  .probs li { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px 12px 52px; position: relative; font-size: 14.5px; }
+  .probs li::before { counter-increment: p; content: counter(p); position: absolute; left: 16px; top: 12px;
+                      width: 24px; height: 24px; border-radius: 50%; background: var(--stop-bg); color: var(--stop);
+                      font-weight: 700; font-size: 13px; text-align: center; line-height: 24px; }
+  .probs b { display: block; margin-bottom: 2px; }
+  .probs .w { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+  @media (max-width: 860px) { .three, .scen, .sim { grid-template-columns: 1fr; } .stage { grid-template-columns: 1fr; } .lanes { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>一条弹幕进来之后会发生什么</h1>
+  <p class="sub">BiliSama 怎么决定回不回观众、先回谁、什么时候开口、被打断了怎么办。</p>
+  <p class="muted">2026-09-30，逐条对照代码核过。行号和完整问题清单见 <code>docs/reply-strategy-map.md</code>。</p>
+</header>
+
+<section>
+  <h2>先记住三句话</h2>
+  <div class="three">
+    <div><b>每条都记，不是每条都回</b><span>弹幕、礼物、进房全部写进记忆和面板。回不回是另一回事：弹幕太多时一次只挑一条，关注和点赞从来不回。</span></div>
+    <div><b>她只有一张嘴</b><span>同一时间只说一件事，其他的排队。主播在说话、她自己在说话、上一句还没播完，都不开口。</span></div>
+    <div><b>花了钱的更优先，也更耐等</b><span>SC 排第一，普通弹幕靠后。弹幕等 20 秒没轮到就作废，SC 和礼物一直等。被主播打断时，花了钱的会重说一遍，没花钱的就算了。</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>整条路一共八步</h2>
+  <p class="lede">从上往下走。每一步左边是「这一步在问什么」，中间是大多数时候的结果，右边是没通过时会怎样。</p>
+  <div class="flow">
+    <div class="stage">
+      <div class="name">① 收到<small>B 站推过来</small></div>
+      <div class="yes"><span class="lab">大多数时候</span>先写进本机记忆库（这个人来过几次、说过什么），面板上显示出来。</div>
+      <div class="no"><span class="lab">没通过</span>几乎不会。只有每秒超过 80 条弹幕、40 个进房时，多出来的会在最前面被丢掉，SC 和礼物不受影响。</div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">② 能回吗<small>三个开关</small></div>
+      <div class="yes"><span class="lab">大多数时候</span>没暂停，这类事件的说话开关开着（出厂全开，除了关注、点赞、分享），不是主播自己打的字。</div>
+      <div class="no"><span class="lab">没通过</span>暂停时只记不回，恢复后也不补。主播自己在房间里打的字不回，只当背景让她知道。</div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">③ 走哪条路<small>按事件种类分</small></div>
+      <div class="yes" style="grid-column: span 2;">
+        <div class="lanes">
+          <div><b>挑着回：弹幕</b>一个时间窗口里只挑分最高的一条。「666」这种直接筛掉；问句、叫她、说卡了没声音这类直接入选。</div>
+          <div><b>攒一次谢：礼物</b>连击停手 1 秒后合并成一次感谢。同一个人 10 分钟内再送同一种不再谢。</div>
+          <div><b>直接回：SC、上舰、贵宾进房</b>不挑、不等，直接去排队。贵宾是在舰或戴本房 5 级以上粉丝牌的人。</div>
+          <div><b>攒一起欢迎：普通进房</b>等 1~8 秒看还有没有人进来，一句话一起欢迎。房间很热闹时不欢迎。</div>
+        </div>
+        <p class="muted" style="margin:8px 0 0">弹幕、普通进房和主动找话题共用一份「说话额度」：最多攒 2 次，冷清时每 8 秒回一次、热闹时每 60 秒回一次。用完了弹幕先存着等，进房欢迎直接放弃。礼物、SC、上舰、贵宾不占额度。</p>
+      </div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">④ 排队<small>谁先说</small></div>
+      <div class="yes"><span class="lab">大多数时候</span>分 6 档：SC → 大礼物 → 上舰 → 中礼物、贵宾进房 → 弹幕、小礼物、普通进房 → 主动找话题、戳一戳。同档先来先说。</div>
+      <div class="no"><span class="lab">没通过</span>等不到就作废：弹幕、小礼物、进房欢迎从发出算 20 秒。SC、上舰、中大礼物不会作废。</div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">⑤ 等时机<small>现在能开口吗</small></div>
+      <div class="yes"><span class="lab">大多数时候</span>主播没在说话，她没在说话，上一句的声音播完了，主播停下来后再等一小会儿（DashScope 0.6 秒，火山 1.8 秒）确认他真说完了。</div>
+      <div class="no"><span class="lab">没通过</span>继续等。哪一档都不能跳过这一步，SC 也得等主播说完。</div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">⑥ 开口<small>交给语音模型</small></div>
+      <div class="yes"><span class="lab">大多数时候</span>把这条事件写进她的对话，附上「这类事件怎么回」的要求，让她现场说。默认只说一句话。</div>
+      <div class="no"><span class="lab">例外</span>duplex 后端不能被叫着说话，要先让一个文字模型把稿子写好，她照着念。</div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">⑦ 被打断<small>主播插话、更重要的事来了</small></div>
+      <div class="yes"><span class="lab">主播插话</span>马上切掉她的声音。花了钱的回去重新排队，等主播说完从头再说一遍；没花钱的就算了。</div>
+      <div class="no"><span class="lab">更重要的事来了</span>只有她还没出声时才能插队，把原来那条挤掉。她一开口，谁来都得等她说完，只有主播插话、紧急叫停、说到屏蔽词能打断。</div>
+    </div>
+    <div class="down">↓</div>
+    <div class="stage">
+      <div class="name">⑧ 说完<small>记住自己说过什么</small></div>
+      <div class="yes" style="grid-column: span 2;">她这句话写进对话历史，下次开口时知道自己说过什么，不会把同一句欢迎连说三遍。被切掉的话不写。</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>自己点一下试试</h2>
+  <p class="lede">选一种事件，勾上现场情况，右边会一步步告诉你这条事件走到哪、为什么。规则和上面八步一致，数字取出厂设置（话痨度「中」）。</p>
+  <div class="sim">
+    <div>
+      <div class="panel">
+        <h3>来了什么</h3>
+        <div class="opts" id="events"></div>
+      </div>
+      <div class="panel">
+        <h3>现场情况</h3>
+        <div class="checks" id="situ"></div>
+      </div>
+      <div class="panel">
+        <h3>语音后端</h3>
+        <select id="backend"></select>
+      </div>
+    </div>
+    <div>
+      <p class="example" id="example"></p>
+      <div class="result" id="result"></div>
+      <ol class="steps" id="steps"></ol>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>六个真实场景</h2>
+  <p class="lede">按时间线走。蓝字是她的反应。后端按 DashScope 算。</p>
+  <div class="scen">
+    <article>
+      <h3>主播聊得正起劲，弹幕一窝蜂</h3>
+      <ol class="tl">
+        <li><span class="at">0 秒</span><span>主播开始讲一段操作，讲了 25 秒。</span></li>
+        <li><span class="at">3 秒</span><span>舰长阿强：「这是什么武器？」带问号，直接入选。主播在说话，<span class="me">先存着，不计时</span>。</span></li>
+        <li><span class="at">5 秒</span><span>小鱼：「几点下播？」也入选，也存着。</span></li>
+        <li><span class="at">8 秒</span><span>路人：「666」。<span class="me">直接筛掉</span>。</span></li>
+        <li><span class="at">25 秒</span><span>主播停下。存着的两条里只放分最高的一条：阿强是舰长，加分多。</span></li>
+        <li><span class="at">25.6 秒</span><span class="me">「阿强问这是什么武器——这是……」小鱼那条放弃。</span></li>
+      </ol>
+      <p class="moral">主播说话时弹幕不会被浪费，但也不会攒一堆一起回：每次只回最好的一条。</p>
+    </article>
+    <article>
+      <h3>她在回弹幕，SC 来了</h3>
+      <ol class="tl">
+        <li><span class="at">0 秒</span><span>她接到一条弹幕，模型开始准备回答。</span></li>
+        <li><span class="at">0.2 秒</span><span>阿强发了 30 元 SC。她还没出声，<span class="me">SC 插队，那条弹幕被挤掉，不再回</span>。</span></li>
+        <li><span class="at">另一种</span><span>如果 SC 来的时候她已经开口了：<span class="me">说完手上这句、声音播完，接着谢 SC</span>。</span></li>
+      </ol>
+      <p class="moral">插队只在她开口之前。开口之后谁都得等，免得一句话说一半被别的事件截断。</p>
+    </article>
+    <article>
+      <h3>礼物连击</h3>
+      <ol class="tl">
+        <li><span class="at">0~4 秒</span><span>小鱼连点了 10 下同一个小礼物。每一下都记进记忆，但<span class="me">一下都不谢</span>。</span></li>
+        <li><span class="at">5 秒</span><span>停手满 1 秒，合并成「小鱼送了 10 个」。</span></li>
+        <li><span class="at">5.5 秒</span><span class="me">谢一次，念礼物名，顺着名字接个小梗，不提价钱。</span></li>
+        <li><span class="at">8 分钟后</span><span>小鱼又送同一种礼物。<span class="me">不谢</span>，同一个人同一种礼物 10 分钟内只谢一次。</span></li>
+      </ol>
+      <p class="moral">礼物分三档：100 元以上郑重感谢，10 元以上热情一些，更小的轻松带过。金额永远不会被说出来，她根本看不到数字。</p>
+    </article>
+    <article>
+      <h3>一群人进房</h3>
+      <ol class="tl">
+        <li><span class="at">0 秒</span><span>房间冷清。小A 进房，开始等 1 秒看还有没有人。</span></li>
+        <li><span class="at">0.5 秒</span><span>小B 进房，一起等。</span></li>
+        <li><span class="at">1 秒</span><span class="me">「欢迎新来的朋友！」一句话，不点名，不报人数。</span></li>
+        <li><span class="at">另一种</span><span>只有小A 一个人：<span class="me">点名欢迎</span>。舰长进房：不参与合并，<span class="me">单独点名，每场一次</span>。</span></li>
+        <li><span class="at">热闹时</span><span>普通进房<span class="me">一律不欢迎</span>，这些人这一场都不会再被欢迎。</span></li>
+      </ol>
+      <p class="moral">每个人每场最多被欢迎一次。进来马上发了弹幕的人，不单独欢迎，回他的弹幕就够了。</p>
+    </article>
+    <article>
+      <h3>她谢 SC 谢到一半，主播插话</h3>
+      <ol class="tl">
+        <li><span class="at">0 秒</span><span class="me">「谢谢阿强的 SC，你问几点下……」</span></li>
+        <li><span class="at">1.5 秒</span><span>主播：「等一下，我先说个事。」</span></li>
+        <li><span class="at">1.8 秒</span><span>服务端大约 0.3 秒后告诉我们主播开口了，<span class="me">她的声音立刻切掉</span>。SC 回到队伍里。</span></li>
+        <li><span class="at">12 秒</span><span>主播说完。再等 0.6 秒。</span></li>
+        <li><span class="at">12.6 秒</span><span class="me">从头再谢一遍 SC，把问题答完。</span></li>
+      </ol>
+      <p class="moral">如果被打断的是普通弹幕，切掉就算了，不会重说。</p>
+    </article>
+    <article>
+      <h3>冷场了</h3>
+      <ol class="tl">
+        <li><span class="at">后台</span><span>每 30 秒，一个文字模型读一遍最近的弹幕、本场进展和对话，提前想好一个话题候选。</span></li>
+        <li><span class="at">0 秒</span><span>最后一条观众动静（弹幕、礼物、进房）。主播自己说话不算动静。</span></li>
+        <li><span class="at">30 秒</span><span>冷清时等够 30 秒（越热闹等越久，很热闹时不主动开口）。没人在说话，也没有别的事在排队。</span></li>
+        <li><span class="at">30.1 秒</span><span class="me">主动开个话题，比如接着刚才没聊完的事。</span></li>
+      </ol>
+      <p class="moral">主动找话题排最后一档，任何观众事件来了都能挤掉它。每小时最多 12 次。</p>
+    </article>
+  </div>
+</section>
+
+<section>
+  <h2>每类事件对照表</h2>
+  <p class="lede">档次越小越先说。「被主播打断」一栏说的是她说到一半主播插话之后，这条还会不会再说。</p>
+  <table>
+    <thead><tr><th>事件</th><th>走哪条路</th><th>档次</th><th>多久没轮到就作废</th><th>被主播打断</th><th>她怎么接</th></tr></thead>
+    <tbody>
+      <tr><td>SC</td><td>直接回</td><td class="rank">第 1 档</td><td>不作废</td><td><span class="pill ok">重说</span></td><td>先谢，再认真回正文；有问题时答问题比反复谢重要。主播私事交给主播</td></tr>
+      <tr><td>大礼物（100 元以上）</td><td>攒一次谢</td><td class="rank">第 2 档</td><td>不作废</td><td><span class="pill ok">重说</span></td><td>惊喜、郑重地谢，念礼物名；不谄媚，不承诺回报</td></tr>
+      <tr><td>上舰</td><td>直接回</td><td class="rank">第 3 档</td><td>不作废</td><td><span class="pill ok">重说</span></td><td>舰长、提督、总督一级比一级隆重；不背会员权益</td></tr>
+      <tr><td>中礼物（10~100 元）</td><td>攒一次谢</td><td class="rank">第 4 档</td><td>不作废</td><td><span class="pill ok">重说</span></td><td>比小礼物热情，念礼物名，顺着名字接个梗</td></tr>
+      <tr><td>贵宾进房</td><td>直接回，每人每场一次</td><td class="rank">第 4 档</td><td>20 秒</td><td><span class="pill stop">算了</span></td><td>按等级表示重视；换着说法，不装熟，不提消费</td></tr>
+      <tr><td>弹幕</td><td>挑着回，占额度</td><td class="rank">第 5 档</td><td>20 秒（存着的不计时）</td><td><span class="pill stop">算了</span></td><td>先想清楚是跟谁说的；提问先用一句话复述再答；多人刷同一句只回共同的；自己能答就答</td></tr>
+      <tr><td>小礼物（10 元以下）</td><td>攒一次谢</td><td class="rank">第 5 档</td><td>20 秒</td><td><span class="pill stop">算了</span></td><td>轻松谢一句，接个小梗，不叫老板</td></tr>
+      <tr><td>普通进房</td><td>攒一起欢迎，占额度</td><td class="rank">第 5 档</td><td>20 秒</td><td><span class="pill stop">算了</span></td><td>一个人点名，几个人一句不点名的欢迎，不报人数</td></tr>
+      <tr><td>主动找话题</td><td>冷场够久才有，占额度</td><td class="rank">第 6 档</td><td>30 秒</td><td><span class="pill stop">算了</span></td><td>文字模型提前想好的话题</td></tr>
+      <tr><td>戳一戳</td><td>面板或桌宠点一下，15 秒冷却</td><td class="rank">第 6 档</td><td>8 秒</td><td><span class="pill stop">算了</span></td><td>很短一句，不写进她的对话历史</td></tr>
+      <tr><td>关注、点赞、分享</td><td colspan="5">只记录、面板显示，不回。设置里的开关打开也不会说话。</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">「付费回复保护」开关（出厂关）打开后，SC 和大礼物在开口后 4 秒内不会被主播插话切掉。本地 s2s 真能做到；DashScope 实测服务端还是会自己切；火山、duplex 没测过。</p>
+</section>
+
+<section>
+  <h2>换一个语音后端，有什么不一样</h2>
+  <p class="lede">上面的八步在所有后端上都一样，差别只在第 ⑤ 步等多久、第 ⑥ 步她拿到什么要求、第 ⑦ 步多快发现主播插话。</p>
+  <div class="cards">
+    <div><b>DashScope（阿里）</b>主播停下后等 0.6 秒开口。每次回事件都附上完整的「怎么回观众」说明。主播插话约 0.33 秒被发现。</div>
+    <div><b>OpenAI GA</b>和 DashScope 一样等 0.6 秒，也附完整说明。插话多快被发现没量过。</div>
+    <div><b>火山</b>等 1.8 秒。<b style="display:inline;color:var(--stop)">完整说明送不过去</b>，她只拿到每类事件的一句话要求（见下方问题 1）。</div>
+    <div><b>火山 duplex</b>等 1.8 秒（这个数是借来的，没量过）。先让文字模型写好稿子她再念，说明书给的是写稿的模型。主播插话约 0.85 秒才被发现，比 DashScope 慢半秒，所以有个「扣住开头几百毫秒再播」的旋钮。</div>
+    <div><b>本地 s2s</b>等 1.9 秒，附完整说明。服务端自己先切她再告诉我们。唯一真能做到「付费回复不被插话切掉」的后端。</div>
+  </div>
+</section>
+
+<section>
+  <h2>现在有问题的地方</h2>
+  <p class="lede">按对直播的影响排。每条都在代码里核过；标「没实测」的是看代码推出来的。</p>
+  <ol class="probs">
+    <li><b>火山上，她没拿到完整的「怎么回观众」说明</b>其他后端每回一条事件都附一份 81 行的说明，比如「弹幕里的『你』默认指主播」「不能说礼物是送给自己的」。火山没有逐条附加的通道，原计划是塞进会话设置，但代码从来没塞过，文档和注释却都写着塞了。所以火山上她只知道每类事件的一句话要求。<div class="w">app.py:403-418；说法有误的地方：capabilities.py:41-46、volcano.py:888-892、architecture-status.md:145-147</div></li>
+    <li><b>暂停期间的 SC 和礼物，恢复后不会补谢</b>SC 在暂停时直接没了。礼物更糟：合并好的感谢在暂停里被吞掉，还会挡住这个人之后 10 分钟内同一种礼物的感谢。<div class="w">app.py:213-214、app.py:281-282、selector.py:222-232</div></li>
+    <li><b>面板上查不到「她为什么没回这条」</b>被筛掉、分不够、窗口里输了、额度用完、开关关着、暂停，这些都只写日志，面板上看不到。<div class="w">dev_talk.py:2194-2206 没接跳过回调；selector.py:17 的注释说接了</div></li>
+    <li><b>花了钱的也可能丢，也可能等太久</b>断线时排队的全丢；回复超时、说到屏蔽词被切的不会重说。反过来，花了钱的不作废，主播一直说它就一直等，可能几分钟后才谢。全分支 review 里「付费事件永不丢」那一节列了六个洞。<div class="w">docs/review-2026-09-23.md 的 C2</div></li>
+    <li><b>面板上「两次发言最短间隔」没有用</b>程序里写死成 0，改面板上的值不起作用。<div class="w">dev_talk.py:2149、2356</div></li>
+    <li><b>没登录 B 站账号时，进房的人都被当成同一个人</b>匿名连接下只有弹幕能分清谁是谁。进房的人全算一个，一场只欢迎一次；不同人送的同一种礼物会被合并成一个人的连击，只谢最后一个。没实测。<div class="w">source.py:18-22、196；selector.py:416-418</div></li>
+    <li><b>「挑着回」的分数线经常被绕过</b>弹幕里只要有「呢」「谁」「哪」，提到「主播」或「up」，或者和最近几句对话有两个字相同，就直接入选，不看分数。热闹的直播间里大部分弹幕都能满足其中一条。<div class="w">scoring.py:59-67、151-158</div></li>
+    <li><b>两份「怎么回」要手工同步，已经对不上了</b>每类一句话的要求写在代码里，81 行的完整说明写在配置文件里，改了一份容易忘另一份。现在配置文件里有几条，代码里就没有。<div class="w">intents.py:153-226 与 config/personas/live/event_responses.md，台账 #94</div></li>
+  </ol>
+</section>
+
+</main>
+
+<script>
+const EVENTS = {
+  q:     { label: '提问弹幕',   ex: '阿强：主播这是什么武器？', kind: 'danmaku', sw: '弹幕', how: '先用一句话复述问题，让只听声音的人知道她在接哪条，再给出答案。' },
+  chat:  { label: '闲聊弹幕',   ex: '小鱼（用户等级 12）：今天画面好清楚', kind: 'danmaku', sw: '弹幕', how: '简短说一下对方提到了什么，自然接一句。' },
+  junk:  { label: '「666」',    ex: '路人：666', kind: 'danmaku', sw: '弹幕' },
+  giftS: { label: '小礼物连击', ex: '小鱼连点 10 下同一个小礼物，一共 1 元', kind: 'gift', tier: 5, sw: '礼物', how: '轻松谢一句，念礼物名，顺着名字接个小梗，不叫老板，不提价钱。' },
+  giftM: { label: '中礼物',     ex: '小鱼送了一个 30 元的礼物', kind: 'gift', tier: 4, sw: '礼物', how: '比小礼物热情，念礼物名，顺着名字接个梗，不提价钱。' },
+  giftB: { label: '大礼物',     ex: '小鱼送了一个 200 元的礼物', kind: 'gift', tier: 2, sw: '礼物', how: '惊喜、郑重地谢，念礼物名；不谄媚，不承诺回报，不提价钱。' },
+  sc:    { label: 'SC',         ex: '阿强发了 30 元 SC：「主播今天几点下播？」', kind: 'sc', tier: 1, sw: 'SC', how: '先谢，再认真回答「几点下播」；这是主播的私事，交给主播本人确认。不提金额。' },
+  guard: { label: '上舰',       ex: '阿强开通了舰长', kind: 'guard', tier: 3, sw: '上舰', how: '点名欢迎成为舰长，比普通进房更有仪式感；不背会员权益，不提金额。' },
+  vip:   { label: '舰长进房',   ex: '舰长阿强进入直播间', kind: 'vip', tier: 4, sw: '贵宾进房', how: '点名欢迎，语气亲切；换着说法，不装熟，不提消费。' },
+  entry: { label: '普通进房',   ex: '小A 进入直播间', kind: 'entry', tier: 5, sw: '进房', how: '一个人就点名欢迎一句；几个人就一句不点名的欢迎，不报人数。' },
+  follow:{ label: '关注',       ex: '小B 关注了主播', kind: 'follow' },
+};
+const SITU = [
+  ['streamer', '主播正在说话，一口气说了半分钟'],
+  ['her',      '她正在回另一条弹幕，已经开口了'],
+  ['busy',     '直播间很热闹'],
+  ['broke',    '刚连着回了几条弹幕，说话额度用完了'],
+  ['paused',   '主播在面板上按了暂停'],
+  ['barge',    '她说到一半，主播插话了'],
+];
+const BACKENDS = {
+  dashscope: { name: 'DashScope', quiet: 0.6, detect: '大约 0.33 秒', full: true },
+  ga:        { name: 'OpenAI GA', quiet: 0.6, detect: '很快（没量过具体多少）', full: true },
+  volcano:   { name: '火山',      quiet: 1.8, detect: '很快（没量过具体多少）', full: false },
+  duplex:    { name: '火山 duplex', quiet: 1.8, detect: '大约 0.85 秒', full: true, ghost: true },
+  s2s:       { name: '本地 s2s',  quiet: 1.9, detect: '服务端自己先切', full: true },
+};
+const PAID = new Set(['sc', 'guard', 'giftM', 'giftB']);
+const TIERS = '6 档：SC → 大礼物 → 上舰 → 中礼物、贵宾进房 → 弹幕、小礼物、普通进房 → 主动找话题、戳一戳';
+const QUOTA = '说话额度：弹幕、普通进房、主动找话题共用，最多攒 2 次；冷清时每 8 秒回一次，热闹时每 60 秒回一次。';
+
+function simulate(key, s, bk) {
+  const ev = EVENTS[key], be = BACKENDS[bk], steps = [];
+  const add = (st, t, b, w) => steps.push({ st, t, b, w });
+  const done = (st, text) => ({ steps, final: { st, text } });
+  const paid = PAID.has(key);
+  const isDm = ev.kind === 'danmaku';
+  const tier = isDm ? 5 : ev.tier;
+
+  add('ok', '① 收到，先记下来', '不管回不回，先写进本机记忆库（这个人来过几次、说过什么），面板上也显示出来。', 'app.py:181-202');
+
+  if (s.paused) {
+    let b = '暂停时新来的事件只记不回，恢复后也不会补。';
+    if (ev.kind === 'gift') b += '礼物更糟：合并好的这次感谢被吞掉，而且接下来 10 分钟里这个人再送同一种礼物也不会被谢。这是个 bug。';
+    else if (paid) b += '花了钱的也一样，这条 SC 或上舰永远不会被感谢。';
+    add('stop', '② 能回吗：暂停了', b, 'app.py:213-214');
+    return done('stop', '不回。暂停结束后也不补。');
+  }
+  if (ev.kind === 'follow') {
+    add('stop', '② 能回吗：关注没有说话的路', '关注、点赞、分享只记录，面板上能看到。设置里有它们的开关，但打开了也不会说话。', 'intents.py:269-275');
+    return done('stop', '只记录，不回。');
+  }
+  add('ok', '② 能回吗', `没暂停，「${ev.sw}」的说话开关出厂是开着的，也不是主播自己打的字。`, 'app.py:203-230');
+
+  let heldByStreamer = false;
+  if (isDm) {
+    if (key === 'junk') {
+      add('stop', '③ 挑着回：先筛一遍', '「666」「哈哈」「来了」这种没什么信息的，直接筛掉。', 'scoring.py:68-81');
+      return done('stop', '被筛掉，不回。');
+    }
+    if (key === 'q') {
+      add('ok', '③ 挑着回：先筛一遍', '带问号，属于「一定要接」的那类（问句、叫她或主播、纠错、说卡了没声音、求助、和刚才聊的话题有关），不用打分，直接入选。', 'scoring.py:161-189');
+    } else {
+      const bar = s.busy ? 0.40 : 0.25;
+      const room = s.busy ? '热闹' : '冷清';
+      if (0.26 < bar) {
+        add('stop', '③ 挑着回：打分', `这条不是问句，要打分：字数算 0.23，用户等级算 0.02，一共 0.26。${room}时分数线是 ${bar.toFixed(2)}，没过线，筛掉。同一条弹幕在冷清的房间能过线。`, 'scoring.py:217-261');
+        return done('stop', '分数不够，不回。');
+      }
+      add('ok', '③ 挑着回：打分', `这条不是问句，要打分：字数算 0.23，用户等级算 0.02，一共 0.26。${room}时分数线是 0.25，刚好过线。热闹时线会升到 0.40，它就过不了。舰长、粉丝牌等级高的人分数会高很多。`, 'scoring.py:217-261');
+    }
+    add('ok', '③ 挑着回：同一窗口只挑一条', `弹幕按时间窗口分组，一个窗口只回分最高的一条。现在窗口是 ${s.busy ? 8 : 1} 秒（冷清 1 秒，热闹 8 秒）。这里假设它是窗口里最好的；有更好的它就输了，不回。`, 'selector.py:132-194');
+    const why = [];
+    if (s.streamer) why.push('主播正在说话');
+    if (s.broke) why.push('说话额度用完了');
+    if (why.length) {
+      heldByStreamer = s.streamer;
+      add('wait', '③ 挑着回：先存起来', `${why.join('，')}，这条先存着。存着的时候还不算开始排队，不会过期。最多存 5 条，放行时只放分最高的一条，其余放弃。${s.broke ? QUOTA : ''}`, 'dev_talk.py:2203-2205、selector.py:272-301');
+      add('ok', '③ 挑着回：放行', `${s.streamer ? '主播说完了' : ''}${s.streamer && s.broke ? '，' : ''}${s.broke ? '额度回来了' : ''}，放行，花掉一次说话额度。`, 'app.py:269-287');
+    } else {
+      add('ok', '③ 挑着回：放行', '主播没在说话，额度也还有，马上放行，花掉一次说话额度。' + QUOTA, 'app.py:269-287、event_pacing.py:39');
+    }
+  } else if (ev.kind === 'gift') {
+    add('ok', '③ 攒一次谢', '连击时不是每一下都谢：停手满 1 秒后合并成一次感谢。谢完之后 10 分钟内，同一个人再送同一种礼物不再谢。礼物不占说话额度。', 'safety.py:197-312');
+    const tierName = { 5: '小礼物（10 元以下）', 4: '中礼物（10~100 元）', 2: '大礼物（100 元以上）' }[ev.tier];
+    add('ok', '③ 按金额分档', `这是${tierName}。分档只用来决定排第几、说得多隆重，金额本身她看不到。`, 'intents.py:276-285');
+  } else if (ev.kind === 'sc' || ev.kind === 'guard') {
+    add('ok', '③ 直接回', `${ev.sw}不挑、不等窗口、不占额度，直接去排队。30 秒内同一条重复收到只算一次。${ev.kind === 'sc' ? '观众撤回的 SC，如果还在排队会被撤掉；已经在说的会说完。' : ''}`, 'app.py:324-357');
+  } else if (ev.kind === 'vip') {
+    add('ok', '③ 直接回', '在舰或戴本房 5 级以上粉丝牌的人进房，算贵宾，单独点名欢迎，不和普通进房合并，不占额度。每人每场只欢迎一次。', 'app.py:251-259、events.py:256-277');
+  } else if (ev.kind === 'entry') {
+    if (s.busy) {
+      add('stop', '③ 攒一起欢迎', '直播间很热闹时，普通进房不欢迎。而且这个人这一场都不会再被欢迎了。', 'selector.py:415-450');
+      return done('stop', '热闹时不欢迎普通进房。');
+    }
+    add('ok', '③ 攒一起欢迎', '先等 1 秒（越热闹等得越久：1、2、4、8 秒），看还有没有别人进来，一起欢迎。进来后马上发弹幕的人，不单独欢迎。每人每场只欢迎一次。', 'selector.py:386-467');
+    if (s.broke) {
+      add('stop', '③ 花说话额度', '额度用完了，这次欢迎直接放弃，面板上看不到原因。' + QUOTA, 'app.py:295-296');
+      return done('stop', '额度用完，欢迎被放弃。');
+    }
+    add('ok', '③ 花说话额度', '还有额度，花掉一次。' + QUOTA, 'app.py:289-305');
+  }
+
+  const expire = paid ? '花了钱的不作废，排多久都等。' : (isDm && heldByStreamer ? '从发出算 20 秒没轮到就作废；存着放出来的至少再给 5 秒。' : '从发出算 20 秒没轮到就作废。');
+  if (s.her) {
+    const cut = tier < 5 ? '如果她那条还没开口（模型准备回答一般要零点几秒），这条档次更高，会直接插队，把那条弹幕挤掉。' : '同档不插队，先来先说。';
+    add('wait', `④ 排队：第 ${tier} 档`, `共 ${TIERS}。她正在回另一条弹幕，而且已经开口了。开了口的话不会被别的事件打断，这条得等她说完。${cut}${expire}`, 'scheduler.py:1140-1149');
+  } else {
+    add('ok', `④ 排队：第 ${tier} 档`, `共 ${TIERS}。前面没有别的，轮到它。${expire}`, 'scheduler.py:343、intents.py:304-318');
+  }
+
+  const gate = `开口前要同时满足：主播没在说话，她没在说话，上一句声音播完，主播停下后再等 ${be.quiet} 秒确认他真说完了。哪一档都不能跳过这一步。`;
+  if (s.streamer && !heldByStreamer) {
+    if (!paid) {
+      add('stop', '⑤ 等时机', `${gate}主播一口气说了半分钟，超过了 20 秒的期限，这条作废了。`, 'scheduler.py:669-682、floor.py:139-163');
+      return done('stop', '主播说太久，等过期了，不回。');
+    }
+    add('wait', '⑤ 等时机', `${gate}主播说了半分钟，它就等了半分钟。花了钱的不作废，主播停下 ${be.quiet} 秒后开口。`, 'floor.py:139-163');
+  } else if (heldByStreamer) {
+    add('ok', '⑤ 等时机', `${gate}它是等主播说完才放出来的，再等 ${be.quiet} 秒就开口。`, 'floor.py:139-163');
+  } else if (s.her) {
+    add('ok', '⑤ 等时机', `${gate}这里等的是她说完、声音播完，播完就开口（等 ${be.quiet} 秒那一段只在主播停下后才有）。`, 'floor.py:139-163');
+  } else {
+    add('ok', '⑤ 等时机', `${gate}现在没人在说话，马上可以开口。`, 'floor.py:139-163');
+  }
+
+  let say;
+  if (be.ghost) say = 'duplex 不能直接叫她「就这条说一句」，所以先让一个文字模型按「怎么回观众」的说明把稿子写好，再交给她照着念。';
+  else if (be.full) say = '把这条事件写进她的对话，附上这类事件的一句话要求和一份 81 行的完整说明，让她现场组织语言。';
+  else say = '把这条事件和这类事件的一句话要求拼在一起发给她。81 行的完整说明在火山上送不过去（见下方问题 1）。';
+  add('ok', `⑥ 开口（${be.name}）`, `${say}她会：${ev.how}默认只说一句话。`, 'scheduler.py:727-753');
+
+  if (s.barge) {
+    const head = `主播一开口，${be.name} ${be.detect}后通知我们，她的声音马上被切掉。`;
+    if (paid) {
+      add('wait', '⑦ 被主播打断', `${head}花了钱的回到队伍里，等主播说完、再过 ${be.quiet} 秒，她从头再说一遍。`, 'scheduler.py:1026-1066、1186-1224');
+      add('ok', '⑧ 说完，记下来', '第二次完整说完。这句话写进她的对话历史，下次开口知道自己说过什么。第一次被切掉的那半句不写（DashScope 和火山上服务端自己可能留着，待验证）。', 'scheduler.py:965-985');
+      return done('ok', '会回，但被切掉一次，主播说完后从头再说。');
+    }
+    add('stop', '⑦ 被主播打断', `${head}没花钱的切掉就算了，不再回。`, 'scheduler.py:1026-1066');
+    return done('stop', '说到一半被切掉，不再回。');
+  }
+  add('ok', '⑦ 被打断了吗', '没有。她一开口，别的事件来了都得等她说完，只有主播插话、紧急叫停、说到屏蔽词能打断。', 'scheduler.py:1140-1149');
+  add('ok', '⑧ 说完，记下来', '这句话写进她的对话历史，下次开口知道自己说过什么；也留给下播时整理记忆用。', 'scheduler.py:965-985');
+
+  const waits = [];
+  if (s.streamer) waits.push('等主播说完');
+  if (isDm && s.broke) waits.push('等说话额度回来');
+  if (s.her) waits.push('等她说完手上这句');
+  let when;
+  if (waits.length) when = waits.join('、') + '再回';
+  else if (ev.kind === 'entry') when = '等 1 秒，和同时进来的人一起欢迎';
+  else if (ev.kind === 'gift') when = '连击停手 1 秒后谢一次';
+  else when = '马上回';
+  return done('ok', `会回，${when}。`);
+}
+
+const $ = (id) => document.getElementById(id);
+function build() {
+  $('events').innerHTML = Object.entries(EVENTS).map(([k, v], i) =>
+    `<label><input type="radio" name="ev" value="${k}" ${i === 0 ? 'checked' : ''}>${v.label}</label>`).join('');
+  $('situ').innerHTML = SITU.map(([k, v]) =>
+    `<label><input type="checkbox" value="${k}">${v}</label>`).join('');
+  $('backend').innerHTML = Object.entries(BACKENDS).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
+  document.querySelectorAll('input, select').forEach((el) => el.addEventListener('change', render));
+  render();
+}
+function render() {
+  const key = document.querySelector('input[name=ev]:checked').value;
+  const s = {};
+  document.querySelectorAll('#situ input').forEach((c) => { s[c.value] = c.checked; });
+  const { steps, final } = simulate(key, s, $('backend').value);
+  $('example').textContent = '例子：' + EVENTS[key].ex;
+  $('result').className = 'result ' + final.st;
+  $('result').textContent = final.text;
+  const label = { ok: '通过', wait: '等待', stop: '停下' };
+  $('steps').innerHTML = steps.map((x) =>
+    `<li><span class="badge ${x.st}">${label[x.st]}</span><div><div class="t">${x.t}</div><div class="b">${x.b}</div>${x.w ? `<div class="w">${x.w}</div>` : ''}</div></li>`).join('');
+}
+build();
+</script>
+</body>
+</html>
