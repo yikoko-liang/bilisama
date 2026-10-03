@@ -785,7 +785,7 @@ def test_no_acceptance_line_is_a_sentence_the_prompt_already_teaches() -> None:
     config_dir = Path(__file__).resolve().parent.parent.parent / "config"
     # The SHIPPED persona, not PersonaConfig()'s default. The default renders
     # {{agentName}} as "tofu" while the tool, dev-talk and the streamer all
-    # say 「豆腐」, and five of the contract's twelve examples carry the name —
+    # say 「豆腐」, and six of the contract's fifteen examples carry the name —
     # rendered with the wrong one, none of those five could ever match,
     # including the two volcano recited to earn this test its existence.
     settings = load(config_dir / "bilisama.toml")
