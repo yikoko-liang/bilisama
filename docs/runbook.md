@@ -1129,10 +1129,16 @@ echo "主播下周五发新歌" >> ~/.local/share/bilisama/personas/tofu/pinned.
 - **她开始念「AUDIENCE」了**：只会发生在门关着（`always`）而提示词还在教记号的空窗，程序切换时已经排好顺序；
   真看到了，先 `bilisama config show` 确认 `interaction.voice_reply`，再看日志里 `voice_gate.mode_changed`
   有没有到。
-- **不用直播 Mock 也能量**：`tools/voice_gate_acceptance.py --provider dashscope|s2s|volcano`（先 `source path.sh`；
+- **不用直播 Mock 也能量**：`tools/voice_gate_acceptance.py --provider dashscope|s2s|volcano|volcano_duplex`（先 `source path.sh`；
   s2s 要先按上面「起本地语音服务器」把官方管线起起来）。它走真实链路、扇出、门和调度器，主播台词用 macOS `say`
-  合成，扬声器换成计数，22 句逐句打分，报一个数「该不该说判对」（她只在对她说的时候出声），另列「该接没接」「不该接却接了」两种错误、
-  「弱线索碎句」桶（6 句真实录音碎句，**按标签挑，不按字数**）和「无输出」；八成以上、该接没接不超过一句就放行。
+  合成，扬声器换成计数，33 句逐句打分，报一个数「该不该说判对」（她只在对她说的时候出声），另列「该接没接」「不该接却接了」两种错误、
+  「弱线索碎句」桶（6 句真实录音碎句，**按标签挑，不按字数**）、「让她别出声」桶（11 句，其中 4 句的说法提示词里一个字都没教过）和「无输出」；八成以上、该接没接不超过一句就放行。
+
+  跑 duplex 要加 `--steady-uplink`（`--provider volcano_duplex` 时自动打开）：句与句之间一直推静音帧，像生产的麦克风一样不断流。
+  不加的话，服务端等不到收尾要的那段静音，判停边沿会丢、整句无输出，2026-09-24 一轮 8 句里 3 句这样。
+  对比两版提示词用 `--prompt-dir DIR`（目录下放 `personas/live/voice_responses.md` 和 `voice_addressing.md`，
+  出货那份不动）、`--only-quiet`（只跑「让她别出声」这一类）、`--json FILE`（逐句结果存下来汇总）。两版要在同一时间窗里
+  **交错**跑、每轮对调先后，理由见工具文件头：端点的工作点一小时内能漂好几倍。
 
   **这套台词在 2026-09-09 重建过，旧成绩不可比。** 旧版 22 句里 7 条正样本全部显式点名「豆腐」，反例也都带足
   「家人们」「谢谢小明」这类关键词，于是同一份提示词在旧集上拿 95%、实盘只有 26%~49%——一整天都在考送分题。

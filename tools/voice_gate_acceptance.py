@@ -15,6 +15,11 @@ Usage::
     .venv/bin/python tools/voice_gate_acceptance.py --provider dashscope
     .venv/bin/python tools/voice_gate_acceptance.py --provider s2s      # server on :8765
     .venv/bin/python tools/voice_gate_acceptance.py --provider volcano
+    .venv/bin/python tools/voice_gate_acceptance.py --provider volcano_duplex
+
+    # One class only, a candidate prompt, results kept for comparison:
+    .venv/bin/python tools/voice_gate_acceptance.py --provider volcano_duplex \
+        --only-quiet --prompt-dir /tmp/candidate --json /tmp/run1.json
 
 One score, 该不该说判对, plus two error columns kept apart because they cost
 different things: 该接没接 (she stayed silent when spoken to) and
@@ -40,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -113,6 +119,11 @@ class Line:
     # two lines that were never recording fragments, missed one that was,
     # and silently changed size when the set was decontaminated (7 → 6).
     weak_cue: bool = False
+    # The 「让她别出声」 boundary and its controls (2026-09-24): the streamer
+    # tells her to be quiet, which is addressed to her AND wants silence.
+    # duplex answered 「收到，立刻静音」 to one of these live. --only-quiet runs
+    # this bucket alone, which is what an A/B on that boundary needs.
+    quiet: bool = False
 
 
 # No line here may be a sentence the prompt's own examples use. A model that
@@ -166,7 +177,39 @@ LINES: tuple[Line, ...] = (
     # --- 出现她的名字但不是在叫她
     Line("你们说豆腐这个反应是不是有点慢", False, "提到她的名字，但在问观众"),
     # --- 明确要求先听
-    Line("豆腐 这段你别插话 让我讲完这个事", False, "明确说给她听，但本轮要求安静"),
+    Line("豆腐 这段你别插话 让我讲完这个事", False, "明确说给她听，但本轮要求安静", quiet=True),
+    # --- 让她别出声，问句也算（2026-09-24 duplex 实盘：第二遍她回了「收到，立刻静音」）
+    Line("你能给我闭嘴吗", False, "问句形式的「别出声」，照做就是不出声", quiet=True),
+    Line(
+        "你可以闭嘴吗",
+        False,
+        "刚让她别出声、她已经先听了，又说一遍",
+        setup=("豆腐 你先别出声",),
+        quiet=True,
+    ),
+    Line("豆腐 你先安静一会儿", False, "点名让她安静", quiet=True),
+    Line("能不能别说了 吵死了", False, "嫌吵、让停下，没点名", quiet=True),
+    # 对照：带「说」「别」但不是让她闭嘴，也不能被一并压掉
+    Line("别光说了 给大家唱两句", True, "让她换一件事做，不是让她安静", quiet=True),
+    Line(
+        "好了 你可以说话了 刚才那局你怎么看",
+        True,
+        "安静之后明确让她开口，得恢复接话",
+        setup=("豆腐 你先别说话",),
+        quiet=True,
+    ),
+    Line("你怎么不说话了", True, "问她为什么不吭声，是在跟她说话", quiet=True),
+    # 留出来的几句：用词在提示词里一个都没出现过，测的是判断，不是背例子
+    Line("豆腐 你嘴歇会儿行不行", False, "没教过的说法：让她停嘴", quiet=True),
+    Line("行了行了 憋着吧", False, "没教过的说法：不耐烦地让停", quiet=True),
+    Line(
+        "你能不能歇会儿嘴",
+        False,
+        "没教过的说法：刚让她停过，又说一遍",
+        setup=("豆腐 先憋会儿",),
+        quiet=True,
+    ),
+    Line("你可以说得详细一点吗", True, "问句加「说」，但是要她多说，不能被压掉", quiet=True),
     # --- 弱线索碎句：实盘失灵段的原话
     Line("在这里", False, "真实录音里的碎句，几乎没有线索", weak_cue=True),
     Line("上去", False, "同上，两个字的自语", weak_cue=True),
@@ -266,10 +309,40 @@ def _load_wav(path: Path) -> bytes:
         return pcm
 
 
-async def _push(speech: link.SpeechLink, pcm: bytes) -> None:
-    for i in range(0, len(pcm), _FRAME):
-        await speech.push_audio(pcm[i : i + _FRAME])
-        await asyncio.sleep(0.02)
+class _Uplink:
+    """The line pusher, and — when steady — the silence between lines.
+
+    Production's microphone never stops: dev-talk pushes a frame every 20 ms,
+    silence included. This tool used to push a line and its 2.5 s tail and
+    then nothing until the next line, which DashScope does not mind and
+    volcano_duplex does: its end-of-speech edge went missing and turns hung
+    to the watchdog (2026-09-24, three of eight lines with no reply at all).
+    `steady` keeps a zero frame going whenever no line is being pushed.
+    """
+
+    def __init__(self, speech: link.SpeechLink, *, steady: bool) -> None:
+        self._speech = speech
+        self._steady = steady
+        self._busy = asyncio.Lock()
+
+    async def push(self, pcm: bytes) -> None:
+        async with self._busy:
+            for i in range(0, len(pcm), _FRAME):
+                await self._speech.push_audio(pcm[i : i + _FRAME])
+                await asyncio.sleep(0.02)
+
+    async def idle_fill(self) -> None:
+        if not self._steady:
+            return
+        zero = b"\x00" * _FRAME
+        while True:
+            if not self._busy.locked():
+                await self._speech.push_audio(zero)
+            await asyncio.sleep(0.02)
+
+
+async def _push(uplink: _Uplink, pcm: bytes) -> None:
+    await uplink.push(pcm)
 
 
 async def _watch_raw(view: AsyncIterator[link.LinkEvent], books: _Books) -> None:
@@ -289,12 +362,39 @@ async def _watch_speakers(view: AsyncIterator[link.LinkEvent], books: _Books) ->
             books.audio[event.handle.handle_id] = books.audio.get(event.handle.handle_id, 0) + 1
 
 
-def _instructions(persona: PersonaStore, variables: dict[str, str]) -> str:
-    rules = live_voice_rules(_CONFIG, variables, addressing=True)
+def _instructions(persona: PersonaStore, variables: dict[str, str], prompt_dir: Path) -> str:
+    """The session instructions: anchors, then the voice contract.
+
+    `prompt_dir` stands where config/ does for the two voice files only
+    (personas/live/voice_responses.md and voice_addressing.md), so a candidate
+    contract can be measured against the shipped one without editing it.
+    """
+    rules = live_voice_rules(prompt_dir, variables, addressing=True)
     return assemble_scoped(static_prefix(persona.anchors(variables)), rules)
 
 
-async def _setup_turn(speech: link.SpeechLink, books: _Books, pcm: bytes, silence: bytes) -> None:
+def _write_json(path: Path, provider: str, prompt_dir: Path, results: list[Result]) -> None:
+    """One run, machine-readable, so interleaved A/B arms can be tallied."""
+    rows = [
+        {
+            "text": r.line.text,
+            "should_answer": r.line.should_answer,
+            "quiet": r.line.quiet,
+            "head": r.head,
+            "skipped": r.skipped,
+            "spoke": r.spoke,
+            "no_output": r.no_output,
+            "decided_right": r.decided_right,
+            "status": r.status,
+            "seconds": round(r.seconds, 2),
+        }
+        for r in results
+    ]
+    payload = {"provider": provider, "prompt_dir": str(prompt_dir), "results": rows}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+async def _setup_turn(uplink: _Uplink, books: _Books, pcm: bytes, silence: bytes) -> None:
     """Speak a line and wait it out without scoring it.
 
     The scored line needs the conversation in a particular state — she has
@@ -303,8 +403,8 @@ async def _setup_turn(speech: link.SpeechLink, books: _Books, pcm: bytes, silenc
     """
     dones_before = len(books.dones)
     deadline = time.monotonic() + _REPLY_TIMEOUT_S
-    await _push(speech, pcm)
-    await _push(speech, silence)
+    await _push(uplink, pcm)
+    await _push(uplink, silence)
     while time.monotonic() < deadline:
         for done in books.dones[dones_before:]:
             hid = done.handle.handle_id
@@ -315,13 +415,13 @@ async def _setup_turn(speech: link.SpeechLink, books: _Books, pcm: bytes, silenc
 
 
 async def _one_line(
-    speech: link.SpeechLink, books: _Books, line: Line, pcm: bytes, silence: bytes
+    uplink: _Uplink, books: _Books, line: Line, pcm: bytes, silence: bytes
 ) -> Result:
     result = Result(line=line)
     dones_before = len(books.dones)
     started_at = time.monotonic()
-    await _push(speech, pcm)
-    await _push(speech, silence)
+    await _push(uplink, pcm)
+    await _push(uplink, silence)
     deadline = started_at + _REPLY_TIMEOUT_S
     while time.monotonic() < deadline:
         for done in books.dones[dones_before:]:
@@ -402,8 +502,23 @@ def _render(results: list[Result]) -> str:
     return "\n".join(rows)
 
 
-async def _run(provider: str, model: str, voice: str, replay: Path | None = None) -> int:
+async def _run(
+    provider: str,
+    model: str,
+    voice: str,
+    replay: Path | None = None,
+    *,
+    prompt_dir: Path = _CONFIG,
+    only_quiet: bool = False,
+    json_out: Path | None = None,
+    steady_uplink: bool = False,
+) -> int:
     logging.basicConfig(level=logging.WARNING)
+    lines = tuple(line for line in LINES if line.quiet) if only_quiet else LINES
+    # duplex without a steady uplink is not a measurement: it waits for
+    # trailing silence before finishing a reply, and a third of the lines came
+    # back with no output at all (2026-09-24).
+    steady_uplink = steady_uplink or provider == "volcano_duplex"
     settings = load(_CONFIG / "bilisama.toml")
     endpoint = resolve_endpoint(
         settings, provider=provider, url=None, model=model or None, env=os.environ
@@ -435,17 +550,17 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
     detail = f"  模型：{model}" if model else ""
     if provider == "volcano":
         detail += f"  音色：{settings.speech.volcano.speaker}"
-    print(f"后端：{endpoint.provider.value}{detail}  地址：{built.url}")
+    print(f"后端：{endpoint.provider.value}{detail}  地址：{built.url}  提示词：{prompt_dir}")
     audio: dict[str, bytes] = {}
     silence = b""
     recorded = b""
     if replay is None:
         print("合成台词…", end="", flush=True)
-        wanted = {line.text for line in LINES} | {t for line in LINES for t in line.setup}
+        wanted = {line.text for line in lines} | {t for line in lines for t in line.setup}
         audio = {text: _say(text) for text in sorted(wanted)}
         silence = b"\x00" * int(16000 * _TAIL_S) * 2
-        setups = sum(len(line.setup) for line in LINES)
-        print(f" {len(LINES)} 句评分 + {setups} 句铺垫")
+        setups = sum(len(line.setup) for line in lines)
+        print(f" {len(lines)} 句评分 + {setups} 句铺垫")
     else:
         recorded = _load_wav(replay)
         print(f"回放 {replay}：{len(recorded) / 32000:.0f} 秒，按实时速度推")
@@ -473,28 +588,30 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
     speech.set_gate(gate)
     raw_view, gated_view = speech.events(), speech.gated_events()
     speech.start()
+    uplink = _Uplink(speech, steady=steady_uplink)
     tasks = [
         asyncio.create_task(scheduler.run()),
         asyncio.create_task(_watch_raw(raw_view, books)),
         asyncio.create_task(_watch_speakers(gated_view, books)),
+        asyncio.create_task(uplink.idle_fill()),
     ]
     results: list[Result] = []
     try:
-        await speech.set_context(_instructions(persona, variables))
+        await speech.set_context(_instructions(persona, variables, prompt_dir))
         await asyncio.sleep(1.0)
         if replay is not None:
-            await _push(speech, recorded)
+            await _push(uplink, recorded)
             print(f"音频推完，再等 {_REPLAY_DRAIN_S:.0f} 秒收最后一轮…")
             await asyncio.sleep(_REPLAY_DRAIN_S)
         else:
-            for line in LINES:
+            for line in lines:
                 for cue in line.setup:
-                    await _setup_turn(speech, books, audio[cue], silence)
-                result = await _one_line(speech, books, line, audio[line.text], silence)
+                    await _setup_turn(uplink, books, audio[cue], silence)
+                result = await _one_line(uplink, books, line, audio[line.text], silence)
                 results.append(result)
                 want = "要接" if line.should_answer else "别接"
                 got = "拦下" if result.skipped else ("出声" if result.spoke else "无输出")
-                print(f"{len(results):>2}/{len(LINES)} {want} → {got:<4} {result.head}")
+                print(f"{len(results):>2}/{len(lines)} {want} → {got:<4} {result.head}")
     finally:
         for task in tasks:
             task.cancel()
@@ -507,6 +624,8 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
         print(f"门：{gate.status()}")
         return 0
 
+    if json_out is not None:
+        _write_json(json_out, endpoint.provider.value, prompt_dir, results)
     print()
     print(_render(results))
     scored = [r for r in results if not r.no_output]
@@ -519,6 +638,7 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
     under = sum(r.under_skip for r in scored)
     dead = len(results) - total
     hard = [r for r in scored if r.line.weak_cue]
+    quiet = [r for r in scored if r.line.quiet]
     print()
     print(
         f"该不该说判对 {decided}/{total} = {decided / total:.0%}   "
@@ -529,6 +649,9 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
         print(
             f"其中弱线索碎句 {hard_ok}/{len(hard)} = {hard_ok / len(hard):.0%}（实盘就栽在这一类）"
         )
+    if quiet and not only_quiet:
+        quiet_ok = sum(r.decided_right for r in quiet)
+        print(f"其中「让她别出声」一类 {quiet_ok}/{len(quiet)} = {quiet_ok / len(quiet):.0%}")
     print(f"无输出 {dead} 句（被取消或空回复，不计入上面两个错误率）")
     print(f"门：{gate.status()}")
     mean_s = sum(r.seconds for r in results) / len(results)
@@ -540,7 +663,9 @@ async def _run(provider: str, model: str, voice: str, replay: Path | None = None
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="语音门验收：真实后端、合成台词、逐句对照")
-    parser.add_argument("--provider", required=True, choices=["s2s", "dashscope", "volcano"])
+    parser.add_argument(
+        "--provider", required=True, choices=["s2s", "dashscope", "volcano", "volcano_duplex"]
+    )
     parser.add_argument("--model", default="", help="覆盖模型；火山上它决定人设走哪个字段")
     parser.add_argument("--voice", default="", help="覆盖音色；火山上必须和模型代际配对")
     parser.add_argument(
@@ -550,8 +675,37 @@ def main(argv: list[str] | None = None) -> int:
         help="不合成台词，改回放一段 dev-talk --record-uplink 录下的上行 WAV："
         "同一份指令、同一个门，换成真实直播的音频",
     )
+    parser.add_argument(
+        "--prompt-dir",
+        type=Path,
+        default=_CONFIG,
+        help="换一版语音合同来测：目录下要有 personas/live/voice_responses.md 和 "
+        "voice_addressing.md，默认就是 config/ 里出货的那份",
+    )
+    parser.add_argument(
+        "--only-quiet", action="store_true", help="只跑「让她别出声」这一类台词和它的对照"
+    )
+    parser.add_argument(
+        "--json", type=Path, default=None, help="逐句结果另存一份 JSON，交错对比两版时汇总用"
+    )
+    parser.add_argument(
+        "--steady-uplink",
+        action="store_true",
+        help="句与句之间一直推静音帧，像生产的麦克风一样不断流；duplex 不加会丢判停、整句无输出",
+    )
     args = parser.parse_args(argv)
-    return asyncio.run(_run(args.provider, args.model, args.voice, args.replay))
+    return asyncio.run(
+        _run(
+            args.provider,
+            args.model,
+            args.voice,
+            args.replay,
+            prompt_dir=args.prompt_dir,
+            only_quiet=args.only_quiet,
+            json_out=args.json,
+            steady_uplink=args.steady_uplink,
+        )
+    )
 
 
 if __name__ == "__main__":
