@@ -503,8 +503,16 @@ source path.sh && .venv/bin/python tools/side_latency.py
 
 #### 另外三条实测
 
-- **人设中途能改。** `session.update` 改 `instructions` 当场生效（改前答「豆腐」、改后答「小明」），
-  比 SC2.0 强——语音门的合同可以重推，不用换会话。
+- **人设中途能改，但会话的第一轮听不到。** 已经聊过一轮之后，`session.update` 改 `instructions`
+  从下一轮起生效（改前答「豆腐」、改后答「小明」），比 SC2.0 强——语音门的合同可以重推，不用换会话。
+  可会话建好、还没发生任何一轮时发的 update，第一轮根本听不见：2026-09-24 实测三次，空提示词建会话再补推
+  人设，第一句问名字她都答「我叫豆包，是字节跳动开发的AI助手」，第一句「别插话」也直接回了话；建会话时就带上
+  人设，三次都答「我叫豆腐呀」、都写了 `[SKIP]`。dev-talk 是先连后拼提示词的，**所以此前每一场开播的第一句，
+  她既没人设也没语音门合同**（日志里每场 `duplex.session_started` 的 `context_len` 都是 0）。现在适配器在空会话
+  拿到第一份人设时，带着它重建一次会话（日志 `duplex.session_recreated`），之后再推还是原地 update。
+  重建时先停上行再关旧连接：顺序反过来，并发推的一帧会撞上正在关的连接抛异常，推帧的一方就此停掉，服务端
+  等不到它收尾要的那段静音，她说完的每一轮都挂到看门狗——这个坑是验收时踩出来的，单测
+  `test_the_uplink_keeps_flowing_through_the_recreate` 钉着。
 - **历史只在建会话时进得去**，走 `extension.dialog.dialog_context`。中途的
   `conversation.item.create` 回 `conversation.item.added`、带 `dialog_context` 的
   `session.update` 回 `session.updated`，两个都是**收下了但她看不见**。所以

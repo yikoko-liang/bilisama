@@ -473,16 +473,111 @@ async def test_an_event_outside_the_vocabulary_is_never_sent() -> None:
             await duplex.aclose()
 
 
-async def test_the_persona_goes_out_in_place() -> None:
-    """instructions are the one thing this protocol applies mid-session —
-    probed by name-swap on the real endpoint. No session churn for a persona."""
+async def test_a_persona_pushed_before_her_first_turn_rides_a_fresh_create() -> None:
+    """dev-talk connects the link before the assembly has built a context, so
+    every duplex session used to be created EMPTY and handed the persona by
+    session.update. Her first turn does not hear that update: live, three runs
+    out of three, the first answer to 「你叫什么名字」 was 「我叫豆包，是字节
+    跳动开发的AI助手」, and the first 「别插话」 was answered aloud instead of
+    marked (2026-09-24). Every stream opened with her off-persona and off the
+    voice contract. The first persona on an empty session therefore goes out
+    on a new session.create, which her first turn does obey."""
     async with MockDuplexServer() as server:
         duplex = _link(server)
         await duplex.connect()
         try:
             await duplex.set_context("你叫豆腐")
-            await _settles(lambda: server.instructions == "你叫豆腐", "人设没推到服务端")
-            assert server.recorded.count("session.create") == 1, "改人设不该换会话"
+            await _settles(
+                lambda: server.heard_instructions == "你叫豆腐", "第一轮用的还不是这份人设"
+            )
+            creates = server.recorded.of("session.create")
+            assert len(creates) == 2, "空会话拿到第一份人设，要带着它重建一次"
+            assert creates[-1]["session"]["instructions"] == "你叫豆腐"
+            assert "id" not in creates[-1]["session"], "空会话没什么可接续的，重建用新会话"
+            assert server.recorded.count("session.close") == 1, "旧会话要按厂商要求正式关掉"
+            assert server.connections == 2
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not [
+                e for e in pending if isinstance(e, link.LinkDown | link.LinkUp)
+            ], "重建是适配器自己的事，不该让上层看到一次断线"
+        finally:
+            await duplex.aclose()
+
+
+async def test_the_uplink_keeps_flowing_through_the_recreate() -> None:
+    """The recreate swaps the socket under a live uplink, and the uplink must
+    not notice. Found live 2026-09-24: session.close went out while the link
+    still called itself started, a concurrent push_audio landed on the closing
+    socket and raised, and the caller's pump died on it. From then on nothing
+    reached the server between the streamer's lines, the endpoint never saw
+    the silence it waits for before finishing a reply, and every turn she
+    ANSWERED hung until the watchdog (the ones the gate cancels were fine,
+    which is why only half the acceptance set went quiet)."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        raised: list[BaseException] = []
+        stop = asyncio.Event()
+
+        async def pump() -> None:
+            while not stop.is_set():
+                try:
+                    await duplex.push_audio(b"\x00" * 640)
+                except Exception as exc:  # the assertion below reports it
+                    raised.append(exc)
+                    return
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(pump())
+        try:
+            await asyncio.sleep(0.05)
+            await duplex.set_context("你叫豆腐")
+            await _settles(lambda: server.connections == 2, "没有带着人设重建")
+            before = server.recorded.count("input_audio_buffer.append")
+            await asyncio.sleep(0.05)
+            stop.set()
+            await task
+            assert not raised, f"换会话时上行推帧抛了异常，推帧的一方会就此停掉：{raised!r}"
+            assert server.recorded.count("input_audio_buffer.append") > before, "重建之后上行没接上"
+        finally:
+            stop.set()
+            await duplex.aclose()
+
+
+async def test_a_later_persona_goes_out_in_place() -> None:
+    """Once the session carries a persona, instructions ARE heard from the next
+    turn — probed by name-swap on the real endpoint — so later pushes stay a
+    session.update. Recreating on every push would throw away the history the
+    server holds, and dev-talk pushes every few minutes."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex.set_context("你叫豆腐")
+            await _settles(lambda: server.connections == 2, "第一份人设没带着重建")
+            await duplex.set_context("你叫豆腐，今天播到十点")
+            await _settles(
+                lambda: server.instructions == "你叫豆腐，今天播到十点", "后来的人设没推到服务端"
+            )
+            assert (
+                server.recorded.count("session.create") == 2
+            ), "会话有了人设之后，改人设不该再换会话"
+            assert server.recorded.count("session.update") == 1
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_persona_set_before_connect_needs_no_second_session() -> None:
+    """The order that never needed the fix: the context is there before the
+    socket, so the one session.create already carries it."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.set_context("你叫豆腐")
+        await duplex.connect()
+        try:
+            assert server.heard_instructions == "你叫豆腐"
+            assert server.recorded.count("session.create") == 1
+            assert server.recorded.count("session.update") == 0
         finally:
             await duplex.aclose()
 

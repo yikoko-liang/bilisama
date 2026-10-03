@@ -160,7 +160,7 @@ duplex 上线上一帧都没有 —— 它的 `add_context_item` 只是攒着等
 | `SpeechLink` | s2s / dashscope / openai_ga | volcano（数字号） | volcano_duplex |
 |---|---|---|---|
 | `connect` | 开 socket，等 `session.created` | `StartSession` **100** | 我们先发 `session.create` |
-| `set_context` | `session.update` | `UpdateConfig`（SC2.0 改不了，只能换会话） | `session.update` |
+| `set_context` | `session.update` | `UpdateConfig`（SC2.0 改不了，只能换会话） | 空会话拿到第一份人设时**带着它重建会话**（第一轮听不到 update，2026-09-24 实测）；之后 `session.update` |
 | `push_audio` | `input_audio_buffer.append` | 二进制音频帧 | `input_audio_buffer.append` |
 | `add_context_item` | `conversation.item.create` | **本地攒着** | **本地攒着** |
 | `request_reply` | `response.create` | `ChatTextQuery` **501** | `speech_text_buffer.commit`（打招呼） |

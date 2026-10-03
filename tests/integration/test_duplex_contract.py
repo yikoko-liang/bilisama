@@ -439,6 +439,34 @@ async def test_instructions_apply_mid_session(tmp_path: Path) -> None:
         assert "小明" in s.said, f"改完人设该改口，她说的是 {s.said!r}"
 
 
+async def test_an_update_before_her_first_turn_is_not_heard_by_it(tmp_path: Path) -> None:
+    """Why DuplexLink.set_context recreates a session that was created empty.
+
+    The rename above works because a turn has already happened when the
+    update goes out. dev-talk's order is the other one — connect with no
+    instructions, push the persona, THEN the streamer speaks — and that first
+    turn answers as the vendor's default assistant. Measured 2026-09-24,
+    three runs out of three: 「我叫豆包，是字节跳动开发的AI助手」. If this ever
+    goes red, the recreate in set_context has become unnecessary churn.
+    """
+    async for s in _open(tmp_path, _create(instructions="")):
+        await s.send(
+            {
+                "type": "session.update",
+                "event_id": "persona",
+                **session_body(
+                    VolcanoDuplexConfig(), instructions=_PERSONA, model=_MODEL, speaker=_VOICE
+                ),
+            }
+        )
+        await s.collect(3)
+        assert s.kinds["session.updated"], f"update 该有回执，收到的是 {dict(s.kinds)}"
+        await s.speak("你叫什么名字")
+        await s.collect(13)
+        assert s.said, "第一轮她得开口，不然这条测不出任何东西"
+        assert "豆腐" not in s.said, f"第一轮听见了建会话之后的人设，重建就多余了：{s.said!r}"
+
+
 # ------------------------------------------------------------ 4. what it sounds like
 
 

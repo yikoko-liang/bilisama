@@ -35,6 +35,14 @@ What it insists on:
   on it, which is harder to notice and worse to ship. The acks are what makes
   all this worth modelling — a client cannot tell success from silence by the
   reply, only by asking her afterwards.
+* **Her first turn only hears the instructions she was CREATED with.** A
+  `session.update` sent before any turn acks with `session.updated` and is
+  not heard by that first turn: she answers as the vendor's default
+  assistant (「我叫豆包，是字节跳动开发的AI助手」), three runs out of three,
+  measured 2026-09-24; the same persona riding `session.create` is obeyed on
+  the first turn every time. After a turn has happened, an update IS heard
+  from the next one (test_duplex_contract.py's mid-session rename).
+  `heard_instructions` is what her next turn runs on.
 * **Transcription carries the speech edges.** There is no
   `input_audio_buffer.speech_started`; `...transcription.started` is the
   earliest one, its deltas are CUMULATIVE, and `...completed` comes back with
@@ -131,6 +139,12 @@ class MockDuplexServer:
         self.tool_results: list[str] = []
         self.tools: list[dict[str, Any]] = []
         self.instructions = ""
+        # What session.create carried, and whether this session has had a
+        # turn yet — together they decide heard_instructions.
+        self._create_instructions = ""
+        self._turned = False
+        # Connections the client has opened; one session each.
+        self.connections = 0
         self.session_id = "sess-1"
         self._refuse_session = refuse_session
         # Takes a speech_text_buffer.replacement and plays nothing: no error,
@@ -173,10 +187,24 @@ class MockDuplexServer:
     async def wait_ready(self) -> None:
         await asyncio.wait_for(self._ready.wait(), timeout=5.0)
 
+    @property
+    def heard_instructions(self) -> str:
+        """The instructions her NEXT turn actually runs on.
+
+        The create-time ones until this session has had a turn; after that,
+        the latest. An update sent into a fresh session is acked and not heard
+        by the first turn — see the module note.
+        """
+        return self.instructions if self._turned else self._create_instructions
+
     # ------------------------------------------------------------ the wire
 
     async def _handle(self, ws: ServerConnection) -> None:
         self._ws = ws
+        # The rule is per CONNECTION: a client that reconnects or recreates
+        # its session opens a new socket and creates again on it.
+        self._created = False
+        self.connections += 1
         try:
             async for raw in ws:
                 if not self._refuse("上行必须是 JSON 文本帧，不是二进制", ok=isinstance(raw, str)):
@@ -205,7 +233,9 @@ class MockDuplexServer:
         if kind == "session.update":
             session = frame.get("session") or {}
             if "instructions" in session:
-                # Instructions DO apply mid-session — the one thing that does.
+                # Instructions DO apply mid-session — the one thing that does —
+                # but only from the turn after one has happened. Before that,
+                # heard_instructions still answers with the create-time ones.
                 self.instructions = str(session["instructions"])
             # dialog_context here is acked and dropped, which is the trap.
             await self._send(ws, {"type": "session.updated"})
@@ -280,6 +310,8 @@ class MockDuplexServer:
             return
         session = frame.get("session") or {}
         self.instructions = str(session.get("instructions") or "")
+        self._create_instructions = self.instructions
+        self._turned = False
         self.tools = list(session.get("tools") or [])
         dialog = list(
             ((frame.get("extension") or {}).get("dialog") or {}).get("dialog_context") or []
@@ -315,6 +347,7 @@ class MockDuplexServer:
         """
         ws = self._ws
         assert ws is not None
+        self._turned = True
         head, tail = (text[:_AHEAD], text[_AHEAD:]) if not ours else ("", "")
         for ch in head:
             await self._send(ws, {"type": "response.output_text.delta", "delta": ch})

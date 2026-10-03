@@ -97,8 +97,18 @@ History reaches the model ONLY at `session.create`, through
 `extension.dialog.dialog_context`. Mid-session `conversation.item.create` acks
 with `conversation.item.added` and `session.update` with a `dialog_context`
 acks with `session.updated`; neither changes what she knows. Same shape as
-SC2.0's character manifest, and the same remedy — a new session — which
-`set_context` uses for the persona.
+SC2.0's character manifest, and the same remedy — a new session.
+
+Instructions are the exception, with a catch. `session.update` does change
+them mid-session, from the turn after one has happened (a live rename,
+2026-09-16). But her FIRST turn only hears what `session.create` carried: an
+update sent into a fresh session is acked and ignored by that turn. Measured
+2026-09-24, three runs each: created empty and updated, her first answer to
+「你叫什么名字」 was 「我叫豆包，是字节跳动开发的AI助手」 and her first
+「别插话」 went out aloud; created with the persona, 「我叫豆腐呀」 and a
+`[SKIP]`. dev-talk connects before it has a context, so every stream opened
+that way. `set_context` therefore recreates a session that was created empty,
+and updates in place after that.
 
 And `dialog_context` must have an EVEN number of turns, because the endpoint
 reads it positionally in pairs and does not look at `role` at all. An odd
@@ -332,6 +342,9 @@ class DuplexLink:
         self._suspended = False
         self._started = False
         self._context = ""
+        # Whether the live session was created without instructions. Its first
+        # turn would never hear a session.update — see the module note.
+        self._created_empty = False
         # Handed back on session.created and replayed on the next create, so a
         # reconnect or a persona swap keeps the last rounds the server holds.
         self._session_id = ""
@@ -434,6 +447,7 @@ class DuplexLink:
                 summary="服务端第一帧不是 session.created",
             )
         self._session_id = str((first.get("session") or {}).get("id") or self._session_id)
+        self._created_empty = not self._context
         self._started = True
         log.info(
             "duplex.session_started", session_id=self._session_id, context_len=len(self._context)
@@ -563,14 +577,22 @@ class DuplexLink:
     async def set_context(self, instructions: str) -> None:
         """Push the persona.
 
-        `instructions` DO apply mid-session — probed 2026-09-16, she answered
-        to the new name straight after a session.update. That is the one thing
-        this protocol lets us change in place; history does not follow
-        (see the module note), so anything stashed for the next session waits
-        for a reconnect rather than forcing one here.
+        On a session that already carries one, `instructions` apply in place:
+        probed 2026-09-16, she answered to the new name straight after a
+        session.update. History does not follow (see the module note), so
+        anything stashed for the next session waits for a reconnect rather
+        than forcing one here.
+
+        On a session created EMPTY — which is every session dev-talk opens,
+        because it connects before the assembly has a context — the first turn
+        would not hear an update at all, so the first persona recreates the
+        session instead (module note, measured 2026-09-24).
         """
         self._context = instructions
         if not self._started:
+            return
+        if self._created_empty and instructions:
+            await self._recreate_session()
             return
         await self._send(
             {
@@ -587,12 +609,44 @@ class DuplexLink:
         )
         log.info("duplex.context_pushed", context_len=len(instructions))
 
+    async def _recreate_session(self) -> None:
+        """Close the empty session and create one that carries `_context`.
+
+        The suspend/resume path, minus what makes it a suspension: no
+        LinkDown or LinkUp goes up, because nothing L3 relies on changed — the
+        socket was up before and is up after. The session id is dropped: the
+        empty session has nothing worth continuing, and a fresh one is what
+        the 2026-09-24 probes measured.
+        """
+        self._settle(link.ReplyStatus.CANCELLED)
+        # Stop the uplink at the door BEFORE the socket starts closing, not
+        # after: push_audio checks this flag, and a frame that gets past it
+        # onto a closing socket raises into the caller's pump, which then
+        # stops for good (see push_audio). aclose() only clears it at the end.
+        self._started = False
+        with contextlib.suppress(Exception):
+            await self._send({"type": "session.close"})
+        await self.aclose()
+        self._closing = False
+        self._session_id = ""
+        await self._open()
+        log.info("duplex.session_recreated", context_len=len(self._context))
+
     async def push_audio(self, pcm: bytes) -> None:
         if self._ws is None or not self._started:
             return
-        await self._send(
-            {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}
-        )
+        try:
+            await self._send(
+                {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}
+            )
+        except (ConnectionError, websockets.ConnectionClosed):
+            if self._started:
+                raise
+            # The frame passed the check just as the session stopped — a
+            # recreate or a teardown. The uplink is a stream, one frame has
+            # nowhere to go, and raising would kill the caller's pump: the
+            # 2026-09-24 hang where every answered turn waited on silence the
+            # server never got.
 
     async def add_context_item(self, text: str, *, role: str = "user") -> None:
         """Stash it for the next session.
