@@ -65,6 +65,7 @@ scripts/smoke_provider_b.sh install             # 装引擎（一次就够）
 | [docs/speech-backends.md](docs/speech-backends.md) | 语音后端这一层是什么：四个功能域、SpeechLink 合同、五个后端的协议对照、两条主线走一遍。隔一阵子回来先看这份 |
 | [docs/architecture-status.md](docs/architecture-status.md) | 架构现状梳理（2026-09-03）：四个功能域逐模块实现到哪、接缝在哪、哪些字段有名无实；跟计划对着读 |
 | [docs/memory-map.md](docs/memory-map.md) | 记忆全景图（2026-09-23）：记忆、人设、上下文一张图一张表；六层记忆各住哪、谁写谁读、活多久；设计 vs 落地逐条对；欠账和重构前要拍板的八个问题 |
+| [docs/memory-store.html](docs/memory-store.html) | 记忆库 memory.db 里到底存了什么（浏览器打开即看）：四张表每个字段的作用、一条弹幕进来哪些行会变、九种读法、设计规矩、本机现状 |
 | [docs/reply-strategy.html](docs/reply-strategy.html) | 一条弹幕进来之后会发生什么（浏览器打开即看）：八步流程、可以自己点的模拟器、六个场景时间线、对照表和问题清单 |
 | [docs/reply-strategy-map.md](docs/reply-strategy-map.md) | 上面那个网页的文字版：每类事件的规则、五个后端的差别、数字表、问题和过时文档清单，全带代码出处 |
 | [docs/mvp-validation-plan.md](docs/mvp-validation-plan.md) | MVP 验证方案：四道门、测试卡、业务评分标准、历次回归记录 |

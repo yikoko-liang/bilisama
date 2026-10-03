@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BiliSama · 记忆库 memory.db 里到底存了什么</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb; --card: #ffffff; --line: #e7e6e2;
+    --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8984;
+    --ok: #1a7f4b; --ok-bg: #e8f5ee;
+    --wait: #a86400; --wait-bg: #fdf2e0;
+    --stop: #b3261e; --stop-bg: #fbeaea;
+    --info: #2a5fb0; --info-bg: #e9f0fb;
+    --t-stream: #8a6bd1; --t-event: #2a78d6; --t-viewer: #1baf7a; --t-fact: #eb6834;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface); color: var(--ink);
+    font: 15px/1.7 -apple-system, "SF Pro SC", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+  main { max-width: 1120px; margin: 0 auto; padding: 44px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  .sub { color: var(--ink-2); margin: 0 0 8px; }
+  section { margin-top: 48px; }
+  h2 { font-size: 20px; margin: 0 0 6px; }
+  .lede { color: var(--ink-2); margin: 0 0 18px; max-width: 76ch; }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f1f0ec; padding: 1px 5px; border-radius: 4px; }
+  .muted { color: var(--ink-3); font-size: 12.5px; }
+
+  .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .three div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .three b { display: block; font-size: 16px; margin-bottom: 4px; }
+  .three span { color: var(--ink-2); font-size: 14px; }
+
+  /* schema */
+  .schema { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .tbl { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; border-top-width: 4px; }
+  .tbl.stream { border-top-color: var(--t-stream); } .tbl.event { border-top-color: var(--t-event); }
+  .tbl.viewer { border-top-color: var(--t-viewer); } .tbl.fact { border-top-color: var(--t-fact); }
+  .tbl header { padding: 12px 16px 8px; }
+  .tbl h3 { margin: 0; font-size: 17px; display: flex; align-items: baseline; gap: 10px; }
+  .tbl h3 small { font-weight: 400; color: var(--ink-2); font-size: 13px; }
+  .tbl .role { font-size: 13px; color: var(--ink-2); margin: 2px 0 0; }
+  .tbl table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .tbl th, .tbl td { text-align: left; padding: 6px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+  .tbl th { background: #f5f4f0; font-weight: 600; font-size: 12px; color: var(--ink-2); }
+  .tbl td.f { font: 12.5px ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .tbl td.ex { color: var(--ink-3); font-size: 12px; }
+  .tbl .life { padding: 10px 16px; font-size: 13px; color: var(--ink-2); background: #fbfaf7; border-top: 1px solid var(--line); }
+  .tag { display: inline-block; font-size: 11px; border-radius: 5px; padding: 0 6px; margin-left: 4px; vertical-align: 1px; }
+  .tag.pk { background: var(--info-bg); color: var(--info); }
+  .tag.dead { background: var(--stop-bg); color: var(--stop); }
+  .tag.idx { background: var(--ok-bg); color: var(--ok); }
+  .rel { margin-top: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .rel h3 { margin: 0 0 8px; font-size: 15px; }
+  .rel ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .rel li { margin: 3px 0; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  /* walkthrough */
+  .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .steps li { display: grid; grid-template-columns: 150px 1fr; gap: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+  .steps .when { font-weight: 600; font-size: 14px; }
+  .steps .when small { display: block; font-weight: 400; color: var(--ink-3); font-size: 12px; word-break: break-all; }
+  .steps .what { font-size: 14px; }
+  .steps pre { margin: 6px 0 0; font: 12px/1.55 ui-monospace, Menlo, monospace; background: #f5f4f0; border-radius: 8px; padding: 8px 12px; overflow-x: auto; white-space: pre; }
+  .steps .delta { color: var(--ok); }
+
+  /* readers */
+  table.plain { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 14px; }
+  table.plain th, table.plain td { text-align: left; padding: 9px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+  table.plain th { background: #f5f4f0; font-weight: 600; font-size: 13px; color: var(--ink-2); border-top: 0; }
+
+  /* rules + numbers */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .cards div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; font-size: 14px; }
+  .cards b { display: block; margin-bottom: 4px; font-size: 15px; }
+  .nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .nums div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
+  .nums .n { font-size: 26px; font-weight: 700; }
+  .nums .l { font-size: 13px; color: var(--ink-2); }
+  .probs { counter-reset: p; list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  .probs li { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px 12px 52px; position: relative; font-size: 14.5px; }
+  .probs li::before { counter-increment: p; content: counter(p); position: absolute; left: 16px; top: 12px; width: 24px; height: 24px; border-radius: 50%; background: var(--wait-bg); color: var(--wait); font-weight: 700; font-size: 13px; text-align: center; line-height: 24px; }
+  .probs b { display: block; margin-bottom: 2px; }
+  @media (max-width: 1180px) { .schema { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .three, .nums { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 640px) { .three, .nums { grid-template-columns: 1fr; } .steps li { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>记忆库 memory.db 里到底存了什么</h1>
+  <p class="sub">四张表、每个字段干什么、一条弹幕进来之后哪些行会变、谁在什么时候来查。</p>
+  <p class="muted">2026-10-03，对着 <code>src/bilisama/memory/schema.sql</code> 和 <code>store.py</code> 逐字段核过，例子取自本机 <code>~/.local/share/bilisama/rooms/dev-talk/memory.db</code> 的真实行。全景见 <code>docs/memory-map.md</code>。</p>
+</header>
+
+<section>
+  <h2>先记住三句话</h2>
+  <div class="three">
+    <div><b>一个文件，四张表</b><span>两张流水账（<code>stream</code> 每场一行、<code>event</code> 每件事一行），一张累计表（<code>viewer</code> 每个观众一行，越来越厚），一张结论表（<code>fact</code>，蒸馏写的短句）。SQLite，标准库，没有 ORM，没有向量。</span></div>
+    <div><b>不用模型的部分每条都记，当场写</b><span>每个事件两条 SQL：<code>event</code> 插一行，<code>viewer</code> 那个人的行加一笔。同步写在事件循环上，微秒级。暂停、静音、主播自己打字，照记。「阿强第五次来了」就是一句 <code>SELECT streams_seen</code>。</span></div>
+    <div><b>事件 7 天删，观众永不删，结论整组覆盖</b><span><code>event</code> 行启动时删掉 7 天前的。<code>viewer</code> 行永远留着，它就是全部意义所在。<code>fact</code> 按「哪方面、谁的」先删后插，所以表永远不会无限长。</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>四张表，每个字段</h2>
+  <p class="lede">颜色区分表。右侧例子是真实行。标 <span class="tag dead">写不读</span> 的字段今天有人写、没人读；标 <span class="tag idx">索引</span> 的是查询靠它快。</p>
+  <div class="schema">
+
+    <article class="tbl stream">
+      <header><h3>stream <small>一场直播</small></h3><p class="role">开播 <code>begin_stream()</code> 插一行，下播 <code>end_stream()</code> 填 <code>ended_at</code>。进程里只记住当前这一行的 id，之后每个事件都挂在它下面。</p></header>
+      <table>
+        <tr><th>字段</th><th>作用</th><th>例子</th></tr>
+        <tr><td class="f">id<span class="tag pk">主键</span></td><td>这一场的编号。<code>event.stream_id</code>、<code>viewer.last_stream_id</code>、<code>fact.subject</code>（本场摘要）都用它</td><td class="ex">161</td></tr>
+        <tr><td class="f">started_at</td><td>开播时刻，UTC ISO 字符串。「开播 1 小时 47 分」和「本周第 N 场」都从它算</td><td class="ex">2026-09-22T03:45:22.315734+00:00</td></tr>
+        <tr><td class="f">ended_at<span class="tag dead">写不读</span></td><td>下播时刻。只有 <code>end_stream()</code> 写它，全仓没有读者。为 NULL 说明那场没正常收尾</td><td class="ex">NULL（本机 169 场里 69 场）</td></tr>
+      </table>
+      <div class="life">寿命：永久，从不删。本机 169 行。</div>
+    </article>
+
+    <article class="tbl event">
+      <header><h3>event <small>一件事</small></h3><p class="role">每个进来的直播事件一行，不管回不回、说话开关开没开。按时间倒序取最近 N 条给蒸馏和主动话题。</p></header>
+      <table>
+        <tr><th>字段</th><th>作用</th><th>例子</th></tr>
+        <tr><td class="f">id<span class="tag pk">主键</span></td><td>自增，「最近 30 条」就是 <code>ORDER BY id DESC</code></td><td class="ex">11346</td></tr>
+        <tr><td class="f">stream_id<span class="tag idx">索引</span></td><td>哪一场。读的时候永远只看当前场</td><td class="ex">161</td></tr>
+        <tr><td class="f">kind</td><td>事件种类，十种之一：danmaku、gift、super_chat、guard_buy、vip_enter、entry、follow、like、share、room_state</td><td class="ex">danmaku</td></tr>
+        <tr><td class="f">identity</td><td>谁。<code>uid:15247</code>、被平台打码时 <code>hash:41cf8adf</code>、两者都没有时 <code>anon</code>。和 <code>viewer.identity</code> 同一把钥匙，但没有外键</td><td class="ex">hash:41cf8adf</td></tr>
+        <tr><td class="f">uname</td><td>当时的昵称。主播自己发的弹幕写成「主播本人·名字」，防蒸馏把它读成观众请求</td><td class="ex">老***</td></tr>
+        <tr><td class="f">text</td><td>弹幕或 SC 正文；礼物、进房为空</td><td class="ex">NS2百亿补贴最低的，我刷到过2732的</td></tr>
+        <tr><td class="f">value_cny</td><td>花了多少钱，统一折成人民币；非付费事件为 0</td><td class="ex">0.0（一条礼物行：0.1）</td></tr>
+        <tr><td class="f">wall_at<span class="tag idx">索引</span></td><td>发生时刻，UTC。7 天清理就是 <code>DELETE WHERE wall_at &lt; 七天前</code></td><td class="ex">2026-09-22T04:21:19.342957+00:00</td></tr>
+      </table>
+      <div class="life">寿命：7 天（<code>retain_event_days</code>），只在启动时清一次。本机 650 行，进房占 575。</div>
+    </article>
+
+    <article class="tbl viewer">
+      <header><h3>viewer <small>一个观众的累计</small></h3><p class="role">每个事件顺手 UPSERT 一笔。「常客感」整个靠这张表：来过几场、说过几句、花过多少。</p></header>
+      <table>
+        <tr><th>字段</th><th>作用</th><th>例子</th></tr>
+        <tr><td class="f">identity<span class="tag pk">主键</span></td><td>和 <code>event.identity</code> 同一把钥匙。<code>anon</code> 的事件不建这一行</td><td class="ex">uid:15247</td></tr>
+        <tr><td class="f">uid<span class="tag dead">写不读</span></td><td>B 站 uid，打码时为 0。identity 已经含它，没人单独读</td><td class="ex">15247</td></tr>
+        <tr><td class="f">uid_hash<span class="tag dead">写不读</span></td><td>打码时平台给的稳定哈希。同上</td><td class="ex">（空）</td></tr>
+        <tr><td class="f">uname</td><td>最近一次见到的昵称，新名字非空才覆盖。常客段和蒸馏名单用它称呼人</td><td class="ex">yiang</td></tr>
+        <tr><td class="f">guard_level<span class="tag dead">写不读</span></td><td>舰队等级 none / captain / admiral / governor。只有带真实等级的事件才覆盖，进房事件不会把它抹成 none。今天没有读者</td><td class="ex">none（本机 11 个 captain）</td></tr>
+        <tr><td class="f">first_seen<span class="tag dead">写不读</span></td><td>第一次见到</td><td class="ex">2026-08-10T21:39:36+00:00</td></tr>
+        <tr><td class="f">last_seen<span class="tag dead">写不读</span></td><td>最近一次见到</td><td class="ex">2026-09-22T03:48:14+00:00</td></tr>
+        <tr><td class="f">streams_seen</td><td>来过几场。只在 <code>last_stream_id</code> 和当前场不同时 +1，所以一场里刷一百条也只算一次。常客门槛是 ≥ 2</td><td class="ex">7</td></tr>
+        <tr><td class="f">last_stream_id<span class="tag idx">索引</span></td><td>最近出现在哪一场。「本场在场的常客」就是 <code>WHERE last_stream_id = 当前场</code></td><td class="ex">161</td></tr>
+        <tr><td class="f">msg_count</td><td>说过几句。只有带正文的事件 +1，礼物和进房不算</td><td class="ex">8</td></tr>
+        <tr><td class="f">gift_value_cny</td><td>累计花了多少钱。蒸馏挑「前 20 名观众」先按它排</td><td class="ex">1360.0</td></tr>
+      </table>
+      <div class="life">寿命：永久，从不删。本机 612 行：46 个有 uid、566 个打码哈希；87 人来过两场以上，绝大多数是测试卡和 Mock 的合成观众。</div>
+    </article>
+
+    <article class="tbl fact">
+      <header><h3>fact <small>蒸馏出的结论</small></h3><p class="role">唯一经过模型的表。<code>(scope, subject)</code> 是一组，写的时候整组先删后插，所以一场永远只有一条摘要、一个观众永远只有一条事实。</p></header>
+      <table>
+        <tr><th>字段</th><th>作用</th><th>例子</th></tr>
+        <tr><td class="f">id<span class="tag pk">主键</span></td><td>自增，同组内按它排序取最后一条</td><td class="ex">40</td></tr>
+        <tr><td class="f">scope<span class="tag idx">索引</span></td><td>哪方面：<code>stream</code> 本场进展、<code>viewer</code> 某个观众、<code>streamer</code> 主播本人（有读者、没有写入方，永远 0 行）</td><td class="ex">stream</td></tr>
+        <tr><td class="f">subject<span class="tag idx">索引</span></td><td>谁的。scope=stream 时是 <code>stream.id</code>，scope=viewer 时是 <code>viewer.identity</code>，scope=streamer 时为空串</td><td class="ex">161 / uid:15247</td></tr>
+        <tr><td class="f">text</td><td>结论正文。本场摘要 ≤ 200 字，观众事实 ≤ 40 字</td><td class="ex">yiáng，老粉，高消费，关注游戏机制与细节</td></tr>
+        <tr><td class="f">tags<span class="tag dead">写不读</span></td><td>计划里的标签检索列。蒸馏已不再向模型索要，模型自愿给的才落库，全仓没有读者</td><td class="ex">8 月旧行：关注直播分工,偏好互动细节,高粘性粉丝</td></tr>
+        <tr><td class="f">created_at<span class="tag dead">写不读</span></td><td>写入时刻。<code>facts()</code> 不选这一列</td><td class="ex">2026-09-22T04:22:59+00:00</td></tr>
+      </table>
+      <div class="life">寿命：同组覆盖。本机 47 行：stream 40、viewer 7、streamer 0。旧场的 39 条摘要再也没人读。</div>
+    </article>
+  </div>
+
+  <div class="rel">
+    <h3>表之间怎么连</h3>
+    <ul>
+      <li><span class="dot" style="background:var(--t-event)"></span><code>event.stream_id</code> → <span class="dot" style="background:var(--t-stream)"></span><code>stream.id</code>：一场有很多事件。读事件时永远先按当前场过滤。</li>
+      <li><span class="dot" style="background:var(--t-viewer)"></span><code>viewer.last_stream_id</code> → <span class="dot" style="background:var(--t-stream)"></span><code>stream.id</code>：这个人最近出现在哪一场。等于当前场就是「在场」。</li>
+      <li><span class="dot" style="background:var(--t-event)"></span><code>event.identity</code> = <span class="dot" style="background:var(--t-viewer)"></span><code>viewer.identity</code>：同一把钥匙，但不是外键，<code>anon</code> 的事件没有对应观众行。</li>
+      <li><span class="dot" style="background:var(--t-fact)"></span><code>fact.subject</code> → <code>viewer.identity</code> 或 <code>stream.id</code>，看 <code>scope</code>。全是字符串，没有约束。</li>
+    </ul>
+    <p class="muted" style="margin:8px 0 0">全库没有外键、没有迁移脚本：建表全是 <code>CREATE TABLE IF NOT EXISTS</code>，加列要自己想办法。时间全是 UTC ISO 字符串，「直播日」按北京时间 04:00 翻（通宵场算同一天）。</p>
+  </div>
+</section>
+
+<section>
+  <h2>一条弹幕进来，哪些行会变</h2>
+  <p class="lede">用真实的那条弹幕走一遍：yiang 在第 161 场说「NS2百亿补贴最低的，我刷到过2732的」。假设这是他本场第一条。</p>
+  <ol class="steps">
+    <li>
+      <div class="when">当场<small>app.py:183 → store.on_event</small></div>
+      <div class="what"><code>event</code> 表插一行。<pre>INSERT INTO event  stream_id=161  kind='danmaku'  identity='uid:15247'  uname='yiang'
+                   text='NS2百亿补贴最低的，我刷到过2732的'  value_cny=0.0  wall_at='2026-09-22T04:21:19Z'</pre></div>
+    </li>
+    <li>
+      <div class="when">同一笔<small>_VIEWER_UPSERT</small></div>
+      <div class="what"><code>viewer</code> 表 yiang 那一行加一笔，一条 SQL 搞定「不存在就建、存在就累加」。<pre>streams_seen    6 → <span class="delta">7</span>     因为 last_stream_id 还是上一场 160，和 161 不同，所以 +1
+last_stream_id  160 → <span class="delta">161</span>   从现在起他算「在场」
+msg_count       7 → <span class="delta">8</span>       这条有正文
+gift_value_cny  1360 → 1360    没花钱
+uname           'yiang'        新名字非空就覆盖
+guard_level     'none'         弹幕带的等级是 none，保持原值
+last_seen       → <span class="delta">现在</span></pre>他本场再发 99 条，<code>streams_seen</code> 还是 7，<code>msg_count</code> 变 107。</div>
+    </li>
+    <li>
+      <div class="when">10 秒内<small>app.py:495 定时器</small></div>
+      <div class="what">动态尾部重算，「在场常客」那段查 <code>viewer WHERE last_stream_id=161 AND streams_seen&gt;=2</code>，yiang 现在在里面，排第二（按 streams_seen、再按花钱排）。再查 <code>fact WHERE scope='viewer' AND subject='uid:15247'</code> 拿到他的事实拼在名字后面。文本变了，推一次 <code>session.update</code>。</div>
+    </li>
+    <li>
+      <div class="when">第 40 条事件时<small>distill.rolling_summary</small></div>
+      <div class="what">读 <code>event WHERE stream_id=161 ORDER BY id DESC LIMIT 30</code>，连旧摘要一起给侧路模型，改写出新的本场进展。<pre>DELETE FROM fact WHERE scope='stream' AND subject='161'
+INSERT INTO fact  scope='stream'  subject='161'  text='直播热度攀升，观众热议卡尔山拍照及游戏流派……'</pre></div>
+    </li>
+    <li>
+      <div class="when">下播<small>distill.end_of_stream</small></div>
+      <div class="what">读 <code>viewer WHERE last_stream_id=161 ORDER BY gift_value_cny DESC, msg_count DESC LIMIT 20</code> 当名单，加最近 30 条事件、摘要、她自己最近 40 句，给侧路模型。回来的每条观众事实整组覆盖。<pre>DELETE FROM fact WHERE scope='viewer' AND subject='uid:15247'
+INSERT INTO fact  scope='viewer'  subject='uid:15247'  text='yiáng，老粉，高消费，关注游戏机制与细节'</pre>然后 <code>UPDATE stream SET ended_at=now WHERE id=161</code>。下一场 yiang 再出现，第 3 步的常客段就会带上这句。</div>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <h2>谁来查什么</h2>
+  <p class="lede">库上一共只有九种读法。左边是业务上在问什么，右边是谁在什么时候问。</p>
+  <table class="plain">
+    <thead><tr><th>在问什么</th><th>方法</th><th>怎么查</th><th>谁、多久一次</th></tr></thead>
+    <tbody>
+      <tr><td>在场的老熟人有谁</td><td><code>present_regulars(5)</code></td><td><code>viewer WHERE last_stream_id=当前 AND streams_seen&gt;=2 ORDER BY streams_seen, gift_value_cny</code></td><td>动态尾部「在场常客」，每 10 秒</td></tr>
+      <tr><td>这个人我们知道什么</td><td><code>facts("viewer", identity)</code></td><td><code>fact WHERE scope='viewer' AND subject=?</code>，每个在场常客查一次</td><td>同上，紧跟上一条</td></tr>
+      <tr><td>这场到现在发生了什么</td><td><code>facts("stream", 当前 id)</code> 取最后一行</td><td><code>fact WHERE scope='stream' AND subject=?</code></td><td>动态尾部「本场进展」每 10 秒；主动话题每 30 秒；蒸馏改写前</td></tr>
+      <tr><td>主播是什么样的人</td><td><code>facts("streamer")</code></td><td><code>fact WHERE scope='streamer'</code></td><td>动态尾部「主播」段，每 10 秒，永远查到 0 行</td></tr>
+      <tr><td>开播多久了、今天几点、本周第几场</td><td><code>stream_started_at()</code> + <code>streams_this_week()</code></td><td>第二个是 <code>SELECT started_at FROM stream</code> 全表拿回来在 Python 里数</td><td>动态尾部「时间」段，每 10 秒。全表扫，库老了先查这里</td></tr>
+      <tr><td>最近发生了哪些事</td><td><code>recent_events(30 / 20)</code></td><td><code>event WHERE stream_id=当前 ORDER BY id DESC LIMIT N</code>，拼成「[danmaku] 老***: ……」</td><td>蒸馏取 30 条，主动话题取 20 条</td></tr>
+      <tr><td>这场谁最值得记</td><td><code>top_viewers(20)</code></td><td><code>viewer WHERE last_stream_id=当前 ORDER BY gift_value_cny DESC, msg_count DESC</code></td><td>下播批量一次</td></tr>
+      <tr><td>清掉过期事件</td><td><code>prune_events(7)</code></td><td><code>DELETE FROM event WHERE wall_at &lt; 七天前</code></td><td>启动时一次</td></tr>
+      <tr><td>查一个人</td><td><code>viewer(identity)</code></td><td><code>viewer WHERE identity=?</code></td><td><b>没有调用方</b>，公开方法但没人用</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">所有读之前都先把攒批写（<code>write_batch_ms</code>，出厂 0 即关）刷进库，所以读到的永远是最新的。</p>
+</section>
+
+<section>
+  <h2>几条设计上的规矩</h2>
+  <div class="cards">
+    <div><b>谁是谁：identity 三选一</b>有 uid 用 <code>uid:15247</code>；被平台打码只剩哈希用 <code>hash:41cf8adf</code>；两者都没有就是 <code>anon</code>。真房间里绝大多数是哈希（本机 566 比 46）。</div>
+    <div><b>anon 不建观众行</b>房间状态这类没人的事件只记事件行。代价：打码到连哈希都没有的送礼人，礼物算不到任何人头上（本机 4 条礼物行全是 anon）。</div>
+    <div><b>一场只算一次来访</b><code>streams_seen</code> 靠 <code>last_stream_id</code> 变化才加，不靠事件数。所以它是「来过几场」不是「来过几次」。</div>
+    <div><b>等级只升不降</b><code>guard_level</code> 只被带真实等级的事件覆盖。好处是进房事件不会把舰长抹成普通人；代价是过期的舰长要等下一条带等级的事件才会更正。</div>
+    <div><b>主播自己的字要认得出</b>主播在自己房间打的弹幕，<code>uname</code> 写成「主播本人·名字」，蒸馏读事件列表时就不会把它当成观众在提要求。</div>
+    <div><b>时间两套</b>行里存 UTC 字符串，机器无关；算「直播日」和「本周」时转北京时间再往前挪 4 小时，通宵场归前一天。</div>
+    <div><b>写法两档</b>出厂每个事件一个事务，当场落盘。<code>write_batch_ms &gt; 0</code> 改成攒批：满 200 行或到时间一次写，任何读之前先刷，崩了最多丢一个窗口的事件行。</div>
+    <div><b>结论整组覆盖</b><code>fact</code> 没有「更新一条」，只有「把这组全删了重写」。好处是表有界、不会积累矛盾的旧结论；代价是蒸馏一次写坏，旧的也没了。</div>
+  </div>
+</section>
+
+<section>
+  <h2>本机现在的数</h2>
+  <p class="lede">2026-10-03 读的。这是 dev-talk 的库，真房间、Mock、测试卡、控制台全写在一起。</p>
+  <div class="nums">
+    <div><div class="n">169</div><div class="l">场，其中 100 场正常收尾、69 场 <code>ended_at</code> 为空</div></div>
+    <div><div class="n">650</div><div class="l">条事件（7 天内）：进房 575、弹幕 68、礼物 4、关注 2、SC 1</div></div>
+    <div><div class="n">612</div><div class="l">个观众，87 人来过两场以上，11 个舰长</div></div>
+    <div><div class="n">47</div><div class="l">条结论：本场摘要 40、观众事实 7、主播 0。文件 1.4 MB</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>看表时顺手发现的</h2>
+  <p class="lede">不算 bug，但重构时要知道。</p>
+  <ol class="probs">
+    <li><b>六个字段写了没人读</b><code>stream.ended_at</code>、<code>viewer.uid / uid_hash / guard_level / first_seen / last_seen</code>、<code>fact.tags / created_at</code>。读进 <code>ViewerRow</code> 的字段里，真被用上的只有 identity、uname、streams_seen、msg_count、gift_value_cny。</li>
+    <li><b>一个公开方法没人调</b><code>store.viewer(identity)</code>。UPSERT 注释里说「VIP 晋升会读等级」，实际晋升读的是事件自带的等级，不查库。</li>
+    <li><b>旧场摘要是死数据</b><code>scope=stream</code> 的五个读者全按当前场查，上一场的摘要留在库里再没人读。本机 40 条里 39 条是这种。</li>
+    <li><b>库不按房间分</b>路径写死 <code>rooms/dev-talk/memory.db</code>，配置里的 <code>memory.db_path</code> 没有读者。合成观众永久混在 <code>viewer</code> 里，612 个里真人很少。</li>
+    <li><b>开播行可能收不了尾</b><code>begin_stream()</code> 在主 try 之前，连接失败、词表缺失这类启动期退出，留下 <code>ended_at</code> 为空的行，而「本周第几场」照数。</li>
+    <li><b>主播说的话、她说的话都不在这里</b>只有观众事件。主播转写和她的回复只在进程内存里，所以「主播」那一段永远 0 行。</li>
+  </ol>
+</section>
+
+</main>
+</body>
+</html>
