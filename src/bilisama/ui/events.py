@@ -195,7 +195,13 @@ def link_frames(
         }
         payload.update(reply_context or {})
         yield ServerEvent.REPLY_DONE, payload
-        yield ServerEvent.EVENT_FEED, {"kind": "reply", **payload}
+        # A turn with no words gets no chat row. The duplex endpoint opens
+        # some of her turns with a few audio frames and no text at all; the
+        # gate cannot read those and releases them, and the row used to draw
+        # as an empty 「（无文本）」 bubble. REPLY_DONE above still goes out:
+        # the pet bubble and the test runner close the reply on it.
+        if event.text:
+            yield ServerEvent.EVENT_FEED, {"kind": "reply", **payload}
     elif isinstance(event, link.UserTranscriptDone):
         yield ServerEvent.TRANSCRIPT_FINAL, {"text": event.text}
         yield ServerEvent.EVENT_FEED, {"kind": "transcript", "text": event.text}

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from bilisama.realtime import link
 from bilisama.ui.events import ClientEvent, ServerEvent, frame, link_frames
 
@@ -103,6 +105,31 @@ def test_reply_done_yields_done_plus_feed_entry() -> None:
     assert _frames(done) == [
         (ServerEvent.REPLY_DONE, base),
         (ServerEvent.EVENT_FEED, {"kind": "reply", **base}),
+    ]
+
+
+@pytest.mark.parametrize("status", [link.ReplyStatus.COMPLETED, link.ReplyStatus.CANCELLED])
+def test_a_reply_without_words_ends_the_reply_but_draws_no_chat_row(
+    status: link.ReplyStatus,
+) -> None:
+    """The duplex endpoint sometimes opens a turn of her own that carries a
+    few audio frames and no text at all (2026-10-05: four in one session).
+    The gate cannot read it and releases it, and the chat page used to draw
+    an empty 「她（无文本）」 bubble for it. reply.done still goes out —
+    the pet bubble and the test runner key their bookkeeping on it — but
+    there is nothing to show in the chat."""
+    handle = link.ReplyHandle(implicit=True)
+    frames = _frames(link.ReplyDone(handle, status, text=""))
+    assert frames == [
+        (
+            ServerEvent.REPLY_DONE,
+            {
+                "reply_id": handle.handle_id,
+                "source": "voice",
+                "status": str(status),
+                "text": "",
+            },
+        )
     ]
 
 
