@@ -87,6 +87,31 @@ def test_chattiness_is_a_relative_event_frequency_not_a_fixed_timer() -> None:
         assert windows == sorted(windows), "the busier room must collect longer before speaking"
 
 
+_SCORE_BARS = {
+    # level: (QUIET, SPARSE, ACTIVE, BUSY). Base 0.35 / 0.22 / 0.10 plus a load
+    # offset of -0.05 / 0 / +0.04 / +0.08, floored at 0.1 (HIGH in a quiet room).
+    Chattiness.LOW: (0.30, 0.35, 0.39, 0.43),
+    Chattiness.MEDIUM: (0.17, 0.22, 0.26, 0.30),
+    Chattiness.HIGH: (0.10, 0.10, 0.14, 0.18),
+}
+
+
+@pytest.mark.parametrize("level", list(Chattiness))
+def test_score_bar_per_chattiness_and_room_band(level: Chattiness) -> None:
+    """The selector's bar for plain chat, every cell pinned. Lowered on
+    2026-10-04 to the yiko/planner/prompt_update values for the sparse,
+    active and busy bands; the quiet band keeps this module's -0.05 offset
+    rather than that branch's separate quiet override."""
+    bars = []
+    for state in RoomActivity:
+        pacer, clock = _pacer(level)
+        _load_state(pacer, clock, state)
+        policy = pacer.snapshot()
+        assert policy.activity is state
+        bars.append(policy.score_threshold)
+    assert bars == pytest.approx(_SCORE_BARS[level])
+
+
 def test_ordinary_budget_allows_a_short_burst_then_throttles_without_a_cooldown() -> None:
     pacer, clock = _pacer(Chattiness.MEDIUM)
     assert pacer.try_consume("danmaku")

@@ -140,16 +140,19 @@ class EventPacer:
             RoomActivity.ACTIVE: 120.0,
             RoomActivity.BUSY: 300.0,
         }[state]
+        # Lowered 2026-10-04 to the yiko/planner/prompt_update values (were
+        # 0.5 / 0.3 / 0.15 and +0.05 / +0.1): plain chat needed about nine
+        # characters to pass a sparse room at medium chattiness, now about six.
         base_score = {
-            Chattiness.LOW: 0.5,
-            Chattiness.MEDIUM: 0.3,
-            Chattiness.HIGH: 0.15,
+            Chattiness.LOW: 0.35,
+            Chattiness.MEDIUM: 0.22,
+            Chattiness.HIGH: 0.10,
         }[level]
         load_score = {
             RoomActivity.QUIET: -0.05,
             RoomActivity.SPARSE: 0.0,
-            RoomActivity.ACTIVE: 0.05,
-            RoomActivity.BUSY: 0.1,
+            RoomActivity.ACTIVE: 0.04,
+            RoomActivity.BUSY: 0.08,
         }[state]
         return EventPacingSnapshot(
             activity=state,
