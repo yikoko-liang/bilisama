@@ -126,6 +126,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "intents.built",
         "intents.no_speaking_path",
         "link.fatal",
+        "live_mock.check_crashed",
         "link.reconnect_already_running",
         "link.reconnect_died_on_arrival",
         "link.reconnect_failed",

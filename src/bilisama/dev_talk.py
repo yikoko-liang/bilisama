@@ -3133,12 +3133,14 @@ async def run_director(args: argparse.Namespace) -> int:
                 # A re-check after an errored run is an exit from that run:
                 # bring the parked room back first (preflight holds its own
                 # source, so the real room may stay live until start parks it
-                # again).
-                await _restore_room_after_mock()
+                # again). Both run behind request_check: awaiting them here
+                # kept this page's socket from reading anything for a whole
+                # connect timeout, and the result could miss the page.
                 capture = data.get("capture")
-                await live_mock.check(
+                live_mock.request_check(
                     room_id=int(data.get("room_id") or 0),
                     capture=capture if isinstance(capture, dict) else {},
+                    before=_restore_room_after_mock,
                 )
 
             async def on_live_mock_start(_data: dict[str, Any]) -> None:

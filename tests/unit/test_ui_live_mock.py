@@ -311,3 +311,69 @@ def test_a_room_that_refuses_keeps_its_own_reason_on_the_room_row() -> None:
             await controller.aclose()
 
     asyncio.run(run())
+
+
+def test_request_check_returns_at_once_and_the_check_runs_behind_it() -> None:
+    """The check used to be awaited inside the page socket's receive loop: for
+    the whole connect timeout that page's socket read nothing, and a page that
+    dropped meanwhile never saw the result (2026-10-05)."""
+
+    async def run() -> None:
+        states: list[dict[str, Any]] = []
+        controller = _controller(
+            lambda room_id: _RoomSource(room_id, hang=True), states, connect_timeout_s=0.3
+        )
+        order: list[str] = []
+
+        async def before() -> None:
+            order.append("restore")
+
+        try:
+            controller.request_check(room_id=7, capture=_capture(), before=before)
+            assert states == [], "nothing has run yet: the caller got control back"
+            await asyncio.sleep(0.05)
+            assert order == ["restore"]
+            assert controller.state()["status"] == "checking"
+            await asyncio.sleep(0.5)
+            assert controller.state()["status"] == "error"
+        finally:
+            await controller.aclose()
+
+    asyncio.run(run())
+
+
+def test_a_check_that_crashes_reports_itself_instead_of_spinning() -> None:
+    async def run() -> None:
+        states: list[dict[str, Any]] = []
+        controller = _controller(lambda room_id: _RoomSource(room_id), states)
+
+        async def before() -> None:
+            raise RuntimeError("恢复房间时炸了")
+
+        try:
+            controller.request_check(room_id=7, capture=_capture(), before=before)
+            await asyncio.sleep(0.05)
+            state = controller.state()
+            assert state["status"] == "error"
+            assert "恢复房间时炸了" in state["error"]
+        finally:
+            await controller.aclose()
+
+    asyncio.run(run())
+
+
+def test_aclose_cancels_a_check_still_waiting_on_the_room() -> None:
+    async def run() -> None:
+        states: list[dict[str, Any]] = []
+        controller = _controller(
+            lambda room_id: _RoomSource(room_id, hang=True), states, connect_timeout_s=30.0
+        )
+        controller.request_check(room_id=7, capture=_capture())
+        await asyncio.sleep(0.05)
+        assert controller.state()["status"] == "checking"
+        await asyncio.wait_for(controller.aclose(), timeout=2.0)
+        assert controller.state()["status"] == "idle"
+        live = [t for t in asyncio.all_tasks() if t.get_name() == "live-mock:check"]
+        assert live == [], "no check task outlives the controller"
+
+    asyncio.run(run())

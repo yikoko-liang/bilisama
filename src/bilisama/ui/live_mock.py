@@ -22,10 +22,13 @@ from typing import Any, Protocol
 
 from bilisama.ingest.events import LiveEvent
 from bilisama.ingest.sources import EventSink
+from bilisama.obs.logging import get_logger
 from bilisama.ui.audio import AudioInputSwitch
 from bilisama.ui.events import live_event_payload
 
 __all__ = ["LiveMockController", "RoomSource"]
+
+log = get_logger(__name__)
 
 StateSink = Callable[[dict[str, Any]], None]
 PreviewSink = Callable[[dict[str, object]], None]
@@ -88,6 +91,9 @@ class LiveMockController:
         self._room_snapshot: dict[str, Any] = {}
         self._running = False
         self._closing = False
+        # Checks started by request_check, held so they are not collected
+        # mid-flight and so aclose can cancel one still waiting on the room.
+        self._check_tasks: set[asyncio.Task[None]] = set()
         self._events_seen = 0
         self._events_forwarded = 0
         self._audio_frames = 0
@@ -162,6 +168,48 @@ class LiveMockController:
         if self._status == "checking":
             return f"正在连接直播间 {self._room_id}…"
         return self._room_error or "尚未检测房间"
+
+    def request_check(
+        self,
+        *,
+        room_id: int,
+        capture: Mapping[str, object],
+        before: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Start a preflight and return at once; the result arrives as state.
+
+        The page's control socket used to await check() inside its receive
+        loop, so for the whole connect timeout that socket read nothing, and
+        a page that dropped and came back in the meantime never saw the
+        result: it sat on 「检测中」 with the error already set server-side
+        (2026-10-05). `before` runs first inside the same task — the caller's
+        "bring the parked room back" step, which can itself take a connect
+        timeout.
+        """
+        task = asyncio.create_task(
+            self._check_in_background(room_id, capture, before), name="live-mock:check"
+        )
+        self._check_tasks.add(task)
+        task.add_done_callback(self._check_tasks.discard)
+
+    async def _check_in_background(
+        self,
+        room_id: int,
+        capture: Mapping[str, object],
+        before: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        try:
+            if before is not None:
+                await before()
+            await self.check(room_id=room_id, capture=capture)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Nobody awaits this task, so an escape would vanish into the
+            # loop's exception handler and leave the page spinning. Say it,
+            # and put the page in a state it can leave.
+            log.warning("live_mock.check_crashed", room_id=room_id, error_text=str(exc)[:200])
+            self._fail(f"状态检测出错：{str(exc)[:120]}")
 
     async def check(self, *, room_id: int, capture: Mapping[str, object]) -> None:
         """Connect the room but keep its events out of Assembly until start."""
@@ -267,6 +315,13 @@ class LiveMockController:
             self._publish()
 
     async def aclose(self) -> None:
+        # Before the lock: a check waiting on the room holds it for up to the
+        # connect timeout. Cancelling releases it; _stop_room below stops the
+        # source the cancelled check left behind.
+        pending = tuple(self._check_tasks)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         async with self._lock:
             self._closing = True
             self._running = False
