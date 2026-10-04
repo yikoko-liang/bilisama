@@ -21,9 +21,12 @@ from bilisama.ui.live_mock import LiveMockController, _event_preview
 class _RoomSource:
     name = "bilibili"
 
-    def __init__(self, room_id: int, *, fail: bool = False) -> None:
+    def __init__(self, room_id: int, *, fail: bool = False, hang: bool = False) -> None:
         self.room_id = room_id
         self.fail = fail
+        # Never reaches connected: what a room-info request that keeps timing
+        # out looks like from here (2026-10-05, six checks in a row).
+        self.hang = hang
         self.connected = False
         self._stopped = asyncio.Event()
         self._emit: Callable[[LiveEvent], Awaitable[None]] | None = None
@@ -32,6 +35,9 @@ class _RoomSource:
         if self.fail:
             raise RuntimeError("房间不存在")
         self._emit = emit
+        if self.hang:
+            await self._stopped.wait()
+            return
         self.connected = True
         await self._stopped.wait()
         self.connected = False
@@ -233,6 +239,74 @@ def test_start_is_refused_when_room_preflight_failed() -> None:
             assert controller.state()["status"] == "error"
             assert "状态检测" in str(controller.state()["error"])
             assert switch.browser_active is False
+        finally:
+            await controller.aclose()
+
+    asyncio.run(run())
+
+
+def _controller(
+    factory: Callable[[int], _RoomSource],
+    states: list[dict[str, Any]],
+    *,
+    connect_timeout_s: float = 0.2,
+) -> LiveMockController:
+    return LiveMockController(
+        source_factory=factory,
+        event_sink=lambda _event: asyncio.sleep(0),
+        audio=AudioInputSwitch(lambda _pcm: asyncio.sleep(0)),
+        publish_state=states.append,
+        publish_event=lambda _event: None,
+        connect_timeout_s=connect_timeout_s,
+    )
+
+
+def test_the_room_row_says_it_is_connecting_while_the_check_runs() -> None:
+    """「尚未检测房间」 under a spinning 「检测中」 read as if nothing had been
+    asked of the room at all."""
+
+    async def run() -> None:
+        states: list[dict[str, Any]] = []
+        controller = _controller(lambda room_id: _RoomSource(room_id, hang=True), states)
+        try:
+            await controller.check(room_id=22174141, capture=_capture())
+            checking = [state for state in states if state["status"] == "checking"]
+            assert checking, "the check publishes its checking state first"
+            assert "正在连接直播间 22174141" in checking[0]["checks"]["room"]["detail"]
+        finally:
+            await controller.aclose()
+
+    asyncio.run(run())
+
+
+def test_a_room_that_never_connects_names_the_timeout_on_the_room_row() -> None:
+    """The timeout landed in `error` only, so the room row kept saying
+    「尚未检测房间」 after a check that had in fact run and failed."""
+
+    async def run() -> None:
+        states: list[dict[str, Any]] = []
+        controller = _controller(lambda room_id: _RoomSource(room_id, hang=True), states)
+        try:
+            await controller.check(room_id=22174141, capture=_capture())
+            state = controller.state()
+            assert state["status"] == "error"
+            room = state["checks"]["room"]
+            assert room["ok"] is False
+            assert "没有连接成功" in room["detail"]
+            assert room["detail"] == state["error"]
+        finally:
+            await controller.aclose()
+
+    asyncio.run(run())
+
+
+def test_a_room_that_refuses_keeps_its_own_reason_on_the_room_row() -> None:
+    async def run() -> None:
+        states: list[dict[str, Any]] = []
+        controller = _controller(lambda room_id: _RoomSource(room_id, fail=True), states)
+        try:
+            await controller.check(room_id=404, capture=_capture())
+            assert controller.state()["checks"]["room"]["detail"] == "房间不存在"
         finally:
             await controller.aclose()
 

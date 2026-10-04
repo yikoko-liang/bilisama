@@ -145,11 +145,7 @@ class LiveMockController:
                 "room": {
                     "ok": room_connected,
                     "label": "真实直播间流",
-                    "detail": (
-                        f"已连接真实房间 {real_room_id}，人气 {int(room.get('popularity') or 0)}"
-                        if room_connected
-                        else self._room_error or "尚未检测房间"
-                    ),
+                    "detail": self._room_detail(room, room_connected, real_room_id),
                 },
             },
             "events_seen": self._events_seen,
@@ -159,6 +155,13 @@ class LiveMockController:
             "audio_dropped": self._audio_dropped,
             "room": dict(room),
         }
+
+    def _room_detail(self, room: Mapping[str, Any], connected: bool, real_room_id: int) -> str:
+        if connected:
+            return f"已连接真实房间 {real_room_id}，人气 {int(room.get('popularity') or 0)}"
+        if self._status == "checking":
+            return f"正在连接直播间 {self._room_id}…"
+        return self._room_error or "尚未检测房间"
 
     async def check(self, *, room_id: int, capture: Mapping[str, object]) -> None:
         """Connect the room but keep its events out of Assembly until start."""
@@ -195,11 +198,13 @@ class LiveMockController:
             deadline = asyncio.get_running_loop().time() + self._connect_timeout_s
             while not bool(source.status().get("connected")):
                 if self._source_task.done():
-                    self._fail(self._room_error or f"房间 {room_id} 连接失败")
+                    self._fail_room(self._room_error or f"房间 {room_id} 连接失败")
                     return
                 if asyncio.get_running_loop().time() >= deadline:
                     await self._stop_room()
-                    self._fail(f"房间 {room_id} 在 {self._connect_timeout_s:g} 秒内没有连接成功")
+                    self._fail_room(
+                        f"房间 {room_id} 在 {self._connect_timeout_s:g} 秒内没有连接成功"
+                    )
                     return
                 await asyncio.sleep(0.02)
 
@@ -312,6 +317,11 @@ class LiveMockController:
             except TimeoutError:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    def _fail_room(self, message: str) -> None:
+        """A failure that belongs to the room, so the room row says it too."""
+        self._room_error = message
+        self._fail(message)
 
     def _fail(self, message: str) -> None:
         self._running = False
