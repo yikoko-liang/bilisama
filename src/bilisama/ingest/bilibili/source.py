@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import http.cookies
 from collections import deque
 from collections.abc import Callable
@@ -153,12 +154,19 @@ def event_from_danmaku(message: Any, *, room_id: int, recv_at: float, generation
             message.medal_name, message.medal_level, message.runame, message.medal_room_id
         ),
     )
+    # rnd is per client, not per message: one viewer's next danmaku can carry
+    # the same value, and an id built from it alone let the Assembly's 30 s
+    # replay ring swallow genuinely new lines. Hash stable wire facts instead,
+    # never the receive time, so a reconnect replay of the same packet still
+    # maps to the same id and is still dropped.
+    wire_facts = (room_id, viewer.identity, message.timestamp, message.rnd, message.msg)
+    message_key = hashlib.sha256(repr(wire_facts).encode("utf-8")).hexdigest()[:32]
     return LiveEvent(
         kind=EventKind.DANMAKU,
         room_id=room_id,
         viewer=viewer,
         text=message.msg,
-        event_id=f"dm:{message.rnd}" if message.rnd else "",
+        event_id=f"dm:{message_key}",
         ts_ms=int(message.timestamp),
         recv_at=recv_at,
         session_generation=generation,

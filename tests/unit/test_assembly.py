@@ -83,6 +83,46 @@ async def test_speak_on_produces_an_intent(tmp_path: Path) -> None:
     assert intents[0].source == "danmaku"
 
 
+async def test_same_client_different_danmaku_survive_the_direct_replay_ring(tmp_path: Path) -> None:
+    """Six different lines from one client that reuses its rnd: the 30 s
+    direct ring must drop only the exact retransmissions, not the new lines."""
+    from bilisama.ingest.bilibili._vendor.blivedm.models.web import DanmakuMessage
+    from bilisama.ingest.bilibili.source import event_from_danmaku
+
+    assembly, store, _persona, intents, _pushed, clock = _assembly(tmp_path)
+    previous = 0
+    try:
+        for offset, body in (
+            (0, "这房间在干嘛"),
+            (12, "聊啥呢"),
+            (20, "为什么不回复我"),
+            (47, "豆腐你是谁"),
+            (55, "是你吗"),
+            (63, "三个字是不是不行"),
+        ):
+            await clock.advance(offset - previous)
+            previous = offset
+            event = event_from_danmaku(
+                DanmakuMessage(
+                    uid=42,
+                    uname="观众",
+                    rnd=1790231238,
+                    timestamp=1790231316000 + offset * 1000,
+                    msg=body,
+                ),
+                room_id=777,
+                recv_at=clock.monotonic(),
+                generation=1,
+            )
+            await assembly.deliver_selected(event)
+            await assembly.deliver_selected(event)
+        assert len(intents) == 6
+        assert len({intent.dedup_key for intent in intents}) == 6
+        assert assembly.events_deduped == 6, "only the exact retransmissions are discarded"
+    finally:
+        store.close()
+
+
 async def test_a_failed_paid_delivery_stays_retryable(tmp_path: Path) -> None:
     """The direct ring marked the key on the ATTEMPT, so a raise from submit
     burned it: the retry the selector's deliver-then-commit contract exists for

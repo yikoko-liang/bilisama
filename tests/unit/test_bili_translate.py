@@ -99,12 +99,35 @@ def test_danmaku_maps_identity_medal_and_millisecond_timestamp() -> None:
     assert event.room_id == 777
     assert event.session_generation == 2
     assert event.ts_ms == 1755000000000, "DANMU_MSG timestamps are already milliseconds"
-    assert event.event_id == "dm:12345"
+    assert event.event_id.startswith("dm:") and len(event.event_id) == 35
     v = event.viewer
     assert v.uid == 42 and v.uid_hash == "abc123ef"
     assert v.guard_level is GuardLevel.CAPTAIN and v.is_admin
     assert v.user_level == 50 and v.wealth_level == 22
     assert v.medal is not None and v.medal.is_this_room(777)
+
+
+@pytest.mark.parametrize("change", ["text", "timestamp", "viewer", "room"])
+def test_danmaku_rnd_is_not_a_unique_message_id(change: str) -> None:
+    """rnd is per client, not per message: one viewer's next danmaku can carry
+    the same value. Two different messages must get two ids, and a transport
+    replay of the same message must still get the same one."""
+    first = web_models.DanmakuMessage.from_command(_danmu_info())
+    second = web_models.DanmakuMessage.from_command(_danmu_info())
+    room_id = 777
+    if change == "text":
+        second.msg = "聊啥呢"
+    elif change == "timestamp":
+        second.timestamp += 1000
+    elif change == "viewer":
+        second.uid += 1
+    else:
+        room_id += 1
+    a = event_from_danmaku(first, **_KW)
+    b = event_from_danmaku(second, room_id=room_id, recv_at=3.0, generation=3)
+    assert a.dedup_key != b.dedup_key
+    replay = event_from_danmaku(first, room_id=777, recv_at=5.0, generation=4)
+    assert replay.dedup_key == a.dedup_key
 
 
 def test_masked_danmaku_keeps_the_event_and_falls_back_to_the_hash() -> None:

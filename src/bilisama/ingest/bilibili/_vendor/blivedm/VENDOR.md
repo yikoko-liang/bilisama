@@ -19,7 +19,11 @@ unrelated, wrong package (upstream README warns about this).
 
 - `DanmakuMessage.uid_crc32` ← `info[0][7]` — the masked-uid fallback identity
   (plan §5.2 correction 1). Timestamp is milliseconds. No `id_str` on the
-  model; `rnd` is the dedup-ish id.
+  model; `rnd` looked like the dedup id and was used as one until 2026-10-04.
+  It is per client, not per message: a live room on 2026-09-24 showed six
+  different danmaku from one viewer sharing `rnd=1790231238`, and the 30 s
+  replay ring dropped four of them. `event_from_danmaku` now hashes
+  room, viewer identity, timestamp, `rnd` and text instead.
 - `SEND_GIFT_V2` dispatches through `GiftMessage.batch_from_command_v2` and
   feeds the SAME `_on_gift` callback as V1 (handlers.py) — one callback covers
   both. `tid` is the transaction id for V1/V2 merging.
