@@ -353,15 +353,20 @@ async def test_without_a_side_model_the_realtime_link_still_breaks_the_ice() -> 
         assert loop.status()["fallback_topics"] == 1
 
 
-async def test_streamer_speech_does_not_reset_the_live_event_clock() -> None:
-    """A monologue is topic material, not room activity: with a pacer wired
-    the dead-air clock keeps running under the floor."""
+async def test_the_streamer_talking_is_not_dead_air() -> None:
+    """A finished streamer line restarts the dead-air clock, pacer or not.
+
+    The clock used to keep running under his voice, so a topic was due the
+    moment a long monologue ended — she cut in on a streamer who had just
+    been talking. Agreed 2026-10-05: his own speech counts as activity."""
     async with _running_paced(side=None) as (loop, floor, intents, clock, _pacer):
-        loop.note_dialogue("streamer", "我先把这段跑通")
         floor.on_speech_started()
         await clock.advance(25.0)
         floor.on_speech_stopped(quiet_s=0.0)
-        await clock.advance(7.0)  # 25 + 7 > 30: the quiet-room target passed under speech
+        loop.note_dialogue("streamer", "我先把这段跑通")  # the line closes as he stops
+        await clock.advance(7.0)  # 25 + 7 > 30, but only 7 since he spoke
+        assert intents == []
+        await clock.advance(24.0)  # 31 of quiet since his line
         assert len(intents) == 1
 
 

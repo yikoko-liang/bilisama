@@ -3552,8 +3552,8 @@ async def run_director(args: argparse.Namespace) -> int:
                     None,
                     stream_text=not use_prompt,
                     link_health=link_health,
-                    # Completed streamer turns are topic material — never a
-                    # reset of the live-event dead-air clock (proactive.py).
+                    # Completed streamer turns are topic material and, since
+                    # 2026-10-05, restart the dead-air clock (proactive.py).
                     on_transcript=on_streamer_transcript,
                     output_enabled=output_enabled,
                 ),

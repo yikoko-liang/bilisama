@@ -122,10 +122,10 @@ class ProactiveTopicLoop:
     def note_dialogue(self, role: Literal["streamer", "assistant"], text: str) -> None:
         """Keep bounded, completed dialogue as topic-candidate material.
 
-        Voice is material, not activity: with a pacer wired, a streamer
-        monologue enriches the next candidate without resetting the
-        live-event dead-air clock. Without one (legacy wiring) the old
-        behaviour stands.
+        A finished streamer line is also activity: the room is not dead while
+        he talks, and with the clock running under his voice a topic fell due
+        the moment a long monologue ended (changed 2026-10-05). Her own lines
+        reset the clock only on legacy wiring, as before.
         """
         line = " ".join(text.split())[:_DIALOGUE_LINE_MAX_CHARS]
         if not line:
@@ -133,7 +133,7 @@ class ProactiveTopicLoop:
         self._dialogue.append((role, line))
         if role == "streamer":
             self._note_response()
-        if self._event_pacer is None:
+        if role == "streamer" or self._event_pacer is None:
             self.note_activity()
 
     def _note_response(self) -> None:
