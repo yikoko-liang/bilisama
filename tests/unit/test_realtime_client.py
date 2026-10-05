@@ -473,6 +473,26 @@ async def test_user_transcript_reaches_l3_as_the_streamer() -> None:
             await linkobj.aclose()
 
 
+async def test_the_streamers_line_keeps_its_item_number() -> None:
+    """Partial and final of one line carry the item id, as the line id the
+    chat page keeps one live row per (link.UserTranscriptDelta)."""
+    async with MockRealtimeServer(caps=caps_mod.S2S) as server:
+        linkobj = S2SLink(server.url)
+        await linkobj.connect()
+        try:
+            events = linkobj.events()
+            await server.user_transcript_delta("主播")
+            partial = await _next_event(events, link.UserTranscriptDelta)
+            await server.user_transcript("主播说了这句话")
+            final = await _next_event(events, link.UserTranscriptDone)
+        finally:
+            await linkobj.aclose()
+    assert isinstance(partial, link.UserTranscriptDelta)
+    assert isinstance(final, link.UserTranscriptDone)
+    assert partial.line_id.startswith("item_user_")
+    assert final.line_id == partial.line_id
+
+
 async def test_protected_reply_wraps_itself_in_interrupt_patches() -> None:
     """Rule 6: protection means interrupt_response=false before, true after —
     and always out-of-band, which the forbidden-frames test already pins."""

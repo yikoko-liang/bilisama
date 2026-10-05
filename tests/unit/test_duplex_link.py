@@ -591,9 +591,10 @@ async def test_what_the_streamer_said_lands_as_a_finished_line() -> None:
     her half of every exchange and none of his — which reads as a UI bug and
     is this adapter.
 
-    The words have to be rebuilt here: the `completed` frame's own
-    `transcript` is empty on this protocol, so the last cumulative delta is
-    the only copy.
+    The words come from the `completed` frame's `text`. This docstring used
+    to say that frame's `transcript` was empty and the words had to be rebuilt
+    from the last delta: true of `transcript`, and the endpoint never sends
+    one — the field is `text` (real endpoint, 2026-10-05).
     """
     async with MockDuplexServer() as server:
         duplex = _link(server)
@@ -603,6 +604,52 @@ async def test_what_the_streamer_said_lands_as_a_finished_line() -> None:
             await server.hear("今天打算打几把游戏", flap="？")
             done = await _next(events, link.UserTranscriptDone)
             assert done.text == "今天打算打几把游戏？", "报的是转写最后定下来的那一版"
+            assert done.line_id == server.items[0]
+        finally:
+            await duplex.aclose()
+
+
+async def test_the_final_words_come_from_the_completed_frame() -> None:
+    """The completed frame's `text` is the transcriber's own final version,
+    and it can differ from the last delta — punctuation settled, a number
+    re-read. The last delta is only a fallback for a frame that lacks it."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear("现在基本上十秒以内", final="现在基本上 10 秒以内。")
+            done = await _next(events, link.UserTranscriptDone)
+            assert done.text == "现在基本上 10 秒以内。"
+        finally:
+            await duplex.aclose()
+
+
+async def test_every_part_of_a_line_names_its_line_and_carries_the_whole_so_far() -> None:
+    """The chat page draws ONE row per line and refreshes it in place, so
+    each delta says which line it belongs to and what the line reads now —
+    the increment alone cannot express the transcriber revising itself."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        deltas: list[link.UserTranscriptDelta] = []
+
+        async def collect() -> link.UserTranscriptDone:
+            async for event in events:
+                if isinstance(event, link.UserTranscriptDelta):
+                    deltas.append(event)
+                elif isinstance(event, link.UserTranscriptDone):
+                    return event
+            raise AssertionError("事件流结束了")
+
+        try:
+            await server.hear("你叫什么")
+            done = await asyncio.wait_for(collect(), timeout=2.0)
+            line = server.items[0]
+            assert [d.whole for d in deltas] == ["你", "你叫", "你叫什", "你叫什么"]
+            assert {d.line_id for d in deltas} == {line}
+            assert done.line_id == line
         finally:
             await duplex.aclose()
 
@@ -616,11 +663,16 @@ async def test_the_transcript_deltas_go_up_as_increments_not_as_restatements() -
         await duplex.connect()
         events = duplex.events()
         seen: list[str] = []
+        wholes: list[str] = []
 
         async def collect() -> None:
             async for event in events:
                 if isinstance(event, link.UserTranscriptDelta):
-                    seen.append(event.text)
+                    # A revision with nothing new still goes up, so the row can
+                    # show it; its increment is empty.
+                    if event.text:
+                        seen.append(event.text)
+                    wholes.append(event.whole)
                 elif isinstance(event, link.UserTranscriptDone):
                     return
 
@@ -634,6 +686,7 @@ async def test_the_transcript_deltas_go_up_as_increments_not_as_restatements() -
                 "么",
                 "？",
             ], f"送上去的该是增量，而且标点反复也只送一次，实际是 {seen}"
+            assert wholes[-3:] == ["你叫什么？", "你叫什么", "你叫什么？"], "整行跟着转写的改口走"
         finally:
             await duplex.aclose()
 
@@ -644,8 +697,11 @@ async def test_a_transcript_that_never_closes_still_hands_the_floor_back() -> No
     `SpeechStopped` is the only thing that clears `streamer_speaking`
     (floor.py:97), and on this protocol its only source is the transcriber's
     completed frame — every other provider has a VAD edge that does not depend
-    on transcription. A live session on 2026-09-17 lost that frame and she
-    answered nothing afterwards, every intent gated `gate.host_speaking`.
+    on transcription. A live session on 2026-09-17 went without that frame
+    and she answered nothing afterwards, every intent gated
+    `gate.host_speaking`. Whether the endpoint lost it or a reply we pushed
+    mid-line abandoned the item is still to be verified (2026-10-05 probes:
+    only the latter was caught).
     """
     from bilisama.clock import FakeClock
 
@@ -805,9 +861,13 @@ async def test_talking_on_past_the_backstop_reopens_the_turn() -> None:
             await server.still_hearing("今天我们打算打几把游戏")
             # Still talking, so the turn must be open again.
             await _next(events, link.SpeechStarted)
-            await server.hear_tail("今天我们打算打几把游戏")
+            await server.hear_tail("今天我们打算打几把游戏。")
             second = await _next(events, link.UserTranscriptDone)
-            assert second.text == "算打几把游戏", "只报没报过的那一截，开头不能重复"
+            # One line, finished twice: the second supersedes the first under
+            # the same id, so the chat page rewrites its row in place and the
+            # console consumer passes on only the part it had not seen.
+            assert second.text == "今天我们打算打几把游戏。"
+            assert second.line_id == first.line_id
             await _next(events, link.SpeechStopped)
         finally:
             await duplex.aclose()
@@ -1113,4 +1173,112 @@ async def test_the_hold_and_the_gates_wait_overlap_rather_than_add(
             )
         finally:
             pumping.cancel()
+            await duplex.aclose()
+
+
+# ------------------------------------------------------------ one line, one row
+
+
+async def _dones_until_quiet(
+    events: AsyncIterator[link.LinkEvent], *, quiet_s: float = 0.3
+) -> list[link.UserTranscriptDone]:
+    """Every UserTranscriptDone until the stream has been quiet for quiet_s."""
+    found: list[link.UserTranscriptDone] = []
+
+    async def pump() -> None:
+        async for event in events:
+            if isinstance(event, link.UserTranscriptDone):
+                found.append(event)
+
+    task = asyncio.create_task(pump())
+    try:
+        last = -1
+        while last != len(found):
+            last = len(found)
+            await asyncio.sleep(quiet_s)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    return found
+
+
+async def test_a_line_restarted_after_our_reply_stays_one_line() -> None:
+    """Measured on the real endpoint 2026-10-05: a reply of ours starting
+    while the streamer is mid-line makes the endpoint abandon that item —
+    no completed, ever — and re-transcribe the line from its first word under
+    a NEW item. Read as two lines, the chat page showed the opening, then the
+    whole thing again; read by item, nothing finishes the first line at all."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("大家好今天我们聊")
+            await _next(events, link.SpeechStarted)
+            await duplex.request_reply(link.ReplySpec(text="都这个点了还不睡"))
+            await _settles(lambda: len(server.items) == 2, "假服务端该换新编号重新转写")
+            await server.still_hearing("大家好今天我们聊新版本")
+            await server.hear_tail("大家好，今天我们聊新版本。")
+            dones = await _dones_until_quiet(events)
+            assert [(d.text, d.line_id) for d in dones] == [
+                ("大家好，今天我们聊新版本。", server.items[0])
+            ], f"应当是一行、定稿一次：{dones}"
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_different_line_after_an_unfinished_one_gets_its_own_row() -> None:
+    """The guard on that rule: a new item that does NOT start the way the
+    unfinished line did is a new line. The old one is finished with what was
+    heard, rather than overwritten by someone else's words."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("我说到一半")
+            await server.hear("换个话题聊聊")
+            dones = await _dones_until_quiet(events)
+            assert [(d.text, d.line_id) for d in dones] == [
+                ("我说到一半", server.items[0]),
+                ("换个话题聊聊", server.items[1]),
+            ]
+        finally:
+            await duplex.aclose()
+
+
+async def test_sound_on_the_uplink_holds_the_backstop_open() -> None:
+    """Inside one line the transcriber goes over a second without a delta
+    while he is still talking (real endpoint, 2026-10-05: up to 1.38 s in a
+    recorded streamer, up to 1.0 s in synthetic monologues). Timed on
+    deltas alone, the backstop split his line and handed the floor to a
+    proactive topic mid-sentence. A frame the noise
+    gate let through is him still making sound, so it restarts the same
+    countdown a delta does — one setting, no second ceiling."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=2.0)
+        await duplex.connect()
+        events = duplex.events()
+        voiced = b"\x10\x00" * 320
+        silent = bytes(640)
+        try:
+            await server.hear_without_ending("我")
+            await _next(events, link.SpeechStarted)
+            for _ in range(6):  # six seconds with no delta, but sound throughout
+                await duplex.push_audio(voiced)
+                await clock.advance(1.0)
+                await asyncio.sleep(0.01)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(
+                isinstance(e, link.SpeechStopped) for e in pending
+            ), f"他还在出声就被收尾了：{[type(e).__name__ for e in pending]}"
+            for _ in range(3):  # now quiet on both counts
+                await duplex.push_audio(silent)
+                await clock.advance(1.0)
+                await asyncio.sleep(0.01)
+            await _next(events, link.SpeechStopped)
+        finally:
             await duplex.aclose()

@@ -603,9 +603,19 @@ class RealtimeClient:
         elif kind is dia.ServerEvent.RESPONSE_DONE:
             self._on_done(payload)
         elif kind is dia.ServerEvent.USER_TRANSCRIPT_DELTA:
-            emit(link.UserTranscriptDelta(str(payload.get("delta") or "")))
+            # The Realtime dialects number transcription items too; passing the
+            # id lets the chat page keep one live row per line here as well.
+            emit(
+                link.UserTranscriptDelta(
+                    str(payload.get("delta") or ""), line_id=str(payload.get("item_id") or "")
+                )
+            )
         elif kind is dia.ServerEvent.USER_TRANSCRIPT_DONE:
-            emit(link.UserTranscriptDone(str(payload.get("transcript") or "")))
+            emit(
+                link.UserTranscriptDone(
+                    str(payload.get("transcript") or ""), line_id=str(payload.get("item_id") or "")
+                )
+            )
         elif kind is dia.ServerEvent.ERROR:
             error = payload.get("error") or {}
             code, message = str(error.get("type") or ""), str(error.get("message") or "")

@@ -478,11 +478,16 @@ class MockRealtimeServer:
         partials, finals, both or neither, and a fake that bundled them would hide
         the code paths that cope with each.
 
-        Carries no item_id: upstream's delta names the transcription item it is
-        building, but nothing on our side reads it, and inventing a shape for an
-        unused field is how a fake starts certifying its own inventions.
+        Carries the item_id upstream's delta names the transcription item with,
+        the same one the final carries: since 2026-10-05 the client passes it
+        on as the line id the chat page keys its live row on.
         """
-        await self.send(dia.ServerEvent.USER_TRANSCRIPT_DELTA, delta=delta)
+        await self.send(
+            dia.ServerEvent.USER_TRANSCRIPT_DELTA,
+            item_id=f"item_user_{self._user_item_seq}",
+            content_index=0,
+            delta=delta,
+        )
 
     async def user_transcript(self, text: str) -> None:
         """What the recogniser decided the streamer said.

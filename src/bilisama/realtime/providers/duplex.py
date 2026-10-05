@@ -155,20 +155,24 @@ _WATCHDOG_S = 25.0
 # already feed at 20 ms, so this is a ceiling for the replay paths, not a
 # throttle on the microphone.
 _FRAME_MS = 20
-# How long the transcriber may say NOTHING about an open turn before we call
-# it over ourselves. Quiet since the last delta, not elapsed since the start:
-# a long sentence keeps producing deltas and keeps resetting this — it only
-# catches the ending that never arrives. Measured 2026-09-16/17: the endings
-# go missing about fifteen times across an hour of talking, in healthy
-# stretches as much as sick ones, and each one costs the streamer a window of
-# her ignoring him completely.
+# How long an open streamer turn may go with neither a transcription delta NOR
+# a sound on the uplink before we call it over ourselves. One countdown, two
+# things that restart it: a delta (the transcriber heard words) or a frame the
+# noise gate let through (he is still making sound). It only catches the
+# ending that never arrives; a normal line ends on the transcriber's own
+# completed frame, which lands together with its last delta.
 #
-# The shipped value lives in VolcanoDuplexConfig.speech_edge_s (1.0 since
-# 2026-09-22; it was 3.0 here). This constant is only the default for a link
-# built without a config — tests, mostly — and tracks the config's default so
-# the two cannot silently disagree. At 1.0 a mid-sentence pause longer than a
-# second splits the turn; the config comment spells out that trade.
-_SPEECH_EDGE_S = 1.0
+# Measured on the real endpoint 2026-10-05: inside one line the transcriber
+# goes up to 1.38 s without a delta while he is still talking (a recorded
+# streamer; synthetic speech up to 1.0 s), so a backstop timed on deltas
+# alone at 1 s split his lines and opened the floor mid-sentence (a
+# proactive topic spoke over him). Restarting on sound fixes
+# that without a second setting; 2.0 s leaves a margin over the gaps seen.
+#
+# The shipped value lives in VolcanoDuplexConfig.speech_edge_s (2.0 since
+# 2026-10-05; 1.0 from 2026-09-22, 3.0 before that). This constant is only the
+# default for a link built without a config and tracks the config's default.
+_SPEECH_EDGE_S = 2.0
 # How long a reply we asked for may stay silent before we give up on it. The
 # endpoint answers a replacement in about 84 ms when it is going to answer at
 # all, so six seconds is not a race — it is the gap between "slow" and "never",
@@ -294,6 +298,29 @@ def session_body(
     return {"session": session, "extension": extension}
 
 
+_PUNCT = set("，。、！？；：,.!?;:…—·「」『』“”‘’（）()[] \t\n")
+
+
+def _bare(text: str) -> str:
+    """Words only: the transcriber re-punctuates as it goes, so comparisons
+    across two readings of one line ignore punctuation and spacing."""
+    return "".join(ch for ch in text if ch not in _PUNCT)
+
+
+def _same_line(old: str, new: str) -> bool | None:
+    """Whether `new` is `old` read again from the start. None while `new` is
+    too short to tell. Four characters, or all of the old line if shorter:
+    a re-transcription starts with the same words by construction, and a
+    different line that happens to share its first four is rare enough."""
+    bare_old, bare_new = _bare(old), _bare(new)
+    need = min(4, len(bare_old))
+    if need == 0:
+        return True
+    if len(bare_new) < need:
+        return None
+    return bare_old[:need] == bare_new[:need]
+
+
 class DuplexLink:
     """SpeechLink over the duplex protocol."""
 
@@ -373,22 +400,38 @@ class DuplexLink:
         # Her streamed words for the turn in flight. Ours never stream, so
         # this stays empty on the replies we drive — see _spoken_text.
         self._heard: list[str] = []
-        # The streamer's words as the transcriber last had them, and how much
-        # of that has already gone up as increments. Two fields because the
-        # tail flaps: the latest value is what the done reports, the longest
-        # sent is what the next increment is measured against.
+        # The streamer's LINE, as the chat page shows it: one row per spoken
+        # line, keyed by the transcription item that started it. The endpoint
+        # numbers its items (`item_id` on started / delta / completed) and,
+        # when a reply starts over an unfinished line, abandons that item and
+        # re-transcribes the line from its first word under a new one — so a
+        # line can outlive the item that opened it (_line_id vs _item_id).
+        self._line_id = ""
+        # What the line reads now: the current item's cumulative text.
         self._asr_text = ""
+        # The longest text already sent as increments, so a flapping tail
+        # (「…游戏？」「…游戏」「…游戏？」) goes up once.
         self._asr_sent = ""
+        # Whether this line has been finished (a done went out). A line the
+        # backstop finished can still go on; a later done supersedes it.
+        self._line_done = True
+        self._item_id = ""
+        # Whether the current item reached its completed frame. False when a
+        # new item starts means the old one was abandoned.
+        self._item_done = True
+        self._item_deltas = 0
+        self._item_started_at = 0.0
+        # A new item taking over an unfinished line: hold its deltas back
+        # until it has caught up with what the row already shows, so the row
+        # does not shrink to two characters and regrow.
+        self._replacing = False
         # A transcription is open; the floor is closed until it ends.
         self._speech_open = False
         self._speech_edge: asyncio.Task[None] | None = None
-        # When the transcriber last said anything about this turn. The backstop
-        # measures quiet from here, not from the start.
+        # When the transcriber last produced a delta, and when the uplink last
+        # carried sound. The backstop counts quiet from the later of the two.
         self._asr_at = 0.0
-        # How much of this utterance has already gone out in a done. Only
-        # moves when a timeout splits one sentence across two turns, and the
-        # continuation's cumulative deltas would otherwise repeat the opening.
-        self._asr_reported = ""
+        self._voice_at = 0.0
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -635,6 +678,11 @@ class DuplexLink:
     async def push_audio(self, pcm: bytes) -> None:
         if self._ws is None or not self._started:
             return
+        # The noise gate upstream (ui/audio.py) replaces what it does not let
+        # through with zeros, so any non-zero byte is a frame it judged to be
+        # sound. That is what restarts the backstop's countdown.
+        if pcm.strip(b"\x00"):
+            self._voice_at = self._clock.monotonic()
         try:
             await self._send(
                 {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}
@@ -789,8 +837,132 @@ class DuplexLink:
 
     # ------------------------------------------------------------ speech edges
 
+    def _open_line(self, line_id: str) -> None:
+        self._finish_line()
+        self._line_id = line_id
+        self._asr_text = ""
+        self._asr_sent = ""
+        self._line_done = False
+
+    def _on_asr_started(self, item_id: str) -> None:
+        """A transcription item opens.
+
+        Usually a new line. But when the item before it never completed, the
+        endpoint abandoned it — a reply started over his unfinished line — and
+        this item re-reads that line from its first word (measured
+        2026-10-05: a commit 25 s into a monologue, the old item never
+        completed, the new one's first delta was the monologue's opening).
+        Which of the two it is shows at the first deltas; until then the row
+        keeps what it shows.
+        """
+        if not self._item_done:
+            self._end_item("replaced")
+        self._replacing = not self._item_done and bool(self._asr_text)
+        if not self._replacing:
+            self._open_line(item_id)
+        self._item_id = item_id
+        self._item_done = False
+        self._item_deltas = 0
+        self._item_started_at = self._clock.monotonic()
+        if not self._speech_open:
+            self._arm_speech_edge()
+            self._events.put_nowait(link.SpeechStarted())
+
+    def _on_asr_delta(self, item_id: str, whole: str) -> None:
+        """CUMULATIVE here, incremental everywhere else: 「今天」「今天打算」….
+
+        Each delta goes up carrying both: `whole`, what the line reads now —
+        which the transcriber revises as it goes, punctuation settling and
+        numbers re-read — and `text`, the increment the contract promises.
+        """
+        if item_id and self._item_id and item_id != self._item_id:
+            return  # a late frame from an item that has been replaced
+        self._asr_at = self._clock.monotonic()  # the turn is still going
+        self._item_deltas += 1
+        if not self._speech_open:
+            # We gave up on this turn and he is still talking, so the ending
+            # was late rather than lost. Without this the rest of the line
+            # falls outside any turn: the floor stays open while he speaks.
+            self._arm_speech_edge()
+            self._events.put_nowait(link.SpeechStarted())
+        if self._replacing:
+            settled = _same_line(self._asr_text, whole)
+            if settled is None:
+                return  # too few words yet to tell
+            if not settled:
+                # Not the old line re-read: that one really ended. Finish it
+                # with what was heard, and give this one its own row.
+                self._replacing = False
+                self._open_line(self._item_id)
+            elif len(_bare(whole)) < len(_bare(self._asr_text)):
+                return  # still catching up; do not shrink the row
+            else:
+                self._replacing = False
+        if whole == self._asr_text and not self._line_done:
+            return
+        self._line_done = False  # a line the backstop finished goes on
+        self._asr_text = whole
+        self._events.put_nowait(
+            link.UserTranscriptDelta(self._increment(whole), line_id=self._line_id, whole=whole)
+        )
+
+    def _increment(self, whole: str) -> str:
+        """What `whole` adds over what has gone up already. The old code
+        required a strict prefix and never sent another increment after the
+        first punctuation flap."""
+        added = link.added_text(self._asr_sent, whole)
+        if added:
+            self._asr_sent = whole
+        return added
+
+    def _on_asr_completed(self, item_id: str, text: str) -> None:
+        if item_id and self._item_id and item_id != self._item_id:
+            return
+        final = text or self._asr_text
+        if self._replacing:
+            if _same_line(self._asr_text, final) is False:
+                self._open_line(self._item_id)
+            self._replacing = False
+        if final and final != self._asr_text:
+            self._asr_text = final
+            self._line_done = False  # the final words supersede an early finish
+        self._item_done = True
+        self._end_item("completed")
+        if self._speech_open:
+            self._close_speech()
+        else:
+            # The backstop already dropped the floor; the line still finishes.
+            self._finish_line()
+
+    def _finish_line(self) -> None:
+        """Report the line as it reads now. Once per finish; a line that goes
+        on after it was finished is finished again under the same id, and
+        that later done supersedes this one (link.UserTranscriptDone)."""
+        if self._line_done:
+            return
+        self._line_done = True
+        if self._asr_text:
+            self._events.put_nowait(link.UserTranscriptDone(self._asr_text, line_id=self._line_id))
+
+    def _end_item(self, how: str) -> None:
+        """One line per transcription item, at info: how it ended and how big
+        it was. It is what answers 「does the completed frame ever really go
+        missing」 from a live session — a question the deltas cannot, and the
+        backstop alone used to answer wrongly."""
+        if not self._item_id:
+            return
+        log.info(
+            "duplex.transcript_item",
+            item_id=self._item_id,
+            line_id=self._line_id,
+            ended=how,
+            chars=len(self._asr_text),
+            deltas=self._item_deltas,
+            open_ms=round((self._clock.monotonic() - self._item_started_at) * 1000),
+        )
+
     def _close_speech(self, *, timed_out: bool = False) -> None:
-        """End the streamer's turn: report what was said, then drop the floor.
+        """End the streamer's turn: finish his line, then drop the floor.
 
         Both halves matter and only one of them is obvious. The transcript is
         the streamer's line in the chat page; `SpeechStopped` is what lets her
@@ -803,24 +975,20 @@ class DuplexLink:
         if self._speech_edge is not None:
             self._speech_edge.cancel()
             self._speech_edge = None
-        # Only the part no earlier done has carried. The transcriber's deltas
-        # are cumulative from the start of the utterance and it does not know
-        # we gave up, so after a timeout the continuation still arrives with
-        # the whole thing — reporting that verbatim would put the opening of
-        # the sentence into the chat page twice.
-        fresh = self._asr_text[len(self._asr_reported) :]
-        if fresh:
-            self._events.put_nowait(link.UserTranscriptDone(fresh))
-            self._asr_reported = self._asr_text
-        self._asr_text = ""
-        self._asr_sent = ""
+        self._finish_line()
         if timed_out:
+            now = self._clock.monotonic()
+            self._end_item("backstop")
             log.warning(
                 "duplex.speech_edge_missing",
-                quiet_ms=round((self._clock.monotonic() - self._asr_at) * 1000),
+                quiet_ms=round((now - self._asr_at) * 1000),
+                # How long sound on the uplink kept it open past the last
+                # delta. Large and frequent would mean noise is holding the
+                # floor shut; this is the number to read before adding a cap.
+                audio_quiet_ms=round((now - self._voice_at) * 1000),
                 error_text=(
-                    "转写不再更新，但结束帧一直没来，按这一句说完处理。"
-                    "端点偶尔会漏这一帧；不自己收尾的话说话权就一直关着。"
+                    "转写和麦克风都安静了，结束帧却一直没来，按这一句说完处理；"
+                    "不自己收尾的话说话权就一直关着。"
                 ),
             )
         self._events.put_nowait(link.SpeechStopped())
@@ -829,20 +997,24 @@ class DuplexLink:
         """A start with no end wedges the gate shut, so bound the wait.
 
         This protocol's only 「the streamer stopped」 signal is the
-        transcriber's completed frame, and that frame goes missing — fifteen
-        times across the corpus of 2026-09-16/17, scattered through healthy
-        stretches as much as sick ones, and self-healing on the next
-        utterance. Every other provider has a VAD edge that does not depend on
-        transcription, so this backstop is this file's alone.
+        transcriber's completed frame. Every other provider has a VAD edge
+        that does not depend on transcription, so this backstop is this
+        file's alone.
 
-        Timed from the last DELTA rather than from the start, which is the
-        difference between a two-second hiccup and a twenty-second one. A long
-        sentence with pauses keeps producing deltas and keeps pushing the
-        deadline out, so this never cuts a streamer off mid-thought; a lost
-        ending shows up as deltas simply stopping, which is exactly what it
-        now measures. Timing it from the start instead cost a flat twenty
+        It was built because that frame was seen to go missing — fifteen
+        times across the corpus of 2026-09-16/17. Probed again 2026-10-05:
+        16 items started, 15 completed, each with its last delta. The one
+        without was ours: a reply pushed mid-line (`speech_text_buffer.commit`)
+        abandons the item, and the endpoint hears the line again under a new
+        one (_on_asr_started). Whether a completed frame is ever lost on its
+        own is still to be verified; `duplex.transcript_item` logs how every
+        item ended, so a live session answers it.
+
+        Timed from the last sign of him — a delta or a sounding uplink frame
+        — rather than from the start. From the start cost a flat twenty
         seconds of her ignoring everything, three or four times per five
-        minutes — the shape the streamer described as 「聊一会儿就不行了」.
+        minutes (「聊一会儿就不行了」); from deltas alone at 1 s it cut lines
+        at the transcriber's own pauses, which run to 1.38 s mid-sentence.
         """
         self._speech_open = True
         self._asr_at = self._clock.monotonic()
@@ -854,10 +1026,11 @@ class DuplexLink:
         task.add_done_callback(self._tasks.discard)
 
     async def _await_speech_edge(self) -> None:
-        # Re-check rather than sleep once: every delta pushes _asr_at forward,
-        # and the turn is only over when the stream has actually gone quiet.
+        # Re-check rather than sleep once: every delta and every sounding
+        # uplink frame pushes the deadline forward, and the turn is only over
+        # when both have actually gone quiet.
         while True:
-            quiet_for = self._clock.monotonic() - self._asr_at
+            quiet_for = self._clock.monotonic() - max(self._asr_at, self._voice_at)
             if quiet_for >= self._speech_edge_s:
                 break
             await self._clock.sleep(self._speech_edge_s - quiet_for)
@@ -955,48 +1128,17 @@ class DuplexLink:
         if kind == "conversation.item.input_audio_transcription.started":
             # This protocol has no input_audio_buffer.speech_started; the
             # transcriber's first word is the earliest edge it offers.
-            self._asr_text = ""
-            self._asr_sent = ""
-            self._asr_reported = ""  # a genuinely new utterance
-            self._arm_speech_edge()
-            self._events.put_nowait(link.SpeechStarted())
+            self._on_asr_started(str(frame.get("item_id") or ""))
             return
         if kind == "conversation.item.input_audio_transcription.delta":
-            # CUMULATIVE here, incremental everywhere else: 「今天」「今天打算」
-            # 「今天打算打」…. The contract downstream is an increment, so only
-            # the growth goes up.
-            #
-            # And the tail flaps: 「…游戏」「…游戏？」「…游戏」「…游戏？」 in one
-            # measured run, the transcriber changing its mind about the
-            # punctuation. Emitting against the LAST value would send 「？」
-            # twice; emitting against the longest already sent sends it once
-            # and stays quiet through the revision, which the done then
-            # settles. Every delta is a prefix of the last one, so nothing is
-            # lost by waiting.
-            whole = str(frame.get("delta") or "")
-            if not self._speech_open:
-                # We gave up on this turn and he is still talking, so the
-                # ending was late rather than lost. Without this the rest of
-                # the sentence falls outside any turn: the floor stays open
-                # while he speaks, and the `completed` that eventually does
-                # arrive finds the turn already closed and reports nothing —
-                # so everything after the timeout never reaches the chat page
-                # or memory at all.
-                self._arm_speech_edge()
-                self._events.put_nowait(link.SpeechStarted())
-            self._asr_text = whole
-            self._asr_at = self._clock.monotonic()  # the turn is still going
-            if whole.startswith(self._asr_sent) and len(whole) > len(self._asr_sent):
-                self._events.put_nowait(link.UserTranscriptDelta(whole[len(self._asr_sent) :]))
-                self._asr_sent = whole
+            self._on_asr_delta(str(frame.get("item_id") or ""), str(frame.get("delta") or ""))
             return
         if kind == "conversation.item.input_audio_transcription.completed":
-            # Its own `transcript` comes back EMPTY — the words only ever live
-            # in the last delta. Sending the edge alone left the streamer's own
-            # side of the conversation out of the chat page, the console and
-            # `on_transcript` entirely (ui/events.py:199, dev_talk.py:1180 both
-            # key on the done), which looked like a UI bug and was this line.
-            self._close_speech()
+            # The finished words ride in `text` (real endpoint, 2026-10-05).
+            # This used to say the frame's transcript came back EMPTY: the
+            # adapter read a `transcript` field the endpoint never sends, and
+            # rebuilt the line from the last delta instead.
+            self._on_asr_completed(str(frame.get("item_id") or ""), str(frame.get("text") or ""))
             return
         if kind == "response.function_call_arguments.done":
             self._on_pull(frame)

@@ -154,6 +154,18 @@ class MockDuplexServer:
         # Whether a greeting we send is played to completion. False leaves it
         # streaming with no done, for tests of the adapter's timed reply hold.
         self.finish_ours = True
+        # Transcription items, as the real endpoint numbers them (measured
+        # 2026-10-05: started / delta / completed all carry `item_id`). The
+        # open one is a line whose `completed` has not been sent yet.
+        self._item_seq = 0
+        self._open_item: tuple[str, str] | None = None
+        # What the real endpoint does to an unfinished line when a reply of
+        # ours starts over it: the item is abandoned, never completed, and a
+        # NEW item re-transcribes the line from its first word (measured
+        # 2026-10-05, a commit 25 s into a 67 s monologue). On by default
+        # because that is the endpoint's behaviour, not a fault.
+        self.retranscribe_on_interrupt = True
+        self.items: list[str] = []
         self._server: Any = None
         self._ws: ServerConnection | None = None
         self._ready = asyncio.Event()
@@ -270,6 +282,19 @@ class MockDuplexServer:
             # that fault models the replacement channel, which is a different
             # event with a different failure.
             await self.say(str(frame.get("text") or ""), ours=True, finish=self.finish_ours)
+            if self._open_item is not None and self.retranscribe_on_interrupt:
+                # The line he was in the middle of is dropped and started over.
+                _old, so_far = self._open_item
+                new_id = self._next_item()
+                await self._send(
+                    ws,
+                    {
+                        "type": "conversation.item.input_audio_transcription.started",
+                        "item_id": new_id,
+                    },
+                )
+                await self._send(ws, self._delta(new_id, so_far))
+                self._open_item = (new_id, so_far)
         elif kind == "speech_text_buffer.replacement.append":
             self._pending = str(frame.get("text") or "")
         elif kind == "speech_text_buffer.replacement.commit":
@@ -389,8 +414,36 @@ class MockDuplexServer:
             },
         )
 
-    async def hear(self, transcript: str, *, flap: str = "") -> None:
-        """The streamer speaks. Deltas are cumulative, `completed` is empty.
+    def _next_item(self) -> str:
+        self._item_seq += 1
+        item_id = f"item-{self._item_seq}"
+        self.items.append(item_id)
+        return item_id
+
+    @staticmethod
+    def _delta(item_id: str, so_far: str) -> dict[str, Any]:
+        return {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": item_id,
+            "content_index": 1,
+            "delta": so_far,
+        }
+
+    @staticmethod
+    def _completed(item_id: str, text: str) -> dict[str, Any]:
+        # The final words ride in `text` (measured 2026-10-05). An adapter
+        # reading `transcript` gets nothing and has to rebuild them from the
+        # deltas — which is what this fake used to model, wrongly.
+        return {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": item_id,
+            "content_index": 1,
+            "text": text,
+        }
+
+    async def hear(self, transcript: str, *, flap: str = "", final: str | None = None) -> None:
+        """The streamer speaks. Deltas are cumulative; `completed` carries the
+        final words in `text`, which may differ from the last delta (`final`).
 
         `flap` replays the tail the real transcriber changes its mind about:
         measured as 「…游戏」「…游戏？」「…游戏」「…游戏？」, punctuation going
@@ -399,63 +452,59 @@ class MockDuplexServer:
         """
         ws = self._ws
         assert ws is not None
-        await self._send(ws, {"type": "conversation.item.input_audio_transcription.started"})
+        item_id = self._next_item()
+        await self._send(
+            ws, {"type": "conversation.item.input_audio_transcription.started", "item_id": item_id}
+        )
         steps = [transcript[:i] for i in range(1, len(transcript) + 1)]
         if flap:
             steps += [transcript + flap, transcript, transcript + flap]
         for step in steps:
-            await self._send(
-                ws,
-                {
-                    "type": "conversation.item.input_audio_transcription.delta",
-                    "delta": step,
-                },
-            )
-        await self._send(
-            ws,
-            {"type": "conversation.item.input_audio_transcription.completed", "transcript": ""},
-        )
+            await self._send(ws, self._delta(item_id, step))
+        await self._send(ws, self._completed(item_id, steps[-1] if final is None else final))
 
     async def hear_without_ending(self, transcript: str) -> None:
-        """The streamer speaks and the transcriber never says he stopped.
+        """The streamer starts a line and the completed frame has not come.
 
-        Seen in a live session: the started frame and the deltas arrive, the
-        completed frame does not, the socket stays healthy, and nothing on the
-        wire says anything is wrong. On this protocol that is the end of her
+        Either he is still talking (follow with `still_hearing`, then
+        `hear_tail`), or the frame is lost. A lost one was reported from live
+        sessions on 2026-09-16/17 and never caught again in the probes of
+        2026-10-05 (16 items, 15 completed, the 16th abandoned by our own
+        commit) — so this is the backstop's case, kept whether or not the
+        endpoint really does it. Without the backstop it would end her
         talking for the rest of the session.
         """
         ws = self._ws
         assert ws is not None
-        await self._send(ws, {"type": "conversation.item.input_audio_transcription.started"})
+        item_id = self._next_item()
+        await self._send(
+            ws, {"type": "conversation.item.input_audio_transcription.started", "item_id": item_id}
+        )
         for i in range(1, len(transcript) + 1):
-            await self._send(
-                ws,
-                {
-                    "type": "conversation.item.input_audio_transcription.delta",
-                    "delta": transcript[:i],
-                },
-            )
+            await self._send(ws, self._delta(item_id, transcript[:i]))
+        self._open_item = (item_id, transcript)
 
     async def still_hearing(self, so_far: str) -> None:
-        """One more cumulative delta on a turn already open — the streamer
-        carrying on. A client timing its backstop from the START of the turn
-        cuts him off here; one timing it from the last delta does not."""
+        """One more cumulative delta on a line already open — the streamer
+        carrying on. A client timing its backstop from the START of the line
+        cuts him off here; one timing it from the last sign of him does not."""
         ws = self._ws
         assert ws is not None
-        await self._send(
-            ws,
-            {"type": "conversation.item.input_audio_transcription.delta", "delta": so_far},
-        )
+        assert self._open_item is not None, "still_hearing 之前要先 hear_without_ending"
+        item_id = self._open_item[0]
+        await self._send(ws, self._delta(item_id, so_far))
+        self._open_item = (item_id, so_far)
 
     async def hear_tail(self, transcript: str) -> None:
-        """Close a turn the client may already have given up on. The endpoint
-        has no idea we timed out, so the ending looks entirely ordinary."""
+        """Finish an open line with its completed frame, `text` carrying the
+        whole line. The endpoint has no idea whether the client's backstop
+        already closed it, so the ending looks entirely ordinary."""
         ws = self._ws
         assert ws is not None
-        await self._send(
-            ws,
-            {"type": "conversation.item.input_audio_transcription.completed", "transcript": ""},
-        )
+        assert self._open_item is not None, "hear_tail 之前要先 hear_without_ending"
+        item_id = self._open_item[0]
+        await self._send(ws, self._completed(item_id, transcript))
+        self._open_item = None
 
     async def fail(self, code: str = "50000000", message: str = "模型推理出错") -> None:
         ws = self._ws

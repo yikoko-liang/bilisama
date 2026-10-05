@@ -122,6 +122,8 @@ class _Session:
         # the whole point of one of the tests below.
         self.order: list[str] = []
         self.asr: list[str] = []
+        # The item id on every transcription frame, deltas and completed alike.
+        self.asr_items: list[str] = []
         self.asr_final: str | None = None
 
     async def send(self, frame: dict[str, Any]) -> None:
@@ -151,8 +153,10 @@ class _Session:
                 self.tts_types.append(str(frame.get("tts_type") or ""))
             elif kind == "conversation.item.input_audio_transcription.delta":
                 self.asr.append(str(frame.get("delta") or ""))
+                self.asr_items.append(str(frame.get("item_id") or ""))
             elif kind == "conversation.item.input_audio_transcription.completed":
-                self.asr_final = str(frame.get("transcript") or "")
+                self.asr_final = str(frame.get("text") or "")
+                self.asr_items.append(str(frame.get("item_id") or ""))
             elif kind == "response.output_audio.delta":
                 self.audio.extend(base64.b64decode(str(frame.get("delta") or "")))
             elif kind == "response.function_call_arguments.done":
@@ -542,38 +546,38 @@ async def test_her_words_start_before_the_frame_that_announces_the_turn(
         assert ahead >= 1, f"音频帧之前只有 {ahead} 个文本块"
 
 
-async def test_the_streamers_words_only_exist_in_the_last_delta(tmp_path: Path) -> None:
-    """Two endpoint facts the adapter has to rebuild the transcript from.
+async def test_the_streamers_line_is_numbered_and_finished_in_text(tmp_path: Path) -> None:
+    """The endpoint facts the adapter builds the streamer's line from.
 
-    The deltas are CUMULATIVE — 「你」「你叫」「你叫什么」 — and `completed`
-    carries an empty `transcript`. So the last delta is the only copy of what
-    the streamer said, and it is what `UserTranscriptDone` is built from. The
-    chat page, the console and `on_transcript` all key on that event, so if
-    this rebuild is wrong the streamer's whole half of the conversation goes
-    missing while hers keeps arriving.
+    Every transcription frame of one line carries the same `item_id`; the
+    deltas are the line as it reads so far, not increments; `completed`
+    carries the finished line in `text`. Until 2026-10-05 this test read a
+    `transcript` field, found it empty and pinned 「completed has no text」 —
+    so the adapter rebuilt the line from the last delta, and the backstop was
+    tuned for a closing frame we were reading wrong. Measured that day on 15
+    lines: `text` equals the last delta every time.
+
+    It also pinned 「each delta is a prefix of the last」. That held for this
+    short line but not for long ones: 14 of the 15 revised a word or a mark
+    in the middle (「今天。」 then 「今天我们」), which is why the adapter
+    measures what a reading adds from the common prefix (link.added_text).
     """
     said = "今天打算打几把游戏"
     async for s in _open(tmp_path):
         await s.speak(said)
         await s.collect(10)
         assert len(s.asr) >= 2, f"转写块太少，没法判断累积与否：{s.asr}"
-        # Cumulative, but the tail flaps — 「…游戏」「…游戏？」「…游戏」 in one
-        # run, the transcriber revising its punctuation. So the invariant is
-        # not "each grows on the last" but "each is a prefix of the last",
-        # which is what makes the final delta the whole sentence.
-        final = s.asr[-1]
-        for i, block in enumerate(s.asr):
-            assert final.startswith(block), (
-                f"第 {i} 块 {block!r} 不是最后一块 {final!r} 的前缀——"
-                "adapter 是靠这个重建整句的，这条变了就得改"
-            )
-        assert s.asr_final == "", (
-            f"completed 里居然带了 transcript={s.asr_final!r}——"
-            "那就可以直接用它，不必再从最后一块 delta 重建"
+        assert s.asr_final is not None, "没收到 completed：结束帧真的丢了，兜底计时是对的"
+        assert s.asr_final == s.asr[-1], (
+            f"completed 的 text={s.asr_final!r} 和最后一块 delta {s.asr[-1]!r} 不一致——"
+            "adapter 以 completed 为准，这条变了要看是谁更全"
         )
+        assert (
+            len(set(s.asr_items)) == 1 and s.asr_items[0]
+        ), f"一句话里的转写帧编号不一致：{s.asr_items}——adapter 靠编号认行"
         assert any(
-            word in s.asr[-1] for word in ("游戏", "几把", "今天")
-        ), f"最后一块 delta 应该是整句，实际是 {s.asr[-1]!r}"
+            word in s.asr_final for word in ("游戏", "几把", "今天")
+        ), f"completed 应该是整句，实际是 {s.asr_final!r}"
 
 
 # ------------------------------------------------------------ 5. the poison

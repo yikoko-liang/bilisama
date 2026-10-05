@@ -637,11 +637,11 @@ UI_META: dict[str, FieldMeta] = {
         order=5,
     ),
     "speech.volcano_duplex.speech_edge_s": FieldMeta(
-        label="转写静默多久算说完（秒）",
+        label="转写和麦克风都安静多久算说完（秒）",
         hint=(
-            "端点偶尔漏发「主播说完了」那一帧，漏了她就一直不接话；这个数是等多久之后"
-            "我们自己替她判说完。小了接得快，但主播想事情停顿超过这个数就会被切成两句、"
-            "她可能只答前半句。出厂 1 秒"
+            "万一端点没发「主播说完了」那一帧，等多久之后我们自己替她判说完。转写来一段、"
+            "或者麦克风有一帧声音，都会让倒计时重新开始，所以主播还在说就不会被切开。"
+            "小了漏帧后她接得快。出厂 2 秒"
         ),
         provider_scoped="volcano_duplex",
         audience=Audience.OPERATOR,

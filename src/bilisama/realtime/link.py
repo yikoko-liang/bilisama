@@ -47,6 +47,7 @@ __all__ = [
     "ToolCall",
     "UserTranscriptDelta",
     "UserTranscriptDone",
+    "added_text",
 ]
 
 _handle_ids = itertools.count(1)
@@ -152,11 +153,46 @@ class UserTranscriptDelta:
     this distinction (dialect.USER_TRANSCRIPT_* versus TRANSCRIPT_*)."""
 
     text: str
+    """What this delta adds. An increment, on every provider."""
+    line_id: str = ""
+    """Which spoken line this belongs to, when the provider numbers them.
+    Equal ids are one line; the chat page keeps one row per id."""
+    whole: str = ""
+    """The line as it reads now, when the provider knows it. A transcriber
+    that revises itself (punctuation settling, a number re-read) cannot say
+    so in increments; this can. Empty means only `text` is known."""
 
 
 @dataclass(frozen=True, slots=True)
 class UserTranscriptDone:
     text: str
+    """The finished line."""
+    line_id: str = ""
+    """As on the delta. A second done with an id already finished SUPERSEDES
+    the first — the line went on after it was closed — and carries the whole
+    line again: a consumer that appends should take only what it had not
+    seen (`added_text`), a consumer that draws rows should rewrite the row."""
+
+
+def added_text(seen: str, now: str) -> str:
+    """What `now` adds to a line already taken up to `seen`.
+
+    `seen` should be the longest reading taken, not the last: a transcriber's
+    tail flaps (「…游戏？」「…游戏」「…游戏？」, measured on the duplex
+    endpoint), and measuring against the last reading would hand out 「？」
+    twice. A revision in the middle — 「今天。」 then 「今天我们」 — continues
+    from the common prefix. A reading no longer than `seen` adds nothing.
+    """
+    if now.startswith(seen):
+        return now[len(seen) :]
+    if len(now) <= len(seen):
+        return ""
+    common = 0
+    for a, b in zip(seen, now, strict=False):
+        if a != b:
+            break
+        common += 1
+    return now[common:]
 
 
 @dataclass(frozen=True, slots=True)
