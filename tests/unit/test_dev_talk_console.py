@@ -166,3 +166,26 @@ def test_a_turn_the_gate_killed_closes_when_the_streamer_speaks_again(
         "the killed turn must close on its own — otherwise its id swallows the next one: "
         f"{dones}"
     )
+
+
+def test_a_line_finished_again_passes_on_only_what_it_added(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The duplex backstop closes a line while the streamer is still saying it;
+    the rest arrives as a second done under the same line id, carrying the
+    whole line. Printing and forwarding that whole line put its first half on
+    screen and into the proactive loop's dialogue twice (2026-10-05)."""
+    heard: list[str] = []
+    events: list[link.LinkEvent] = [
+        link.UserTranscriptDone("你叫什么", line_id="57"),
+        link.UserTranscriptDone("你叫什么名字？", line_id="57"),
+        link.UserTranscriptDone("你叫什么名字？", line_id="57"),  # nothing new
+        link.UserTranscriptDone("好", line_id="58"),
+        link.UserTranscriptDone("好"),  # unnumbered: always whole
+    ]
+    asyncio.run(
+        _consume_events(_feed(events), None, None, stream_text=False, on_transcript=heard.append)
+    )
+    assert heard == ["你叫什么", "名字？", "好", "好"]
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert lines == ["你说：你叫什么", "你说（接上句）：名字？", "你说：好", "你说：好"]

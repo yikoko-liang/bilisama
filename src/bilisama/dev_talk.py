@@ -1118,6 +1118,9 @@ async def _consume_events(
     transcribes: bool | None = None
     awaiting = False
     held: list[str] = []
+    # The last finished line (id, longest text), so a second done under the
+    # same id hands on only what it added (link.UserTranscriptDone).
+    last_line = ("", "")
     # Whether anything of hers came back in the current turn. A turn the gate
     # held and killed produces no ReplyDone on this (gated) view, so the id
     # opened for the streamer's speech never closed and the NEXT turn's lines
@@ -1185,9 +1188,20 @@ async def _consume_events(
                 # reply it explains rather than joining the queue behind it.
                 awaiting = False
                 open_turn()
-                print(f"你说：{event.text}")
-                if on_transcript is not None and event.text:
-                    on_transcript(event.text)
+                heard = event.text
+                if event.line_id and event.line_id == last_line[0]:
+                    # The line went on after it was closed and came back
+                    # whole: pass on only the rest, or its first half is
+                    # printed and handed to the proactive loop twice.
+                    heard = link.added_text(last_line[1], event.text)
+                    if heard:
+                        print(f"你说（接上句）：{heard}")
+                else:
+                    print(f"你说：{heard}")
+                if heard or event.line_id != last_line[0]:
+                    last_line = (event.line_id, event.text)
+                if on_transcript is not None and heard:
+                    on_transcript(heard)
                 release()
             elif isinstance(event, link.ReplyTextDelta):
                 open_turn()  # a proactive reply starts a turn with no speech before it
