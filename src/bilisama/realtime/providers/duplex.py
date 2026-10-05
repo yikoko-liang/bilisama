@@ -166,13 +166,15 @@ _FRAME_MS = 20
 # goes up to 1.38 s without a delta while he is still talking (a recorded
 # streamer; synthetic speech up to 1.0 s), so a backstop timed on deltas
 # alone at 1 s split his lines and opened the floor mid-sentence (a
-# proactive topic spoke over him). Restarting on sound fixes
-# that without a second setting; 2.0 s leaves a margin over the gaps seen.
+# proactive topic spoke over him). Restarting on sound fixes that without a
+# second setting: with sound counted, the longest stretch inside a line with
+# neither was 0.73 s across the 16 probe items.
 #
-# The shipped value lives in VolcanoDuplexConfig.speech_edge_s (2.0 since
-# 2026-10-05; 1.0 from 2026-09-22, 3.0 before that). This constant is only the
-# default for a link built without a config and tracks the config's default.
-_SPEECH_EDGE_S = 2.0
+# The shipped value lives in VolcanoDuplexConfig.speech_edge_s (1.0; 2.0 for
+# part of 2026-10-05, 1.0 from 2026-09-22, 3.0 before that). This constant is
+# only the default for a link built without a config and tracks the config's
+# default.
+_SPEECH_EDGE_S = 1.0
 # How long a reply we asked for may stay silent before we give up on it. The
 # endpoint answers a replacement in about 84 ms when it is going to answer at
 # all, so six seconds is not a race — it is the gap between "slow" and "never",

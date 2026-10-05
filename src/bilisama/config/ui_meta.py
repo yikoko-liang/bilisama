@@ -641,7 +641,7 @@ UI_META: dict[str, FieldMeta] = {
         hint=(
             "万一端点没发「主播说完了」那一帧，等多久之后我们自己替她判说完。转写来一段、"
             "或者麦克风有一帧声音，都会让倒计时重新开始，所以主播还在说就不会被切开。"
-            "小了漏帧后她接得快。出厂 2 秒"
+            "小了漏帧后她接得快；主播一句话中间不出声地停超过它，会先被判说完。出厂 1 秒"
         ),
         provider_scoped="volcano_duplex",
         audience=Audience.OPERATOR,

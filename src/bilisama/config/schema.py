@@ -204,10 +204,14 @@ class VolcanoDuplexConfig(BaseModel):
     # on the transcriber's own completed frame; this only catches the one that
     # never comes, and without it the floor stays shut and she ignores him.
     # Measured 2026-10-05: inside one line deltas can pause up to 1.38 s while
-    # he talks, which is why 1.0 on deltas alone split lines mid-sentence;
-    # restarting on sound covers that, 2.0 leaves a margin. Lower lets her
-    # answer sooner after a lost frame; it was 3.0, then 1.0 from 2026-09-22.
-    speech_edge_s: float = Field(2.0, ge=0.3, le=10.0)
+    # he talks, which is why 1.0 on deltas ALONE split lines mid-sentence.
+    # Counting sound as well, the longest stretch inside a line with neither
+    # was 0.73 s across the 16 probe items, so 1.0 cuts none of them. Lower
+    # lets her answer sooner after a lost frame; a silent pause longer than
+    # this inside a line closes the turn early, and the line goes on under
+    # the same line id. It was 3.0, 1.0 from 2026-09-22, 2.0 for part of
+    # 2026-10-05, then 1.0 again: the streamer found 2.0 slow.
+    speech_edge_s: float = Field(1.0, ge=0.3, le=10.0)
     # How long a reply's frames wait in the adapter before they may play. On
     # this protocol 「主播开口了」 arrives ~850 ms after the streamer starts
     # (the transcriber has to recognise a word; DashScope's VAD is ~330 ms), and

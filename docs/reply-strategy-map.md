@@ -149,7 +149,7 @@ duplex 另一条路线 `event_replies = "tool"`：弹幕只存着，她在自己
 - `docs/architecture-status.md:145-147`、计划 §15.22、`capabilities.py:41-46`、`volcano.py:888-892`：「事件规则折进会话」，假（§6 第 1 条）。
 - `config/schema.py:222-242`：还在说代笔路线「启动时拒绝」、tool 是「唯一能用的路线」；出厂已经是代笔。
 - `docs/runbook.md:298-299`、台账 #104/#105：「出厂默认仍然是 tool」，过时。
-- ~~`docs/runbook.md:454-455`：转写兜底「20 秒」~~ 2026-10-05 已改，兜底现在是 `speech_edge_s` 2 秒、主播有声音就往后推。
+- ~~`docs/runbook.md:454-455`：转写兜底「20 秒」~~ 2026-10-05 已改，兜底现在是 `speech_edge_s` 1 秒、主播有声音就往后推。
 - `docs/speech-backends.md:151-152`、`docs/architecture-status.md:143, 147`：「只有主播的麦克风能起一轮」，09-21 起过时。
 - `docs/speech-backends.md:168`：说 s2s 的 `end_protection` 只打警告，实际会重新打开服务端的打断。
 - `hosted.py:323-333`：说没有探针验证过保护字段，#45 在 08-25 测过 DashScope。

@@ -499,7 +499,7 @@ def test_the_duplex_speech_edge_default_is_the_documented_one() -> None:
     from bilisama.config.schema import VolcanoDuplexConfig
     from bilisama.realtime.providers.duplex import _SPEECH_EDGE_S
 
-    assert VolcanoDuplexConfig().speech_edge_s == 2.0
+    assert VolcanoDuplexConfig().speech_edge_s == 1.0
     assert (
         VolcanoDuplexConfig().speech_edge_s == _SPEECH_EDGE_S
     ), "adapter 的兜底常量和配置默认值分叉了，直接建的 link 和配置建的行为会不一样"
