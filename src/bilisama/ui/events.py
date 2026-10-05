@@ -59,6 +59,9 @@ class ServerEvent(StrEnum):
     # The live-mock console's state machine and its adopted-event preview.
     LIVE_MOCK_STATE = "live_mock.state"
     LIVE_MOCK_EVENT = "live_mock.event"
+    # The streamer's line while he is still saying it, one row per line id.
+    # Transient: not in the feed replay, which keeps the finished line.
+    TRANSCRIPT_PARTIAL = "transcript.partial"
 
 
 class ClientEvent(StrEnum):
@@ -202,9 +205,19 @@ def link_frames(
         # the pet bubble and the test runner close the reply on it.
         if event.text:
             yield ServerEvent.EVENT_FEED, {"kind": "reply", **payload}
+    elif isinstance(event, link.UserTranscriptDelta):
+        # Only for a numbered line: without an id there is no row to refresh,
+        # and the finished line is drawn from the done as before.
+        if event.line_id:
+            yield ServerEvent.TRANSCRIPT_PARTIAL, {
+                "line_id": event.line_id,
+                "text": event.whole,
+                "delta": event.text,
+            }
     elif isinstance(event, link.UserTranscriptDone):
-        yield ServerEvent.TRANSCRIPT_FINAL, {"text": event.text}
-        yield ServerEvent.EVENT_FEED, {"kind": "transcript", "text": event.text}
+        numbered = {"line_id": event.line_id} if event.line_id else {}
+        yield ServerEvent.TRANSCRIPT_FINAL, {"text": event.text, **numbered}
+        yield ServerEvent.EVENT_FEED, {"kind": "transcript", "text": event.text, **numbered}
     elif isinstance(event, link.LinkDown):
         # The panel shows this to a streamer mid-stream: say what happened and
         # whether anything is being done about it, not the close code.

@@ -342,6 +342,9 @@ body.panel-only .scrim {
 .entry.gift .who { color: var(--c-gift); }
 .entry.danmaku { border-left-color: var(--c-danmaku); }
 .entry.transcript { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+/* Still being said: the row will be rewritten until the line closes. */
+.entry.transcript.live .line-text { color: var(--ink-dim); }
+.entry.transcript.live .line-text::after { content: "…"; }
 .entry.reply { border-left-color: var(--c-reply); }
 .entry.reply .who { color: var(--c-reply); }
 .entry.error { border-left-color: var(--c-err); color: var(--c-err); }

@@ -37,6 +37,7 @@ def test_server_vocabulary_is_pinned() -> None:
         "app.exiting",
         "live_mock.state",
         "live_mock.event",
+        "transcript.partial",
     ]
 
 
@@ -137,6 +138,31 @@ def test_user_transcript_done_yields_final_plus_feed_entry() -> None:
     assert _frames(link.UserTranscriptDone("今天玩什么")) == [
         (ServerEvent.TRANSCRIPT_FINAL, {"text": "今天玩什么"}),
         (ServerEvent.EVENT_FEED, {"kind": "transcript", "text": "今天玩什么"}),
+    ]
+
+
+def test_a_numbered_line_refreshes_one_row_while_he_talks() -> None:
+    """One row per spoken line, rewritten in place as the transcriber goes —
+    instead of a new row each time the backstop cut the line, and the whole
+    line again at the end (2026-10-05). The partial carries the line as it
+    reads now, so the page sets the row rather than guessing at appends."""
+    delta = link.UserTranscriptDelta("叫", line_id="item-1", whole="你叫")
+    assert _frames(delta) == [
+        (ServerEvent.TRANSCRIPT_PARTIAL, {"line_id": "item-1", "text": "你叫", "delta": "叫"})
+    ]
+    done = link.UserTranscriptDone("你叫什么？", line_id="item-1")
+    assert _frames(done) == [
+        (ServerEvent.TRANSCRIPT_FINAL, {"text": "你叫什么？", "line_id": "item-1"}),
+        (ServerEvent.EVENT_FEED, {"kind": "transcript", "text": "你叫什么？", "line_id": "item-1"}),
+    ]
+
+
+def test_a_provider_that_only_sends_increments_still_gets_a_live_row() -> None:
+    """Hosted transcribers number their items too but stream increments only;
+    the page appends those to the row."""
+    delta = link.UserTranscriptDelta("叫", line_id="it-9")
+    assert _frames(delta) == [
+        (ServerEvent.TRANSCRIPT_PARTIAL, {"line_id": "it-9", "text": "", "delta": "叫"})
     ]
 
 

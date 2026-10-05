@@ -386,6 +386,9 @@ const handlers = {
     // Already mirrored into event.feed by the server; the stage shows nothing
     // extra for it today.
   },
+  // The streamer's line while he is still saying it; the chat tab keeps one
+  // row per line and rewrites it as this arrives.
+  "transcript.partial": (data) => panel.handleFrame("transcript.partial", data),
   "app.exiting": () => {
     // The backend acknowledged the quit (or someone else asked for it).
     // Close before the socket dies so the window never enters its reconnect

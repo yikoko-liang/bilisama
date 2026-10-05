@@ -46,7 +46,7 @@ const socket = connect({
     }
     if (event === "live_mock.state") applyState(data);
     else if (event === "live_mock.event") appendEntry(data.kind, data.name, eventText(data));
-    else if (event === "transcript.final") appendEntry("transcript", "浏览器语音", data.text ?? "");
+    else if (event === "transcript.final") appendEntry("transcript", "浏览器语音", data.text ?? "", data.line_id);
     else if (event === "reply.done" && data.text) {
       const reference = data.reference ? `引用${eventLabel(data.reference.kind)}：${eventText(data.reference)} ｜ ` : "";
       appendEntry("reply", "伴播", `${reference}${data.text}`);
@@ -289,7 +289,7 @@ function render() {
   flowSteps[2].classList.toggle("active", Boolean(backendState?.running));
 }
 
-function appendEntry(kind, who, text) {
+function appendEntry(kind, who, text, lineId = "") {
   if (!text && !who) return;
   if (!monitorStarted) {
     monitorFeed.textContent = "";
@@ -300,6 +300,16 @@ function appendEntry(kind, who, text) {
   const name = document.createElement("b");
   name.textContent = who || kind || "事件";
   entry.append(name, document.createTextNode(text ? ` ${text}` : ""));
+  // A line the backend finished twice under one number (it re-heard the part
+  // we interrupted) replaces its first row instead of stacking a second.
+  if (lineId) {
+    entry.dataset.line = lineId;
+    const earlier = [...monitorFeed.children].find((node) => node.dataset.line === lineId);
+    if (earlier) {
+      earlier.replaceWith(entry);
+      return;
+    }
+  }
   monitorFeed.appendChild(entry);
   while (monitorFeed.children.length > 100) monitorFeed.firstChild.remove();
   monitorFeed.scrollTop = monitorFeed.scrollHeight;

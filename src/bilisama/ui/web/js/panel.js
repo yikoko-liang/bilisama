@@ -608,8 +608,39 @@ export function createPanel({ send }) {
     timelineEl.parentElement.scrollTop = timelineEl.parentElement.scrollHeight;
   };
 
+  // One row per spoken line. A numbered line is drawn once and rewritten in
+  // place while the streamer talks: the transcriber keeps refining it, and the
+  // duplex backend re-hears a line we interrupted and finishes it a second time
+  // under the same number. Stacking a row per update read as the line split up
+  // and then sent again whole (2026-10-05).
+  const transcriptRow = (data, { text, delta = "", live }) => {
+    const lineId = String(data.line_id);
+    let row = null;
+    for (const node of timelineEl.querySelectorAll(".entry.transcript[data-line]")) {
+      if (node.dataset.line === lineId) row = node;
+    }
+    if (!row) {
+      row = el("div", "entry transcript");
+      row.dataset.line = lineId;
+      row.appendChild(el("span", "when", clock(data.ts)));
+      row.appendChild(el("span", "who", "你"));
+      row.appendChild(el("span", "line-text", ""));
+      pushEntry(row);
+    }
+    const copy = row.querySelector(".line-text");
+    copy.textContent = text || copy.textContent + delta;
+    row.classList.toggle("live", live);
+    if (row === timelineEl.lastElementChild) {
+      timelineEl.parentElement.scrollTop = timelineEl.parentElement.scrollHeight;
+    }
+  };
+
   const feedEntry = (data) => {
     const kind = data.kind ?? "system";
+    if (kind === "transcript" && data.line_id) {
+      transcriptRow(data, { text: data.text ?? "", live: false });
+      return;
+    }
     const entry = el("div", `entry ${kind}`);
     entry.appendChild(el("span", "when", clock(data.ts)));
     if (kind === "verdict") {
@@ -1589,6 +1620,8 @@ export function createPanel({ send }) {
           return;
         }
         feedEntry(data);
+      } else if (event === "transcript.partial") {
+        if (data.line_id) transcriptRow(data, { text: data.text ?? "", delta: data.delta ?? "", live: true });
       } else if (event === "log.line") logEntry(data.line ?? "");
       else if (event === "panel.state") {
         panicked = Boolean(data.panicked);

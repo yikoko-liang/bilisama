@@ -497,6 +497,29 @@ async def test_reconnect_does_not_double_the_panel(page: Page, harness: Harness)
     )
 
 
+async def test_a_spoken_line_is_one_row_rewritten_in_place(page: Page, harness: Harness) -> None:
+    """The transcriber refines a line while the streamer talks, and the duplex
+    backend finishes an interrupted line a second time under the same number.
+    The chat tab drew each as a new row — the line in pieces, then whole again
+    (2026-10-05). One number, one row; an unnumbered line keeps its own."""
+    await _wait(page, "document.title.includes('豆腐')")
+    rows = "document.querySelectorAll('#timeline .entry.transcript')"
+    partial = ServerEvent.TRANSCRIPT_PARTIAL
+    harness.hub.broadcast(partial, {"line_id": "57", "text": "你叫", "delta": "你叫"})
+    await _wait(page, f"{rows}.length === 1 && {rows}[0].classList.contains('live')")
+    harness.hub.broadcast(partial, {"line_id": "57", "text": "你叫什么", "delta": "什么"})
+    feed = ServerEvent.EVENT_FEED
+    harness.hub.broadcast(feed, {"kind": "transcript", "text": "你叫什么", "line_id": "57"})
+    harness.hub.broadcast(feed, {"kind": "transcript", "text": "你叫什么名字？", "line_id": "57"})
+    harness.hub.broadcast(feed, {"kind": "transcript", "text": "好"})
+    await _wait(page, f"{rows}.length === 2")
+    first = await page.evaluate(
+        f"(() => {{ const r = {rows}[0];"
+        " return [r.querySelector('.line-text').textContent, r.classList.contains('live')]; })()"
+    )
+    assert first == ["你叫什么名字？", False]
+
+
 # ------------------------------------------------------------ themes & motion
 
 
@@ -1630,6 +1653,21 @@ async def test_live_mock_restores_the_topic_when_the_room_id_returns(
     await _wait(page, "document.getElementById('stream-intro').value === ''")
     await page.keyboard.type("5")  # back to the configured room
     await _wait(page, "document.getElementById('stream-intro').value === '今天聊AI'")
+
+
+async def test_live_mock_shows_a_line_finished_twice_once(page: Page, harness: Harness) -> None:
+    """The duplex backend finishes a line we interrupted a second time under
+    the same number; the monitor showed both (2026-10-05)."""
+    await page.goto(harness.url + "live-mock")
+    await _wait(page, "document.getElementById('connection-pill').dataset.state === 'online'")
+    final = ServerEvent.TRANSCRIPT_FINAL
+    harness.hub.broadcast(final, {"text": "你叫什么", "line_id": "57"})
+    harness.hub.broadcast(final, {"text": "你叫什么名字？", "line_id": "57"})
+    harness.hub.broadcast(final, {"text": "好"})
+    rows = "[...document.querySelectorAll('#monitor-feed .monitor-entry.transcript')]"
+    await _wait(page, f"{rows}.length === 2")
+    texts = await page.evaluate(f"{rows}.map((r) => r.textContent)")
+    assert texts == ["浏览器语音 你叫什么名字？", "浏览器语音 好"]
 
 
 async def test_the_skin_selector_lists_packs_and_marks_the_current_one(
