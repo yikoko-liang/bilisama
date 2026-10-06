@@ -517,6 +517,9 @@ class DuplexLink:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        # After the receive loop has stopped, so no frame of this session can
+        # land behind the close and reopen the turn.
+        self._end_turn_with_session("session_closed")
         if self._ws is not None:
             with contextlib.suppress(Exception):
                 await self._ws.close()
@@ -963,6 +966,23 @@ class DuplexLink:
             open_ms=round((self._clock.monotonic() - self._item_started_at) * 1000),
         )
 
+    def _end_turn_with_session(self, how: str) -> None:
+        """The session his line lived on is over, so nothing can finish it now.
+
+        Its completed frame belonged to that session, and a new session knows
+        nothing of it. Left open, the floor held `streamer_speaking` through
+        the panel's 暂停 and after 恢复 until he finished a whole new line, and
+        that line raised no SpeechStarted, armed no backstop and could be
+        folded into the row the pause cut off (2026-10-05, reproduced on the
+        fake). So the line is finished with what was heard and the floor
+        handed back, as a backstop close would, without blaming the endpoint.
+        """
+        if not self._item_done:
+            self._item_done = True
+            self._end_item(how)
+        self._replacing = False
+        self._close_speech()
+
     def _close_speech(self, *, timed_out: bool = False) -> None:
         """End the streamer's turn: finish his line, then drop the floor.
 
@@ -1298,6 +1318,8 @@ class DuplexLink:
     # ------------------------------------------------------------ reconnect
 
     async def _on_disconnect(self, exc: Exception) -> None:
+        # First, so L3 hears his line end before it hears the link go.
+        self._end_turn_with_session("link_lost")
         self._started = False
         self._settle(link.ReplyStatus.FAILED)
         klass = classify_error(exc)

@@ -1282,3 +1282,92 @@ async def test_sound_on_the_uplink_holds_the_backstop_open() -> None:
             await _next(events, link.SpeechStopped)
         finally:
             await duplex.aclose()
+
+
+# ------------------------------------------------------------ a session that ends mid-line
+
+
+async def _heard(events: AsyncIterator[link.LinkEvent], whole: str) -> link.UserTranscriptDelta:
+    """Wait until the line reads `whole`; the fake streams it a word at a time."""
+    delta = await _next(events, link.UserTranscriptDelta)
+    while delta.whole != whole:
+        delta = await _next(events, link.UserTranscriptDelta)
+    return delta
+
+
+async def test_pausing_mid_line_finishes_the_line_and_hands_the_floor_back() -> None:
+    """The panel's 暂停 hangs up the session, and the streamer may be mid-line
+    when he presses it (「我先暂停一下」, then the button). The completed frame
+    that would have closed his line belonged to the session that just ended,
+    so it never came: the floor held `streamer_speaking` through the pause and
+    after 恢复, and every intent waited on gate.host_speaking until he finished
+    a whole new line — forever, if he stayed quiet. A session that ends ends
+    his line with it."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("我先暂停一下")
+            await _next(events, link.SpeechStarted)
+            await _heard(events, "我先暂停一下")
+            await duplex.suspend()
+            done = await _next(events, link.UserTranscriptDone)
+            assert done.text == "我先暂停一下", "暂停掐断的半句也要作为说完的一句报上去"
+            await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()
+
+
+async def test_after_resume_his_next_line_opens_a_turn_and_a_row_of_its_own() -> None:
+    """The other half of the same wedge. The adapter still believed the old
+    line open, so after 恢复 his next line raised no SpeechStarted (no barge-in)
+    and armed no backstop, and one that began with the same words was folded
+    into the row the pause had cut off."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("我们接着看这一关")
+            await _next(events, link.SpeechStarted)
+            before = await _heard(events, "我们接着看这一关")
+            await duplex.suspend()
+            await duplex.resume()
+            await server.hear_without_ending("我们接着看这一关的boss")
+            await _next(events, link.SpeechStarted)
+            after = await _heard(events, "我们接着看这一关的boss")
+            assert after.line_id != before.line_id, "恢复后的一句被并进了暂停前那一行"
+            await clock.advance(1.5)
+            await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_dropped_socket_ends_his_line_before_it_reports_the_drop() -> None:
+    """The same rule when the network ends the session: his line is finished
+    and the floor handed back first, then the drop is reported. Before, the
+    floor waited on the backstop, which then logged duplex.speech_edge_missing
+    and blamed the endpoint for a frame that could no longer come."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("网络好像卡了")
+            await _next(events, link.SpeechStarted)
+            await _heard(events, "网络好像卡了")
+            await server.drop()
+            got = [type(e).__name__ for e in await _drain_until(events, link.LinkDown)]
+            assert got[-3:] == ["UserTranscriptDone", "SpeechStopped", "LinkDown"], got
+        finally:
+            await duplex.aclose()

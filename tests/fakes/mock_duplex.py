@@ -506,6 +506,13 @@ class MockDuplexServer:
         await self._send(ws, self._completed(item_id, transcript))
         self._open_item = None
 
+    async def drop(self, code: int = 1011) -> None:
+        """The socket dies under the client the way a network blip looks from
+        our side: no session.close, no error frame, just an abnormal close."""
+        ws = self._ws
+        assert ws is not None
+        await ws.close(code=code, reason="dropped")
+
     async def fail(self, code: str = "50000000", message: str = "模型推理出错") -> None:
         ws = self._ws
         assert ws is not None
