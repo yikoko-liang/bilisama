@@ -543,6 +543,7 @@ def _bare_speaker(stream: object | None) -> dev_talk._Speaker:
     speaker._opened_device = None
     speaker._last_output_error = ""
     speaker._last_default_ca_id = None
+    speaker._volume = dev_talk._VoiceVolume(100)
     return speaker
 
 
@@ -659,6 +660,70 @@ def test_disabling_speaker_flushes_current_audio_and_blocks_later_chunks() -> No
     speaker.play(b"audible again")
     assert speaker.enabled is True
     assert bytes(speaker._buffer) == b"audible again"
+
+
+def _tone_pcm(amplitude: float, frames: int) -> bytes:
+    from array import array
+    from math import pi, sin
+
+    rate = dev_talk._OUTPUT_RATE
+    return array(
+        "h", (round(amplitude * 32767 * sin(2 * pi * 220 * i / rate)) for i in range(frames))
+    ).tobytes()
+
+
+def _pcm_peak(pcm: bytes | bytearray) -> float:
+    from array import array
+
+    samples = array("h", bytes(pcm))
+    return max(-min(samples), max(samples)) / 32768
+
+
+def test_the_local_speaker_plays_her_at_the_volume_the_panel_set() -> None:
+    """Her volume on the sounddevice fallback: applied in the callback, so it
+    reaches audio already queued instead of waiting out the backlog."""
+    speaker = _bare_speaker(object())
+    speaker.play(_tone_pcm(0.5, 24000))  # a second of her, queued in one burst
+    output = bytearray(1024)
+    speaker._feed(output, 512, None, None)
+    assert _pcm_peak(output) == pytest.approx(0.5, rel=0.02)
+
+    speaker.set_volume(50)
+    assert speaker.volume == 50
+    speaker._feed(output, 512, None, None)  # the ramp down
+    speaker._feed(output, 512, None, None)
+    assert _pcm_peak(output) == pytest.approx(0.25, rel=0.02), "已经排进去的那段没变小"
+
+
+def test_the_local_speaker_looks_ahead_into_its_own_ring() -> None:
+    """A full-scale word queued right behind a quiet one, at 200%: the quiet
+    block already sees it coming and turns down on its way out, so the loud
+    word starts at a gain it can take instead of a step down to one.
+
+    The tail is what tells the two apart. Without the lookahead the loud word
+    still stays under the ceiling (the step-down catches it), so asserting
+    only the peak passed with the lookahead removed."""
+    speaker = _bare_speaker(object())
+    speaker.set_volume(200)
+    speaker.play(_tone_pcm(0.1, 4096) + _tone_pcm(0.95, 4096))
+    blocks = []
+    for _ in range(16):
+        output = bytearray(1024)
+        speaker._feed(output, 512, None, None)
+        blocks.append(bytes(output))
+    assert max(_pcm_peak(block) for block in blocks) <= dev_talk._VOICE_CEILING
+    assert _pcm_peak(blocks[0][-256:]) == pytest.approx(0.2, rel=0.03), "安静段本该是两倍"
+    last_quiet_tail = _pcm_peak(blocks[7][-256:])
+    assert last_quiet_tail < 0.15, f"响的那个字到之前没先收：尾巴还是 {last_quiet_tail:.3f}"
+
+
+def test_the_speaker_takes_her_volume_when_it_opens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "sounddevice", _FakeSoundDeviceModule())
+    speaker = dev_talk._Speaker(3, volume=40)
+    try:
+        assert speaker.volume == 40
+    finally:
+        speaker.close()
 
 
 def test_speaker_reopens_when_the_macos_default_output_changes() -> None:

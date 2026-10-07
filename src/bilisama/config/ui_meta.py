@@ -208,6 +208,18 @@ UI_META: dict[str, FieldMeta] = {
         group="音频",
         order=7,
     ),
+    "audio.voice_volume": FieldMeta(
+        label="她的音量",
+        hint="只调她的声音，不动电脑的音量，BGM 和游戏声也不受影响。拖完马上生效，"
+        "不断线。100 是原样；0 是静音，但她照样占着说话的时间，不想让她出声用「语音播报」"
+        "开关；最高 200，调大时自动压住最响的地方，不会爆音",
+        widget="slider",
+        unit="%",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="音频",
+        order=8,
+    ),
     "audio.output_route": FieldMeta(
         label="输出方式",
         hint="这两个值现在都不生效，声音去哪儿由「声音」那一节的扬声器决定；"
@@ -681,7 +693,8 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "speech.volcano_duplex.loudness": FieldMeta(
         label="音量",
-        hint="0 是原音量；-50 约一半，100 约两倍",
+        hint="服务端合成时的音量，改了要重连；0 是原音量，-50 约一半，100 约两倍。"
+        "直播中调她多大声用「音频」里的「她的音量」，不用重连",
         provider_scoped="volcano_duplex",
         audience=Audience.OPERATOR,
         reload=Reload.RECONNECT,

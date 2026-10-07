@@ -732,9 +732,14 @@ class _FakeLink:
 class _SilentSpeaker:
     """dev_talk._Speaker without PortAudio behind it."""
 
-    def __init__(self, device: int | None = None) -> None:
+    instances: ClassVar[list[_SilentSpeaker]] = []
+
+    def __init__(self, device: int | None = None, *, volume: int = 100) -> None:
+        _SilentSpeaker.instances.append(self)
         self.closed = False
         self.played = bytearray()
+        self.volume = volume
+        self.volume_calls: list[int] = []
 
     @property
     def busy(self) -> bool:
@@ -760,6 +765,10 @@ class _SilentSpeaker:
 
     def set_enabled(self, enabled: bool) -> None:
         return None
+
+    def set_volume(self, percent: int) -> None:
+        self.volume_calls.append(percent)
+        self.volume = percent
 
     def refresh_default_device(self) -> str | None:
         return None
@@ -817,6 +826,7 @@ def _director_config(root: Path) -> Path:
 def director_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Everything that would otherwise reach a device, a socket or $HOME."""
     _FakeLink.instances.clear()
+    _SilentSpeaker.instances.clear()
     monkeypatch.setattr(dev_talk, "_Speaker", _SilentSpeaker)
 
     async def _no_mic(*args: Any, **kwargs: Any) -> None:
@@ -1509,6 +1519,7 @@ def duplex_panel_box(
     def _catch_app(**kwargs: Any) -> object:
         caught["handlers"] = kwargs["handlers"]
         caught["settings"] = kwargs["settings"]
+        caught["hub"] = kwargs["hub"]
         return object()
 
     monkeypatch.setattr(server_module, "create_ui_app", _catch_app)
@@ -1689,3 +1700,122 @@ async def test_picking_a_duplex_voice_reaches_the_running_link(
     assert receipts and "已保存并生效" in receipts[0], printed
     assert caught["settings"].speech.volcano_duplex.voice == "zh_male_m191_uranus_bigtts"
     assert duplex.voice_calls == ["zh_male_m191_uranus_bigtts"]
+
+
+# ------------------------------------------------------------ her volume
+
+
+async def test_her_volume_in_the_config_reaches_the_local_speaker_at_start(
+    director_box: Path,
+) -> None:
+    """A volume saved last stream must be the one the sounddevice fallback
+    opens with, not 100 until somebody touches the slider again."""
+    director_box.write_text(
+        director_box.read_text(encoding="utf-8") + "[audio]\nvoice_volume = 40\n",
+        encoding="utf-8",
+    )
+    await _run_until_ready(_director_args(director_box))
+    assert _SilentSpeaker.instances, "director 没建本机扬声器"
+    assert _SilentSpeaker.instances[0].volume == 40
+
+
+async def _start_panel_director(config_path: Path, caught: dict[str, Any]) -> asyncio.Task[int]:
+    """run_director on the duplex panel box, returned once the panel is wired.
+
+    Her volume is provider-independent; duplex is simply the box that already
+    catches the panel handlers and the hub.
+    """
+    task = asyncio.create_task(
+        dev_talk.run_director(_duplex_panel_args(config_path)), name="test:director"
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline:
+        if (
+            "handlers" in caught
+            and _OfflineDuplex.instances
+            and _OfflineDuplex.instances[-1].contexts
+        ):
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover - only on a hang, and then the assert says so
+        task.cancel()
+        raise AssertionError("run_director 没在预期时间内把面板挂上")
+    await asyncio.sleep(0.05)
+    return task
+
+
+def _sticky_panel_audio(hub: Any) -> dict[str, Any]:
+    """The audio block of the panel.state a page attaching now would replay."""
+    replay, queue = hub.attach()
+    hub.detach(queue)
+    states = [json.loads(line) for line in replay if json.loads(line)["event"] == "panel.state"]
+    assert states, "hub 里没有 panel.state"
+    audio: dict[str, Any] = states[-1]["data"]["audio"]
+    return audio
+
+
+async def test_her_volume_on_the_panel_reaches_the_speaker_the_page_and_the_disk(
+    duplex_panel_box: tuple[Path, dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The slider's whole round trip in dev-talk: the local speaker is told,
+    the panel.state every page applies carries it, and it is saved to the
+    user layer so the next stream starts there."""
+    config_path, caught = duplex_panel_box
+    task = await _start_panel_director(config_path, caught)
+    from bilisama.ui.events import ClientEvent
+
+    try:
+        assert _sticky_panel_audio(caught["hub"])["voice_volume"] == 100
+        capsys.readouterr()
+        await caught["handlers"][ClientEvent.PANEL_SET]({"audio": {"voice_volume": 60}})
+        printed = capsys.readouterr().out
+        page_sees = _sticky_panel_audio(caught["hub"])["voice_volume"]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    receipts = [line for line in printed.splitlines() if line.startswith("[面板] ")]
+    assert receipts and "她的音量：100 → 60（已保存并生效）" in receipts[0], printed
+    assert caught["settings"].audio.voice_volume == 60
+    assert _SilentSpeaker.instances[0].volume_calls == [60]
+    assert page_sees == 60
+    from bilisama.config.persist import TomlConfigWriter
+
+    written = TomlConfigWriter(config_path, caught["settings"]).target_for("audio.voice_volume")
+    assert written != config_path  # the checkout stays clean: user layer, not base
+    assert "voice_volume = 60" in written.read_text(encoding="utf-8")
+
+
+async def test_a_failed_save_puts_her_volume_back_everywhere(
+    duplex_panel_box: tuple[Path, dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving is part of the edit: a disk that refuses it rolls the setting
+    back, the speaker is told the old value again, and the page is never left
+    playing a volume the panel no longer shows."""
+    from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
+
+    def _full_disk(self: TomlConfigWriter, field_path: str, value: Any) -> Path:
+        raise ConfigWriteError("配置保存失败：磁盘满了")
+
+    monkeypatch.setattr(TomlConfigWriter, "write", _full_disk)
+    config_path, caught = duplex_panel_box
+    task = await _start_panel_director(config_path, caught)
+    from bilisama.ui.events import ClientEvent
+
+    try:
+        capsys.readouterr()
+        await caught["handlers"][ClientEvent.PANEL_SET]({"audio": {"voice_volume": 60}})
+        printed = capsys.readouterr().out
+        page_sees = _sticky_panel_audio(caught["hub"])["voice_volume"]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    receipts = [line for line in printed.splitlines() if line.startswith("[面板] ")]
+    assert receipts and "「她的音量」没改成" in receipts[0] and "磁盘满了" in receipts[0], printed
+    assert caught["settings"].audio.voice_volume == 100
+    assert _SilentSpeaker.instances[0].volume_calls == [60, 100]
+    assert page_sees == 100

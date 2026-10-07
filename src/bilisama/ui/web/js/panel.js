@@ -118,6 +118,8 @@ export function createPanel({ send }) {
   const signalValue = document.getElementById("audio-signal-value");
   const noiseSlider = document.getElementById("noise-sensitivity");
   const noiseValue = document.getElementById("noise-value");
+  const voiceVolume = document.getElementById("voice-volume");
+  const voiceVolumeValue = document.getElementById("voice-volume-value");
   const roomIdInput = document.getElementById("room-id");
   const roomConnectBtn = document.getElementById("room-connect");
   const roomDisconnectBtn = document.getElementById("room-disconnect");
@@ -389,6 +391,18 @@ export function createPanel({ send }) {
   noiseSlider?.addEventListener("change", () => {
     send("panel.set", { audio: { noise_sensitivity: Number(noiseSlider.value) } });
   });
+  // Her volume: same shape, committed on release like the noise slider. The
+  // window that plays her may be another one (the shell's pet window), so the
+  // change goes round through the server and comes back as panel.state.
+  const showVoiceVolume = () => {
+    if (voiceVolumeValue) voiceVolumeValue.textContent = `${voiceVolume.value}%`;
+  };
+  voiceVolume?.addEventListener("input", showVoiceVolume);
+  voiceVolume?.addEventListener("change", () => {
+    if (!send("panel.set", { audio: { voice_volume: Number(voiceVolume.value) } })) {
+      feedEntry({ kind: "system", text: "连接断开，这条修改没发出去" });
+    }
+  });
 
   chattinessSel?.addEventListener("change", () => {
     sendConfig("interaction.chattiness", chattinessSel.value);
@@ -519,6 +533,14 @@ export function createPanel({ send }) {
     ) {
       noiseSlider.value = String(audio.noise_sensitivity);
       if (noiseValue) noiseValue.textContent = noiseSlider.value;
+    }
+    if (
+      voiceVolume &&
+      document.activeElement !== voiceVolume &&
+      Number.isFinite(audio.voice_volume)
+    ) {
+      voiceVolume.value = String(audio.voice_volume);
+      showVoiceVolume();
     }
     const interaction = state.interaction ?? {};
     if (chattinessSel && document.activeElement !== chattinessSel) {

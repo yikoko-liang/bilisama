@@ -213,6 +213,9 @@ def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
         "audio.input_enabled",
         "audio.output_enabled",
         "audio.noise_sensitivity",
+        # LIVE with two consumers: the page re-poked by the PANEL_STATE
+        # broadcast, the local speaker by its run_reload_hook arm.
+        "audio.voice_volume",
         "persona.id",
         "persona.streamer_name",
         "persona.display_name",

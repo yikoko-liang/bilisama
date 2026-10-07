@@ -41,6 +41,7 @@ import threading
 import traceback
 import wave
 import zlib
+from array import array
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -642,6 +643,100 @@ async def _pump_mic(
         await asyncio.to_thread(holder.close)
 
 
+# Her voice's own volume on the local speaker (audio.voice_volume). The page
+# applies the same rule in ui/web/js/voice-worklet.js;
+# tests/unit/test_voice_volume.py holds the two copies of these constants to
+# each other.
+#
+# The ceiling is where the limiter starts. At 100% it only touches a sample
+# already within 0.18 dB of full scale; the hottest of nine real duplex
+# recordings peaked 3.3 dB below that, so the default sound is the sound that
+# arrived. The release is how fast a boost comes back after a loud word.
+_VOICE_CEILING = 0.98
+_VOICE_RELEASE_S = 0.1
+# Within this of the gain it is heading for, a release lands exactly, so it
+# ends on 1.0 and the bytes go through untouched again.
+_VOICE_SNAP = 1e-4
+
+
+def _int16_peak(samples: array[int]) -> int:
+    return max(max(samples), -min(samples)) if samples else 0
+
+
+class _VoiceVolume:
+    """Her volume knob plus a peak limiter, for PCM on its way to PortAudio.
+
+    Applied in the callback, not in play(): a reply arrives in a burst far
+    faster than it plays, so a gain applied at play() would wait out seconds
+    of queued audio before the streamer heard the change.
+
+    It never has to clip. Each block's gain ramps from where the last block
+    ended to a value safe for this block AND the next one, so every block
+    starts at a gain its own loudest sample can take. The next block is the
+    lookahead, and the ring already holds it. When it did not (a jitter gap,
+    the first block of all), the block starts at its own safe gain instead,
+    a step rather than a ramp. The int16 clamp after that is only for
+    rounding: an out-of-range value would raise inside the PortAudio
+    callback and stop the stream.
+    """
+
+    def __init__(self, percent: float = 100) -> None:
+        self._percent = self._checked(percent)
+        self._gain: float | None = None  # where the last block's ramp ended
+
+    @staticmethod
+    def _checked(percent: float) -> float:
+        if not math.isfinite(percent) or percent < 0:
+            raise ValueError(f"voice volume must be a finite percentage >= 0, got {percent!r}")
+        return percent
+
+    @property
+    def percent(self) -> float:
+        return self._percent
+
+    def set_percent(self, percent: float) -> None:
+        self._percent = self._checked(percent)
+
+    def apply(self, block: bytes, ahead: bytes = b"") -> bytes:
+        """Scale one callback's int16 PCM. `ahead` is what plays right after it."""
+        whole = len(block) - len(block) % 2  # a stray odd byte passes through as-is
+        if not whole:
+            return block
+        samples = array("h", block[:whole])
+        target = self._percent / 100
+        # Whole samples: 0.98 of 32768 is 32112.64, and rounding a product
+        # that lands exactly on it would put one sample past the line.
+        ceiling = math.floor(_VOICE_CEILING * 32768)
+        own = _int16_peak(samples)
+        upcoming = _int16_peak(array("h", ahead[: len(ahead) - len(ahead) % 2]))
+        safe_now = target if own * target <= ceiling else ceiling / own
+        loudest = max(own, upcoming)
+        safe = target if loudest * target <= ceiling else ceiling / loudest
+        start = safe_now if self._gain is None else min(self._gain, safe_now)
+        end = safe
+        if end > start:
+            # Rising: a boost coming back after a loud word, or the knob
+            # turned up. Both ride the release so neither pumps or clicks.
+            frames = len(samples)
+            end = start + (end - start) * (
+                1 - math.exp(-frames / (_VOICE_RELEASE_S * _OUTPUT_RATE))
+            )
+            if safe - end < _VOICE_SNAP:
+                end = safe
+        self._gain = end
+        if start == end == 1.0:
+            return block
+        step = (end - start) / len(samples)
+        scaled = array(
+            "h",
+            (
+                max(-32768, min(32767, round(sample * (start + step * (i + 1)))))
+                for i, sample in enumerate(samples)
+            ),
+        )
+        return scaled.tobytes() + block[whole:]
+
+
 class _Speaker:
     """Callback-fed playback so the event loop never blocks on audio.
 
@@ -658,9 +753,11 @@ class _Speaker:
     flush() empties the buffer, which silences the speaker within one block.
     """
 
-    def __init__(self, device: int | None) -> None:
+    def __init__(self, device: int | None, *, volume: int = 100) -> None:
         import threading
 
+        # Before _open(): the stream's first callback may already want it.
+        self._volume = _VoiceVolume(volume)
         self._buffer = bytearray()
         self._dropped_s = 0.0
         self._device = device
@@ -725,6 +822,12 @@ class _Speaker:
                 if was_primed:
                     self._rebuffer_count += 1
                     self._underrun_blocks += 1
+            # What plays next, copied under the lock: her volume's limiter
+            # looks one block ahead so it can turn down before a loud word
+            # instead of clipping it. The arithmetic runs after the lock.
+            ahead = bytes(self._buffer[:need]) if chunk else b""
+        if chunk:
+            chunk = self._volume.apply(chunk, ahead)
         outdata[: len(chunk)] = chunk
         if len(chunk) < need:
             outdata[len(chunk) :] = b"\x00" * (need - len(chunk))
@@ -1006,6 +1109,15 @@ class _Speaker:
     def enabled(self) -> bool:
         with self._lock:
             return self._enabled
+
+    @property
+    def volume(self) -> float:
+        """Her volume in percent, as the panel set it."""
+        return self._volume.percent
+
+    def set_volume(self, percent: int) -> None:
+        """Her volume knob; lands on audio already queued within one block."""
+        self._volume.set_percent(percent)
 
     def set_enabled(self, enabled: bool) -> None:
         """Enable playback; disabling also stops already-buffered speech."""
@@ -2450,6 +2562,14 @@ async def run_director(args: argparse.Namespace) -> int:
             if not audio_input.paused:
                 audio_input.set_enabled(settings.audio.input_enabled)
             return True
+        if path == "audio.voice_volume":
+            # Two consumers. The page applies it from the PANEL_STATE broadcast
+            # that ends every panel edit; the local speaker is told here. Same
+            # NameError guard as the output switch below: the speaker is built
+            # further down this function.
+            with contextlib.suppress(NameError):
+                speaker.set_volume(settings.audio.voice_volume)
+            return True
         if path == "audio.output_enabled":
             # Mirror the switch into the local sink so a play() call that
             # slips past the closure gate still stays silent; disabling also
@@ -2647,7 +2767,7 @@ async def run_director(args: argparse.Namespace) -> int:
     )
     registry.register("live_mock", live_mock.state)
     seq = itertools.count(1)
-    speaker = _Speaker(args.output_device)
+    speaker = _Speaker(args.output_device, volume=settings.audio.voice_volume)
     registry.register("audio_output", speaker.status)
 
     class _LocalPair:
@@ -2859,6 +2979,7 @@ async def run_director(args: argparse.Namespace) -> int:
                         "input_enabled": settings.audio.input_enabled,
                         "output_enabled": settings.audio.output_enabled,
                         "noise_sensitivity": settings.audio.noise_sensitivity,
+                        "voice_volume": settings.audio.voice_volume,
                         "signal_level": audio_input.signal_level,
                         "output": speaker.status(),
                     },
@@ -3837,7 +3958,7 @@ async def run(args: argparse.Namespace) -> int:
             reply_wav = args.wav.with_name(args.wav.stem + ".reply.wav")
             pump = asyncio.create_task(_pump_wav(client, args.wav))
         else:
-            speaker = _Speaker(args.output_device)
+            speaker = _Speaker(args.output_device, volume=settings.audio.voice_volume)
             pump = asyncio.create_task(
                 _pump_mic(client, args.input_device, speaker, args.mute_while_speaking)
             )

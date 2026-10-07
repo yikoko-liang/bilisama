@@ -214,7 +214,7 @@ def _visible_controls(audience: Audience) -> list[str]:
 
 
 def test_streamer_sees_a_manageable_number_of_controls() -> None:
-    """The streamer view should stay under thirty controls.
+    """The streamer view should stay at about thirty controls.
 
     That is the whole point of the three audience tiers. Going over means
     something is tagged for the wrong audience. The bound was twenty until the
@@ -222,7 +222,9 @@ def test_streamer_sees_a_manageable_number_of_controls() -> None:
     tiers, entry-welcome groups, noise gate, stream intro) — all genuinely
     streamer-facing, rendered as grouped cards on the system page rather than
     one flat list, so the ceiling moved with the design instead of demoting
-    real controls to hide the count.
+    real controls to hide the count. 31 since 2026-10-08: her own volume, which
+    the streamer asked for by name at the Stage 1 packaging review, put
+    dashscope and volcano_duplex one over 30.
 
     Counted per running provider, not as a union: `ui/server.py:174` hides the
     sections belonging to backends this session is not using, so nobody ever
@@ -235,7 +237,7 @@ def test_streamer_sees_a_manageable_number_of_controls() -> None:
     for provider in scoped:
         mine = [path for path in _visible_controls(Audience.STREAMER) if _owner(path) == provider]
         total = len(shared) + len(mine)
-        assert total <= 30, f"跑 {provider} 时主播能看到 {total} 个控件：{sorted(shared + mine)}"
+        assert total <= 31, f"跑 {provider} 时主播能看到 {total} 个控件：{sorted(shared + mine)}"
 
 
 def _owner(path: str) -> str | None:

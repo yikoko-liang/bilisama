@@ -327,6 +327,14 @@ class AudioConfig(BaseModel):
     # on the uplink, because smart_turn takes no server-VAD threshold and
     # the hosted endpoints' own knobs cannot see the streamer's room.
     noise_sensitivity: int = Field(50, ge=0, le=100)
+    # Her voice's own volume, in percent of what the backend sends: 100 is
+    # untouched, 0 silent, 200 twice the amplitude (+6 dB). Applied where she
+    # is played (the page's GainNode, the local speaker's callback), so it
+    # never reaches the wire or costs a reconnect, and the machine's volume
+    # stays the streamer's. Above 100 a peak limiter sits behind it: nine real
+    # duplex recordings at loudness 0 peaked at -9.9 to -3.5 dBFS, so 200
+    # would push the hottest of them 2.5 dB past full scale without one.
+    voice_volume: int = Field(100, ge=0, le=200)
 
 
 class SafetyConfig(BaseModel):

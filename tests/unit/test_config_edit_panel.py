@@ -298,3 +298,24 @@ def test_unknown_audio_key_is_announced_not_swallowed() -> None:
     changed = apply_panel_edits(settings, {"audio": {"volume": 3}}, announce=lines.append)
     assert changed == []
     assert any("未知音频配置 volume" in line for line in lines)
+
+
+def test_her_volume_slider_lands_through_the_shared_table() -> None:
+    """The system page's 「她的音量」 sends {audio:{voice_volume}}, the same
+    shape the noise slider uses; both ends of the edit read the one table."""
+    settings = Settings()
+    lines: list[str] = []
+    changed = apply_panel_edits(settings, {"audio": {"voice_volume": 60}}, announce=lines.append)
+    assert settings.audio.voice_volume == 60
+    assert changed == ["audio.voice_volume"]
+    assert any("她的音量 → 60" in line for line in lines), lines
+
+
+@pytest.mark.parametrize("value", [201, -1, "大声点", None])
+def test_her_volume_out_of_range_is_refused_with_the_range(value: object) -> None:
+    settings = Settings()
+    lines: list[str] = []
+    changed = apply_panel_edits(settings, {"audio": {"voice_volume": value}}, announce=lines.append)
+    assert changed == []
+    assert settings.audio.voice_volume == 100
+    assert any("「她的音量」要在 0 到 200 之间" in line for line in lines), lines

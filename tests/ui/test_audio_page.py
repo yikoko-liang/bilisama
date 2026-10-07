@@ -79,6 +79,39 @@ media.getUserMedia = async (constraints) => {
   window.__streams.push(granted);
   return granted;
 };
+window.__worklets = [];
+class RecordingWorkletNode extends AudioWorkletNode {
+  constructor(context, name, options) {
+    super(context, name, options);
+    window.__worklets.push(name);
+  }
+}
+window.AudioWorkletNode = RecordingWorkletNode;
+// The output tap: whatever a live context wires into its speaker is also
+// wired into one analyser, and a 10 ms poll keeps the loudest sample since
+// the last reset in window.__peak. 2048 frames is ~43 ms at 48 kHz, so the
+// windows overlap and nothing between two polls goes unseen. It reads the
+// float signal BEFORE the destination clamps it, so a boost that would clip
+// shows up above 1.0 here instead of hiding at it.
+window.__peak = 0;
+const realConnect = AudioNode.prototype.connect;
+AudioNode.prototype.connect = function (target, ...rest) {
+  const wired = realConnect.call(this, target, ...rest);
+  const ctx = this.context;
+  if (target instanceof AudioDestinationNode && ctx instanceof AudioContext) {
+    if (!ctx.__tap) {
+      ctx.__tap = ctx.createAnalyser();
+      ctx.__tap.fftSize = 2048;
+      const window_ = new Float32Array(2048);
+      setInterval(() => {
+        ctx.__tap.getFloatTimeDomainData(window_);
+        for (const v of window_) window.__peak = Math.max(window.__peak, Math.abs(v));
+      }, 10);
+    }
+    realConnect.call(this, ctx.__tap);
+  }
+  return wired;
+};
 """
 
 _AUDIO_SOCKETS = "window.__sockets.filter((s) => s.url.includes('/audio'))"
@@ -188,13 +221,15 @@ async def browser() -> AsyncIterator[Browser]:
         await launched.close()
 
 
-async def _open(browser: Browser, harness: Harness) -> tuple[BrowserContext, Page]:
+async def _open(
+    browser: Browser, harness: Harness, *, extra_script: str = ""
+) -> tuple[BrowserContext, Page]:
     """One instrumented tab, loaded and ready to be asked questions."""
     # bypass_csp for the same reason test_pet_page needs it: the shipped
     # default-src 'self' blocks the eval wait_for_function runs on. The header
     # itself is pinned by test_ui_server.
     context = await browser.new_context(bypass_csp=True, permissions=["microphone"])
-    await context.add_init_script(_SPY)
+    await context.add_init_script(_SPY + extra_script)
     page = await context.new_page()
     await page.goto(harness.url)
     return context, page
@@ -574,3 +609,236 @@ async def test_a_microphone_switch_that_fails_says_so_too(
     )
     failed = next(one for one in harness.payloads(ClientEvent.AUDIO_REPORT) if "error" in one)
     assert failed["devices"], f"报错时没把设备列表重发回来：{failed}"
+
+
+# ------------------------------------------------------------ her volume
+#
+# Measured at the output tap in _SPY, not read off a GainNode: the claim is
+# 「she comes out of the speaker this loud」, and a gain that is set but not in
+# the path (or a limiter that is in the path but not limiting) would pass any
+# check on the node's own value.
+#
+# 0.67 of full scale is the hottest peak among nine real duplex recordings at
+# loudness 0 (2026-10-07 voice probe: -9.9 to -3.5 dBFS, median -6.5).
+
+_HOTTEST_MEASURED = 0.67
+_LIMITER = "bilisama-voice-limiter"
+
+
+def _tone(amplitude: float, seconds: float, *, hz: float = 220.0) -> bytes:
+    """Her downlink shape, 24 kHz int16 mono, as one sine."""
+    import math
+    from array import array
+
+    frames = int(seconds * 24000)
+    return array(
+        "h",
+        (round(amplitude * 32767 * math.sin(2 * math.pi * hz * i / 24000)) for i in range(frames)),
+    ).tobytes()
+
+
+def _panel_audio(**audio: Any) -> dict[str, Any]:
+    """A panel.state carrying the system page's audio block, as dev-talk sends it."""
+    return {
+        "audio": {
+            "input_enabled": True,
+            "output_enabled": True,
+            "noise_sensitivity": 50,
+            **audio,
+        }
+    }
+
+
+async def _set_volume(page: Page, harness: Harness, percent: int) -> None:
+    """Broadcast it, then wait for the panel's slider as proof the frame landed:
+    the same handleFrame call hands it to the audio module."""
+    harness.hub.broadcast(ServerEvent.PANEL_STATE, _panel_audio(voice_volume=percent))
+    await _wait(page, f"document.getElementById('voice-volume').value === '{percent}'")
+
+
+async def _loudest_over(page: Page, seconds: float) -> float:
+    """Reset the tap, let that much page-clock audio go by, return the peak."""
+    await page.evaluate("window.__peak = 0")
+    await _let_it_play(page, seconds)
+    peak: float = await page.evaluate("window.__peak")
+    return peak
+
+
+async def _limiter_in(page: Page) -> None:
+    await _wait(page, f"window.__worklets.includes('{_LIMITER}')")
+
+
+async def test_her_volume_from_the_panel_lands_on_the_reply_already_playing(
+    audio_page: Page, harness: Harness
+) -> None:
+    """The whole reply is queued before the change, which is how she arrives
+    (faster than real time). A volume baked into the samples would wait it
+    out; this one is on the way to the speaker, so it moves mid-sentence."""
+    await _ready(audio_page, harness)
+    await _limiter_in(audio_page)
+    harness.broker.play(_tone(0.5, 4.0))
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) >= 1, what="音频没开始播")
+    assert await _loudest_over(audio_page, 0.4) == pytest.approx(0.5, rel=0.08)
+
+    await _set_volume(audio_page, harness, 50)
+    await _let_it_play(audio_page, 0.3)  # 「a fraction of a second」, on the page's own clock
+    assert await _loudest_over(audio_page, 0.4) == pytest.approx(0.25, rel=0.08)
+    assert harness.count(ClientEvent.PLAYBACK_CANCELLED) == 0, "调音量不该打断她"
+
+
+async def test_at_zero_she_is_silent_but_her_turn_still_finishes(
+    audio_page: Page, harness: Harness
+) -> None:
+    """0 is quiet, not paused: the receipts still run, or the floor gate would
+    wait forever for a reply that is playing to nobody."""
+    await _ready(audio_page, harness)
+    await _set_volume(audio_page, harness, 0)
+    harness.broker.play(_tone(0.5, 1.0))
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) >= 1, what="音频没开始播")
+    assert await _loudest_over(audio_page, 0.5) < 0.001
+    await _until(
+        lambda: harness.count(ClientEvent.PLAYBACK_ENDED) >= 1,
+        what="音量 0 时那段没报 ended，说话闸门会一直关着",
+    )
+
+
+async def test_at_200_the_hottest_measured_voice_gets_louder_and_never_clips(
+    audio_page: Page, harness: Harness
+) -> None:
+    await _ready(audio_page, harness)
+    await _limiter_in(audio_page)
+    await _set_volume(audio_page, harness, 200)
+    harness.broker.play(_tone(_HOTTEST_MEASURED, 2.0))
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) >= 1, what="音频没开始播")
+    loudest = await _loudest_over(audio_page, 1.0)
+    assert loudest <= 0.98 + 1e-4, f"调到 200% 爆音了：峰值 {loudest:.3f}"
+    assert loudest >= 0.9, f"调到 200% 却没变响：峰值 {loudest:.3f}"
+
+
+async def test_a_garbled_volume_keeps_the_last_good_one(audio_page: Page, harness: Harness) -> None:
+    """A frame with no number, or a number no slider can produce, changes
+    nothing: neither a silent stream nor a jump back to 100."""
+    await _ready(audio_page, harness)
+    await _set_volume(audio_page, harness, 50)
+    for n, garbled in enumerate([None, "很大", -5, "missing"], start=1):
+        audio = {} if garbled == "missing" else {"voice_volume": garbled}
+        # noise_sensitivity moves each time so the panel shows the frame landed.
+        harness.hub.broadcast(
+            ServerEvent.PANEL_STATE, _panel_audio(noise_sensitivity=50 + n, **audio)
+        )
+        await _wait(
+            audio_page, f"document.getElementById('noise-sensitivity').value === '{50 + n}'"
+        )
+    harness.broker.play(_tone(0.5, 1.5))
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) >= 1, what="音频没开始播")
+    await _let_it_play(audio_page, 0.2)
+    assert await _loudest_over(audio_page, 0.5) == pytest.approx(0.25, rel=0.08)
+
+
+# Fails the limiter's module only; the capture worklet still loads, so the
+# microphone half of the page is unaffected. Two shapes: a load that rejects,
+# and a call that throws on the spot (what a missing audioWorklet does).
+_NO_LIMITER = """
+const realAddModule = AudioWorklet.prototype.addModule;
+AudioWorklet.prototype.addModule = function (url, ...rest) {
+  if (String(url).includes("voice-worklet")) {
+    const err = new DOMException("blocked by the test", "AbortError");
+    if (%s) throw err;
+    return Promise.reject(err);
+  }
+  return realAddModule.call(this, url, ...rest);
+};
+"""
+
+
+@pytest.mark.parametrize("throws", [False, True], ids=["rejects", "throws"])
+async def test_without_the_limiter_a_boost_holds_at_100_and_says_so(
+    browser: Browser, harness: Harness, throws: bool
+) -> None:
+    """The guard is what makes louder safe, so louder waits for it. Quieter
+    needs no guard and keeps working; the streamer is told in the log pane,
+    in words, with what to do."""
+    script = _NO_LIMITER % ("true" if throws else "false")
+    context, page = await _open(browser, harness, extra_script=script)
+    try:
+        await _ready(page, harness)
+        await _wait(
+            page, "document.getElementById('loglines').textContent.includes('防爆音保护没装上')"
+        )
+        line = await page.locator("#loglines").text_content()
+        assert line is not None and "刷新" in line, f"提示没说怎么办：{line}"
+
+        await _set_volume(page, harness, 200)
+        harness.broker.play(_tone(0.5, 3.0))
+        await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) >= 1, what="音频没开始播")
+        assert await _loudest_over(page, 0.4) == pytest.approx(0.5, rel=0.08)
+        await _set_volume(page, harness, 50)
+        await _let_it_play(page, 0.3)
+        assert await _loudest_over(page, 0.4) == pytest.approx(0.25, rel=0.08)
+    finally:
+        await context.close()
+
+
+# Offline, so every sample is accounted for: no device clock, no polling.
+_RENDER_CHAIN = """
+async ({ volume, signal, quietFirst }) => {
+  const { createVoiceChain } = await import(new URL("assets/js/audio.js", location.href));
+  const rate = 48000;
+  const frames = 9600;
+  const ctx = new OfflineAudioContext(1, frames + 256, rate);
+  let quiet = !quietFirst;
+  const chain = createVoiceChain(ctx, { volume, quiet: () => quiet });
+  await chain.ready;
+  const deferred = !chain.limited();
+  quiet = true;
+  chain.attach();
+  const buffer = ctx.createBuffer(1, frames, rate);
+  const input = buffer.getChannelData(0);
+  let seed = 7;
+  for (let i = 0; i < frames; i += 1) {
+    if (signal === "square") {
+      input[i] = Math.floor(i / 40) % 2 ? 1 : -1;
+    } else {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      input[i] = (seed / 2147483648) * 1.3 - 0.65; // within the measured -3.5 dBFS
+    }
+  }
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(chain.input);
+  source.start(0);
+  const out = (await ctx.startRendering()).getChannelData(0);
+  let peak = 0;
+  let worst = 0;
+  for (let i = 0; i < frames; i += 1) {
+    peak = Math.max(peak, Math.abs(out[i + 128]));
+    worst = Math.max(worst, Math.abs(out[i + 128] - input[i] * volume));
+  }
+  return { peak, worst, deferred, limited: chain.limited() };
+}
+"""
+
+
+async def test_the_chain_hands_her_through_untouched_until_she_would_clip(
+    audio_page: Page, harness: Harness
+) -> None:
+    """Sample for sample: at 100% the limiter is a one-block delay and nothing
+    else, at 50% it is exactly half, and a full-scale square doubled (the
+    worst input there is) stays under the ceiling. The limiter also waits for
+    a quiet moment to go in: swapping it into a sentence would jump the sound
+    by one block, which is a click."""
+    await _ready(audio_page, harness)
+    unity = await audio_page.evaluate(
+        _RENDER_CHAIN, {"volume": 1, "signal": "noise", "quietFirst": True}
+    )
+    assert unity["limited"] and unity["worst"] == 0, unity
+    assert unity["deferred"], "还在说话就把限幅器接进去了"
+    half = await audio_page.evaluate(
+        _RENDER_CHAIN, {"volume": 0.5, "signal": "noise", "quietFirst": False}
+    )
+    assert half["worst"] == 0, half
+    loud = await audio_page.evaluate(
+        _RENDER_CHAIN, {"volume": 2, "signal": "square", "quietFirst": False}
+    )
+    assert loud["peak"] <= 0.98 + 1e-6, loud
+    assert loud["peak"] >= 0.9, loud

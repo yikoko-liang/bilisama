@@ -271,6 +271,7 @@ AUDIO_PANEL_PATHS: dict[str, str] = {
     "input_enabled": "audio.input_enabled",
     "output_enabled": "audio.output_enabled",
     "noise_sensitivity": "audio.noise_sensitivity",
+    "voice_volume": "audio.voice_volume",
 }
 
 

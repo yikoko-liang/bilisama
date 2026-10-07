@@ -12,8 +12,81 @@
 // chunk leaves an audible seam every time the main thread is busy.
 
 const DOWNLINK_RATE = 24000; // what the providers send (plan section 3.1)
+// How fast her volume follows the slider: 95% of the way in 90 ms. A jump
+// would click; slower than this and a drag no longer feels attached.
+const VOLUME_TAU_S = 0.03;
 
-export function createAudio({ onOwner }) {
+/** Her voice's own volume, then a peak limiter, then the speaker.
+ *
+ * Every buffer she plays goes into `input`. The knob is a GainNode, so a
+ * change lands on audio already scheduled (she arrives faster than real time,
+ * so most of a reply is queued before the streamer reaches for the slider)
+ * and never touches the wire. Above 100% the limiter in voice-worklet.js is
+ * what keeps the louder sound from clipping, so a boost waits for it: until
+ * the module has loaded, or if it never does, the knob goes no higher than
+ * 100%. Quieter needs no guard and always works.
+ *
+ * The limiter goes in only when `quiet()` says nothing is scheduled. It delays
+ * the sound by one render quantum, and swapping it into a sentence would make
+ * the sound jump by that much — a click. `attach()` is how the caller says
+ * the moment has come.
+ *
+ * Args (second argument):
+ *   volume: Initial gain, 1 = as she arrived.
+ *   quiet: True while nothing is playing through `input`.
+ *   onTrouble: Called once with the error if the limiter cannot load.
+ */
+export function createVoiceChain(
+  context,
+  { volume = 1, quiet = () => true, onTrouble = () => {} } = {},
+) {
+  const knob = context.createGain();
+  let wanted = volume;
+  let loaded = null; // the limiter, built and waiting for a quiet moment
+  let limiter = null; // the limiter, in the path
+  const allowed = () => (limiter ? wanted : Math.min(wanted, 1));
+  knob.gain.value = allowed();
+  knob.connect(context.destination);
+  const steer = () => knob.gain.setTargetAtTime(allowed(), context.currentTime, VOLUME_TAU_S);
+  const attach = () => {
+    if (!loaded || limiter || !quiet()) return;
+    knob.disconnect();
+    knob.connect(loaded);
+    loaded.connect(context.destination);
+    limiter = loaded;
+    steer(); // a boost that was held at 100% can go through now
+  };
+  // Through a resolved promise so a synchronous throw (no audioWorklet at all,
+  // as on a page Chromium does not count as secure) lands in the same catch
+  // as a failed load: thrown here, it would take her whole voice down with
+  // it instead of only the boost.
+  const ready = Promise.resolve()
+    .then(() => context.audioWorklet.addModule(new URL("./voice-worklet.js", import.meta.url)))
+    .then(() => {
+      // Mono in, mono out: her voice is one channel, and the speaker upmixes.
+      loaded = new AudioWorkletNode(context, "bilisama-voice-limiter", {
+        channelCount: 1,
+        channelCountMode: "explicit",
+        outputChannelCount: [1],
+      });
+      attach();
+    })
+    .catch((err) => onTrouble(err));
+  return {
+    input: knob,
+    /** Settles once the limiter has loaded (or failed to); never rejects. */
+    ready,
+    /** 1 = as she arrived, 0 = silent; above 1 only once the limiter is in. */
+    setVolume(gain) {
+      wanted = gain;
+      steer();
+    },
+    attach,
+    limited: () => limiter !== null,
+  };
+}
+
+export function createAudio({ onOwner, onNotice = () => {} }) {
   // Receipts go out on THIS socket, not the control one. They describe the
   // audio that just arrived here, and the control socket is a separate
   // connection opening on its own schedule — send a playback.started before it
@@ -40,9 +113,31 @@ export function createAudio({ onOwner }) {
   let playedMs = 0; // of the current utterance, for playback.cancelled
   let analyser = null; // input level, for the panel's meter
   let wantedInput = undefined; // deviceId the streamer picked, if any
+  let voice = null; // createVoiceChain, built with the context
+  let volume = 1; // her volume from panel.state, kept for a context not built yet
   // Bumped by every stopCapture(), so a getUserMedia still in flight can tell
   // on the way back that the chain it was opening is no longer wanted.
   let captureGen = 0;
+
+  // One context per page, and her voice chain is built with it: every path
+  // that might be first (capture, her first word, a speaker switch, the test
+  // tone) comes through here, so no buffer can reach a context without one.
+  const ensureContext = () => {
+    if (context) return context;
+    context = new AudioContext();
+    voice = createVoiceChain(context, {
+      volume,
+      quiet: () => live.length === 0,
+      onTrouble: (err) => {
+        console.warn("防爆音保护没装上：", err);
+        onNotice(
+          `防爆音保护没装上（${err}），这一场她的音量最高只到 100%，调小照常。` +
+            "刷新页面或重开桌宠再试。",
+        );
+      },
+    });
+    return context;
+  };
 
   const role = window.bilisamaShell ? "shell" : "browser";
   const url =
@@ -157,7 +252,7 @@ export function createAudio({ onOwner }) {
       letGo(granted);
       return null;
     }
-    context = context ?? new AudioContext();
+    ensureContext();
     await context.audioWorklet.addModule(new URL("./capture-worklet.js", import.meta.url));
     if (superseded()) {
       letGo(granted);
@@ -222,12 +317,13 @@ export function createAudio({ onOwner }) {
     live = [];
     nextStart = 0;
     playedMs = 0;
+    voice?.attach(); // quiet now, if the limiter was waiting for that
     report("playback.cancelled", { played_ms: heard });
   }
 
   function schedule(samples) {
     if (!samples.length) return;
-    context = context ?? new AudioContext();
+    ensureContext();
     // Autoplay policy parks a context until a gesture. In the shell there is
     // rarely one before she first speaks, so ask every time — resume() on a
     // running context is free.
@@ -245,7 +341,7 @@ export function createAudio({ onOwner }) {
 
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    source.connect(voice.input);
     // A small cushion the first time: starting exactly at currentTime means
     // any scheduling jitter lands in the past and the browser drops the head
     // of the first word.
@@ -260,6 +356,7 @@ export function createAudio({ onOwner }) {
     source.onended = () => {
       live = live.filter((entry) => entry.source !== source);
       playedMs += buffer.duration * 1000;
+      if (!live.length) voice.attach(); // her turn has drained: a quiet moment
       report("playback.ended");
     };
   }
@@ -323,6 +420,17 @@ export function createAudio({ onOwner }) {
     },
     /** Stop everything scheduled and report how much of it was heard. */
     clear: stopEverything,
+    /** Her volume from panel.state, in percent (100 = as she arrived).
+     *
+     * Anything that is not a number a slider could produce is ignored rather
+     * than guessed at: the frame may come from an older server with no such
+     * field, and silence or a jump to 100 would both be wrong.
+     */
+    setVolume(percent) {
+      if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0) return;
+      volume = percent / 100;
+      voice?.setVolume(volume);
+    },
     /** 0..1 input loudness right now, or 0 when there is no microphone. */
     level() {
       if (!analyser) return 0;
@@ -359,14 +467,14 @@ export function createAudio({ onOwner }) {
      * none of it is in there, whatever this control is set to.
      */
     async useOutput(deviceId) {
-      context = context ?? new AudioContext();
+      ensureContext();
       if (typeof context.setSinkId !== "function") return false;
       await context.setSinkId(deviceId || "");
       return true;
     },
     /** A short tone down the real playback path, to confirm the right speaker. */
     async test() {
-      context = context ?? new AudioContext();
+      ensureContext();
       if (context.state === "suspended") await context.resume().catch(() => {});
       const osc = context.createOscillator();
       const gain = context.createGain();

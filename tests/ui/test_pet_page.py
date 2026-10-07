@@ -173,6 +173,7 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
                         "input_enabled": settings.audio.input_enabled,
                         "output_enabled": settings.audio.output_enabled,
                         "noise_sensitivity": settings.audio.noise_sensitivity,
+                        "voice_volume": settings.audio.voice_volume,
                     },
                     "room": {
                         **(harness_ref[0].room if harness_ref else {}),
@@ -1936,3 +1937,45 @@ async def test_a_young_session_is_not_reported_as_collapsed(page: Page, harness:
     await page.click("#corner")
     state, _ = await _gate_strip(page, "system")
     assert state == "working", "窗口还没满就报警会天天狼来了"
+
+
+async def test_her_volume_slider_saves_through_the_panel_and_reads_back(
+    page: Page, harness: Harness
+) -> None:
+    """「她的音量」 on the system page: the slider carries the schema's own range,
+    a drag sends {audio:{voice_volume}} through the shared panel-edit table,
+    and the receipt and the echo both come back."""
+    from bilisama.config.schema import AudioConfig
+    from bilisama.ui.config_edit import field_control
+
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    slider = page.locator("#voice-volume")
+    await slider.wait_for(state="visible")
+    bounds = field_control(AudioConfig.model_fields["voice_volume"])
+    assert await slider.get_attribute("min") == f"{bounds['min']:g}"
+    assert await slider.get_attribute("max") == f"{bounds['max']:g}"
+    assert await page.locator("#voice-volume-value").inner_text() == "100%"
+
+    await page.evaluate(
+        "(() => { const s = document.getElementById('voice-volume'); s.value = '60';"
+        " s.dispatchEvent(new Event('input')); s.dispatchEvent(new Event('change')); })()"
+    )
+    assert await page.locator("#voice-volume-value").inner_text() == "60%"
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda data: data.get("audio") == {"voice_volume": 60},
+    )
+    assert harness.settings.audio.voice_volume == 60
+    await _wait(page, "document.getElementById('timeline').textContent.includes('她的音量 → 60')")
+
+    # Moved somewhere else (another window, the config tab): the slider follows
+    # the echo once it is not the control being dragged.
+    await page.evaluate("document.activeElement?.blur()")
+    harness.settings.audio.voice_volume = 140
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {"audio": {"input_enabled": True, "output_enabled": True, "voice_volume": 140}},
+    )
+    await _wait(page, "document.getElementById('voice-volume-value').textContent === '140%'")

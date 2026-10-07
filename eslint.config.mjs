@@ -37,9 +37,12 @@ export default [
     },
   },
   {
-    // The capture worklet runs on the audio thread, where `window` does not
-    // exist and `sampleRate`, `currentTime` and AudioWorkletProcessor do.
-    files: ["src/bilisama/ui/web/js/capture-worklet.js"],
+    // The worklets run on the audio thread, where `window` does not exist and
+    // `sampleRate`, `currentTime` and AudioWorkletProcessor do.
+    files: [
+      "src/bilisama/ui/web/js/capture-worklet.js",
+      "src/bilisama/ui/web/js/voice-worklet.js",
+    ],
     languageOptions: {
       globals: { ...globals.worker, ...globals.audioWorklet },
     },

@@ -124,6 +124,9 @@ panel.setOnPanelState((state) => {
   controlState.paused = Boolean(state.paused);
   controlState.input = Boolean(state.audio?.input_enabled ?? true);
   controlState.output = Boolean(state.audio?.output_enabled ?? true);
+  // Her volume is applied where she is played, which is this window when it
+  // holds the devices. The panel window has no audio and skips this.
+  audio?.setVolume(state.audio?.voice_volume);
   paintControls();
   if (controlState.paused) bubble.shatter?.();
 });
@@ -420,6 +423,9 @@ const audio = panelOnly
         // holds the devices now.
         else panel.forgetLocalMicTrouble();
       },
+      // Same reasoning as the renderer's: a limiter that failed to load is
+      // something only this window knows.
+      onNotice: (text) => panel.notice(text),
     });
 
 const socket = connect({

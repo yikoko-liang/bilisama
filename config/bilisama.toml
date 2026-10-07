@@ -134,6 +134,7 @@ echo_guard = "duck"                     # 主播一开口先把 AI 音量压下�
 input_enabled = true                    # 语音输入开关；每次启动恢复 true，面板改动只管本场
 output_enabled = true                   # 语音播报开关；同上
 noise_sensitivity = 50                  # 0 更抗噪，100 更容易听见小声说话；本地门限，改了立即生效
+voice_volume = 100                      # 她的音量（%）：只调她，不动系统音量；0 静音，最高 200，调大自动压峰值防爆音
 
 [safety]
 wordlist_path = "auto"
