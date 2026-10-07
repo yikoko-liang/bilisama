@@ -294,7 +294,17 @@ class SpeechLink(Protocol):
 
     async def request_reply(self, spec: ReplySpec) -> ReplyHandle: ...
 
-    async def cancel(self, handle: ReplyHandle) -> None: ...
+    async def cancel(self, handle: ReplyHandle, *, unheard: bool = False) -> None:
+        """Stop this reply, and settle it with exactly one ReplyDone.
+
+        `unheard` is a fact L3 states, not an order: nothing of this reply has
+        reached a speaker, because the voice gate held every frame of it. An
+        adapter whose protocol is harmed by a server-side cancel may stop such
+        a reply by dropping it instead (duplex: a cancel scrambles the
+        streamer's transcription, 2026-10-05). False means it may have been
+        heard, and the reply must actually stop.
+        """
+        ...
 
     async def end_protection(self) -> None:
         """Re-arm barge-in after a protected reply. The scheduler calls this

@@ -45,9 +45,15 @@ class _Tee:
     def __init__(self, inner: S2SLink) -> None:
         self._inner = inner
         self.started: list[link.ReplyHandle] = []
+        # What the scheduler said about each cancel: was any of it heard?
+        self.unheard: list[bool] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
+
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
+        self.unheard.append(unheard)
+        await self._inner.cancel(handle, unheard=unheard)
 
     async def events(self) -> AsyncIterator[link.LinkEvent]:
         async for event in self._inner.events():
@@ -187,7 +193,7 @@ class _ScriptedLink:
         while True:
             yield await self.queue.get()
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
         self.cancelled.append(handle)
 
     async def connect(self) -> None: ...
@@ -295,6 +301,38 @@ async def test_panic_kills_her_own_turn_too() -> None:
         assert server.recorded.count("response.cancel") == 1
 
 
+async def test_the_link_hears_whether_anything_of_a_killed_turn_was_heard() -> None:
+    """Only the voice gate's normal path can prove nobody heard the turn: it
+    held every frame. That fact goes down with the cancel so an adapter whose
+    protocol is hurt by a server-side cancel can drop the turn instead
+    (duplex, 2026-10-05). Every path where sound may have left — a requested
+    flush, the output guard, panic — says it may have been heard."""
+    async with _running() as (scheduler, server, tee):
+        await _her_turn_in_flight(scheduler, server)
+        scheduler.skip_implicit(tee.started[-1], reason=SkipReason.VOICE_NOT_ADDRESSED)
+        await _until(lambda: bool(tee.unheard), what="门杀的取消")
+        assert tee.unheard == [True]
+    async with _running() as (scheduler, server, tee):
+        await _her_turn_in_flight(scheduler, server)
+        scheduler.skip_implicit(
+            tee.started[-1], reason=SkipReason.VOICE_NOT_ADDRESSED, clear_playback=True
+        )
+        await _until(lambda: bool(tee.unheard), what="要求清喇叭的取消")
+        assert tee.unheard == [False]
+    async with _running() as (scheduler, server, tee):
+        await _her_turn_in_flight(scheduler, server)
+        scheduler.panic_mute()
+        await _until(lambda: bool(tee.unheard), what="紧急闭嘴的取消")
+        assert tee.unheard == [False]
+    async with _running(
+        Script(reply_text="禁词禁词禁词禁词禁词禁词", delta_chunks=3, delta_interval_s=0.05),
+        guard=lambda text: "禁词" in text,
+    ) as (scheduler, server, tee):
+        await server.emit_implicit_reply()
+        await _until(lambda: bool(tee.unheard), what="守卫命中的取消")
+        assert tee.unheard == [False]
+
+
 async def test_the_streamer_speaking_over_her_is_the_providers_cut_not_ours() -> None:
     """s2s sends done(cancelled) before speech_started: by the time the
     scheduler hears the streamer, the turn is already over. A cancel from our
@@ -318,7 +356,7 @@ class _StubLink:
     def __init__(self) -> None:
         self.cancels: list[link.ReplyHandle] = []
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
         self.cancels.append(handle)
 
 

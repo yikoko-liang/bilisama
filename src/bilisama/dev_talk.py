@@ -1415,8 +1415,8 @@ class _Fanout:
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
         return await self._inner.request_reply(spec)
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
-        await self._inner.cancel(handle)
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
+        await self._inner.cancel(handle, unheard=unheard)
 
     async def end_protection(self) -> None:
         await self._inner.end_protection()

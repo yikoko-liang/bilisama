@@ -296,7 +296,7 @@ class RealtimeClient:
         watchdog.add_done_callback(self._tasks.discard)
         return record.handle
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
         """response.cancel, bypassing the queue — waiting to interrupt defeats
         the point. The handle goes stale immediately; the server's done event
         settles the books.

@@ -150,7 +150,7 @@ class _StubLink:
     async def request_reply(self, spec: link.ReplySpec) -> link.ReplyHandle:
         return link.ReplyHandle()
 
-    async def cancel(self, handle: link.ReplyHandle) -> None: ...
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None: ...
 
     def events(self) -> object:
         async def gen() -> object:

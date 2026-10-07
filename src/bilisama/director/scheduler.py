@@ -483,7 +483,11 @@ class Scheduler:
         if clear_playback and not implicit.cleared:
             implicit.cleared = True
             self.controls.put_nowait(PlaybackClear(reason=_clear_reason(reason)))
-        self._spawn(self._speech.cancel(handle), name="scheduler:implicit-cancel")
+        # `cleared` is set exactly when sound of this turn may have left: the
+        # flush just above, or panic's own before it calls here. Otherwise the
+        # gate held every frame, and the link may stop it without a cancel.
+        unheard = not implicit.cleared
+        self._spawn(self._speech.cancel(handle, unheard=unheard), name="scheduler:implicit-cancel")
         spoken_ms = self._spoken_ms(implicit.started_at)
         intent_id = f"voice:{handle.handle_id}"
         with bind(intent_id=intent_id):
@@ -492,6 +496,7 @@ class Scheduler:
                 reason=str(reason),
                 spoken_ms=spoken_ms,
                 cleared=implicit.cleared,
+                unheard=unheard,
                 **_detail_fields(reason, detail),
             )
         self._emit(

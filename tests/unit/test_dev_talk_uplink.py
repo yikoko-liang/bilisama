@@ -718,7 +718,7 @@ class _FakeLink:
     async def request_reply(self, spec: Any) -> Any:
         return link.ReplyHandle()
 
-    async def cancel(self, handle: Any) -> None:
+    async def cancel(self, handle: Any, *, unheard: bool = False) -> None:
         return None
 
     async def end_protection(self) -> None:
@@ -1435,7 +1435,7 @@ class _OfflineDuplex(duplex_module.DuplexLink):
     async def request_reply(self, spec: Any) -> Any:
         return link.ReplyHandle()
 
-    async def cancel(self, handle: Any) -> None:
+    async def cancel(self, handle: Any, *, unheard: bool = False) -> None:
         return None
 
     async def end_protection(self) -> None:

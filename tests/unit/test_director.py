@@ -560,7 +560,7 @@ class _ScriptedLink:
         self.handles.append(handle)
         return handle
 
-    async def cancel(self, handle: ReplyHandle) -> None:
+    async def cancel(self, handle: ReplyHandle, *, unheard: bool = False) -> None:
         self.cancels.append(handle)
         if self._cancel_error is not None:
             raise self._cancel_error

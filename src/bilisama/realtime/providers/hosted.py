@@ -355,8 +355,8 @@ class HostedLink:
         )
         return await self._client.request_reply(frame)
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
-        await self._client.cancel(handle)
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
+        await self._client.cancel(handle)  # unheard: a cancel here does no harm
 
     async def end_protection(self) -> None:
         # Nothing to re-arm: request_reply never disarmed anything (backlog

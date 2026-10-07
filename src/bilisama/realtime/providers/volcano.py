@@ -938,8 +938,8 @@ class VolcanoLink:
         )
         return handle
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
-        """Stop her, on the wire and locally.
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
+        """Stop her, on the wire and locally. `unheard` changes nothing here.
 
         This used to be local-only, on the reading that the protocol had no
         cancel. It has one: ClientInterrupt, which the docs qualify with

@@ -244,8 +244,8 @@ class S2SLink:
         # belt-and-braces second call, which re-arms what is already armed.
         log.info("s2s.protection_ended", was_armed=was_armed)
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
-        await self._client.cancel(handle)
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
+        await self._client.cancel(handle)  # unheard: a cancel here does no harm
 
     def events(self) -> AsyncIterator[link.LinkEvent]:
         return self._client.events()

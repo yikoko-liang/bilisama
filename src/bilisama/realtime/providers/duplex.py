@@ -789,7 +789,7 @@ class DuplexLink:
         log.info("duplex.reply_requested", handle_id=handle.handle_id, text_len=len(spec.text))
         return handle
 
-    async def cancel(self, handle: link.ReplyHandle) -> None:
+    async def cancel(self, handle: link.ReplyHandle, *, unheard: bool = False) -> None:
         """Stop her.
 
         The ack is immediate, but audio already generated keeps arriving —
