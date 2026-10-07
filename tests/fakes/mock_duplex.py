@@ -165,6 +165,10 @@ class MockDuplexServer:
         # 2026-10-05, a commit 25 s into a 67 s monologue). On by default
         # because that is the endpoint's behaviour, not a fault.
         self.retranscribe_on_interrupt = True
+        # How many response.cancel frames arrived, and whether one scrambles
+        # the next transcription item the way the real endpoint's did.
+        self.cancels = 0
+        self.scramble_after_cancel = False
         self.items: list[str] = []
         self._server: Any = None
         self._ws: ServerConnection | None = None
@@ -301,7 +305,25 @@ class MockDuplexServer:
             if not self._deaf_to_tts:
                 await self.say(getattr(self, "_pending", ""), ours=True)
         elif kind == "response.cancel":
+            self.cancels += 1
+            # Two terminal frames, canceled and then done: 23 cancels out of
+            # 23 against the real endpoint on 2026-10-05. Neither carries a
+            # response id.
             await self._send(ws, {"type": "response.canceled"})
+            await self._send(ws, {"type": "response.done"})
+            if self.scramble_after_cancel:
+                # What the real endpoint did right after a cancel in the
+                # 2026-10-05 probes (8 of 8 on a real streamer recording): a
+                # new transcription item opens at the done and never gets a
+                # word. Off by default; its other shape (lines cut after
+                # 0.2-0.3 s) is not modelled.
+                await self._send(
+                    ws,
+                    {
+                        "type": "conversation.item.input_audio_transcription.started",
+                        "item_id": self._next_item(),
+                    },
+                )
         elif kind == "session.close":
             await self._send(ws, {"type": "session.closed"})
         elif kind not in _KNOWN:
@@ -394,6 +416,26 @@ class MockDuplexServer:
             # reply that finishes inside its own hold flushes at once — so a
             # test of the TIMER needs a reply that has not finished yet.
             return
+        await self._send(ws, {"type": "response.output_audio.done"})
+        await self._send(ws, {"type": "response.done"})
+
+    async def more(self, text: str, *, audio: bytes = b"\x03\x04") -> None:
+        """Her turn goes on: more words and another audio frame on a reply
+        left open by `say(finish=False)`."""
+        ws = self._ws
+        assert ws is not None
+        for ch in text:
+            await self._send(ws, {"type": "response.output_text.delta", "delta": ch})
+        await self._send(
+            ws,
+            {"type": "response.output_audio.delta", "delta": base64.b64encode(audio).decode()},
+        )
+
+    async def end_reply(self) -> None:
+        """The endpoint finishes a reply left open by `say(finish=False)` on
+        its own: the audio done, then one response.done and nothing else."""
+        ws = self._ws
+        assert ws is not None
         await self._send(ws, {"type": "response.output_audio.done"})
         await self._send(ws, {"type": "response.done"})
 
