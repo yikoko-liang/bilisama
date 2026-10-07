@@ -1163,10 +1163,26 @@ export function createPanel({ send }) {
     voiceCardEl.appendChild(el("h3", "voice-title", "音色"));
     if (v.mode === "select") {
       const sel = el("select", "voice-select");
+      // Optional per option: a name to show instead of the id (duplex ids say
+      // nothing — zh_male_m191_uranus_bigtts is 云舟) and a group; the payload
+      // may name the shipped default, which the option then says.
+      const groups = new Map();
       for (const opt of v.options ?? []) {
-        const node = el("option", "", opt.hint ? `${opt.id}（${opt.hint}）` : opt.id);
+        const notes = [opt.hint, opt.id === v.default ? "默认" : ""].filter(Boolean).join(" · ");
+        const name = opt.label ?? opt.id;
+        const node = el("option", "", notes ? `${name}（${notes}）` : name);
         node.value = opt.id;
-        sel.appendChild(node);
+        if (opt.group) {
+          if (!groups.has(opt.group)) {
+            const group = document.createElement("optgroup");
+            group.label = opt.group;
+            groups.set(opt.group, group);
+            sel.appendChild(group);
+          }
+          groups.get(opt.group).appendChild(node);
+        } else {
+          sel.appendChild(node);
+        }
       }
       if ((v.options ?? []).every((opt) => opt.id !== v.current)) {
         // The configured value may be off-list (hand-edited, or empty for

@@ -1745,3 +1745,48 @@ async def test_a_cancel_answered_without_a_trailing_done_does_not_swallow_the_ne
             assert done.handle is ours and done.status is link.ReplyStatus.COMPLETED
         finally:
             await duplex.aclose()
+
+
+# ------------------------------------------------------------ her voice
+
+
+async def test_a_new_voice_goes_out_in_place_and_survives_a_reconnect() -> None:
+    """The panel's voice picker (2026-10-07). Against the real endpoint a
+    session.update carrying a new voice took effect on her very next reply
+    (same session: Vivi 242 Hz, then 云舟 120 Hz after the update), so the
+    switch is live; and every later session.create carries it too."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex.set_context("你叫豆腐。")  # dev-talk's order: the persona comes first
+            await duplex.set_voice("zh_male_m191_uranus_bigtts")
+            await _settles(lambda: server.recorded.count("session.update") >= 1, "换音色没发出去")
+            update = server.recorded.last("session.update")
+            assert update["session"]["audio"]["output"]["voice"] == "zh_male_m191_uranus_bigtts"
+            assert update["session"]["instructions"].startswith(
+                "你叫豆腐。"
+            ), "换音色不能把人设丢了"
+            await duplex.suspend()
+            await duplex.resume()
+            create = server.recorded.last("session.create")
+            assert create["session"]["audio"]["output"]["voice"] == "zh_male_m191_uranus_bigtts"
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_voice_set_before_the_persona_rides_the_recreated_session() -> None:
+    """A session dev-talk opened empty is recreated by the first persona (the
+    module note); a voice chosen before that has nothing to update in place
+    and must ride that create instead."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex.set_voice("zh_female_xiaohe_uranus_bigtts")
+            await duplex.set_context("你叫豆腐。")
+            await _settles(lambda: server.recorded.count("session.create") >= 2, "人设没触发重建")
+            create = server.recorded.last("session.create")
+            assert create["session"]["audio"]["output"]["voice"] == "zh_female_xiaohe_uranus_bigtts"
+        finally:
+            await duplex.aclose()

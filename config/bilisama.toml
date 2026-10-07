@@ -80,7 +80,7 @@ end_smooth_window_ms = 1500             # 停多久算一句说完了。这条�
 endpoint = ""
 api_key_ref = "volcano_api_key"         # 和上面那套同一个 key
 model = "1.2.6.1"                       # 这条协议目前只有这一个版本
-voice = "zh_female_vv_uranus_bigtts"    # uranus 表，和上面那套的音色不通用
+voice = "zh_female_vv_uranus_bigtts"    # Vivi 2.0。uranus 表，和上面那套不通用；面板「形象与声音」里可以换，下一句生效
 # 弹幕由谁来回。这条协议不会「现场组织」一句回复（起轮次可以，走打招呼事件），所以要选：
 #   ghostwriter = 出厂值（2026-09-22 起）。侧路模型写词、她照着念，弹幕立刻回、冷场也能
 #                 开口、戳一下有反应。**需要先配好侧路模型**（[speech.side] 或 path.sh 的兼容

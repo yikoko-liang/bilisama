@@ -98,6 +98,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "duplex.suspended",
         "duplex.transcript_item",
         "duplex.turn_overlapped",
+        "duplex.voice_set",
         "distill.batch_applied",
         "distill.batch_failed",
         "distill.batch_started",

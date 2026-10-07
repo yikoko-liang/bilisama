@@ -2468,6 +2468,12 @@ async def run_director(args: argparse.Namespace) -> int:
             # whole hook. Same shape as the volcano speaker arm below.
             inner.set_reply_hold_ms(settings.speech.volcano_duplex.reply_hold_ms)
             return True
+        if path == "speech.volcano_duplex.voice" and isinstance(inner, DuplexLink):
+            # The voice picker: a session.update switches her from the next
+            # reply on (measured 2026-10-07), so this no longer waits for a
+            # reconnect that the panel had no way to ask for.
+            await inner.set_voice(settings.speech.volcano_duplex.voice)
+            return True
         if path == "speech.volcano_duplex.skip_without_cancel" and isinstance(inner, DuplexLink):
             # The rollback switch for letting an unheard turn run out: read at
             # each kill inside the adapter, so the setter is the whole hook.

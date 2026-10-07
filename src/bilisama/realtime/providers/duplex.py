@@ -684,6 +684,25 @@ class DuplexLink:
         await self._update_session()
         log.info("duplex.context_pushed", context_len=len(instructions))
 
+    async def set_voice(self, voice: str) -> None:
+        """Switch her voice, from her next reply on.
+
+        Measured 2026-10-07: a session.update carrying a new voice took effect
+        on the very next reply of the same session (Vivi 242 Hz, then 云舟
+        120 Hz). Every later session.create carries it too. A session opened
+        empty is about to be recreated by the first persona, which carries the
+        new voice by itself, so nothing is sent into it here.
+
+        A wrong id is accepted by the endpoint, which then writes her text and
+        sends no audio at all, with no error frame; validate.py warns about an
+        id that is not on the probed list.
+        """
+        self._speaker = voice
+        if not self._started or self._created_empty:
+            return
+        await self._update_session()
+        log.info("duplex.voice_set", voice=voice)
+
     async def _update_session(self) -> None:
         """Send the session block as it stands now, in place."""
         await self._send(

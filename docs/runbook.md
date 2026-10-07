@@ -196,7 +196,7 @@ export volcano_api_key=...
 | 字段 | 说明 |
 |---|---|
 | `model` | 固定 `1.2.6.1`，厂商升版本才改 |
-| `voice` | 走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表。**和上面那套火山的音色表不通用**（探针里 `jupiter` 的 `zh_female_vv_jupiter_bigtts` 也能连上，但别指望通用） |
+| `voice` | 走「豆包语音合成模型 2.0 / S2S-全双工」那张 `uranus` 表，和上面那套火山的音色表不通用。出厂 Vivi 2.0；面板「形象与声音」里能当场换，填错 ID 她会没声音且不报错。清单和实测基频见下面「换音色（duplex）」 |
 | `event_replies` | 弹幕由谁来回：`ghostwriter`（**出厂**，侧路模型写词她念，弹幕立刻回、冷场也能开口；要先配侧路模型）或 `tool`（她自己拉、自己答，不用侧路模型，但要等主播开口）。两条的差别见下面那张表 |
 | `speed` / `loudness` | 0 是原速原音量，范围 -50~100 |
 | `speech_edge_s` | 结束帧没来时，转写和麦克风都安静多久我们替主播判「说完了」。只管结束帧不来的情况，正常一句话靠端点自己的结束帧收尾。出厂 1 秒。2026-10-05 起麦克风有声音也会把倒计时往后推，所以主播出着声就不会被掐断；之前只看转写，会在句中停顿处把一句切成几段。主播一句话中间不出声地停超过它，会先被判说完，接着说还续在同一行 |
@@ -205,6 +205,123 @@ export volcano_api_key=...
 
 **选 `ghostwriter` 就得先有侧路模型，否则启动阶段直接退出**——不会等到第一条弹幕进来
 才发现她哑了。报错里会同时告诉你另一条路：把 `event_replies` 改成 `tool` 就不需要侧路模型。
+
+#### 换音色（duplex）
+
+出厂是 Vivi 2.0（`zh_female_vv_uranus_bigtts`）。面板助手页「形象与声音」卡片里有下拉框，选了下一句就换，
+不用重启：适配器发一次 `session.update`（2026-10-07 实测，同一会话里女声 242Hz 换成男声 120Hz）。
+也可以直接改 `[speech.volcano_duplex] voice`。命令行的 `--voice` 只管 DashScope，管不到 duplex。
+
+**ID 填错不会报错**：会话照样建、文字照样出，就是一点声音都没有，没有任何错误帧（厂商错误码表里列着
+`InvalidSpeaker`，实测没收到）。所以下拉框里只放实测能出声的：官方音色表里「豆包语音合成模型2.0、
+S2S-O2.0、S2S-全双工」这一节的 90 个中文音色，2026-10-07 逐个对真端点问了同一句话，90 个都出了声（第一轮有 4 个因为网络抖动没出声或没连上，重测都正常），
+基频是那一句的实测值（数字越小越低沉）。清单以 `config/voices.py` 为源，有单测对账。清单以外、
+又不是克隆音色（`S_` / `saturn_` / `ICL_` 开头）的 ID，启动时会打一条「配置提醒」。
+
+官方主推（只有这四个支持方言参数）：
+
+| 音色 | ID | 基频 |
+|---|---|---|
+| **Vivi 2.0（出厂值）** | `zh_female_vv_uranus_bigtts` | 255Hz |
+| 小何 2.0 | `zh_female_xiaohe_uranus_bigtts` | 229Hz |
+| 云舟 2.0 | `zh_male_m191_uranus_bigtts` | 133Hz |
+| 小天 2.0 | `zh_male_taocheng_uranus_bigtts` | 150Hz |
+
+女声：
+
+| 音色 | ID | 基频 |
+|---|---|---|
+| 婆婆 2.0 | `zh_female_popo_uranus_bigtts` | 190Hz |
+| 温柔妈妈 2.0 | `zh_female_wenroumama_uranus_bigtts` | 203Hz |
+| 鸡汤女 2.0 | `zh_female_jitangnv_uranus_bigtts` | 207Hz |
+| 玲玲姐姐 2.0 | `zh_female_lingling_uranus_bigtts` | 213Hz |
+| 甜美悦悦 2.0 | `zh_female_tianmeiyueyue_uranus_bigtts` | 214Hz |
+| 开朗姐姐 2.0 | `zh_female_kailangjiejie_uranus_bigtts` | 216Hz |
+| Tina老师 2.0 | `zh_female_yingyujiaoxue_uranus_bigtts` | 217Hz |
+| 心灵鸡汤 2.0 | `zh_female_xinlingjitang_uranus_bigtts` | 218Hz |
+| 武则天 2.0 | `zh_female_wuzetian_uranus_bigtts` | 218Hz |
+| 知性灿灿 2.0 | `zh_female_cancan_uranus_bigtts` | 222Hz |
+| 顾姐 2.0 | `zh_female_gujie_uranus_bigtts` | 224Hz |
+| 女雷神 2.0 | `zh_female_nvleishen_uranus_bigtts` | 226Hz |
+| 邻家女孩 2.0 | `zh_female_linjianvhai_uranus_bigtts` | 229Hz |
+| 黑猫侦探社咪仔 2.0 | `zh_female_mizai_uranus_bigtts` | 229Hz |
+| 暖阳女声 2.0 | `zh_female_kefunvsheng_uranus_bigtts` | 231Hz |
+| 魅力女友 2.0 | `zh_female_meilinvyou_uranus_bigtts` | 231Hz |
+| 文静毛毛 2.0 | `zh_female_wenjingmaomao_uranus_bigtts` | 233Hz |
+| 魅力苏菲 2.0 | `zh_female_sophie_uranus_bigtts` | 235Hz |
+| 高冷御姐 2.0 | `zh_female_gaolengyujie_uranus_bigtts` | 238Hz |
+| 知性女声 2.0 | `zh_female_zhixingnv_uranus_bigtts` | 238Hz |
+| 温柔淑女 2.0 | `zh_female_wenroushunv_uranus_bigtts` | 239Hz |
+| 清澈梓梓 2.0 | `zh_female_qingchezizi_uranus_bigtts` | 240Hz |
+| 鸡汤妹妹 2.0 | `zh_female_jitangmei_uranus_bigtts` | 240Hz |
+| 亲切女声 2.0 | `zh_female_qinqienv_uranus_bigtts` | 241Hz |
+| 流畅女声 2.0 | `zh_female_liuchangnv_uranus_bigtts` | 242Hz |
+| 甜美桃子 2.0 | `zh_female_tianmeitaozi_uranus_bigtts` | 244Hz |
+| 柔美女友 2.0 | `zh_female_roumeinvyou_uranus_bigtts` | 245Hz |
+| 清新女声 2.0 | `zh_female_qingxinnvsheng_uranus_bigtts` | 247Hz |
+| 贴心女声 2.0 | `zh_female_tiexinnvsheng_uranus_bigtts` | 247Hz |
+| 娇喘女声 2.0 | `zh_female_jiaochuannv_uranus_bigtts` | 251Hz |
+| 少儿故事 2.0 | `zh_female_shaoergushi_uranus_bigtts` | 251Hz |
+| 爽快思思 2.0 | `zh_female_shuangkuaisisi_uranus_bigtts` | 253Hz |
+| 儿童绘本 2.0 | `zh_female_xiaoxue_uranus_bigtts` | 253Hz |
+| TVB女声 2.0 | `zh_female_tvbnv_uranus_bigtts` | 254Hz |
+| 佩奇猪 2.0 | `zh_female_peiqi_uranus_bigtts` | 264Hz |
+| 春日部姐姐 2.0 | `zh_female_chunribu_uranus_bigtts` | 264Hz |
+| 温柔小雅 2.0 | `zh_female_wenrouxiaoya_uranus_bigtts` | 265Hz |
+| 樱桃丸子 2.0 | `zh_female_yingtaowanzi_uranus_bigtts` | 270Hz |
+| 古风少御 2.0 | `zh_female_gufengshaoyu_uranus_bigtts` | 270Hz |
+| 直率英子 2.0 | `zh_female_zhishuaiyingzi_uranus_bigtts` | 279Hz |
+| 萌丫头 2.0 | `zh_female_mengyatou_uranus_bigtts` | 279Hz |
+| 俏皮女声 2.0 | `zh_female_qiaopinv_uranus_bigtts` | 282Hz |
+| 甜美小源 2.0 | `zh_female_tianmeixiaoyuan_uranus_bigtts` | 286Hz |
+| 林潇 2.0 | `zh_female_linxiao_uranus_bigtts` | 291Hz |
+| 撒娇学妹 2.0 | `zh_female_sajiaoxuemei_uranus_bigtts` | 293Hz |
+| 谄媚女声 2.0 | `zh_female_chanmeinv_uranus_bigtts` | 300Hz |
+| 感冒电音姐姐 2.0 | `zh_female_ganmaodianyin_uranus_bigtts` | 320Hz |
+
+男声：
+
+| 音色 | ID | 基频 |
+|---|---|---|
+| 深夜播客 2.0 | `zh_male_shenyeboke_uranus_bigtts` | 100Hz |
+| 傲娇霸总 2.0 | `zh_male_aojiaobazong_uranus_bigtts` | 106Hz |
+| 刘飞 2.0 | `zh_male_liufei_uranus_bigtts` | 107Hz |
+| 渊博小叔 2.0 | `zh_male_yuanboxiaoshu_uranus_bigtts` | 107Hz |
+| 温暖阿虎 2.0 | `zh_male_wennuanahu_uranus_bigtts` | 112Hz |
+| 快乐小东 2.0 | `zh_male_kuailexiaodong_uranus_bigtts` | 112Hz |
+| 儒雅逸辰 2.0 | `zh_male_ruyayichen_uranus_bigtts` | 114Hz |
+| 悠悠君子 2.0 | `zh_male_youyoujunzi_uranus_bigtts` | 114Hz |
+| 高冷沉稳 2.0 | `zh_male_gaolengchenwen_uranus_bigtts` | 117Hz |
+| 少年梓辛 2.0 | `zh_male_shaonianzixin_uranus_bigtts` | 119Hz |
+| 霸气青叔 2.0 | `zh_male_baqiqingshu_uranus_bigtts` | 119Hz |
+| 东方浩然 2.0 | `zh_male_dongfanghaoran_uranus_bigtts` | 119Hz |
+| 擎苍 2.0 | `zh_male_qingcang_uranus_bigtts` | 122Hz |
+| 唐僧 2.0 | `zh_male_tangseng_uranus_bigtts` | 127Hz |
+| 四郎 2.0 | `zh_male_silang_uranus_bigtts` | 128Hz |
+| 悬疑解说 2.0 | `zh_male_xuanyijieshuo_uranus_bigtts` | 130Hz |
+| 磁性解说男声 2.0 | `zh_male_cixingjieshuonan_uranus_bigtts` | 130Hz |
+| 开朗学长 2.0 | `zh_male_kailangxuezhang_uranus_bigtts` | 142Hz |
+| 解说小明 2.0 | `zh_male_jieshuoxiaoming_uranus_bigtts` | 148Hz |
+| 大壹 2.0 | `zh_male_dayi_uranus_bigtts` | 149Hz |
+| 清爽男大 2.0 | `zh_male_qingshuangnanda_uranus_bigtts` | 150Hz |
+| 反卷青年 2.0 | `zh_male_fanjuanqingnian_uranus_bigtts` | 151Hz |
+| 开朗弟弟 2.0 | `zh_male_kailangdidi_uranus_bigtts` | 162Hz |
+| 广告解说 2.0 | `zh_male_guanggaojieshuo_uranus_bigtts` | 162Hz |
+| 儒雅青年 2.0 | `zh_male_ruyaqingnian_uranus_bigtts` | 166Hz |
+| 庄周 2.0 | `zh_male_zhuangzhou_uranus_bigtts` | 166Hz |
+| 译制片男 2.0 | `zh_male_yizhipiannan_uranus_bigtts` | 168Hz |
+| 温柔小哥 2.0 | `zh_male_wenrouxiaoge_uranus_bigtts` | 176Hz |
+| 猪八戒 2.0 | `zh_male_zhubajie_uranus_bigtts` | 193Hz |
+| 活力小哥 2.0 | `zh_male_huolixiaoge_uranus_bigtts` | 197Hz |
+| 阳光青年 2.0 | `zh_male_yangguangqingnian_uranus_bigtts` | 209Hz |
+| 亮嗓萌仔 2.0 | `zh_male_liangsangmengzai_uranus_bigtts` | 211Hz |
+| 邻家男孩 2.0 | `zh_male_linjiananhai_uranus_bigtts` | 222Hz |
+| 熊二 2.0 | `zh_male_xionger_uranus_bigtts` | 241Hz |
+| 鲁班七号 2.0 | `zh_male_lubanqihao_uranus_bigtts` | 242Hz |
+| 猴哥 2.0 | `zh_male_sunwukong_uranus_bigtts` | 247Hz |
+| 懒音绵宝 2.0 | `zh_male_lanyinmianbao_uranus_bigtts` | 258Hz |
+| 天才童声 2.0 | `zh_male_tiancaitongsheng_uranus_bigtts` | 261Hz |
+| 奶气萌娃 2.0 | `zh_male_naiqimengwa_uranus_bigtts` | 312Hz |
 
 #### 为什么它要一个自己的 adapter（2026-09-16 真端点五轮探针）
 

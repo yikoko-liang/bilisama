@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from bilisama.config.enums import GrowthMode, ProviderName
-from bilisama.config.schema import CURRENT_VERSION
+from bilisama.config.schema import CURRENT_VERSION, VolcanoDuplexConfig
 
 if TYPE_CHECKING:
     from bilisama.config.schema import Settings
-from bilisama.config.voices import VOLCANO_OFFICIAL_SPEAKERS
+from bilisama.config.voices import DUPLEX_VOICES, VOLCANO_OFFICIAL_SPEAKERS
 
 
 def _customised(section: BaseModel) -> tuple[str, ...]:
@@ -60,6 +60,11 @@ class ConfigError(Exception):
         super().__init__("\n".join(p.message for p in problems))
 
 
+# Voices cloned on an account: their ids are the account's own, so no list of
+# ours can hold them, and every voice rule lets them through on the prefix.
+_CLONED_PREFIXES = ("saturn_", "ICL_", "S_")
+
+
 def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
     """Whether this voice and this model generation can work together.
 
@@ -73,7 +78,7 @@ def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
         model: The generation, `1.2.1.1` (O2.0) or `2.2.0.0` (SC2.0).
         speaker: The voice id that will be sent, after any override.
     """
-    cloned = speaker.startswith(("saturn_", "ICL_", "S_"))
+    cloned = speaker.startswith(_CLONED_PREFIXES)
     problems: list[ConfigProblem] = []
     if not speaker:
         # Reproduced on the real endpoint 2026-08-28, and it is the combination
@@ -126,6 +131,35 @@ def volcano_voice_problems(model: str, speaker: str) -> list[ConfigProblem]:
             )
         )
     return problems
+
+
+def duplex_voice_problems(voice: str) -> list[ConfigProblem]:
+    """Whether this duplex voice is one we have heard her speak with.
+
+    The endpoint takes any id. A wrong one creates the session, writes her
+    text and sends no audio at all, with no error frame (real endpoint,
+    2026-10-07, despite the InvalidSpeaker row in the vendor's error table):
+    she goes mute and nothing says why. Advisory, not fatal — the list is
+    what we probed, and cloned voices are the account's own.
+    """
+    if voice.startswith(_CLONED_PREFIXES) or voice in {v for v, _, _ in DUPLEX_VOICES}:
+        return []
+    shipped = VolcanoDuplexConfig.model_fields["voice"].default
+    return [
+        ConfigProblem(
+            field="speech.volcano_duplex.voice",
+            message=(
+                (
+                    f"duplex 的音色「{voice}」不在实测过的清单里。"
+                    if voice
+                    else "duplex 的音色留空了。"
+                )
+                + "填错了她会完全没声音，服务端也不报错。"
+            ),
+            fix=f"在面板「形象与声音」的下拉框里选一个，或者改回出厂的 {shipped}。",
+            fatal=False,
+        )
+    ]
 
 
 def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]:
@@ -398,6 +432,8 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     #
     # One guard for both volcano rules. They used to be two adjacent `if`s on
     # the same condition with nothing between them.
+    if s.speech.provider is ProviderName.VOLCANO_DUPLEX:
+        problems += duplex_voice_problems(s.speech.volcano_duplex.voice)
     if s.speech.provider is ProviderName.VOLCANO:
         problems += volcano_voice_problems(s.speech.volcano.model, s.speech.volcano.speaker)
 

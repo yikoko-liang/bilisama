@@ -1802,6 +1802,70 @@ async def test_picking_a_voice_sends_the_config_edit(page: Page, harness: Harnes
     )
 
 
+async def test_the_duplex_voice_picker_names_marks_and_groups_its_voices(
+    page: Page, harness: Harness
+) -> None:
+    """Duplex voice ids are long and say nothing (zh_male_m191_uranus_bigtts is
+    云舟); the options read as name and pitch, the shipped default says so, and
+    the four the vendor features sit apart from the rest (2026-10-07)."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='assistants']")
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {
+            "panicked": False,
+            "speak": {},
+            "voices": {
+                "mode": "select",
+                "path": "speech.volcano_duplex.voice",
+                "current": "zh_male_m191_uranus_bigtts",
+                "default": "zh_female_vv_uranus_bigtts",
+                "options": [
+                    {
+                        "id": "zh_female_vv_uranus_bigtts",
+                        "label": "Vivi 2.0",
+                        "hint": "255Hz",
+                        "group": "官方主推",
+                    },
+                    {
+                        "id": "zh_male_m191_uranus_bigtts",
+                        "label": "云舟 2.0",
+                        "hint": "133Hz",
+                        "group": "官方主推",
+                    },
+                    {
+                        "id": "zh_female_cancan_uranus_bigtts",
+                        "label": "知性灿灿 2.0",
+                        "hint": "240Hz",
+                        "group": "女声",
+                    },
+                ],
+                "hint": "换完下一句就是新嗓子",
+            },
+        },
+    )
+    await _wait(page, "document.querySelector('#voice-card select') !== null")
+    groups = await page.evaluate(
+        "[...document.querySelectorAll('#voice-card optgroup')].map((g) => g.label)"
+    )
+    assert groups == ["官方主推", "女声"]
+    texts = await page.evaluate(
+        "[...document.querySelectorAll('#voice-card option')].map((o) => o.textContent)"
+    )
+    assert texts == ["Vivi 2.0（255Hz · 默认）", "云舟 2.0（133Hz）", "知性灿灿 2.0（240Hz）"]
+    assert await page.evaluate("document.querySelector('#voice-card select').value") == (
+        "zh_male_m191_uranus_bigtts"
+    )
+    await page.select_option("#voice-card select", "zh_female_cancan_uranus_bigtts")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda d: (d.get("config") or {}).get("path") == "speech.volcano_duplex.voice"
+        and (d.get("config") or {}).get("value") == "zh_female_cancan_uranus_bigtts",
+    )
+
+
 # ------------------------------------------------------- the intent strip
 
 

@@ -1410,6 +1410,7 @@ class _OfflineDuplex(duplex_module.DuplexLink):
         self.contexts: list[str] = []
         self.hold_calls: list[int] = []
         self.skip_calls: list[bool] = []
+        self.voice_calls: list[str] = []
         self.closed = False
 
     async def connect(self) -> None:
@@ -1449,6 +1450,9 @@ class _OfflineDuplex(duplex_module.DuplexLink):
     def set_skip_without_cancel(self, on: bool) -> None:
         self.skip_calls.append(on)
         super().set_skip_without_cancel(on)
+
+    async def set_voice(self, voice: str) -> None:
+        self.voice_calls.append(voice)
 
 
 class _NoUvicorn:
@@ -1637,3 +1641,51 @@ async def test_the_skip_without_cancel_switch_lands_on_the_running_link(
     assert caught["settings"].speech.volcano_duplex.skip_without_cancel is False
     assert duplex.skip_calls == [False]
     assert duplex._skip_without_cancel is False
+
+
+async def test_picking_a_duplex_voice_reaches_the_running_link(
+    duplex_panel_box: tuple[Path, dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The voice picker on duplex (2026-10-07): the edit used to be refused
+    with 「还没有对应的热生效通道」; now it reaches the link that is running,
+    which switches her voice with a session.update."""
+    config_path, caught = duplex_panel_box
+    task = asyncio.create_task(
+        dev_talk.run_director(_duplex_panel_args(config_path)), name="test:director"
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline:
+        if (
+            "handlers" in caught
+            and _OfflineDuplex.instances
+            and _OfflineDuplex.instances[-1].contexts
+        ):
+            break
+        await asyncio.sleep(0.01)
+    else:  # pragma: no cover - only on a hang, and then the assert says so
+        task.cancel()
+        raise AssertionError("run_director 没在预期时间内把面板挂上")
+    await asyncio.sleep(0.05)
+    duplex = _OfflineDuplex.instances[-1]
+    from bilisama.ui.events import ClientEvent
+
+    try:
+        capsys.readouterr()
+        await caught["handlers"][ClientEvent.PANEL_SET](
+            {
+                "config": {
+                    "path": "speech.volcano_duplex.voice",
+                    "value": "zh_male_m191_uranus_bigtts",
+                }
+            }
+        )
+        printed = capsys.readouterr().out
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    receipts = [line for line in printed.splitlines() if line.startswith("[面板] ")]
+    assert receipts and "已保存并生效" in receipts[0], printed
+    assert caught["settings"].speech.volcano_duplex.voice == "zh_male_m191_uranus_bigtts"
+    assert duplex.voice_calls == ["zh_male_m191_uranus_bigtts"]

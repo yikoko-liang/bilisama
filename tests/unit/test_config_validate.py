@@ -150,6 +150,12 @@ class _Broken(NamedTuple):
 _NO_CONFIG_DIR = Path(__file__).resolve().parent / "_no_such_config_dir"
 
 
+def _duplex_with_voice(voice: str) -> Settings:
+    settings = _settings(provider=ProviderName.VOLCANO_DUPLEX, expression_source="lexicon")
+    settings.speech.volcano_duplex.voice = voice
+    return settings
+
+
 # One deliberately broken config per rule. Reused by the tests that have to see
 # every problem `check` can produce, not just the ones they happen to trip.
 BROKEN_ONE_WAY_EACH = {
@@ -209,6 +215,8 @@ BROKEN_ONE_WAY_EACH = {
             volcano_app_id_ref="volcano_app_id",
         )
     ),
+    # A duplex voice nobody has heard: the endpoint takes it and she goes mute.
+    "speech.volcano_duplex.voice": _Broken(_duplex_with_voice("zh_female_not_a_real_voice_bigtts")),
 }
 
 
@@ -714,3 +722,22 @@ def test_paid_protection_is_only_questioned_where_it_cannot_hold() -> None:
         "interaction.protect_paid_replies",
     )
     assert problem.fatal is False, "半截保护是提醒，不是拒绝启动"
+
+
+def test_a_duplex_voice_off_the_probed_list_is_advisory() -> None:
+    """On duplex a wrong voice id creates the session, writes her text and
+    sends no audio at all, with no error frame (real endpoint, 2026-10-07) —
+    she simply goes mute. Not fatal: the list is what we probed, and the
+    vendor's table and cloned voices are larger than it."""
+    from bilisama.config.validate import duplex_voice_problems
+
+    settings = _settings()
+    settings.speech.provider = ProviderName.VOLCANO_DUPLEX
+    settings.speech.volcano_duplex.voice = "zh_female_not_a_real_voice_bigtts"
+    found = [p for p in check(settings) if p.field == "speech.volcano_duplex.voice"]
+    assert len(found) == 1 and found[0].fatal is False, found
+    assert "没声音" in found[0].message
+    assert duplex_voice_problems("zh_female_vv_uranus_bigtts") == []
+    assert duplex_voice_problems("S_my_own_clone") == [], "克隆音色列不进清单，不该被当成填错"
+    settings.speech.provider = ProviderName.DASHSCOPE
+    assert not [p for p in check(settings) if p.field == "speech.volcano_duplex.voice"]

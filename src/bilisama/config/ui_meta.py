@@ -600,10 +600,13 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "speech.volcano_duplex.voice": FieldMeta(
         label="音色",
-        hint="这条协议用的是另一套音色表（uranus 开头），和上面那套火山的不通用",
+        hint=(
+            "最好在「形象与声音」卡片的下拉框里选，那里的每个都在真服务端上试过能出声。"
+            "这里手填的 ID 写错了，她会完全没声音而且不报错。换完下一句就是新嗓子"
+        ),
         provider_scoped="volcano_duplex",
         audience=Audience.STREAMER,
-        reload=Reload.RECONNECT,
+        reload=Reload.LIVE,
         group="火山全双工",
         order=4,
         wizard_step=2,

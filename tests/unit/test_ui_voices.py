@@ -57,3 +57,27 @@ def test_s2s_and_openai_offer_nothing_with_a_reason() -> None:
         assert options["mode"] == "none"
         assert options["hint"]
         assert "path" not in options, "none 模式不该给可写路径"
+
+
+def test_duplex_offers_the_probed_list_and_marks_the_shipped_default() -> None:
+    """The duplex voice picker (2026-10-07): only voices that made a sound on
+    the real endpoint — a wrong id there is silent with no error frame — with
+    the shipped default marked, the four the vendor features first."""
+    from bilisama.config.schema import VolcanoDuplexConfig
+    from bilisama.config.voices import DUPLEX_FEATURED, DUPLEX_VOICES
+
+    settings = _settings(ProviderName.VOLCANO_DUPLEX)
+    settings.speech.volcano_duplex.voice = "zh_male_m191_uranus_bigtts"
+    options = voice_options(settings)
+    assert options["mode"] == "select"
+    assert options["path"] == "speech.volcano_duplex.voice"
+    assert options["current"] == "zh_male_m191_uranus_bigtts"
+    assert options["default"] == VolcanoDuplexConfig().voice == "zh_female_vv_uranus_bigtts"
+    assert {o["id"] for o in options["options"]} == {voice_id for voice_id, _, _ in DUPLEX_VOICES}
+    first = options["options"][0]
+    assert first["id"] == DUPLEX_FEATURED[0]
+    assert first["label"] == "Vivi 2.0"
+    assert first["hint"].endswith("Hz")
+    groups = [o["group"] for o in options["options"]]
+    assert groups[: len(DUPLEX_FEATURED)] == ["官方主推"] * len(DUPLEX_FEATURED)
+    assert set(groups) <= {"官方主推", "女声", "男声"}
