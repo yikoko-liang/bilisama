@@ -681,12 +681,17 @@ class DuplexLink:
         if self._created_empty and instructions:
             await self._recreate_session()
             return
+        await self._update_session()
+        log.info("duplex.context_pushed", context_len=len(instructions))
+
+    async def _update_session(self) -> None:
+        """Send the session block as it stands now, in place."""
         await self._send(
             {
                 "type": "session.update",
                 **session_body(
                     self._cfg,
-                    instructions=instructions,
+                    instructions=self._context,
                     model=self._model,
                     speaker=self._speaker,
                     session_id=self._session_id,
@@ -694,7 +699,6 @@ class DuplexLink:
                 ),
             }
         )
-        log.info("duplex.context_pushed", context_len=len(instructions))
 
     async def _recreate_session(self) -> None:
         """Close the empty session and create one that carries `_context`.
