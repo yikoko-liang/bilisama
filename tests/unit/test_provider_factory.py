@@ -514,3 +514,18 @@ def test_the_duplex_reply_hold_comes_from_config() -> None:
     )
     assert isinstance(built.link, DuplexLink)
     assert built.link._reply_hold_ms == 350
+
+
+def test_the_duplex_skip_without_cancel_comes_from_config_and_ships_on() -> None:
+    """The rollback switch for letting an unheard turn run out (2026-10-07):
+    on unless the config says otherwise, and the factory hands it over."""
+    from bilisama.config.schema import VolcanoDuplexConfig
+
+    assert VolcanoDuplexConfig().skip_without_cancel is True
+    settings = _settings(provider=ProviderName.VOLCANO_DUPLEX)
+    settings.speech.volcano_duplex.skip_without_cancel = False
+    built = build_link(
+        _request(ProviderName.VOLCANO_DUPLEX, settings=settings, env={"volcano_api_key": "k"})
+    )
+    assert isinstance(built.link, DuplexLink)
+    assert built.link._skip_without_cancel is False

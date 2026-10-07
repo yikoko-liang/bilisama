@@ -221,6 +221,16 @@ class VolcanoDuplexConfig(BaseModel):
     # reply already audibly playing: what left the speaker is gone. Every reply
     # starts N ms later. 0 is today's behaviour. Live: the next turn uses it.
     reply_hold_ms: int = Field(0, ge=0, le=2000)
+    # When the voice gate stops one of her own turns that nobody heard (it
+    # held every frame), let the endpoint finish it instead of cancelling it:
+    # the audio is dropped all the same. A cancel on this endpoint scrambles
+    # the streamer's next transcription — items that never get a word, his
+    # line cut after 0.2-0.3 s with words lost — and letting her short [SKIP]
+    # line finish kept every line whole (real endpoint, 2026-10-05). The cost
+    # is the slot staying hers until the endpoint's done, measured 0.25-2.85 s.
+    # False is the behaviour before 2026-10-07: the rollback. Live: the next
+    # kill uses it.
+    skip_without_cancel: bool = True
     # Who answers a danmaku on this protocol, and it is a real fork rather
     # than a tuning knob, because this endpoint will not compose a reply on
     # demand (probed 2026-09-16; corrected 2026-09-21 — it WILL start a turn

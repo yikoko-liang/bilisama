@@ -662,6 +662,20 @@ UI_META: dict[str, FieldMeta] = {
         group="火山全双工",
         order=8,
     ),
+    "speech.volcano_duplex.skip_without_cancel": FieldMeta(
+        label="拦下她时不发取消",
+        hint=(
+            "语音门判「不是对她说的」、拦下她自己起的那一轮时，让服务端把那条 [SKIP] 说完，"
+            "声音照样丢掉，观众听不到。发取消会把主播接下来的转写搞乱：没字的空句，"
+            "或者一句话被切成碎片、丢字。代价是那一两秒里回复名额还占着。关掉就是原来的做法，"
+            "改了下一次拦截就生效"
+        ),
+        provider_scoped="volcano_duplex",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="火山全双工",
+        order=9,
+    ),
     "speech.volcano_duplex.loudness": FieldMeta(
         label="音量",
         hint="0 是原音量；-50 约一半，100 约两倍",

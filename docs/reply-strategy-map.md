@@ -171,6 +171,7 @@ duplex 另一条路线 `event_replies = "tool"`：弹幕只存着，她在自己
 | `interaction.proactive.wake_interval_s / max_per_hour` | 30 / 12 | 主动话题 | 是 |
 | `speech.volcano_duplex.event_replies` | ghostwriter | duplex 代笔还是工具拉取 | 重连 |
 | `speech.volcano_duplex.reply_hold_ms` | 0 | duplex 扣住开头多久再播 | 是 |
+| `speech.volcano_duplex.skip_without_cancel` | true | duplex 上语音门拦下她时不发取消、让那条 [SKIP] 说完 | 是 |
 | `room.stream_intro` | 空 | 进提示词，也是弹幕相关性的材料 | 是 |
 | `persona.display_name / id / streamer_name` | 豆腐 / tofu / 主播 | 弹幕里点名她的词 | 是 |
 

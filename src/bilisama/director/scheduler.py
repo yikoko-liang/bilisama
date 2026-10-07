@@ -443,8 +443,10 @@ class Scheduler:
         is ignored, so a late call cannot cancel whoever holds the slot by
         then — the link's cancel() only sends for a live record of this very
         handle anyway. Idempotent on the record — the second caller finds
-        `killed` set and does nothing — and the link's own bookkeeping makes a
-        second cancel frame impossible regardless.
+        `killed` set and does nothing — so the link is asked once per turn.
+        Whether the link then stops it on the wire is its business: it is told
+        whether anything of the turn may have been heard (see the cancel
+        below), and duplex lets an unheard one run out instead.
 
         Args:
             handle: The turn's handle, as seen on its ReplyStarted.

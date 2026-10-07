@@ -1443,3 +1443,214 @@ async def test_a_plain_pause_and_resume_does_not_announce_a_recovery() -> None:
             assert not any(isinstance(e, link.LinkUp) for e in pending), pending
         finally:
             await duplex.aclose()
+
+
+# ------------------------------------------------------------ a turn nobody heard
+
+
+async def _her_turn(
+    server: MockDuplexServer, events: AsyncIterator[link.LinkEvent], text: str = "[SKIP] 在聊天气"
+) -> link.ReplyHandle:
+    """Her own turn, left streaming so it can be stopped mid-way."""
+    await server.say(text, ours=False, finish=False)
+    started = await _next(events, link.ReplyStarted)
+    assert started.handle.implicit
+    return started.handle
+
+
+async def test_a_skipped_turn_nobody_heard_runs_out_without_a_cancel() -> None:
+    """The voice gate held every frame of her turn and ruled it not addressed
+    to her. On this protocol a response.cancel scrambles the streamer's next
+    transcription — items that never get a word, lines cut after 0.2-0.3 s,
+    words lost at the seams — while letting her short [SKIP] line finish on
+    the server kept every line whole (real endpoint, 2026-10-05). So the turn
+    goes stale at once, nothing is sent, and it settles CANCELLED on the
+    endpoint's own done; the slot is free again right after."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle, unheard=True)
+            assert handle.stale
+            await server.more("改动")
+            await server.end_reply()
+            got = await _drain_until(events, link.ReplyDone)
+            done = got[-1]
+            assert isinstance(done, link.ReplyDone)
+            assert done.handle is handle and done.status is link.ReplyStatus.CANCELLED
+            late = [e.text for e in got if isinstance(e, link.ReplyTextDelta)]
+            assert "改" not in late and "动" not in late, f"拦下之后的字不该再往上送：{late}"
+            assert server.cancels == 0, "没人听见的那轮不该发取消"
+            await asyncio.wait_for(duplex.request_reply(link.ReplySpec(text="下一条")), timeout=1.0)
+        finally:
+            await duplex.aclose()
+
+
+async def test_stopping_her_turn_that_may_have_been_heard_still_cancels() -> None:
+    """Sound may have left (a flush, the output guard, panic): on duplex the
+    server does not stop by itself, so this one is still a real cancel."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle)
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is handle and done.status is link.ReplyStatus.CANCELLED
+            await _settles(lambda: server.cancels == 1, "可能被听见的那轮必须真的取消")
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_reply_of_ours_is_always_really_cancelled() -> None:
+    """Only her own turns can run out; ours stop on the wire even if L3 says
+    nobody heard them."""
+    async with MockDuplexServer() as server:
+        server.finish_ours = False
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await duplex.request_reply(link.ReplySpec(text="谢谢小明送的火箭"))
+            started = await _next(events, link.ReplyStarted)
+            assert started.handle is handle
+            await duplex.cancel(handle, unheard=True)
+            await _next(events, link.ReplyDone)
+            await _settles(lambda: server.cancels == 1, "我们点的回复必须真的取消")
+        finally:
+            await duplex.aclose()
+
+
+async def test_the_switch_puts_back_the_cancel_and_takes_effect_on_the_next_kill() -> None:
+    """[speech.volcano_duplex] skip_without_cancel = false is today's
+    behaviour, and the panel can flip it live: the next kill uses it."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server, skip_without_cancel=False)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            first = await _her_turn(server, events)
+            await duplex.cancel(first, unheard=True)
+            await _next(events, link.ReplyDone)
+            await _settles(lambda: server.cancels == 1, "开关关着就照旧取消")
+            duplex.set_skip_without_cancel(True)
+            second = await _her_turn(server, events, "[SKIP] 在调窗口")
+            await duplex.cancel(second, unheard=True)
+            await server.end_reply()
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is second and done.status is link.ReplyStatus.CANCELLED
+            assert server.cancels == 1, "开关打开后的那一次不该再发取消"
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_turn_that_never_finishes_is_cancelled_after_a_bounded_wait() -> None:
+    """If the endpoint never sends the done, the slot cannot wait for the
+    25-second watchdog: after run_out_s the turn is cancelled for real."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle, unheard=True)
+            await clock.advance(4.0)
+            await asyncio.sleep(0.05)
+            assert server.cancels == 0, "还没到时限就取消了"
+            await clock.advance(2.0)
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is handle and done.status is link.ReplyStatus.CANCELLED
+            await _settles(lambda: server.cancels == 1, "超时以后要真的取消")
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_heard_stop_after_a_quiet_one_cancels_exactly_once() -> None:
+    """A quiet stop, then one that may have been heard (panic, say): the
+    second escalates to a real cancel, and a third adds nothing."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle, unheard=True)
+            await duplex.cancel(handle)
+            await duplex.cancel(handle)
+            got = await _drain_until(events, link.ReplyDone)
+            assert sum(isinstance(e, link.ReplyDone) for e in got) == 1
+            await asyncio.sleep(0.05)
+            assert server.cancels == 1
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_reply_asked_for_while_her_turn_runs_out_waits_for_it() -> None:
+    """The slot is hers until the endpoint is done with her turn; a commit
+    sent into it would land on a server still busy with the [SKIP] line."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle, unheard=True)
+            pending = asyncio.create_task(duplex.request_reply(link.ReplySpec(text="下一条")))
+            await asyncio.sleep(0.1)
+            assert not pending.done(), "她那轮还没结束，下一条就抢了名额"
+            assert server.recorded.count("speech_text_buffer.commit") == 0
+            await server.end_reply()
+            await asyncio.wait_for(pending, timeout=1.0)
+            await _settles(
+                lambda: server.recorded.count("speech_text_buffer.commit") == 1,
+                "她那轮结束以后下一条才发出去",
+            )
+        finally:
+            await duplex.aclose()
+
+
+async def test_pausing_while_her_turn_runs_out_settles_it_without_a_cancel() -> None:
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle, unheard=True)
+            await duplex.suspend()
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is handle and done.status is link.ReplyStatus.CANCELLED
+            assert server.cancels == 0
+        finally:
+            await duplex.aclose()
+
+
+@pytest.mark.parametrize("skip_without_cancel", [False, True])
+async def test_only_the_cancel_scrambles_his_next_line(skip_without_cancel: bool) -> None:
+    """The fake's `scramble_after_cancel` replays what the real endpoint did
+    after a cancel on a real streamer recording (2026-10-05, 8 of 8): an item
+    opens at the done and never gets a word — and the floor reads it as him
+    talking. Letting the turn run out sends no cancel, so nothing opens."""
+    async with MockDuplexServer() as server:
+        server.scramble_after_cancel = True
+        duplex = _link(server, skip_without_cancel=skip_without_cancel)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            handle = await _her_turn(server, events)
+            await duplex.cancel(handle, unheard=True)
+            if skip_without_cancel:
+                await server.end_reply()
+            await _drain_until(events, link.ReplyDone)
+            await asyncio.sleep(0.1)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            opened = any(isinstance(e, link.SpeechStarted) for e in pending)
+            assert opened is not skip_without_cancel, pending
+        finally:
+            await duplex.aclose()

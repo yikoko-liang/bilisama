@@ -128,6 +128,7 @@ import base64
 import contextlib
 import json
 from collections import deque
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 import websockets
@@ -181,6 +182,11 @@ _SPEECH_EDGE_S = 1.0
 # and the cost of guessing wrong is her ignoring the streamer for the rest of
 # the wait.
 _UNSPOKEN_S = 6.0
+# How long a turn of hers that nobody heard may take to finish on the server
+# before we cancel it after all (see cancel). Measured 2026-10-05: the done
+# came 0.25-2.85 s after audio.started on 10 replies. Five seconds leaves room
+# and still frees the slot long before the 25-second watchdog would.
+_RUN_OUT_S = 5.0
 # What a reply's own frames carry when the words were ours rather than hers.
 _OURS = "chat_tts_text"
 
@@ -341,6 +347,8 @@ class DuplexLink:
         unspoken_s: float = _UNSPOKEN_S,
         speech_edge_s: float = _SPEECH_EDGE_S,
         reply_hold_ms: int = 0,
+        skip_without_cancel: bool = True,
+        run_out_s: float = _RUN_OUT_S,
         auto_reconnect: bool = True,
         reconnect_backoff_s: float = 1.0,
         max_reconnect_attempts: int = 6,
@@ -359,6 +367,13 @@ class DuplexLink:
         # barge-in landing inside that window throws away sound nobody has
         # heard yet. See _begin_hold for what it buys and what it costs.
         self._reply_hold_ms = max(0, int(reply_hold_ms))
+        self._skip_without_cancel = skip_without_cancel
+        self._run_out_s = min(run_out_s, watchdog_s)
+        # Her turn that nobody heard, stale and left to finish on the server
+        # (see cancel); and whether a later stop has cancelled it for real.
+        self._running_out: link.ReplyHandle | None = None
+        self._run_out_escalated = False
+        self._run_out_since = 0.0
         self._held: list[link.LinkEvent] = []
         self._hold_handle: link.ReplyHandle | None = None
         self._hold_task: asyncio.Task[None] | None = None
@@ -557,6 +572,11 @@ class DuplexLink:
             raise ConnectionError("还没连接")
         async with self._send_lock:
             await self._ws.send(json.dumps(frame))
+
+    def set_skip_without_cancel(self, on: bool) -> None:
+        """Live: the next kill uses it; a turn already running out finishes
+        the way it started."""
+        self._skip_without_cancel = on
 
     def set_reply_hold_ms(self, ms: int) -> None:
         """Live: the next turn uses it; a hold already running keeps its own.
@@ -803,7 +823,37 @@ class DuplexLink:
         then sat taken until the 25-second watchdog, which is a quarter of a
         minute of her answering nothing at all — measured in a live session on
         2026-09-17, request at :47 and watchdog at :12.
+
+        A turn of HER OWN that nobody heard (`unheard`: the voice gate held
+        every frame) is not cancelled on the wire while skip_without_cancel is
+        on. On this endpoint a cancel scrambles the streamer's transcription:
+        right after it, items open that never get a word, or his line is cut
+        after 0.2-0.3 s and she is started again, so one sentence comes back as
+        fragments with words lost at the seams. Letting her short [SKIP] line
+        finish on the server kept every line whole (real endpoint, 2026-10-05).
+        So the handle goes stale (nothing more of it reaches anyone), the slot
+        stays hers, and the endpoint's own done settles it CANCELLED; if no
+        done comes within run_out_s, it is cancelled after all. A later stop
+        that may have been heard cancels it for real, once.
         """
+        if handle is self._running_out:
+            if not unheard and not self._run_out_escalated:
+                self._run_out_escalated = True
+                with contextlib.suppress(Exception):
+                    await self._send({"type": "response.cancel"})
+            return
+        if (
+            unheard
+            and self._skip_without_cancel
+            and handle.implicit
+            and handle is self._active
+            and not handle.stale
+        ):
+            handle.stale = True
+            self._running_out = handle
+            self._run_out_since = self._clock.monotonic()
+            self._arm_watchdog(self._watch_run_out)
+            return
         mine = self._active is handle or self._pending_ours is handle
         if not mine:
             return
@@ -843,6 +893,8 @@ class DuplexLink:
         self._arm_watchdog()
 
     def _release_slot(self) -> None:
+        self._running_out = None
+        self._run_out_escalated = False
         self._active = None
         self._pending_ours = None
         self._pending_text = ""
@@ -1070,10 +1122,10 @@ class DuplexLink:
             await self._clock.sleep(self._speech_edge_s - quiet_for)
         self._close_speech(timed_out=True)
 
-    def _arm_watchdog(self) -> None:
+    def _arm_watchdog(self, watch: Callable[[], Coroutine[Any, Any, None]] | None = None) -> None:
         if self._watchdog is not None:
             self._watchdog.cancel()
-        task = asyncio.create_task(self._watch(), name="duplex:watchdog")
+        task = asyncio.create_task((watch or self._watch)(), name="duplex:watchdog")
         self._watchdog = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -1110,6 +1162,20 @@ class DuplexLink:
         with contextlib.suppress(Exception):
             await self._send({"type": "response.cancel"})
         self._settle(link.ReplyStatus.TIMED_OUT)
+
+    async def _watch_run_out(self) -> None:
+        await self._clock.sleep(self._run_out_s)
+        if self._running_out is None:
+            return
+        log.warning(
+            "duplex.run_out_overdue",
+            waited_s=self._run_out_s,
+            error_text="拦下的那一轮服务端迟迟没说完，补发取消并结算，放开名额。",
+        )
+        self._run_out_escalated = True
+        with contextlib.suppress(Exception):
+            await self._send({"type": "response.cancel"})
+        self._settle(link.ReplyStatus.CANCELLED, text=self._spoken_text())
 
     def _settle(self, status: link.ReplyStatus, *, text: str = "") -> None:
         handle = self._active or self._pending_ours
@@ -1218,11 +1284,19 @@ class DuplexLink:
                     self._emit(link.ReplyAudioDelta(handle, base64.b64decode(audio)))
             return
         if kind in ("response.done", "response.canceled"):
+            # A turn left to run out was stopped by L3; it ends CANCELLED even
+            # though the endpoint finished it.
+            ran_out = self._running_out is not None and self._running_out is self._active
             status = (
                 link.ReplyStatus.CANCELLED
-                if kind == "response.canceled"
+                if kind == "response.canceled" or ran_out
                 else link.ReplyStatus.COMPLETED
             )
+            if ran_out and not self._run_out_escalated:
+                log.info(
+                    "duplex.reply_ran_out",
+                    waited_ms=round((self._clock.monotonic() - self._run_out_since) * 1000),
+                )
             self._settle(status, text=self._spoken_text())
             return
         if kind == "error":

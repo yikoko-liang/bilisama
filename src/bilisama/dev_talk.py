@@ -2468,6 +2468,11 @@ async def run_director(args: argparse.Namespace) -> int:
             # whole hook. Same shape as the volcano speaker arm below.
             inner.set_reply_hold_ms(settings.speech.volcano_duplex.reply_hold_ms)
             return True
+        if path == "speech.volcano_duplex.skip_without_cancel" and isinstance(inner, DuplexLink):
+            # The rollback switch for letting an unheard turn run out: read at
+            # each kill inside the adapter, so the setter is the whole hook.
+            inner.set_skip_without_cancel(settings.speech.volcano_duplex.skip_without_cancel)
+            return True
         if path == "speech.volcano.speaker" and isinstance(inner, VolcanoLink):
             # EXACT match on purpose — a speech.volcano. prefix would unlock
             # endpoint/model to raw frames the way the dashscope arm below
