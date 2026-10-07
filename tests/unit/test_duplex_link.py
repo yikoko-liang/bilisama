@@ -1371,3 +1371,75 @@ async def test_a_dropped_socket_ends_his_line_before_it_reports_the_drop() -> No
             assert got[-3:] == ["UserTranscriptDone", "SpeechStopped", "LinkDown"], got
         finally:
             await duplex.aclose()
+
+
+@pytest.mark.parametrize("code", [1000, 1001])
+async def test_a_polite_close_from_the_server_is_still_a_drop(code: int) -> None:
+    """A normal close (1000, or 1001 going away) ends websockets' iteration
+    instead of raising, and the receive loop used to fall out of it quietly:
+    no LinkDown, no reconnect, `_started` still true. His open line waited on
+    the backstop, which blamed the endpoint, and after that the link was dead
+    while every health signal said it was fine — replies failed and nothing
+    he said was transcribed until someone pressed 暂停 and 恢复 (plan #117)."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.hear_without_ending("我说到一半")
+            await _next(events, link.SpeechStarted)
+            await _heard(events, "我说到一半")
+            await server.drop(code=code)
+            got = [type(e).__name__ for e in await _drain_until(events, link.LinkDown)]
+            assert got[-3:] == ["UserTranscriptDone", "SpeechStopped", "LinkDown"], got
+            await clock.advance(1.5)
+            await _next(events, link.LinkUp)
+            assert server.connections == 2, "正常关闭之后没有重连"
+        finally:
+            await duplex.aclose()
+
+
+async def test_resuming_after_a_drop_says_the_link_is_back() -> None:
+    """After a drop, 暂停 during the reconnect backoff cancels the ladder, and
+    恢复 reconnects without saying so. The scheduler keeps `_link_down` until a
+    LinkUp arrives, so every danmaku and topic after that was skipped as
+    link.down for the rest of the session (plan #119). A resume that brings
+    back a link we reported down says it is back — once."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, reconnect_backoff_s=3.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await server.drop()
+            await _next(events, link.LinkDown)
+            await duplex.suspend()
+            await duplex.resume()
+            await _next(events, link.LinkUp)
+            await clock.advance(10.0)
+            await asyncio.sleep(0.05)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(isinstance(e, link.LinkUp) for e in pending), pending
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_plain_pause_and_resume_does_not_announce_a_recovery() -> None:
+    """The other side of the same rule: LinkUp means the link came BACK. A
+    pause with no drop before it must not print 「已恢复」 into the panel."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server)
+        await duplex.connect()
+        try:
+            await duplex.suspend()
+            await duplex.resume()
+            await asyncio.sleep(0.1)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(isinstance(e, link.LinkUp) for e in pending), pending
+        finally:
+            await duplex.aclose()

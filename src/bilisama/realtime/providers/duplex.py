@@ -370,6 +370,10 @@ class DuplexLink:
         self._closing = False
         self._suspended = False
         self._started = False
+        # A LinkDown went up and no LinkUp has answered it yet. L3 holds every
+        # intent until that LinkUp, so whichever way the link comes back has to
+        # send it — the reconnect ladder, or a 恢复 that replaced the ladder.
+        self._down_reported = False
         self._context = ""
         # Whether the live session was created without instructions. Its first
         # turn would never hear a session.update — see the module note.
@@ -536,6 +540,14 @@ class DuplexLink:
     async def resume(self) -> None:
         self._suspended = False
         await self.connect()
+        if self._down_reported:
+            # A pause during the reconnect backoff (or after it gave up)
+            # cancelled the ladder that would have said so; without this the
+            # scheduler skipped everything as link.down for good (plan #119).
+            # Only after a reported drop: LinkUp means the link came BACK, and
+            # a plain pause never lost it (volcano.py says the same).
+            self._down_reported = False
+            self._events.put_nowait(link.LinkUp())
         log.info("duplex.resumed")
 
     # ------------------------------------------------------------ sending
@@ -1144,6 +1156,14 @@ class DuplexLink:
         except Exception as exc:  # the socket died
             if not self._closing:
                 await self._on_disconnect(exc)
+            return
+        # The server closed politely (1000, or 1001 going away): websockets
+        # ends the iteration instead of raising, and this used to fall out of
+        # the method with no LinkDown and no reconnect — a dead link that still
+        # looked healthy (plan #117). Every close of ours clears `_started` or
+        # sets `_closing` first, so a polite close we did not start is a drop.
+        if not self._closing and self._started:
+            await self._on_disconnect(ConnectionError(f"connection_closed:{socket.close_code}"))
 
     def _dispatch(self, frame: Mapping[str, Any]) -> None:
         kind = str(frame.get("type") or "")
@@ -1327,6 +1347,7 @@ class DuplexLink:
         if klass is ErrorClass.FATAL or not self._auto_reconnect or self._suspended:
             self._events.put_nowait(link.LinkError("disconnected", describe(klass, detail)))
             return
+        self._down_reported = True
         self._events.put_nowait(link.LinkDown(reason=detail))
         if self._reconnect_task is None or self._reconnect_task.done():
             self._reconnect_task = asyncio.create_task(self._reconnect(), name="duplex:reconnect")
@@ -1347,6 +1368,7 @@ class DuplexLink:
                 )
                 delay = min(delay * 2, 30.0)
                 continue
+            self._down_reported = False
             self._events.put_nowait(link.LinkUp(attempts=attempt))
             return
         self._events.put_nowait(link.LinkError("reconnect_gave_up", "重连多次都没成功"))
