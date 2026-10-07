@@ -228,10 +228,12 @@ def link_frames(
             "detail": f"语音连接断了，{detail}",
         }
     elif isinstance(event, link.LinkUp):
+        # A system row is drawn from `text`, like every other system entry;
+        # `detail` is the error row's field and drew this one empty.
         yield ServerEvent.EVENT_FEED, {
             "kind": "system",
             "code": "link_up",
-            "detail": "语音连接已恢复",
+            "text": "语音连接已恢复",
         }
     elif isinstance(event, link.LinkError):
         yield ServerEvent.EVENT_FEED, {"kind": "error", "code": event.code, "detail": event.detail}

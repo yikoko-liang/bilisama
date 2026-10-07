@@ -26,9 +26,10 @@ import pytest
 from bilisama.clock import SystemClock
 from bilisama.config.schema import Settings
 from bilisama.obs.health import HealthRegistry
+from bilisama.realtime import link
 from bilisama.ui.audio import AudioBroker
 from bilisama.ui.config_edit import apply_panel_edits
-from bilisama.ui.events import ClientEvent, ServerEvent
+from bilisama.ui.events import ClientEvent, ServerEvent, link_frames
 from bilisama.ui.hub import UiHub
 from bilisama.ui.server import UiServer, bind_ui_socket, create_ui_app
 from bilisama.ui.skins import list_skin_packs, packaged_skins_root
@@ -518,6 +519,23 @@ async def test_a_spoken_line_is_one_row_rewritten_in_place(page: Page, harness: 
         " return [r.querySelector('.line-text').textContent, r.classList.contains('live')]; })()"
     )
     assert first == ["你叫什么名字？", False]
+
+
+async def test_a_restored_voice_link_says_so_in_the_chat_tab(page: Page, harness: Harness) -> None:
+    """The row is built from the frames the link translation really produces,
+    not a hand-written dict: the bug was the two sides naming the field
+    differently, and a copied payload would agree with whichever side it was
+    copied from. The reconnect row read as a bare timestamp (2026-10-08)."""
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("[data-tab='chat']")
+    for event, data in link_frames(link.LinkUp(attempts=2)):
+        harness.hub.broadcast(event, data)
+    await _wait(page, "document.querySelector('#timeline .entry.system') !== null")
+    words = await page.evaluate(
+        "document.querySelector('#timeline .entry.system span:not(.when)').textContent"
+    )
+    assert words == "语音连接已恢复"
 
 
 # ------------------------------------------------------------ themes & motion

@@ -175,6 +175,18 @@ def test_link_error_lands_in_the_feed() -> None:
     ]
 
 
+def test_link_up_is_a_system_line_with_its_words_in_text() -> None:
+    """The panel draws a system row from `text`, as every other system entry
+    sends it. This one put its words in `detail` and the row came out as a bare
+    timestamp after every reconnect (2026-10-08)."""
+    assert _frames(link.LinkUp(attempts=2)) == [
+        (
+            ServerEvent.EVENT_FEED,
+            {"kind": "system", "code": "link_up", "text": "语音连接已恢复"},
+        )
+    ]
+
+
 def test_audio_and_speech_edges_produce_nothing() -> None:
     """PCM never reaches the browser, and raw speech edges belong to the
     state poller — forwarding both would give the page two clocks."""
