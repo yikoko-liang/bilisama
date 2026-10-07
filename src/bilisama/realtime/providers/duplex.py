@@ -374,6 +374,12 @@ class DuplexLink:
         self._running_out: link.ReplyHandle | None = None
         self._run_out_escalated = False
         self._run_out_since = 0.0
+        # A response.canceled has settled a turn and its response.done has not
+        # come yet. The endpoint sends both for every cancel (23 of 23,
+        # 2026-10-05) and neither names the response, so that done must not
+        # settle whoever took the slot in between (plan #120). The next
+        # reply's first audio frame ends the wait, in case it never comes.
+        self._tail_done_owed = False
         self._held: list[link.LinkEvent] = []
         self._hold_handle: link.ReplyHandle | None = None
         self._hold_task: asyncio.Task[None] | None = None
@@ -511,6 +517,7 @@ class DuplexLink:
                 summary="服务端第一帧不是 session.created",
             )
         self._session_id = str((first.get("session") or {}).get("id") or self._session_id)
+        self._tail_done_owed = False  # a new socket owes nothing for the old one
         self._created_empty = not self._context
         self._started = True
         log.info(
@@ -833,8 +840,10 @@ class DuplexLink:
         finish on the server kept every line whole (real endpoint, 2026-10-05).
         So the handle goes stale (nothing more of it reaches anyone), the slot
         stays hers, and the endpoint's own done settles it CANCELLED; if no
-        done comes within run_out_s, it is cancelled after all. A later stop
-        that may have been heard cancels it for real, once.
+        done comes within run_out_s, it is cancelled after all, and settled
+        by the endpoint's answer to that cancel. A later stop that may have
+        been heard would cancel it for real, once — no L3 path does that
+        today (skip_implicit asks once per turn), so the branch is a guard.
         """
         if handle is self._running_out:
             if not unheard and not self._run_out_escalated:
@@ -1164,18 +1173,32 @@ class DuplexLink:
         self._settle(link.ReplyStatus.TIMED_OUT)
 
     async def _watch_run_out(self) -> None:
+        turn = self._running_out
         await self._clock.sleep(self._run_out_s)
-        if self._running_out is None:
+        if turn is None or self._running_out is not turn:
             return
         log.warning(
             "duplex.run_out_overdue",
             waited_s=self._run_out_s,
-            error_text="拦下的那一轮服务端迟迟没说完，补发取消并结算，放开名额。",
+            error_text="拦下的那一轮服务端迟迟没说完，补发取消，等它确认再放开名额。",
         )
-        self._run_out_escalated = True
-        with contextlib.suppress(Exception):
-            await self._send({"type": "response.cancel"})
-        self._settle(link.ReplyStatus.CANCELLED, text=self._spoken_text())
+        if not self._run_out_escalated:
+            self._run_out_escalated = True
+            with contextlib.suppress(Exception):
+                await self._send({"type": "response.cancel"})
+        # Settled by the endpoint's answer to the cancel, like any other. Doing
+        # it here handed that answer — and any frame still in flight — to the
+        # reply that took the slot next: ours was settled CANCELLED before it
+        # spoke, and its audio came back booked as her own turn. If no answer
+        # ever comes, the ordinary watchdog bound still ends it.
+        await self._clock.sleep(max(0.0, self._watchdog_s - self._run_out_s))
+        if self._running_out is not turn:
+            return
+        log.warning(
+            "duplex.reply_watchdog",
+            error_text="一条回复超过看门狗时限还没结束，按超时结算并放开名额。",
+        )
+        self._settle(link.ReplyStatus.TIMED_OUT)
 
     def _settle(self, status: link.ReplyStatus, *, text: str = "") -> None:
         handle = self._active or self._pending_ours
@@ -1252,6 +1275,7 @@ class DuplexLink:
             self._on_pull(frame)
             return
         if kind == "response.output_audio.started":
+            self._tail_done_owed = False  # a new response has begun
             self._on_reply_started(frame)
             return
         if kind == "response.output_text.delta":
@@ -1283,7 +1307,12 @@ class DuplexLink:
                 with contextlib.suppress(ValueError):
                     self._emit(link.ReplyAudioDelta(handle, base64.b64decode(audio)))
             return
+        if kind == "response.done" and self._tail_done_owed:
+            self._tail_done_owed = False  # the second frame of a cancel already settled
+            return
         if kind in ("response.done", "response.canceled"):
+            if kind == "response.canceled":
+                self._tail_done_owed = True
             # A turn left to run out was stopped by L3; it ends CANCELLED even
             # though the endpoint finished it.
             ran_out = self._running_out is not None and self._running_out is self._active

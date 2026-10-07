@@ -1572,8 +1572,9 @@ async def test_a_turn_that_never_finishes_is_cancelled_after_a_bounded_wait() ->
 
 
 async def test_a_heard_stop_after_a_quiet_one_cancels_exactly_once() -> None:
-    """A quiet stop, then one that may have been heard (panic, say): the
-    second escalates to a real cancel, and a third adds nothing."""
+    """A quiet stop, then one that may have been heard: the second escalates
+    to a real cancel, and a third adds nothing. No L3 path sends that second
+    stop today (skip_implicit asks once per turn); this pins the guard."""
     async with MockDuplexServer() as server:
         duplex = _link(server)
         await duplex.connect()
@@ -1652,5 +1653,95 @@ async def test_only_the_cancel_scrambles_his_next_line(skip_without_cancel: bool
             pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
             opened = any(isinstance(e, link.SpeechStarted) for e in pending)
             assert opened is not skip_without_cancel, pending
+        finally:
+            await duplex.aclose()
+
+
+async def test_the_trailing_done_of_a_cancel_never_settles_the_next_reply() -> None:
+    """The endpoint answers a cancel with response.canceled and then
+    response.done (23 of 23 on 2026-10-05), and neither names the response.
+    The canceled settles the cancelled turn and frees the slot; a reply of
+    ours that was waiting takes it at once, and the trailing done used to
+    settle THAT reply as COMPLETED before it said a word — its audio then
+    came back booked as her own turn and went through the voice gate (plan
+    #120). Today's cancel, so with the switch off."""
+    async with MockDuplexServer() as server:
+        duplex = _link(server, skip_without_cancel=False)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            hers = await _her_turn(server, events)
+            waiting = asyncio.create_task(duplex.request_reply(link.ReplySpec(text="谢谢小明")))
+            await asyncio.sleep(0.05)
+            await duplex.cancel(hers, unheard=True)
+            ours = await asyncio.wait_for(waiting, timeout=1.0)
+            got = await _drain_until(events, link.ReplyStarted)
+            while not any(isinstance(e, link.ReplyStarted) and e.handle is not hers for e in got):
+                got += await _drain_until(events, link.ReplyStarted)
+            started = [e for e in got if isinstance(e, link.ReplyStarted) and e.handle is not hers]
+            assert started[0].handle is ours and not started[0].handle.implicit, got
+            done = await _next(events, link.ReplyDone)
+            while done.handle is hers:
+                done = await _next(events, link.ReplyDone)
+            assert done.handle is ours and done.status is link.ReplyStatus.COMPLETED
+        finally:
+            await duplex.aclose()
+
+
+async def test_an_overdue_run_out_waits_for_the_cancels_answer_before_freeing_the_slot() -> None:
+    """When the endpoint has not finished her unheard turn within run_out_s,
+    the cancel goes out — and the slot stays hers until the endpoint answers
+    it. Settling at once handed both late terminal frames to the reply that
+    took the slot next: ours was settled CANCELLED before it spoke, and its
+    audio came back as her own turn."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            hers = await _her_turn(server, events)
+            await duplex.cancel(hers, unheard=True)
+            waiting = asyncio.create_task(duplex.request_reply(link.ReplySpec(text="谢谢小明")))
+            await asyncio.sleep(0.05)
+            await clock.advance(5.5)
+            ours = await asyncio.wait_for(waiting, timeout=1.0)
+            seen: list[link.LinkEvent] = []
+
+            async def until_ours_is_done() -> None:
+                async for event in events:
+                    seen.append(event)
+                    if isinstance(event, link.ReplyDone) and event.handle is not hers:
+                        return
+
+            await asyncio.wait_for(until_ours_is_done(), timeout=2.0)
+            starts = [e for e in seen if isinstance(e, link.ReplyStarted)]
+            assert starts and starts[-1].handle is ours and not ours.implicit, seen
+            final = seen[-1]
+            assert isinstance(final, link.ReplyDone)
+            assert final.handle is ours and final.status is link.ReplyStatus.COMPLETED, seen
+            assert server.cancels == 1
+        finally:
+            await duplex.aclose()
+
+
+async def test_a_cancel_answered_without_a_trailing_done_does_not_swallow_the_next_one() -> None:
+    """Dropping the trailing done must not eat a later reply's real done if
+    the endpoint ever answers a cancel with canceled alone: the next reply's
+    first frames end the wait."""
+    async with MockDuplexServer() as server:
+        server.done_after_canceled = False
+        duplex = _link(server, skip_without_cancel=False)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            hers = await _her_turn(server, events)
+            await duplex.cancel(hers, unheard=True)
+            await _next(events, link.ReplyDone)
+            ours = await duplex.request_reply(link.ReplySpec(text="谢谢小明"))
+            done = await _next(events, link.ReplyDone)
+            assert done.handle is ours and done.status is link.ReplyStatus.COMPLETED
         finally:
             await duplex.aclose()

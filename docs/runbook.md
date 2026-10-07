@@ -368,7 +368,8 @@ export volcano_api_key=...
 都被扣着；敏感词拦截、紧急叫停、需要清空播放的情况照旧真的取消，我们点的回复也照旧取消。
 
 - **代价**：那一两秒里回复名额还是她的，排队的弹幕要等它结束，桌宠显示「思考中」；服务端那几秒压着
-  主播的转写，他的话晚一点上屏。服务端 5 秒内一直没说完，就补发取消并结算（`duplex.run_out_overdue`）。
+  主播的转写，他的话晚一点上屏。服务端 5 秒内一直没说完，就补发取消，等它确认后再放开名额
+  （`duplex.run_out_overdue`）。
 - **回退**：面板「火山全双工」里关掉「拦下她时不发取消」，下一次拦截就回到原来的做法，不用重启；
   也可以在配置里写 `skip_without_cancel = false`。代码层面是单独一笔提交，可以直接 revert。
 - **对比看什么**：开和关各跑一段，数日志里这几样：
@@ -377,9 +378,10 @@ export volcano_api_key=...
 grep -E '"(scheduler.implicit_killed|duplex.reply_ran_out|duplex.run_out_overdue|duplex.transcript_item)"' ~/.local/share/bilisama/logs/dev-talk.jsonl
 ```
 
-  `scheduler.implicit_killed` 带 `unheard=true` 的是走了新做法的拦截；`duplex.reply_ran_out` 的
-  `waited_ms` 是每次多占名额的时间；`duplex.transcript_item` 里 `chars=0` 和 `ended=replaced` 的
-  条数，开着的时候应该明显少。
+  `scheduler.implicit_killed` 带 `unheard=true` 只说明语音门把这一轮扣住了、一帧没放出去，开关开着
+  关着都一样记；真正走了新做法的，每次会有一条 `duplex.reply_ran_out`（`waited_ms` 是多占名额的时间）
+  或 `duplex.run_out_overdue`。`duplex.transcript_item` 里 `chars=0` 和 `ended=replaced` 的条数，
+  开着的时候应该明显少。
 
 #### duplex 上哪些能用、哪些不能：一次说全
 

@@ -169,6 +169,9 @@ class MockDuplexServer:
         # the next transcription item the way the real endpoint's did.
         self.cancels = 0
         self.scramble_after_cancel = False
+        # False drops the trailing done, for a test that the client does not
+        # wait for one that never comes.
+        self.done_after_canceled = True
         self.items: list[str] = []
         self._server: Any = None
         self._ws: ServerConnection | None = None
@@ -310,7 +313,8 @@ class MockDuplexServer:
             # 23 against the real endpoint on 2026-10-05. Neither carries a
             # response id.
             await self._send(ws, {"type": "response.canceled"})
-            await self._send(ws, {"type": "response.done"})
+            if self.done_after_canceled:
+                await self._send(ws, {"type": "response.done"})
             if self.scramble_after_cancel:
                 # What the real endpoint did right after a cancel in the
                 # 2026-10-05 probes (8 of 8 on a real streamer recording): a
