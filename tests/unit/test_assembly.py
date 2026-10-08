@@ -646,10 +646,8 @@ async def test_voice_and_event_turns_share_public_context_but_not_source_rules(
     assert reply.write_history is True
 
 
-async def test_no_per_reply_scope_keeps_event_rules_off_the_wire(tmp_path: Path) -> None:
-    """volcano's shape: the session is the only carrier, so intents ride bare
-    (their per-kind instructions still travel) instead of carrying a base the
-    adapter would ignore."""
+async def test_no_per_reply_scope_leaves_base_instructions_unset(tmp_path: Path) -> None:
+    """An adapter without scoped bases must not receive a field it ignores."""
     kit = build_assembly_kit(tmp_path)
     kit.assembly._voice_rules = "语音规则"
     kit.assembly._event_rules = "事件规则"
@@ -847,3 +845,31 @@ def test_the_gates_note_folds_in_the_scheduler_log_lines(caplog: pytest.LogCaptu
     ]
     assert out[0]["detail_text"] == f"<{len(note)} chars>", "her note is a length on disk"
     assert out[1]["detail"] == "紧急叫停", "code-authored reasons still read as words"
+
+
+@pytest.mark.parametrize("lane", ["danmaku", "entries", "legacy_entries"])
+@pytest.mark.parametrize(("scoped", "composes"), [(True, True), (False, True), (False, False)])
+async def test_event_contract_uses_one_available_channel(
+    tmp_path: Path, lane: str, scoped: bool, composes: bool
+) -> None:
+    from bilisama.ingest.bilibili.selector import PresenceWelcomer
+
+    rules = "共同事件规则：先说明观众说了什么，再回应。"
+    kit = build_assembly_kit(
+        tmp_path,
+        speak=SpeakSwitches(danmaku=True, entry=True),
+        event_rules=rules,
+        presence=PresenceWelcomer(uniques=1) if lane == "legacy_entries" else None,
+    )
+    kit.assembly._per_reply_scope = scoped
+    kit.assembly._link_composes = composes
+    if lane == "entries":
+        await kit.assembly.deliver_entries((_event(kind=EventKind.ENTRY),))
+    else:
+        await kit.assembly.on_event(
+            _event(kind=EventKind.ENTRY if lane == "legacy_entries" else EventKind.DANMAKU)
+        )
+    assert len(kit.intents) == 1
+    reply = kit.intents[0].injection.reply
+    assert (reply.base_instructions or "").count(rules) == int(scoped)
+    assert (reply.instructions or "").count(rules) == int(not scoped and composes)

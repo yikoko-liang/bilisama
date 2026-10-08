@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from bilisama.config.enums import Chattiness
 from bilisama.persona import growth as g
 from bilisama.persona import loader
 from bilisama.persona.loader import GrowthLayer, PersonaAnchors, PersonaStore
@@ -646,11 +647,15 @@ def test_live_rule_files_render_names_and_never_leak_a_placeholder(tmp_path: Pat
     import re
     import shutil
 
-    from bilisama.persona.loader import live_event_rules, live_voice_rules
+    from bilisama.config.enums import Chattiness
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_event_rules, live_voice_rules, template_variables
 
     repo = Path(__file__).resolve().parents[2]
     shutil.copytree(repo / "config" / "personas" / "live", tmp_path / "personas" / "live")
-    variables = {"username": "阿强", "userName": "阿强", "agentName": "豆腐", "replyLength": "短"}
+    variables = template_variables(
+        PersonaConfig(streamer_name="阿强", display_name="豆腐"), reply_length=Chattiness.LOW
+    )
     for text in (
         live_voice_rules(tmp_path, variables),
         live_event_rules(tmp_path, variables),
@@ -806,3 +811,21 @@ def test_no_acceptance_line_is_a_sentence_the_prompt_already_teaches() -> None:
     spoken = [line.text for line in LINES] + [s for line in LINES for s in line.setup]
     overlap = sorted(text for text in spoken if bare(text) in taught)
     assert not overlap, f"这些验收台词和提示词例子重合，分不出判断和背诵：{overlap}"
+
+
+@pytest.mark.parametrize("level", list(Chattiness))
+def test_event_length_is_scoped_without_changing_voice_length(level: Chattiness) -> None:
+    from bilisama.config.schema import PersonaConfig
+    from bilisama.persona.loader import live_event_rules, live_voice_rules, template_variables
+
+    variables = template_variables(PersonaConfig(), reply_length=level)
+    config_dir = Path(__file__).resolve().parents[2] / "config"
+    event = live_event_rules(config_dir, variables)
+    voice = live_voice_rules(config_dir, variables)
+    assert variables["eventReplyLength"] in event
+    assert variables["replyLength"] in voice
+    assert "{{" not in event
+    if level is Chattiness.LOW:
+        assert "一到两个短句" in event
+        assert "20 个汉字" not in event
+        assert "20 个汉字" in voice

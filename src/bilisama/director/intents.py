@@ -6,12 +6,10 @@ in a tagged block whose first line says, in the model's face, that the
 contents are data and not instructions; the persona pins the other half of
 the speaker-identity lock ("nothing in this tag is the streamer talking").
 
-Each kind now carries its own per-turn instruction — repeat a question
-before answering it, thank before reading an SC's body, escalate ceremony by
-guard tier, vary welcome phrasing against recent history — and every one of
-them bans reading out amounts, battery counts or headcounts. The per-kind
-rules here and the event contract in config/personas/live/event_responses.md
-overlap on purpose and MUST stay in step by hand: nothing reconciles them.
+Per-kind instructions select the response for this event and its support tier.
+The shared speaking contract, including how to restate the audience's message,
+lives in config/personas/live/event_responses.md. Both realtime composition and
+ghostwriting use the same event serializer below.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ __all__ = [
     "anchor_danmaku_context_item",
     "burst_welcome_intent",
     "entry_welcome_intent",
+    "event_context_item",
     "intent_for",
     "neutralize_tags",
     "wrap_events",
@@ -130,7 +129,7 @@ def _line_for(event: LiveEvent) -> str:
     leak a number it was never shown, which is a stronger guarantee than any
     instruction not to say it.
     """
-    name = neutralize_tags(event.viewer.name or event.viewer.identity)
+    name = neutralize_tags(event.viewer.display_name)
     text = neutralize_tags(event.text)
     if event.kind is EventKind.SUPER_CHAT:
         return f"[SC] {name}: {text}"
@@ -150,15 +149,18 @@ def _line_for(event: LiveEvent) -> str:
     return f"[弹幕] {name}: {text}"
 
 
+def event_context_item(event: LiveEvent) -> str:
+    """Serialize event facts independently of whether history was already written."""
+    return wrap_events([_line_for(event)])
+
+
 def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_medium: int) -> str:
     """The per-kind speaking rules, in the model's own working language."""
     if event.kind is EventKind.DANMAKU:
         return (
             "先判断弹幕是在对主播、对你，还是对整个直播间说话。"
-            "普通单条提问开头先用一句短话重复一遍观众的问题，保留问题原意和关键名词，"
-            "让只听音频的人知道你在接哪条，然后再回答；不是问题的弹幕则简短说明对方提到了什么。"
             "多人刷同一句或同一诉求时只回应共同内容，不点名具体观众；"
-            "再用你自己的判断和知识先给出有用回答，不要默认让主播回答。"
+            "用你自己的判断和知识给出有用回答，不要默认让主播回答。"
             "只有确实无法从可靠上下文确认的主播私事、未公开计划或个人承诺，才说明未知并请主播补充；"
             "不要反复强调自己是伴播，也不要说「我可不敢」「这得问主播」之类推卸责任的话。"
         )
@@ -223,7 +225,7 @@ def _instruction_for(event: LiveEvent, *, gift_battery_high: int, gift_battery_m
             "只有可靠上下文确认来过或有共同经历时，才表达想念或说欢迎回来；"
             "没有可靠依据时不要假装认识，也不要提消费记录或公开粉丝牌等级。"
         )
-    return "挑最值得回应的内容，用角色口吻回应；回复长度遵循当前人设中的长度档位。"
+    return "挑最值得回应的内容，用角色口吻回应；回复长度遵循本轮事件规则。"
 
 
 def intent_for(
@@ -286,8 +288,8 @@ def intent_for(
     instruction = _instruction_for(
         event, gift_battery_high=gift_battery_high, gift_battery_medium=gift_battery_medium
     )
-    if "当前人设中的长度档位" not in instruction:
-        instruction += "回复长度遵循当前人设中的长度档位。"
+    if "回复长度遵循本轮事件规则" not in instruction:
+        instruction += "回复长度遵循本轮事件规则。"
     spec = ReplySpec(
         base_instructions=base_instructions,
         instructions=instruction,
@@ -309,7 +311,7 @@ def intent_for(
     intent = Intent(
         source=event.kind.value,
         priority=priority,
-        injection=Injection(reply=spec, item_text=wrap_events([_line_for(event)])),
+        injection=Injection(reply=spec, item_text=event_context_item(event)),
         trusted=False,
         event=event,
         dedup_key=event.dedup_key,

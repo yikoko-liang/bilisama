@@ -80,6 +80,14 @@ _REPLY_LENGTH_INSTRUCTIONS: dict[Chattiness, str] = {
 }
 
 
+# Event turns need room to identify the message before responding. This
+# variable is used only by the event contract; voice/persona lengths stay put.
+_EVENT_REPLY_LENGTH_INSTRUCTIONS = {
+    **_REPLY_LENGTH_INSTRUCTIONS,
+    Chattiness.LOW: "短档：通常一到两个短句，能说清楚就收住，不额外展开。",
+}
+
+
 def template_variables(
     cfg: PersonaConfig,
     *,
@@ -101,6 +109,7 @@ def template_variables(
         "username": streamer_name,
         "agentName": cfg.display_name or cfg.id,
         "replyLength": _REPLY_LENGTH_INSTRUCTIONS[reply_length],
+        "eventReplyLength": _EVENT_REPLY_LENGTH_INSTRUCTIONS[reply_length],
     }
 
 

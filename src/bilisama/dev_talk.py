@@ -42,7 +42,6 @@ import traceback
 import wave
 import zlib
 from array import array
-from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -1832,6 +1831,7 @@ async def run_director(args: argparse.Namespace) -> int:
     from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
     from bilisama.config.schema import SideModelConfig
     from bilisama.director.floor import SpeakingFloor
+    from bilisama.director.ghostwriter import RecentDialogue, compose_reply
     from bilisama.director.intent import Intent
     from bilisama.director.scheduler import Scheduler
     from bilisama.director.turn_protocol import TurnPolicy
@@ -1849,7 +1849,6 @@ async def run_director(args: argparse.Namespace) -> int:
         live_voice_rules,
         template_variables,
     )
-    from bilisama.persona.prompt import assemble_scoped
     from bilisama.proactive import ProactiveTopicLoop
     from bilisama.realtime.providers.duplex import DuplexLink
     from bilisama.realtime.providers.volcano import VolcanoLink
@@ -2212,21 +2211,14 @@ async def run_director(args: argparse.Namespace) -> int:
                 },
             )
 
-    # The last few lines actually said on air — streamer transcript and her
-    # own completed replies — so the selector's zero-model relevance check can
-    # hard-accept an audience line that picks up the current conversation.
-    # 300s freshness at read time, one normalised line each, capped at 8.
-    recent_dialogue: deque[tuple[float, str]] = deque(maxlen=8)
-
-    def note_recent_line(text: str) -> None:
-        line = " ".join(text.split())[:240]
-        if line:
-            recent_dialogue.append((clock.monotonic(), line))
+    # One bounded, role-labelled window for relevance and event composition.
+    # Completed generation is recorded without claiming playback completed.
+    recent_dialogue = RecentDialogue(clock)
 
     def spoken_line(text: str) -> None:
         distiller.note_assistant_line(text)
         proactive.note_dialogue("assistant", text)
-        note_recent_line(text)
+        recent_dialogue.note("assistant", text)
 
     composes = profile_for(provider).caps.composes_on_demand
     # Which of the two routes a backend that will not compose on demand takes.
@@ -2237,12 +2229,9 @@ async def run_director(args: argparse.Namespace) -> int:
     async def ghostwrite(intent: Intent) -> str | None:
         """Write one event reply for a link that cannot start its own turn.
 
-        The same context she would have been given if the endpoint could be
-        asked to compose: the public prefix plus the event contract, with the
-        event line and this turn's ask as the question. Matching it is the
-        whole point — the words come from another model, so everything else
-        about the request has to stay the same or she changes character the
-        moment the backend does.
+        Reuse the public persona and event contract, adding a bounded recent
+        dialogue window. The composer owns the stable event brief and token
+        allowance; the adapter receives only the finished words.
 
         Under the 「tool」 route nobody ghostwrites: returning None tells the
         scheduler this one is filed rather than spoken, and the context item
@@ -2254,15 +2243,13 @@ async def run_director(args: argparse.Namespace) -> int:
         if pulls_events:
             return None
         assert side is not None  # the SystemExit above
-        parts = [
-            part
-            for part in (intent.injection.item_text, intent.injection.reply.instructions)
-            if part
-        ]
-        return await side.complete(
-            system=assemble_scoped(assembly.build_public_context(), event_rules),
-            user="\n\n".join(parts),
-            max_tokens=intent.injection.reply.max_tokens or 256,
+        return await compose_reply(
+            side,
+            intent,
+            public_context=assembly.build_public_context(),
+            event_rules=event_rules,
+            recent_dialogue=recent_dialogue,
+            reply_length=settings.interaction.reply_length,
         )
 
     scheduler = Scheduler(
@@ -2277,8 +2264,8 @@ async def run_director(args: argparse.Namespace) -> int:
         verdict_sink=verdict_sink,
         guard=guard,
         on_hit=settings.safety.on_hit,
-        # One clean spoken line, two readers: the distiller's voice-exemplar
-        # buffer and the proactive loop's dialogue material.
+        # Completed text feeds distillation, proactive topics and recent context.
+        # Recent context preserves speaker identity without tracking playback.
         spoken_sink=spoken_line,
         # Her own microphone turns go the same way: what she said to the
         # streamer used to reach no memory at all (plan, voice gate 5.3).
@@ -2305,8 +2292,7 @@ async def run_director(args: argparse.Namespace) -> int:
     def selector_context_lines() -> tuple[str, ...]:
         # What the stream is about plus what was just said on air, for the
         # relevance hard-accept.
-        now = clock.monotonic()
-        recent = tuple(line for stamp, line in recent_dialogue if now - stamp <= 300.0)
+        recent = recent_dialogue.lines()
         return tuple(line for line in (settings.room.stream_intro, *recent) if line.strip())
 
     def selector_mention_terms() -> tuple[str, ...]:
@@ -2385,10 +2371,9 @@ async def run_director(args: argparse.Namespace) -> int:
     )
 
     def on_streamer_transcript(text: str) -> None:
-        # Two readers of one transcript line: topic material for the proactive
-        # loop, relevance material for the danmaku selector.
+        # Topic material plus the shared window used by selection and writing.
         proactive.note_dialogue("streamer", text)
-        note_recent_line(text)
+        recent_dialogue.note("streamer", text)
 
     async def push_context(text: str) -> None:
         await speech.set_context(text)
@@ -2450,6 +2435,7 @@ async def run_director(args: argparse.Namespace) -> int:
         event_rules=event_rules,
         stream_intro=lambda: settings.room.stream_intro,
         per_reply_scope=profile_for(provider).caps.per_reply_base_instructions,
+        link_composes_on_demand=composes,
         gift_battery_high=settings.interaction.gift_battery_high,
         gift_battery_medium=settings.interaction.gift_battery_medium,
     )

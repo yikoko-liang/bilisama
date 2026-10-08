@@ -888,12 +888,12 @@ class VolcanoLink:
         if spec.base_instructions is not None and not self._warned_base_instructions:
             # No per-response instruction channel on this protocol: the query
             # body carries content only. The Assembly reads the capability bit
-            # and folds event rules into the session context here instead, so
+            # and puts event rules in the query instructions instead, so
             # a spec still carrying one means a wiring bug worth one line.
             self._warned_base_instructions = True
             log.warning(
                 "volcano.base_instructions_ignored",
-                error_text="这个语音后端没有逐轮指令通道，事件规则应并入会话上下文。",
+                error_text="这个语音后端没有逐轮指令通道，事件规则应随本轮请求一起发送。",
             )
         handle = link.ReplyHandle()
         item = self._pending_item

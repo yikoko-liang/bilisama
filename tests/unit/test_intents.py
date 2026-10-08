@@ -157,13 +157,12 @@ def test_the_default_level_stays_quiet(caplog: pytest.LogCaptureFixture) -> None
 # ------------------------------------------------------------ per-kind rules
 
 
-def test_danmaku_reply_repeats_the_question_before_answering() -> None:
-    """A listener hears only audio: without the question restated, the answer
-    floats free of whatever it answers."""
+def test_danmaku_leaves_restatement_to_the_shared_event_contract() -> None:
+    """Per-kind hints should not impose another restatement format."""
     intent = intent_for(_danmaku("显存爆了是为什么？"), now=0.0)
     assert intent is not None
     rules = intent.injection.reply.instructions or ""
-    assert "重复一遍观众的问题" in rules
+    assert "重复一遍观众的问题" not in rules
     assert "先判断弹幕是在对主播、对你" in rules
 
 

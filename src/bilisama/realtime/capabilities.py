@@ -149,8 +149,8 @@ VOLCANO = Capabilities(
     turn_detection_types=frozenset({"server_vad"}),
     # No per-response instruction channel: the query body carries content
     # only, the persona rides StartSession, and SC2.0 cannot even update it
-    # mid-session (see providers/volcano.py). The Assembly folds event rules
-    # into the session context on this provider instead.
+    # mid-session (see providers/volcano.py). The Assembly includes the event
+    # contract in the per-turn instructions carried by the query instead.
     per_reply_base_instructions=False,
 )
 

@@ -74,6 +74,21 @@ _REPLY_TOKENS: dict[Chattiness, int] = {
 }
 
 
+# Headroom for a complete event script, not a target speaking length. Only
+# the ghostwriter reads this table; the voice reply cap remains _REPLY_TOKENS.
+# These initial caps need live evaluation with the configured side model.
+_EVENT_REPLY_TOKENS: dict[Chattiness, int] = {
+    Chattiness.LOW: 128,
+    Chattiness.MEDIUM: 192,
+    Chattiness.HIGH: 288,
+}
+
+
+def event_reply_max_tokens(reply_length: Chattiness) -> int:
+    """Generation allowance for the event ghostwriter at each length setting."""
+    return _EVENT_REPLY_TOKENS[reply_length]
+
+
 def derive(chattiness: Chattiness) -> DerivedThresholds:
     return _CHATTINESS_TABLE[chattiness]
 

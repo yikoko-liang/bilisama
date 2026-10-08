@@ -107,10 +107,11 @@ class Assembly:
         voice_rules: str = "",
         event_rules: str = "",
         stream_intro: Callable[[], str] | None = None,
-        # capabilities.per_reply_base_instructions. False (volcano) means the
-        # session context is the only carrier: event turns keep their per-kind
-        # instructions but no per-reply base rides the wire.
+        # Without a scoped base, on-demand endpoints read the same event
+        # contract through per-turn instructions. A ghostwriter supplies its
+        # own system context, so it must not receive a duplicate here.
         per_reply_scope: bool = True,
+        link_composes_on_demand: bool = True,
         # Defaults READ the schema rather than repeating its numbers: retuning
         # the tier ladder in one place must not leave shadow defaults behind.
         gift_battery_high: int = _TIER_DEFAULTS.gift_battery_high,
@@ -147,6 +148,7 @@ class Assembly:
         self._event_rules = event_rules
         self._stream_intro = stream_intro or (lambda: "")
         self._per_reply_scope = per_reply_scope
+        self._link_composes = link_composes_on_demand
         self._gift_battery_high = gift_battery_high
         self._gift_battery_medium = gift_battery_medium
         # Anchors are read once: editing an anchor is a restart-level change
@@ -239,7 +241,7 @@ class Assembly:
                 burst = self._presence.note(event.viewer.identity, self._clock.monotonic())
                 if burst is not None:
                     self.intents_submitted += 1
-                    self._submit(
+                    self._submit_event_intent(
                         burst_welcome_intent(
                             burst,
                             now=self._clock.monotonic(),
@@ -295,7 +297,7 @@ class Assembly:
         if self._event_pacer is not None and not self._event_pacer.try_consume("entry"):
             return
         self.intents_submitted += 1
-        self._submit(
+        self._submit_event_intent(
             entry_welcome_intent(
                 events,
                 now=self._clock.monotonic(),
@@ -320,6 +322,20 @@ class Assembly:
         the panel; nothing reaches the selector, the coalescer or the
         scheduler until it is back on."""
         self._event_input_enabled = enabled
+
+    def _submit_event_intent(self, intent: Intent) -> None:
+        """Send the shared contract once through the available prompt channel."""
+        if not self._per_reply_scope and self._link_composes and self._event_rules:
+            reply = dataclasses.replace(
+                intent.injection.reply,
+                instructions=assemble_scoped(
+                    self._event_rules, intent.injection.reply.instructions or ""
+                ),
+            )
+            intent = dataclasses.replace(
+                intent, injection=dataclasses.replace(intent.injection, reply=reply)
+            )
+        self._submit(intent)
 
     def _submit_event(self, event: LiveEvent) -> None:
         # Re-checked here because selector winners arrive up to a window
@@ -347,7 +363,7 @@ class Assembly:
         )
         if intent is not None:
             self.intents_submitted += 1
-            self._submit(intent)
+            self._submit_event_intent(intent)
         # Marked only once the delivery is through. Marking on the ATTEMPT meant
         # a raise from _submit left the key burned: the selector's retry (its
         # deliver-then-commit contract exists for exactly that) came back to a
@@ -411,8 +427,8 @@ class Assembly:
 
     def build_event_context(self) -> str:
         """What one event reply carries as its scoped base, or "" when the
-        provider has no per-reply channel (volcano) — the per-kind
-        instructions still travel, only the full event contract stays home."""
+        provider has no per-reply base channel. In that case an on-demand
+        reply carries the event contract in its per-turn instructions."""
         if not self._per_reply_scope or not self._event_rules:
             return ""
         return assemble_scoped(self.build_public_context(), self._event_rules)
