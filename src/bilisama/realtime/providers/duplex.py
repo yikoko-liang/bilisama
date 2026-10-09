@@ -343,7 +343,7 @@ class DuplexLink:
         watchdog_s: float = _WATCHDOG_S,
         unspoken_s: float = _UNSPOKEN_S,
         speech_edge_s: float = _SPEECH_EDGE_S,
-        speech_commit_s: float = 0.0,
+        speech_commit_s: float = 3.0,
         reply_hold_ms: int = 0,
         skip_without_cancel: bool = True,
         run_out_s: float = _RUN_OUT_S,

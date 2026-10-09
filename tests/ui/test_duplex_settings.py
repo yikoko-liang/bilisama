@@ -37,11 +37,11 @@ async def test_duplex_deadlines_are_editable_and_commit_zero_disables(
     await expect(edge).to_have_count(1, timeout=2000)
     await expect(commit).to_have_count(1, timeout=2000)
     await expect(edge).to_have_value("1")
-    await expect(commit).to_have_value("0")
+    await expect(commit).to_have_value("3")
     await expect(commit).to_have_attribute("min", "0")
     assert await page.locator(f"[data-path='{_COMMIT}'] input[type=checkbox]").count() == 0
 
-    for value in (3, 0):
+    for value in (0, 3):
         await commit.fill(str(value))
         await commit.press("Tab")
         await _wait_for_call(
@@ -62,7 +62,7 @@ async def test_duplex_deadlines_are_editable_and_commit_zero_disables(
         for event, data in harness.calls
         if event is ClientEvent.PANEL_SET and data.get("config", {}).get("path") == _COMMIT
     ]
-    assert commit_edits == [3, 0]
+    assert commit_edits == [0, 3]
 
     await edge.fill("1.5")
     await edge.press("Tab")

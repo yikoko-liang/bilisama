@@ -1923,7 +1923,7 @@ async def test_panel_speech_timeouts_reject_conflicting_values_before_touching_t
 
 @pytest.mark.parametrize(
     ("field_name", "value", "attempted"),
-    [("speech_edge_s", 2.0, (2.0, 0.0)), ("speech_commit_s", 3.0, (1.0, 3.0))],
+    [("speech_edge_s", 2.0, (2.0, 3.0)), ("speech_commit_s", 0.0, (1.0, 0.0))],
 )
 async def test_failed_timeout_save_restores_the_running_adapter_and_settings(
     duplex_panel_box: tuple[Path, dict[str, Any]],
@@ -1933,7 +1933,7 @@ async def test_failed_timeout_save_restores_the_running_adapter_and_settings(
     value: float,
     attempted: tuple[float, float],
 ) -> None:
-    """A failed durable write must undo the synchronous timeout setter as well."""
+    """A failed durable write must restore the factory-enabled timeout in memory too."""
     from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
     from bilisama.ui.events import ClientEvent
 
@@ -1952,9 +1952,9 @@ async def test_failed_timeout_save_restores_the_running_adapter_and_settings(
         await caught["handlers"][ClientEvent.PANEL_SET]({"config": {"path": path, "value": value}})
         printed = capsys.readouterr().out
         cfg = caught["settings"].speech.volcano_duplex
-        assert (cfg.speech_edge_s, cfg.speech_commit_s) == (1.0, 0.0)
-        assert duplex.timeout_calls == [attempted, (1.0, 0.0)]
-        assert (duplex._speech_edge_s, duplex._speech_commit_s) == (1.0, 0.0)
+        assert (cfg.speech_edge_s, cfg.speech_commit_s) == (1.0, 3.0)
+        assert duplex.timeout_calls == [attempted, (1.0, 3.0)]
+        assert (duplex._speech_edge_s, duplex._speech_commit_s) == (1.0, 3.0)
         assert duplex.lifecycle_calls == ["connect"]
         after = written.read_bytes() if written.exists() else None
         assert after == before

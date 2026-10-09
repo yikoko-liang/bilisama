@@ -1555,13 +1555,13 @@ async def test_replaced_item_cannot_overwrite_the_newer_transcript_for_the_same_
 # ------------------------------------------------------------ optional remote endpoint fallback
 
 
-async def test_remote_speech_commit_is_disabled_by_default() -> None:
-    """The local timeout must not silently opt a session into forced endpointing."""
+async def test_remote_speech_commit_can_be_disabled() -> None:
+    """An explicit zero keeps local release without forced endpointing."""
     from bilisama.clock import FakeClock
 
     clock = FakeClock()
     async with MockDuplexServer() as server:
-        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        duplex = _link(server, clock=clock, speech_edge_s=1.0, speech_commit_s=0.0)
         await duplex.connect()
         try:
             await duplex.push_audio(b"\x10\x00" * 320)
@@ -1576,13 +1576,13 @@ async def test_remote_speech_commit_is_disabled_by_default() -> None:
             await duplex.aclose()
 
 
-async def test_remote_speech_commit_fires_once_after_its_own_silence_window() -> None:
+async def test_remote_speech_commit_defaults_to_three_seconds_and_fires_once() -> None:
     """Local floor release and remote forced endpointing have separate deadlines."""
     from bilisama.clock import FakeClock
 
     clock = FakeClock()
     async with MockDuplexServer() as server:
-        duplex = _link(server, clock=clock, speech_edge_s=1.0, speech_commit_s=3.0)
+        duplex = _link(server, clock=clock)
         await duplex.connect()
         events = duplex.events()
         try:

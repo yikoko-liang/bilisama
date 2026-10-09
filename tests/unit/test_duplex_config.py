@@ -1,4 +1,4 @@
-"""Keep remote input commits opt-in and later than the local speech release."""
+"""Keep remote input commits configurable and later than the local speech release."""
 
 from __future__ import annotations
 
@@ -30,11 +30,11 @@ def _settings(edge_s: float, commit_s: float) -> Settings:
     )
 
 
-def test_remote_input_commit_ships_disabled() -> None:
-    assert VolcanoDuplexConfig().speech_commit_s == 0.0
+def test_remote_input_commit_ships_after_three_seconds() -> None:
+    assert VolcanoDuplexConfig().speech_commit_s == 3.0
     config = Path(__file__).resolve().parents[2] / "config/bilisama.toml"
     shipped = tomllib.loads(config.read_text(encoding="utf-8"))
-    assert shipped["speech"]["volcano_duplex"]["speech_commit_s"] == 0.0
+    assert shipped["speech"]["volcano_duplex"]["speech_commit_s"] == 3.0
 
 
 @pytest.mark.parametrize("value", [-0.1, 30.1, float("inf"), float("nan")])

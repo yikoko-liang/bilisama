@@ -201,9 +201,9 @@ class VolcanoDuplexConfig(BaseModel):
     # The provider still owns final transcription. Releasing the local speech
     # state does not commit its input or claim that its item has completed.
     speech_edge_s: float = Field(1.0, ge=0.3, le=10.0)
-    # Opt-in remote endpointing after a longer silence. It can split a pause
-    # the provider would have kept inside one turn, so it ships disabled.
-    speech_commit_s: float = Field(0.0, ge=0.0, le=30.0)
+    # End remote input after a longer silence; zero disables the fallback.
+    # A pause longer than this may be split into separate input turns.
+    speech_commit_s: float = Field(3.0, ge=0.0, le=30.0)
     # How long a reply's frames wait in the adapter before they may play. On
     # this protocol 「主播开口了」 arrives ~850 ms after the streamer starts
     # (the transcriber has to recognise a word; DashScope's VAD is ~330 ms), and

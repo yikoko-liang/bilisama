@@ -98,10 +98,10 @@ speed = 0                               # -50 约慢一半，100 约两倍速
 # the local speech state after this interval; delayed ASR never restarts the timer.
 # This does not force the provider to finish its input.
 speech_edge_s = 1.0
-# Disabled by default. After verification, a nonzero value requests remote input
-# completion after this much audio silence. It must exceed speech_edge_s and may
-# split a thinking pause into two turns. Panel edits apply immediately and persist.
-speech_commit_s = 0.0
+# Request remote input completion after this much audio silence. Set 0 to disable.
+# When enabled, it must exceed speech_edge_s and may split a thinking pause into
+# two turns. Panel edits apply immediately and persist.
+speech_commit_s = 3.0
 # 这条协议要 850ms 才知道主播开口了（转写器得听出一个字；DashScope 的 VAD 是 330ms），这期间她
 # 一直在放。扣住回复的前 N 毫秒不放，主播在这个窗口里插话就一个字都听不到她的。她已经放出来的
 # 部分拦不住。代价是每条回复晚 N 毫秒开口。0 = 现在的样子。改了下一轮生效。
