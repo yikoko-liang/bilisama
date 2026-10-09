@@ -156,6 +156,12 @@ def _duplex_with_voice(voice: str) -> Settings:
     return settings
 
 
+def _duplex_with_early_commit() -> Settings:
+    settings = _settings(provider=ProviderName.VOLCANO_DUPLEX, expression_source="lexicon")
+    settings.speech.volcano_duplex.speech_commit_s = 0.5
+    return settings
+
+
 # One deliberately broken config per rule. Reused by the tests that have to see
 # every problem `check` can produce, not just the ones they happen to trip.
 BROKEN_ONE_WAY_EACH = {
@@ -217,6 +223,7 @@ BROKEN_ONE_WAY_EACH = {
     ),
     # A duplex voice nobody has heard: the endpoint takes it and she goes mute.
     "speech.volcano_duplex.voice": _Broken(_duplex_with_voice("zh_female_not_a_real_voice_bigtts")),
+    "speech.volcano_duplex.speech_commit_s": _Broken(_duplex_with_early_commit()),
 }
 
 

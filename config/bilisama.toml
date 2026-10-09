@@ -94,11 +94,14 @@ voice = "zh_female_vv_uranus_bigtts"    # Vivi 2.0。uranus 表，和上面那�
 # 改这一项要重启进程：工具声明必须在建会话那一刻就带上，重连换不掉。
 event_replies = "ghostwriter"
 speed = 0                               # -50 约慢一半，100 约两倍速
-# 万一端点没发「主播说完了」那一帧，我们等多久自己替她判说完。转写来一段、或者麦克风有一帧声音，
-# 都会让这个倒计时重新开始，所以主播出着声就不会被切开。正常情况下用不到它：端点自己的结束帧
-# 会先到。小了漏帧后她接得快；主播一句话中间不出声地停超过它，会先被判说完，接着说还续在同一行。
-# 先是 3，09-22 改成 1，10-05 改成 2，同日又改回 1（探针录音回放：句中字和声音同时停最长 0.73 秒）。
+# The provider normally ends the input. If it has not, quiet uplink audio releases
+# the local speech state after this interval; delayed ASR never restarts the timer.
+# This does not force the provider to finish its input.
 speech_edge_s = 1.0
+# Disabled by default. After verification, a nonzero value requests remote input
+# completion after this much audio silence. It must exceed speech_edge_s and may
+# split a thinking pause into two turns. Panel edits apply immediately and persist.
+speech_commit_s = 0.0
 # 这条协议要 850ms 才知道主播开口了（转写器得听出一个字；DashScope 的 VAD 是 330ms），这期间她
 # 一直在放。扣住回复的前 N 毫秒不放，主播在这个窗口里插话就一个字都听不到她的。她已经放出来的
 # 部分拦不住。代价是每条回复晚 N 毫秒开口。0 = 现在的样子。改了下一轮生效。

@@ -197,21 +197,13 @@ class VolcanoDuplexConfig(BaseModel):
     voice: str = Field("zh_female_vv_uranus_bigtts")
     speed: int = Field(0, ge=-50, le=100)
     loudness: int = Field(0, ge=-50, le=100)
-    # How long an open streamer turn may go with neither a transcript delta nor
-    # sound on the uplink before the adapter closes it on his behalf. One
-    # countdown, restarted by either: a delta (words heard) or a frame the
-    # noise gate let through (still making sound). A normal line ends earlier,
-    # on the transcriber's own completed frame; this only catches the one that
-    # never comes, and without it the floor stays shut and she ignores him.
-    # Measured 2026-10-05: inside one line deltas can pause up to 1.38 s while
-    # he talks, which is why 1.0 on deltas ALONE split lines mid-sentence.
-    # Counting sound as well, the longest stretch inside a line with neither
-    # was 0.73 s across the 16 probe items, so 1.0 cuts none of them. Lower
-    # lets her answer sooner after a lost frame; a silent pause longer than
-    # this inside a line closes the turn early, and the line goes on under
-    # the same line id. It was 3.0, 1.0 from 2026-09-22, 2.0 for part of
-    # 2026-10-05, then 1.0 again: the streamer found 2.0 slow.
+    # Audio starts this local deadline; late transcription cannot extend it.
+    # The provider still owns final transcription. Releasing the local speech
+    # state does not commit its input or claim that its item has completed.
     speech_edge_s: float = Field(1.0, ge=0.3, le=10.0)
+    # Opt-in remote endpointing after a longer silence. It can split a pause
+    # the provider would have kept inside one turn, so it ships disabled.
+    speech_commit_s: float = Field(0.0, ge=0.0, le=30.0)
     # How long a reply's frames wait in the adapter before they may play. On
     # this protocol 「主播开口了」 arrives ~850 ms after the streamer starts
     # (the transcriber has to recognise a word; DashScope's VAD is ~330 ms), and

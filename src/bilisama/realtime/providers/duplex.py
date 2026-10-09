@@ -15,9 +15,10 @@ scripts are recorded in docs/runbook.md.
    would have been gated and skipped for carrying no marker. They are told
    apart by `tts_type` on `response.output_audio.started`: `chat_tts_text` is
    the text we handed over, `default` is her own.
-3. **Speech edges ride the transcriber.** No `input_audio_buffer.speech_*`
-   here; the streamer's first word arrives as
-   `conversation.item.input_audio_transcription.started`.
+3. **The server exposes no separate VAD edges.** No `input_audio_buffer.speech_*`
+   here; speech is reported by
+   `conversation.item.input_audio_transcription.started`. A local silence
+   monitor runs from uplink sound without waiting for that transcription.
 4. **The uplink vocabulary is closed, and stepping outside it costs the
    session.** The endpoint names the offence and then drops the socket:
    `45000000 unknown event name:<name>` followed 0.0-0.1 s later by the
@@ -129,6 +130,7 @@ import contextlib
 import json
 from collections import deque
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import websockets
@@ -156,25 +158,9 @@ _WATCHDOG_S = 25.0
 # already feed at 20 ms, so this is a ceiling for the replay paths, not a
 # throttle on the microphone.
 _FRAME_MS = 20
-# How long an open streamer turn may go with neither a transcription delta NOR
-# a sound on the uplink before we call it over ourselves. One countdown, two
-# things that restart it: a delta (the transcriber heard words) or a frame the
-# noise gate let through (he is still making sound). It only catches the
-# ending that never arrives; a normal line ends on the transcriber's own
-# completed frame, which lands together with its last delta.
-#
-# Measured on the real endpoint 2026-10-05: inside one line the transcriber
-# goes up to 1.38 s without a delta while he is still talking (a recorded
-# streamer; synthetic speech up to 1.0 s), so a backstop timed on deltas
-# alone at 1 s split his lines and opened the floor mid-sentence (a
-# proactive topic spoke over him). Restarting on sound fixes that without a
-# second setting: with sound counted, the longest stretch inside a line with
-# neither was 0.73 s across the 16 probe items.
-#
-# The shipped value lives in VolcanoDuplexConfig.speech_edge_s (1.0; 2.0 for
-# part of 2026-10-05, 1.0 from 2026-09-22, 3.0 before that). This constant is
-# only the default for a link built without a config and tracks the config's
-# default.
+# Local floor release after the last frame admitted by the upstream noise
+# gate. ASR may arrive seconds late, so it neither starts nor resets this
+# clock. Normal server completion can still end the local turn sooner.
 _SPEECH_EDGE_S = 1.0
 # How long a reply we asked for may stay silent before we give up on it. The
 # endpoint answers a replacement in about 84 ms when it is going to answer at
@@ -329,6 +315,17 @@ def _same_line(old: str, new: str) -> bool | None:
     return bare_old[:need] == bare_new[:need]
 
 
+@dataclass
+class _RetiredTranscript:
+    """Enough caption state to route late frames back to their original row."""
+
+    line_id: str
+    text: str
+    sent: str
+    done: bool
+    superseded: bool = False
+
+
 class DuplexLink:
     """SpeechLink over the duplex protocol."""
 
@@ -346,6 +343,7 @@ class DuplexLink:
         watchdog_s: float = _WATCHDOG_S,
         unspoken_s: float = _UNSPOKEN_S,
         speech_edge_s: float = _SPEECH_EDGE_S,
+        speech_commit_s: float = 0.0,
         reply_hold_ms: int = 0,
         skip_without_cancel: bool = True,
         run_out_s: float = _RUN_OUT_S,
@@ -363,6 +361,7 @@ class DuplexLink:
         self._watchdog_s = watchdog_s
         self._unspoken_s = min(unspoken_s, watchdog_s)
         self._speech_edge_s = speech_edge_s
+        self._speech_commit_s = speech_commit_s
         # How long a reply's frames wait before L3 hears about them, so that a
         # barge-in landing inside that window throws away sound nobody has
         # heard yet. See _begin_hold for what it buys and what it costs.
@@ -452,13 +451,17 @@ class DuplexLink:
         # until it has caught up with what the row already shows, so the row
         # does not shrink to two characters and regrow.
         self._replacing = False
-        # A transcription is open; the floor is closed until it ends.
+        # Sound starts the silence monitor, not a barge-in. ASR confirms the
+        # speech start only while that audio segment is still active.
         self._speech_open = False
+        self._audio_open = False
+        self._audio_generation = 0
+        self._pending_audio_generation: int | None = None
+        self._item_audio_generation = 0
         self._speech_edge: asyncio.Task[None] | None = None
-        # When the transcriber last produced a delta, and when the uplink last
-        # carried sound. The backstop counts quiet from the later of the two.
-        self._asr_at = 0.0
+        self._asr_at: float | None = None  # diagnostics only
         self._voice_at = 0.0
+        self._retired_items: dict[str, _RetiredTranscript] = {}
         self._pull_tool = pull_tool
         # Viewer events filed but not yet handed to her. Only fills when the
         # tool is declared; in ghostwriter mode L3 answers these itself and
@@ -592,6 +595,29 @@ class DuplexLink:
         panel promise Reload.LIVE for it.
         """
         self._reply_hold_ms = max(0, int(ms))
+
+    def set_speech_timeouts(self, *, edge_s: float, commit_s: float) -> None:
+        """Apply validated settings to the pending segment, keeping its audio clock.
+
+        Shorter deadlines can already be due. Queue their check for the next
+        loop iteration, so the panel's synchronous persistence/rollback can
+        finish first. A locally stopped segment never reopens, and an input
+        already committed or completed never gets committed again by an edit.
+        """
+        if (edge_s, commit_s) == (self._speech_edge_s, self._speech_commit_s):
+            return
+        self._speech_edge_s = edge_s
+        self._speech_commit_s = commit_s
+        if self._pending_audio_generation is None:
+            return
+        self._stop_speech_monitor()
+        if (
+            self._started
+            and not self._closing
+            and self._ws is not None
+            and (self._audio_open or commit_s > 0)
+        ):
+            self._start_speech_monitor()
 
     # ------------------------------------------------------------ the hold
 
@@ -749,7 +775,7 @@ class DuplexLink:
         # through with zeros, so any non-zero byte is a frame it judged to be
         # sound. That is what restarts the backstop's countdown.
         if pcm.strip(b"\x00"):
-            self._voice_at = self._clock.monotonic()
+            self._on_sound()
         try:
             await self._send(
                 {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}
@@ -956,18 +982,21 @@ class DuplexLink:
         Which of the two it is shows at the first deltas; until then the row
         keeps what it shows.
         """
+        if item_id == self._item_id or item_id in self._retired_items:
+            return
+        self._archive_item()
         if not self._item_done:
             self._end_item("replaced")
         self._replacing = not self._item_done and bool(self._asr_text)
+        if not self._replacing:
+            self._item_audio_generation = self._audio_generation
         if not self._replacing:
             self._open_line(item_id)
         self._item_id = item_id
         self._item_done = False
         self._item_deltas = 0
         self._item_started_at = self._clock.monotonic()
-        if not self._speech_open:
-            self._arm_speech_edge()
-            self._events.put_nowait(link.SpeechStarted())
+        self._announce_speech()
 
     def _on_asr_delta(self, item_id: str, whole: str) -> None:
         """CUMULATIVE here, incremental everywhere else: 「今天」「今天打算」….
@@ -977,15 +1006,12 @@ class DuplexLink:
         numbers re-read — and `text`, the increment the contract promises.
         """
         if item_id and self._item_id and item_id != self._item_id:
-            return  # a late frame from an item that has been replaced
-        self._asr_at = self._clock.monotonic()  # the turn is still going
+            self._revise_retired(item_id, whole, completed=False)
+            return
+        self._asr_at = self._clock.monotonic()
         self._item_deltas += 1
-        if not self._speech_open:
-            # We gave up on this turn and he is still talking, so the ending
-            # was late rather than lost. Without this the rest of the line
-            # falls outside any turn: the floor stays open while he speaks.
-            self._arm_speech_edge()
-            self._events.put_nowait(link.SpeechStarted())
+        if not self._item_done:
+            self._announce_speech()
         if self._replacing:
             settled = _same_line(self._asr_text, whole)
             if settled is None:
@@ -995,10 +1021,23 @@ class DuplexLink:
                 # with what was heard, and give this one its own row.
                 self._replacing = False
                 self._open_line(self._item_id)
+                self._item_audio_generation = self._audio_generation
             elif len(_bare(whole)) < len(_bare(self._asr_text)):
                 return  # still catching up; do not shrink the row
             else:
                 self._replacing = False
+                self._supersede_line_items()
+        if (
+            _bare(whole) != _bare(self._asr_text)
+            and not self._item_done
+            and self._audio_open
+            and self._clock.monotonic() < self._voice_at + self._speech_edge_s
+        ):
+            # The server may continue the same item after a local pause. New
+            # words during resumed sound allow its normal end to settle this
+            # segment. With no audio offsets, delayed words coinciding with
+            # new sound cannot be distinguished from a real continuation.
+            self._item_audio_generation = self._audio_generation
         if whole == self._asr_text and not self._line_done:
             return
         self._line_done = False  # a line the backstop finished goes on
@@ -1018,22 +1057,28 @@ class DuplexLink:
 
     def _on_asr_completed(self, item_id: str, text: str) -> None:
         if item_id and self._item_id and item_id != self._item_id:
+            self._revise_retired(item_id, text, completed=True)
             return
         final = text or self._asr_text
         if self._replacing:
             if _same_line(self._asr_text, final) is False:
                 self._open_line(self._item_id)
+                self._item_audio_generation = self._audio_generation
+            else:
+                self._supersede_line_items()
             self._replacing = False
         if final and final != self._asr_text:
             self._asr_text = final
             self._line_done = False  # the final words supersede an early finish
         self._item_done = True
         self._end_item("completed")
-        if self._speech_open:
+        if self._item_audio_generation == self._audio_generation:
+            self._pending_audio_generation = None
+            self._stop_speech_monitor()
             self._close_speech()
-        else:
-            # The backstop already dropped the floor; the line still finishes.
-            self._finish_line()
+        # An old completed frame can revise captions, but cannot close sound
+        # that resumed after the old segment's local timeout.
+        self._finish_line()
 
     def _finish_line(self) -> None:
         """Report the line as it reads now. Once per finish; a line that goes
@@ -1062,97 +1107,161 @@ class DuplexLink:
             open_ms=round((self._clock.monotonic() - self._item_started_at) * 1000),
         )
 
-    def _end_turn_with_session(self, how: str) -> None:
-        """The session his line lived on is over, so nothing can finish it now.
+    def _archive_item(self) -> None:
+        if not self._item_id:
+            return
+        self._retired_items[self._item_id] = _RetiredTranscript(
+            self._line_id, self._asr_text, self._asr_sent, self._line_done
+        )
+        # Bound late-caption memory independently of session length.
+        if len(self._retired_items) > 16:
+            del self._retired_items[next(iter(self._retired_items))]
 
-        Its completed frame belonged to that session, and a new session knows
-        nothing of it. Left open, the floor held `streamer_speaking` through
-        the panel's 暂停 and after 恢复 until he finished a whole new line, and
-        that line raised no SpeechStarted, armed no backstop and could be
-        folded into the row the pause cut off (2026-10-05, reproduced on the
-        fake). So the line is finished with what was heard and the floor
-        handed back, as a backstop close would, without blaming the endpoint.
-        """
+    def _supersede_line_items(self) -> None:
+        for old in self._retired_items.values():
+            if old.line_id == self._line_id:
+                old.superseded = True
+
+    def _revise_retired(self, item_id: str, text: str, *, completed: bool) -> None:
+        old = self._retired_items.get(item_id)
+        if old is None or old.superseded or old.line_id == self._line_id:
+            # A replacement item now owns this same row; its predecessor
+            # must not overwrite the replacement's more recent transcription.
+            return
+        whole = text or old.text
+        changed = whole != old.text
+        if changed:
+            old.text = whole
+            old.done = False
+        if completed:
+            if whole and not old.done:
+                self._events.put_nowait(link.UserTranscriptDone(whole, line_id=old.line_id))
+            old.done = True
+        elif changed:
+            added = link.added_text(old.sent, whole)
+            if added:
+                old.sent = whole
+            self._events.put_nowait(
+                link.UserTranscriptDelta(added, line_id=old.line_id, whole=whole)
+            )
+
+    def _end_turn_with_session(self, how: str) -> None:
+        """Finish captions and invalidate timers belonging to the old socket."""
         if not self._item_done:
             self._item_done = True
             self._end_item(how)
         self._replacing = False
+        self._pending_audio_generation = None
+        self._audio_generation += 1
+        self._stop_speech_monitor()
         self._close_speech()
+        self._finish_line()
+        self._retired_items.clear()
+        self._item_id = ""
+        self._asr_at = None
 
     def _close_speech(self, *, timed_out: bool = False) -> None:
-        """End the streamer's turn: finish his line, then drop the floor.
-
-        Both halves matter and only one of them is obvious. The transcript is
-        the streamer's line in the chat page; `SpeechStopped` is what lets her
-        answer anything ever again, because until it arrives the floor holds
-        `streamer_speaking` and every intent is gated `gate.host_speaking`.
-        """
-        if not self._speech_open:
-            return
+        """Release the local floor without declaring the server input closed."""
+        was_open = self._audio_open or self._speech_open
+        self._audio_open = False
         self._speech_open = False
-        if self._speech_edge is not None:
-            self._speech_edge.cancel()
-            self._speech_edge = None
         self._finish_line()
+        if not was_open:
+            return
         if timed_out:
             now = self._clock.monotonic()
-            self._end_item("backstop")
+            if not self._item_done:
+                self._end_item("backstop")
             log.warning(
                 "duplex.speech_edge_missing",
-                quiet_ms=round((now - self._asr_at) * 1000),
-                # How long sound on the uplink kept it open past the last
-                # delta. Large and frequent would mean noise is holding the
-                # floor shut; this is the number to read before adding a cap.
+                quiet_ms=round((now - self._asr_at) * 1000) if self._asr_at is not None else None,
                 audio_quiet_ms=round((now - self._voice_at) * 1000),
-                error_text=(
-                    "转写和麦克风都安静了，结束帧却一直没来，按这一句说完处理；"
-                    "不自己收尾的话说话权就一直关着。"
-                ),
+                audio_generation=self._audio_generation,
+                error_text="麦克风已停声，先放开本地说话权；服务端输入是否结束仍等转写结束帧确认。",
             )
+        # Keep the stop independent of ASR, including its complete absence.
+        # L3 applies its existing quiet window to this local stop.
         self._events.put_nowait(link.SpeechStopped())
 
-    def _arm_speech_edge(self) -> None:
-        """A start with no end wedges the gate shut, so bound the wait.
+    def _announce_speech(self) -> None:
+        if (
+            self._audio_open
+            and not self._speech_open
+            and self._clock.monotonic() < self._voice_at + self._speech_edge_s
+        ):
+            self._speech_open = True
+            self._events.put_nowait(link.SpeechStarted())
 
-        This protocol's only 「the streamer stopped」 signal is the
-        transcriber's completed frame. Every other provider has a VAD edge
-        that does not depend on transcription, so this backstop is this
-        file's alone.
+    def _stop_speech_monitor(self) -> None:
+        task = self._speech_edge
+        self._speech_edge = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
 
-        It was built because that frame was seen to go missing — fifteen
-        times across the corpus of 2026-09-16/17. Probed again 2026-10-05:
-        16 items started, 15 completed, each with its last delta. The one
-        without was ours: a reply pushed mid-line (`speech_text_buffer.commit`)
-        abandons the item, and the endpoint hears the line again under a new
-        one (_on_asr_started). Whether a completed frame is ever lost on its
-        own is still to be verified; `duplex.transcript_item` logs how every
-        item ended, so a live session answers it.
+    def _on_sound(self) -> None:
+        self._voice_at = self._clock.monotonic()
+        if self._audio_open:
+            return
+        self._audio_open = True
+        self._audio_generation += 1
+        self._pending_audio_generation = self._audio_generation
+        self._stop_speech_monitor()
+        self._start_speech_monitor()
 
-        Timed from the last sign of him — a delta or a sounding uplink frame
-        — rather than from the start. From the start cost a flat twenty
-        seconds of her ignoring everything, three or four times per five
-        minutes (「聊一会儿就不行了」); from deltas alone at 1 s it cut lines
-        at the transcriber's own pauses, which run to 1.38 s mid-sentence.
-        """
-        self._speech_open = True
-        self._asr_at = self._clock.monotonic()
-        if self._speech_edge is not None:
-            self._speech_edge.cancel()
-        task = asyncio.create_task(self._await_speech_edge(), name="duplex:speech-edge")
+    def _start_speech_monitor(self) -> None:
+        task = asyncio.create_task(
+            self._await_speech_edge(self._audio_generation, self._ws),
+            name="duplex:speech-edge",
+        )
         self._speech_edge = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _await_speech_edge(self) -> None:
-        # Re-check rather than sleep once: every delta and every sounding
-        # uplink frame pushes the deadline forward, and the turn is only over
-        # when both have actually gone quiet.
-        while True:
-            quiet_for = self._clock.monotonic() - max(self._asr_at, self._voice_at)
-            if quiet_for >= self._speech_edge_s:
-                break
-            await self._clock.sleep(self._speech_edge_s - quiet_for)
-        self._close_speech(timed_out=True)
+    async def _await_speech_edge(self, generation: int, ws: Any) -> None:
+        try:
+            while generation == self._pending_audio_generation:
+                now = self._clock.monotonic()
+                if now >= self._voice_at + self._speech_edge_s and self._audio_open:
+                    self._close_speech(timed_out=True)
+                if not self._audio_open:
+                    if self._speech_commit_s <= 0:
+                        return
+                    if now >= self._voice_at + self._speech_commit_s:
+                        await self._commit_input(generation, ws)
+                        return
+                    deadline = self._voice_at + self._speech_commit_s
+                else:
+                    deadline = self._voice_at + self._speech_edge_s
+                await self._clock.sleep(deadline - now)
+        finally:
+            if self._speech_edge is asyncio.current_task():
+                self._speech_edge = None
+
+    async def _commit_input(self, generation: int, ws: Any) -> None:
+        # Waiting for a different send can outlast silence. Check on the
+        # wire side of the lock, so resumed sound or a natural completed frame
+        # cannot leave a queued commit that cuts the next sentence in half.
+        try:
+            async with self._send_lock:
+                if (
+                    self._pending_audio_generation != generation
+                    or self._speech_commit_s <= 0
+                    or self._ws is not ws
+                    or not self._started
+                    or self._closing
+                    or self._clock.monotonic() < self._voice_at + self._speech_commit_s
+                ):
+                    return
+                self._pending_audio_generation = None  # at most one attempt per segment
+                await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                log.info(
+                    "duplex.input_committed",
+                    audio_generation=generation,
+                    item_id=self._item_id,
+                    audio_quiet_ms=round((self._clock.monotonic() - self._voice_at) * 1000),
+                )
+        except (OSError, websockets.ConnectionClosed) as exc:
+            log.warning("duplex.input_commit_failed", error_text=str(exc))
 
     def _arm_watchdog(self, watch: Callable[[], Coroutine[Any, Any, None]] | None = None) -> None:
         if self._watchdog is not None:

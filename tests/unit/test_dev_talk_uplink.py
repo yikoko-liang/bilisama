@@ -21,6 +21,7 @@ import json
 import logging
 import shutil
 import sys
+import tomllib
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -1408,8 +1409,8 @@ class _OfflineDuplex(duplex_module.DuplexLink):
 
     A subclass rather than a stand-in so `isinstance(inner, DuplexLink)` in
     dev_talk's reload hook (the arm that calls set_reply_hold_ms) stays true.
-    Every method that would touch the wire is a no-op; the hold setter is
-    the one thing recorded, because it is what the test is about.
+    Methods that would touch the wire are no-ops. Runtime setter calls and
+    connection changes are recorded so edits can be checked end to end.
     """
 
     instances: ClassVar[list[_OfflineDuplex]] = []
@@ -1421,19 +1422,21 @@ class _OfflineDuplex(duplex_module.DuplexLink):
         self.hold_calls: list[int] = []
         self.skip_calls: list[bool] = []
         self.voice_calls: list[str] = []
+        self.timeout_calls: list[tuple[float, float]] = []
+        self.lifecycle_calls: list[str] = []
         self.closed = False
 
     async def connect(self) -> None:
-        return None
+        self.lifecycle_calls.append("connect")
 
     async def aclose(self) -> None:
         self.closed = True
 
     async def suspend(self) -> None:
-        return None
+        self.lifecycle_calls.append("suspend")
 
     async def resume(self) -> None:
-        return None
+        self.lifecycle_calls.append("resume")
 
     async def set_context(self, instructions: str) -> None:
         self.contexts.append(instructions)
@@ -1463,6 +1466,10 @@ class _OfflineDuplex(duplex_module.DuplexLink):
 
     async def set_voice(self, voice: str) -> None:
         self.voice_calls.append(voice)
+
+    def set_speech_timeouts(self, *, edge_s: float, commit_s: float) -> None:
+        self.timeout_calls.append((edge_s, commit_s))
+        super().set_speech_timeouts(edge_s=edge_s, commit_s=commit_s)
 
 
 class _NoUvicorn:
@@ -1819,3 +1826,140 @@ async def test_a_failed_save_puts_her_volume_back_everywhere(
     assert caught["settings"].audio.voice_volume == 100
     assert _SilentSpeaker.instances[0].volume_calls == [60, 100]
     assert page_sees == 100
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "initial_commit", "expected"),
+    [
+        ("speech_edge_s", 2.0, 0.0, (2.0, 0.0)),
+        ("speech_commit_s", 3.0, 0.0, (1.0, 3.0)),
+        ("speech_commit_s", 0.0, 3.0, (1.0, 0.0)),
+    ],
+)
+async def test_panel_speech_timeouts_apply_and_persist_without_reconnecting(
+    duplex_panel_box: tuple[Path, dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+    field_name: str,
+    value: float,
+    initial_commit: float,
+    expected: tuple[float, float],
+) -> None:
+    """Both controls reach the existing adapter and are saved to the active profile."""
+    from bilisama.config.persist import TomlConfigWriter
+    from bilisama.ui.events import ClientEvent
+
+    config_path, caught = duplex_panel_box
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "reply_hold_ms = 0\n", f"reply_hold_ms = 0\nspeech_commit_s = {initial_commit}\n"
+        ),
+        encoding="utf-8",
+    )
+    task = await _start_panel_director(config_path, caught)
+    duplex = _OfflineDuplex.instances[-1]
+    path = f"speech.volcano_duplex.{field_name}"
+    try:
+        capsys.readouterr()
+        await caught["handlers"][ClientEvent.PANEL_SET]({"config": {"path": path, "value": value}})
+        printed = capsys.readouterr().out
+        cfg = caught["settings"].speech.volcano_duplex
+        assert (cfg.speech_edge_s, cfg.speech_commit_s) == expected
+        assert duplex.timeout_calls == [expected]
+        assert (duplex._speech_edge_s, duplex._speech_commit_s) == expected
+        assert duplex.lifecycle_calls == ["connect"], "修改计时不应重连或暂停语音链路"
+        assert len(_OfflineDuplex.instances) == 1
+        written = TomlConfigWriter(config_path, caught["settings"]).target_for(path)
+        assert written != config_path
+        saved = tomllib.loads(written.read_text(encoding="utf-8"))
+        assert saved["speech"]["volcano_duplex"][field_name] == value
+        assert "已保存并生效" in printed
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"), [("speech_commit_s", 1.0), ("speech_edge_s", 3.0)]
+)
+async def test_panel_speech_timeouts_reject_conflicting_values_before_touching_the_link(
+    duplex_panel_box: tuple[Path, dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+    field_name: str,
+    value: float,
+) -> None:
+    """Either control must preserve commit > edge before applying or saving anything."""
+    from bilisama.config.persist import TomlConfigWriter
+    from bilisama.ui.events import ClientEvent
+
+    config_path, caught = duplex_panel_box
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "reply_hold_ms = 0\n", "reply_hold_ms = 0\nspeech_commit_s = 3.0\n"
+        ),
+        encoding="utf-8",
+    )
+    task = await _start_panel_director(config_path, caught)
+    duplex = _OfflineDuplex.instances[-1]
+    path = f"speech.volcano_duplex.{field_name}"
+    written = TomlConfigWriter(config_path, caught["settings"]).target_for(path)
+    before = written.read_bytes() if written.exists() else None
+    try:
+        capsys.readouterr()
+        await caught["handlers"][ClientEvent.PANEL_SET]({"config": {"path": path, "value": value}})
+        printed = capsys.readouterr().out
+        cfg = caught["settings"].speech.volcano_duplex
+        assert (cfg.speech_edge_s, cfg.speech_commit_s) == (1.0, 3.0)
+        assert duplex.timeout_calls == []
+        assert (duplex._speech_edge_s, duplex._speech_commit_s) == (1.0, 3.0)
+        assert duplex.lifecycle_calls == ["connect"]
+        after = written.read_bytes() if written.exists() else None
+        assert after == before
+        assert "强制结束输入的等待时间必须长于本地收尾时间" in printed
+        assert "已保存并生效" not in printed
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "attempted"),
+    [("speech_edge_s", 2.0, (2.0, 0.0)), ("speech_commit_s", 3.0, (1.0, 3.0))],
+)
+async def test_failed_timeout_save_restores_the_running_adapter_and_settings(
+    duplex_panel_box: tuple[Path, dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    value: float,
+    attempted: tuple[float, float],
+) -> None:
+    """A failed durable write must undo the synchronous timeout setter as well."""
+    from bilisama.config.persist import ConfigWriteError, TomlConfigWriter
+    from bilisama.ui.events import ClientEvent
+
+    def full_disk(self: TomlConfigWriter, field_path: str, value: Any) -> Path:
+        raise ConfigWriteError("配置保存失败：磁盘满了")
+
+    monkeypatch.setattr(TomlConfigWriter, "write", full_disk)
+    config_path, caught = duplex_panel_box
+    task = await _start_panel_director(config_path, caught)
+    duplex = _OfflineDuplex.instances[-1]
+    path = f"speech.volcano_duplex.{field_name}"
+    written = TomlConfigWriter(config_path, caught["settings"]).target_for(path)
+    before = written.read_bytes() if written.exists() else None
+    try:
+        capsys.readouterr()
+        await caught["handlers"][ClientEvent.PANEL_SET]({"config": {"path": path, "value": value}})
+        printed = capsys.readouterr().out
+        cfg = caught["settings"].speech.volcano_duplex
+        assert (cfg.speech_edge_s, cfg.speech_commit_s) == (1.0, 0.0)
+        assert duplex.timeout_calls == [attempted, (1.0, 0.0)]
+        assert (duplex._speech_edge_s, duplex._speech_commit_s) == (1.0, 0.0)
+        assert duplex.lifecycle_calls == ["connect"]
+        after = written.read_bytes() if written.exists() else None
+        assert after == before
+        assert "没改成" in printed and "磁盘满了" in printed
+        assert "已保存并生效" not in printed
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

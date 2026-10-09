@@ -433,7 +433,18 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     # One guard for both volcano rules. They used to be two adjacent `if`s on
     # the same condition with nothing between them.
     if s.speech.provider is ProviderName.VOLCANO_DUPLEX:
-        problems += duplex_voice_problems(s.speech.volcano_duplex.voice)
+        duplex = s.speech.volcano_duplex
+        problems += duplex_voice_problems(duplex.voice)
+        if 0 < duplex.speech_commit_s <= duplex.speech_edge_s:
+            problems.append(
+                ConfigProblem(
+                    field="speech.volcano_duplex.speech_commit_s",
+                    message="强制结束输入的等待时间必须长于本地收尾时间。",
+                    fix=(
+                        "设为 0 关闭强制结束输入，或设为大于 " f"{duplex.speech_edge_s:g} 秒的值。"
+                    ),
+                )
+            )
     if s.speech.provider is ProviderName.VOLCANO:
         problems += volcano_voice_problems(s.speech.volcano.model, s.speech.volcano.speaker)
 

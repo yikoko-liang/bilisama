@@ -529,3 +529,14 @@ def test_the_duplex_skip_without_cancel_comes_from_config_and_ships_on() -> None
     )
     assert isinstance(built.link, DuplexLink)
     assert built.link._skip_without_cancel is False
+
+
+@pytest.mark.parametrize("seconds", [0.0, 4.5])
+def test_the_duplex_remote_commit_comes_from_config(seconds: float) -> None:
+    settings = _settings(provider=ProviderName.VOLCANO_DUPLEX)
+    settings.speech.volcano_duplex.speech_commit_s = seconds
+    built = build_link(
+        _request(ProviderName.VOLCANO_DUPLEX, settings=settings, env={"volcano_api_key": "k"})
+    )
+    assert isinstance(built.link, DuplexLink)
+    assert built.link._speech_commit_s == seconds

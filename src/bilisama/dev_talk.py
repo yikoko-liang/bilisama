@@ -2569,6 +2569,17 @@ async def run_director(args: argparse.Namespace) -> int:
                     if broker is not None:
                         broker.flush()
             return True
+        if path in {
+            "speech.volcano_duplex.speech_edge_s",
+            "speech.volcano_duplex.speech_commit_s",
+        } and isinstance(inner, DuplexLink):
+            # Both deadlines must change together; the same hook restores
+            # them if persisting the edited value fails.
+            inner.set_speech_timeouts(
+                edge_s=settings.speech.volcano_duplex.speech_edge_s,
+                commit_s=settings.speech.volcano_duplex.speech_commit_s,
+            )
+            return True
         if path == "speech.volcano_duplex.reply_hold_ms" and isinstance(inner, DuplexLink):
             # Read at each turn start inside the adapter, so a setter is the
             # whole hook. Same shape as the volcano speaker arm below.

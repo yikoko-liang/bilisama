@@ -785,7 +785,7 @@ export function createPanel({ send }) {
 
   // Which badge a frozen row wears; live rows get an editor instead.
   const RELOAD_BADGE = { reconnect: "重连生效", engine: "重启引擎", restart: "重启生效" };
-  const CONFIG_NOTE = "亮着的控件直播中能改，只管本场；带徽章的行要到标注的时机才生效。";
+  const CONFIG_NOTE = "亮着的控件直播中能改，是否保存以操作后的提示为准；带徽章的行要到标注的时机才生效。";
 
   let configReloadTimer = null;
   let configRetryTimer = null;

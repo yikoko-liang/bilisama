@@ -652,17 +652,30 @@ UI_META: dict[str, FieldMeta] = {
         order=5,
     ),
     "speech.volcano_duplex.speech_edge_s": FieldMeta(
-        label="转写和麦克风都安静多久算说完（秒）",
+        label="麦克风安静多久后本地收尾（秒）",
         hint=(
-            "万一端点没发「主播说完了」那一帧，等多久之后我们自己替她判说完。转写来一段、"
-            "或者麦克风有一帧声音，都会让倒计时重新开始，所以主播还在说就不会被切开。"
-            "小了漏帧后她接得快；主播一句话中间不出声地停超过它，会先被判说完。出厂 1 秒"
+            "默认 1 秒。服务端还没判断说完时，麦克风连续安静这么久，本地先收尾；"
+            "迟到的转写不会延长等待。这里只结束本地等待，不要求服务端强制切句。"
+            "修改立即按已过去的停声时长重算，调短后可能立刻收尾；本轮已收尾就不会重新打开"
         ),
         provider_scoped="volcano_duplex",
         audience=Audience.OPERATOR,
-        reload=Reload.RECONNECT,
+        reload=Reload.LIVE,
         group="火山全双工",
         order=7,
+    ),
+    "speech.volcano_duplex.speech_commit_s": FieldMeta(
+        label="麦克风安静多久后请求服务端结束输入（秒）",
+        hint=(
+            "默认 0，关闭；直接填秒数即可开启，须大于本地收尾时间。"
+            "麦克风连续安静这么久、服务端仍未结束输入时，请求强制结束，可能把思考时的停顿切成两句话。"
+            "修改立即按已过去的停声时长重算，调短后可能立刻请求；不会重新打开本地已收尾的本轮"
+        ),
+        provider_scoped="volcano_duplex",
+        audience=Audience.OPERATOR,
+        reload=Reload.LIVE,
+        group="火山全双工",
+        order=8,
     ),
     "speech.volcano_duplex.reply_hold_ms": FieldMeta(
         label="回复先扣多少毫秒再放",
@@ -675,7 +688,7 @@ UI_META: dict[str, FieldMeta] = {
         audience=Audience.OPERATOR,
         reload=Reload.LIVE,
         group="火山全双工",
-        order=8,
+        order=9,
     ),
     "speech.volcano_duplex.skip_without_cancel": FieldMeta(
         label="拦下她时不发取消",
@@ -689,7 +702,7 @@ UI_META: dict[str, FieldMeta] = {
         audience=Audience.OPERATOR,
         reload=Reload.LIVE,
         group="火山全双工",
-        order=9,
+        order=10,
     ),
     "speech.volcano_duplex.loudness": FieldMeta(
         label="音量",

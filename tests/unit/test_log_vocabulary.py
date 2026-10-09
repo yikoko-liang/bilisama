@@ -83,6 +83,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         "duplex.reply_hold_dropped",
         "duplex.events_pulled",
         "duplex.frame_handler_failed",
+        "duplex.input_committed",
+        "duplex.input_commit_failed",
         "duplex.pull_without_call_id",
         "duplex.reconnect_failed",
         "duplex.reply_requested",

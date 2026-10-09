@@ -694,10 +694,9 @@ async def test_the_transcript_deltas_go_up_as_increments_not_as_restatements() -
 async def test_a_transcript_that_never_closes_still_hands_the_floor_back() -> None:
     """A start with no end wedges the gate shut for the rest of the session.
 
-    `SpeechStopped` is the only thing that clears `streamer_speaking`
-    (floor.py:97), and on this protocol its only source is the transcriber's
-    completed frame — every other provider has a VAD edge that does not depend
-    on transcription. A live session on 2026-09-17 went without that frame
+    `SpeechStopped` clears `streamer_speaking` (floor.py:97). The endpoint's
+    transcriber may never send its completed frame; local audio silence must
+    still release the floor. A live session on 2026-09-17 went without that frame
     and she answered nothing afterwards, every intent gated
     `gate.host_speaking`. Whether the endpoint lost it or a reply we pushed
     mid-line abandoned the item is still to be verified (2026-10-05 probes:
@@ -711,6 +710,7 @@ async def test_a_transcript_that_never_closes_still_hands_the_floor_back() -> No
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我说到一半")
             await _next(events, link.SpeechStarted)
             await clock.advance(4.0)
@@ -732,9 +732,11 @@ async def test_a_real_ending_cancels_the_backstop() -> None:
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear("说完了")
             await _next(events, link.SpeechStopped)
             await clock.advance(10.0)
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("下一句")
             await _next(events, link.SpeechStarted)
             # Only ONE stopped may be in flight: the first turn's backstop must
@@ -748,14 +750,14 @@ async def test_a_real_ending_cancels_the_backstop() -> None:
             await duplex.aclose()
 
 
-async def test_speech_edges_come_off_the_transcriber() -> None:
-    """There is no input_audio_buffer.speech_started on this protocol; the
-    floor would never close for a client that waited for one."""
+async def test_asr_confirms_speech_while_audio_is_active() -> None:
+    """ASR confirms current audio activity without requiring a provider VAD event."""
     async with MockDuplexServer() as server:
         duplex = _link(server)
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear("在这里")
             await _next(events, link.SpeechStarted)
             first = await _next(events, link.UserTranscriptDelta)
@@ -799,12 +801,7 @@ def test_dialog_context_only_rides_when_it_can_work() -> None:
 
 
 async def test_a_long_sentence_keeps_pushing_the_backstop_out() -> None:
-    """The backstop counts quiet since the last delta, not time since the
-    start — otherwise it cuts the streamer off mid-thought.
-
-    Timing it from the start is what made a lost ending cost a flat twenty
-    seconds of her ignoring everything, three or four times per five minutes.
-    """
+    """Continued sound resets the timeout even when one item lasts a long time."""
     from bilisama.clock import FakeClock
 
     clock = FakeClock()
@@ -813,12 +810,14 @@ async def test_a_long_sentence_keeps_pushing_the_backstop_out() -> None:
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我")
             await _next(events, link.SpeechStarted)
-            # Still talking: a delta every two seconds for ten seconds, which
-            # a start-relative deadline would have cut off three times over.
+            # Sound and words continue every two seconds for ten seconds;
+            # a deadline measured from the first sound would cut this off.
             for i in range(5):
                 await clock.advance(2.0)
+                await duplex.push_audio(b"\x10\x00" * 320)
                 await server.still_hearing("我" + "说" * (i + 1))
                 await asyncio.sleep(0.02)
             pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
@@ -850,14 +849,16 @@ async def test_talking_on_past_the_backstop_reopens_the_turn() -> None:
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("今天我们打")
             await _next(events, link.SpeechStarted)
             await clock.advance(4.0)
             first = await _next(events, link.UserTranscriptDone)
             assert first.text == "今天我们打"
 
-            # He never stopped; the transcriber picks up where it was, still
-            # cumulative, and then finally closes.
+            # He resumes after a pause, and the same ASR item continues.
+            # Fresh audio, not the cumulative text, permits another start.
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.still_hearing("今天我们打算打几把游戏")
             # Still talking, so the turn must be open again.
             await _next(events, link.SpeechStarted)
@@ -1213,6 +1214,7 @@ async def test_a_line_restarted_after_our_reply_stays_one_line() -> None:
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("大家好今天我们聊")
             await _next(events, link.SpeechStarted)
             await duplex.request_reply(link.ReplySpec(text="都这个点了还不睡"))
@@ -1253,8 +1255,8 @@ async def test_sound_on_the_uplink_holds_the_backstop_open() -> None:
     recorded streamer, up to 1.0 s in synthetic monologues). Timed on
     deltas alone, the backstop split his line and handed the floor to a
     proactive topic mid-sentence. A frame the noise
-    gate let through is him still making sound, so it restarts the same
-    countdown a delta does — one setting, no second ceiling."""
+    gate let through is still sound, so it restarts the silence countdown
+    independently of delayed transcription."""
     from bilisama.clock import FakeClock
 
     clock = FakeClock()
@@ -1265,6 +1267,7 @@ async def test_sound_on_the_uplink_holds_the_backstop_open() -> None:
         voiced = b"\x10\x00" * 320
         silent = bytes(640)
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我")
             await _next(events, link.SpeechStarted)
             for _ in range(6):  # six seconds with no delta, but sound throughout
@@ -1280,6 +1283,480 @@ async def test_sound_on_the_uplink_holds_the_backstop_open() -> None:
                 await clock.advance(1.0)
                 await asyncio.sleep(0.01)
             await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()
+
+
+# ------------------------------------------------------------ audio owns the local speech edges
+
+
+async def test_audio_without_asr_still_closes_the_local_turn() -> None:
+    """The silence monitor must start before the first transcript is available."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await clock.advance(0)
+            started = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(
+                isinstance(e, link.SpeechStarted) for e in started
+            ), "通过噪声门的声音本身不能立即打断豆腐"
+            await clock.advance(0.99)
+            assert duplex._events.empty(), "静音还不到一秒就结束了"
+            await duplex.push_audio(bytes(640))
+            await clock.advance(0.02)
+            ended = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert (
+                sum(isinstance(e, link.SpeechStopped) for e in ended) == 1
+            ), "没有转写也要在实际声音停止一秒后结束本地轮次"
+            assert not any(isinstance(e, link.UserTranscriptDone) for e in ended)
+            await clock.advance(5.0)
+            assert duplex._events.empty(), "同一段静音不能重复结束轮次"
+        finally:
+            await duplex.aclose()
+
+
+async def test_first_asr_arriving_eight_seconds_late_only_updates_captions() -> None:
+    """The 2026-10-08 trace had no ASR until eight seconds after sound ended."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await clock.advance(1.01)
+            stopped = await _drain_until(events, link.SpeechStopped)
+            assert [type(e) for e in stopped] == [link.SpeechStopped]
+            await clock.advance(7.0)
+            sentence = "有的时候可能很久"
+            await server.hear_without_ending(sentence)
+            await _settles(lambda: duplex._asr_text == sentence, "迟来的首条转写没更新字幕")
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert pending and all(
+                isinstance(e, link.UserTranscriptDelta) for e in pending
+            ), "首条转写晚到时只能补字幕，不能重新占用话筒"
+            revisions = [e for e in pending if isinstance(e, link.UserTranscriptDelta)]
+            assert revisions[-1].whole == sentence
+            assert {e.line_id for e in revisions} == {server.items[0]}
+            await clock.advance(1.5)
+            assert duplex._events.empty(), "迟到的首条转写又启动了一轮停声计时"
+            await server.hear_tail(sentence + "。")
+            finished = await _drain_until(events, link.UserTranscriptDone)
+            assert len(finished) == 1
+            done = finished[0]
+            assert isinstance(done, link.UserTranscriptDone)
+            assert (done.line_id, done.text) == (server.items[0], sentence + "。")
+            await clock.advance(2.0)
+            assert duplex._events.empty(), "迟来的 completed 重复发出了停声事件"
+        finally:
+            await duplex.aclose()
+
+
+async def test_late_asr_does_not_extend_the_audio_silence_deadline() -> None:
+    """A delayed transcript describes old sound; it is not fresh microphone activity."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear_without_ending("刚才")
+            await _heard(events, "刚才")
+            await clock.advance(0.8)
+            await server.still_hearing("刚才说完了")
+            await _heard(events, "刚才说完了")
+            await clock.advance(0.21)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert any(
+                isinstance(e, link.SpeechStopped) for e in pending
+            ), "迟来的转写把一秒静音兜底往后推了"
+        finally:
+            await duplex.aclose()
+
+
+@pytest.mark.parametrize("late_started", [False, True], ids=["delta", "started-then-delta"])
+async def test_late_asr_updates_the_row_without_reopening_speech(late_started: bool) -> None:
+    """Subtitle corrections after local silence must not interrupt a new reply."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear_without_ending("这句")
+            first = await _heard(events, "这句")
+            await clock.advance(1.01)
+            await _next(events, link.SpeechStopped)
+            ws = server._ws
+            assert ws is not None
+            if late_started:
+                await server._send(
+                    ws,
+                    {
+                        "type": "conversation.item.input_audio_transcription.started",
+                        "item_id": server.items[0],
+                    },
+                )
+            await server.still_hearing("这句早就说完了")
+            pending = await _drain_until(events, link.UserTranscriptDelta)
+            assert not any(
+                isinstance(e, link.SpeechStarted) for e in pending
+            ), "静音后的旧转写不该重新占住话筒或打断豆腐"
+            revisions = [e for e in pending if isinstance(e, link.UserTranscriptDelta)]
+            assert [(e.line_id, e.whole) for e in revisions] == [(first.line_id, "这句早就说完了")]
+        finally:
+            await duplex.aclose()
+
+
+async def test_old_completion_does_not_close_a_new_audio_segment() -> None:
+    """The previous ASR item can finish while new sound has no item id yet."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear_without_ending("第一段")
+            first = await _heard(events, "第一段")
+            await clock.advance(1.01)
+            await _next(events, link.SpeechStopped)
+            await duplex.push_audio(b"\x20\x00" * 320)
+            await clock.advance(0)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(isinstance(e, link.SpeechStopped) for e in pending)
+            ws = server._ws
+            assert ws is not None
+            await server._send(ws, server._completed(server.items[0], "第一段。"))
+            done = await _next(events, link.UserTranscriptDone)
+            assert (done.line_id, done.text) == (first.line_id, "第一段。")
+            await clock.advance(0.5)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(
+                isinstance(e, link.SpeechStopped) for e in pending
+            ), "上一段的 completed 把仍在进行的新音频段关掉了"
+            await clock.advance(0.51)
+            await _next(events, link.SpeechStopped)
+        finally:
+            await duplex.aclose()
+
+
+async def test_old_asr_item_can_correct_its_row_after_the_next_item_starts() -> None:
+    """Late subtitles belong to the original row, not whichever item is newest."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear_without_ending("前面那句话")
+            first = await _heard(events, "前面那句话")
+            await clock.advance(1.01)
+            await _next(events, link.SpeechStopped)
+            await duplex.push_audio(b"\x20\x00" * 320)
+            await server.hear_without_ending("现在换个话题")
+            second = await _heard(events, "现在换个话题")
+            assert second.line_id != first.line_id
+            ws = server._ws
+            assert ws is not None
+            await server._send(ws, server._delta(server.items[0], "前面那句话补上标点。"))
+            revision = await _next(events, link.UserTranscriptDelta)
+            assert (revision.line_id, revision.whole) == (
+                first.line_id,
+                "前面那句话补上标点。",
+            )
+            await server._send(ws, server._completed(server.items[0], "前面那句话补上标点。"))
+            done = await _next(events, link.UserTranscriptDone)
+            assert (done.line_id, done.text) == (first.line_id, "前面那句话补上标点。")
+            await clock.advance(0.5)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert not any(isinstance(e, link.SpeechStopped) for e in pending)
+        finally:
+            await duplex.aclose()
+
+
+async def test_continuous_audio_resets_the_local_timeout_without_any_asr() -> None:
+    """A slow transcriber must neither disable the timer nor cut through fresh sound."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            for _ in range(8):
+                await clock.advance(0.75)
+                await duplex.push_audio(b"\x10\x00" * 320)
+                pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+                assert not any(
+                    isinstance(e, link.SpeechStopped) for e in pending
+                ), "连续声音没有重置停声计时"
+                assert not any(isinstance(e, link.SpeechStarted) for e in pending)
+            await clock.advance(0.99)
+            assert duplex._events.empty()
+            await clock.advance(0.02)
+            pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
+            assert sum(isinstance(e, link.SpeechStopped) for e in pending) == 1
+        finally:
+            await duplex.aclose()
+
+
+async def test_replaced_item_cannot_overwrite_the_newer_transcript_for_the_same_row() -> None:
+    """A re-transcribed item owns the shared row; the replaced item is stale."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear_without_ending("大家好今天我们聊")
+            first = await _heard(events, "大家好今天我们聊")
+            await server.hear_without_ending("大家好今天我们聊新版本")
+            second = await _heard(events, "大家好今天我们聊新版本")
+            assert second.line_id == first.line_id, "重读同一句应当更新原字幕行"
+            ws = server._ws
+            assert ws is not None
+            await server._send(ws, server._delta(server.items[0], "大家好今天我们聊。"))
+            await server._send(ws, server._completed(server.items[0], "大家好今天我们聊。"))
+            await server.still_hearing("大家好今天我们聊新版本更新")
+            pending = await _drain_until(events, link.UserTranscriptDelta)
+            revisions = [e for e in pending if isinstance(e, link.UserTranscriptDelta)]
+            assert [(e.line_id, e.whole) for e in revisions] == [
+                (first.line_id, "大家好今天我们聊新版本更新")
+            ], "旧 item 的短字幕覆盖了同一行已经扩展的新字幕"
+            assert not any(isinstance(e, link.UserTranscriptDone) for e in pending)
+            assert not any(isinstance(e, link.SpeechStopped) for e in pending)
+        finally:
+            await duplex.aclose()
+
+
+# ------------------------------------------------------------ optional remote endpoint fallback
+
+
+async def test_remote_speech_commit_is_disabled_by_default() -> None:
+    """The local timeout must not silently opt a session into forced endpointing."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0)
+        await duplex.connect()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await clock.advance(30.0)
+            await duplex.push_audio(bytes(640))
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == 2,
+                "服务端没收到静音帧",
+            )
+            assert server.recorded.count("input_audio_buffer.commit") == 0
+        finally:
+            await duplex.aclose()
+
+
+async def test_remote_speech_commit_fires_once_after_its_own_silence_window() -> None:
+    """Local floor release and remote forced endpointing have separate deadlines."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0, speech_commit_s=3.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await clock.advance(1.01)
+            await _next(events, link.SpeechStopped)
+            assert server.recorded.count("input_audio_buffer.commit") == 0
+            await clock.advance(1.98)
+            assert server.recorded.count("input_audio_buffer.commit") == 0
+            await clock.advance(0.02)
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.commit") == 1,
+                "静音满三秒后没有发送强制判停",
+            )
+            await clock.advance(30.0)
+            await duplex.push_audio(bytes(640))
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == 2,
+                "服务端没收到后续静音帧",
+            )
+            assert (
+                server.recorded.count("input_audio_buffer.commit") == 1
+            ), "持续静音期间不能反复强制判停"
+        finally:
+            await duplex.aclose()
+
+
+async def test_new_sound_restarts_the_remote_commit_deadline() -> None:
+    """Old quiet time must not be charged to a sentence that just resumed."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0, speech_commit_s=3.0)
+        await duplex.connect()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await clock.advance(2.5)
+            await duplex.push_audio(b"\x20\x00" * 320)
+            await clock.advance(0.6)
+            await duplex.push_audio(bytes(640))
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == 3,
+                "服务端没收到第二段之后的静音帧",
+            )
+            assert (
+                server.recorded.count("input_audio_buffer.commit") == 0
+            ), "新声音到来后仍用了上一段的提交期限"
+            await clock.advance(2.41)
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.commit") == 1,
+                "新一段静音满三秒后没有提交",
+            )
+        finally:
+            await duplex.aclose()
+
+
+async def test_natural_asr_completion_cancels_the_remote_commit() -> None:
+    """A completed backend item needs no later forced endpoint."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0, speech_commit_s=3.0)
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear("这句正常结束")
+            await _next(events, link.UserTranscriptDone)
+            await clock.advance(10.0)
+            await duplex.push_audio(bytes(640))
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == 2,
+                "服务端没收到自然结束之后的静音帧",
+            )
+            assert server.recorded.count("input_audio_buffer.commit") == 0
+        finally:
+            await duplex.aclose()
+
+
+@pytest.mark.parametrize("change", ["new-audio", "completed"])
+async def test_remote_commit_is_rechecked_after_waiting_for_the_send_lock(change: str) -> None:
+    """A commit waiting behind another send may be obsolete before it reaches the wire."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(server, clock=clock, speech_edge_s=1.0, speech_commit_s=3.0)
+        await duplex.connect()
+        events = duplex.events()
+        audio_task: asyncio.Task[None] | None = None
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await server.hear_without_ending("第一段")
+            await _heard(events, "第一段")
+            await duplex._send_lock.acquire()
+            try:
+                await clock.advance(3.01)
+                # Clear the local timeout's events before injecting a later completion.
+                for _ in range(duplex._events.qsize()):
+                    duplex._events.get_nowait()
+                assert server.recorded.count("input_audio_buffer.commit") == 0
+                if change == "new-audio":
+                    audio_task = asyncio.create_task(duplex.push_audio(b"\x20\x00" * 320))
+                    await clock.advance(0)
+                else:
+                    ws = server._ws
+                    assert ws is not None
+                    await server._send(ws, server._completed(server.items[0], "第一段。"))
+                    await _next(events, link.UserTranscriptDone)
+            finally:
+                duplex._send_lock.release()
+            if audio_task is not None:
+                await audio_task
+            await duplex.push_audio(bytes(640))
+            expected_appends = 3 if change == "new-audio" else 2
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == expected_appends,
+                "发送锁释放后静音帧没到服务端",
+            )
+            assert (
+                server.recorded.count("input_audio_buffer.commit") == 0
+            ), "等待发送锁期间已发生新声音或自然结束，过期提交仍然发了出去"
+        finally:
+            if audio_task is not None and not audio_task.done():
+                audio_task.cancel()
+                await asyncio.gather(audio_task, return_exceptions=True)
+            await duplex.aclose()
+
+
+@pytest.mark.parametrize("reconnect", [False, True], ids=["pause-resume", "socket-reconnect"])
+async def test_remote_commit_does_not_survive_the_session_that_armed_it(reconnect: bool) -> None:
+    """An old silence deadline must not commit a newly opened backend session."""
+    from bilisama.clock import FakeClock
+
+    clock = FakeClock()
+    async with MockDuplexServer() as server:
+        duplex = _link(
+            server, clock=clock, speech_edge_s=1.0, speech_commit_s=3.0, reconnect_backoff_s=0.1
+        )
+        await duplex.connect()
+        events = duplex.events()
+        try:
+            await duplex.push_audio(b"\x10\x00" * 320)
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == 1,
+                "服务端没收到第一段音频",
+            )
+            await clock.advance(0.5)
+            if reconnect:
+                await server.drop()
+                await _next(events, link.LinkDown)
+                await clock.advance(0.2)
+                await _next(events, link.LinkUp)
+            else:
+                await duplex.suspend()
+                await duplex.resume()
+            assert server.connections == 2
+            await clock.advance(10.0)
+            await duplex.push_audio(bytes(640))
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.append") == 2,
+                "新连接没有收到静音帧",
+            )
+            assert (
+                server.recorded.count("input_audio_buffer.commit") == 0
+            ), "旧连接的静音计时器向新连接发送了提交"
+            await duplex.push_audio(b"\x20\x00" * 320)
+            await clock.advance(3.01)
+            await _settles(
+                lambda: server.recorded.count("input_audio_buffer.commit") == 1,
+                "新连接的音频没有重新启动提交计时",
+            )
         finally:
             await duplex.aclose()
 
@@ -1311,6 +1788,7 @@ async def test_pausing_mid_line_finishes_the_line_and_hands_the_floor_back() -> 
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我先暂停一下")
             await _next(events, link.SpeechStarted)
             await _heard(events, "我先暂停一下")
@@ -1335,11 +1813,13 @@ async def test_after_resume_his_next_line_opens_a_turn_and_a_row_of_its_own() ->
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我们接着看这一关")
             await _next(events, link.SpeechStarted)
             before = await _heard(events, "我们接着看这一关")
             await duplex.suspend()
             await duplex.resume()
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我们接着看这一关的boss")
             await _next(events, link.SpeechStarted)
             after = await _heard(events, "我们接着看这一关的boss")
@@ -1363,6 +1843,7 @@ async def test_a_dropped_socket_ends_his_line_before_it_reports_the_drop() -> No
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("网络好像卡了")
             await _next(events, link.SpeechStarted)
             await _heard(events, "网络好像卡了")
@@ -1389,6 +1870,7 @@ async def test_a_polite_close_from_the_server_is_still_a_drop(code: int) -> None
         await duplex.connect()
         events = duplex.events()
         try:
+            await duplex.push_audio(b"\x10\x00" * 320)
             await server.hear_without_ending("我说到一半")
             await _next(events, link.SpeechStarted)
             await _heard(events, "我说到一半")
@@ -1633,11 +2115,12 @@ async def test_pausing_while_her_turn_runs_out_settles_it_without_a_cancel() -> 
 
 
 @pytest.mark.parametrize("skip_without_cancel", [False, True])
-async def test_only_the_cancel_scrambles_his_next_line(skip_without_cancel: bool) -> None:
-    """The fake's `scramble_after_cancel` replays what the real endpoint did
-    after a cancel on a real streamer recording (2026-10-05, 8 of 8): an item
-    opens at the done and never gets a word — and the floor reads it as him
-    talking. Letting the turn run out sends no cancel, so nothing opens."""
+async def test_cancel_created_asr_without_audio_does_not_take_the_floor(
+    skip_without_cancel: bool,
+) -> None:
+    """The endpoint may open an empty ASR item after cancellation (2026-10-05,
+    8 of 8 recordings). Without current sound, that item must not claim speech.
+    Letting the reply run out avoids the extra ASR item altogether."""
     async with MockDuplexServer() as server:
         server.scramble_after_cancel = True
         duplex = _link(server, skip_without_cancel=skip_without_cancel)
@@ -1651,8 +2134,8 @@ async def test_only_the_cancel_scrambles_his_next_line(skip_without_cancel: bool
             await _drain_until(events, link.ReplyDone)
             await asyncio.sleep(0.1)
             pending = [duplex._events.get_nowait() for _ in range(duplex._events.qsize())]
-            opened = any(isinstance(e, link.SpeechStarted) for e in pending)
-            assert opened is not skip_without_cancel, pending
+            assert len(server.items) == (0 if skip_without_cancel else 1)
+            assert not any(isinstance(e, link.SpeechStarted) for e in pending), pending
         finally:
             await duplex.aclose()
 
