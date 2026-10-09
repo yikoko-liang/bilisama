@@ -733,3 +733,27 @@ async def test_recorder_is_optional_and_absent_by_default() -> None:
     switch = AudioInputSwitch(sink)
     await switch.push_audio(_loud_frame())
     assert "recorded_s" not in switch.status(), "no recorder, no row in the health card"
+
+
+def test_cancelled_reply_receipts_do_not_clear_the_next_reply() -> None:
+    tally, gate, _woke = _tally()
+    tally.started(1)
+    tally.cancelled(1)
+    tally.started(2)
+    tally.ended(1)
+    tally.cancelled(1)
+    assert tally.outstanding == 1
+    assert gate[-1] is True
+    tally.ended(2)
+    assert tally.outstanding == 0
+
+
+def test_cancelling_one_reply_preserves_other_reply_audio() -> None:
+    tally, gate, _woke = _tally()
+    tally.started(1)
+    tally.started(2)
+    tally.cancelled(2)
+    assert tally.outstanding == 1
+    assert gate == [True]
+    tally.ended(1)
+    assert gate == [True, False]

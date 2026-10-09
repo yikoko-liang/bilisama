@@ -388,20 +388,35 @@ def create_ui_app(
             # The shell's preload declares itself; a plain tab cannot, which is
             # exactly the distinction we want to rank on.
             who: AudioOwner = "shell" if ws.query_params.get("role") == "shell" else "browser"
-            outbound: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=_AUDIO_QUEUE)
+            outbound: asyncio.Queue[tuple[int | None, bytes | str] | None] = asyncio.Queue(
+                maxsize=_AUDIO_QUEUE
+            )
+            sending_reply: int | None = None
+            closing = False
+
+            def enqueue(packet: tuple[int | None, bytes | str]) -> None:
+                if closing:
+                    return
+                if outbound.full():
+                    # Dropping PCM while keeping its end marker would report
+                    # a partial reply as fully played. Closing uses the same
+                    # handoff settlement as a device leaving mid-reply.
+                    log.warning("audio.output_queue_full", who=who)
+                    close()
+                    return
+                outbound.put_nowait(packet)
 
             def send(pcm: bytes) -> None:
-                # Drop the NEWEST under pressure, the opposite of the control
-                # hub. A late sample is worse than a missing one: keeping it
-                # would push everything behind it further out of time, which
-                # is the backlog this project already measured once.
-                if not outbound.full():
-                    outbound.put_nowait(pcm)
+                enqueue((sending_reply, pcm))
 
             # None through the queue is the pump's hang-up sentinel; reused
             # here so a displaced client is told to let go of its microphone
             # rather than left capturing into a socket nobody reads.
             def close() -> None:
+                nonlocal closing
+                if closing:
+                    return
+                closing = True
                 # The queue is bounded, and a page that stopped reading fills
                 # it — audio arrives faster than it plays, which is how this
                 # project once measured 106 seconds of unplayed sound inside
@@ -417,13 +432,35 @@ def create_ui_app(
                 outbound.put_nowait(None)
 
             def flush() -> None:
+                if closing:
+                    return
                 # Everything still queued belongs to the utterance that was
                 # just interrupted. The marker goes on afterwards, so by the
                 # time the page reads it, it has seen every stale sample and
                 # can drop the lot in one go.
                 while not outbound.empty():
                     outbound.get_nowait()
-                outbound.put_nowait(_CLEAR_MARKER)
+                outbound.put_nowait((None, _CLEAR_MARKER))
+
+            def marker(event: str, data: dict[str, object]) -> None:
+                nonlocal sending_reply
+                if closing:
+                    return
+                handle_id = data.get("handle_id")
+                if event == "playback.reply":
+                    sending_reply = handle_id if isinstance(handle_id, int) else None
+                if event == "playback.clear":
+                    reply_ids = data.get("reply_ids")
+                    targets = set(reply_ids) if isinstance(reply_ids, list) else set()
+                    kept = []
+                    while not outbound.empty():
+                        packet = outbound.get_nowait()
+                        if packet is not None and targets and packet[0] not in targets:
+                            kept.append(packet)
+                    for packet in kept:
+                        outbound.put_nowait(packet)
+                owner = handle_id if isinstance(handle_id, int) else None
+                enqueue((owner, json.dumps({"event": event, "data": data})))
 
             # None until claim() answers. A claim that fails partway has
             # already pointed the broker at this socket (AudioBroker.claim
@@ -440,7 +477,9 @@ def create_ui_app(
             # that lasts the whole session.
             heard_at = time.monotonic()
             try:
-                granted = await broker.claim(who, send=send, close=close, flush=flush)
+                granted = await broker.claim(
+                    who, send=send, close=close, flush=flush, marker=marker
+                )
                 if not granted:
                     # Someone stronger has the devices. Say so and hang up
                     # rather than sit on a socket nobody feeds. Nothing is
@@ -595,7 +634,9 @@ async def _fill_uplink_silence(
         dropped = await _forward_uplink(on_audio, _UPLINK_SILENCE, dropped)
 
 
-async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | str | None]) -> None:
+async def _pump_audio(
+    ws: WebSocket, queue: asyncio.Queue[tuple[int | None, bytes | str] | None]
+) -> None:
     """Move downlink PCM onto the wire until the socket goes away.
 
     Text rides the same queue as the samples so that a stop is ordered behind
@@ -603,10 +644,11 @@ async def _pump_audio(ws: WebSocket, queue: asyncio.Queue[bytes | str | None]) -
     to the control socket.
     """
     while True:
-        chunk = await queue.get()
-        if chunk is None:
+        packet = await queue.get()
+        if packet is None:
             await ws.close(code=1001)
             return
+        _handle_id, chunk = packet
         if isinstance(chunk, str):
             await ws.send_text(chunk)
             continue

@@ -91,6 +91,10 @@ class Assembly:
         max_tokens: int = 120,
         protect_ms: int = 4000,
         protect_paid: bool = False,
+        protect_danmaku: bool = _TIER_DEFAULTS.protect_danmaku_replies,
+        danmaku_protect_ms: int = _TIER_DEFAULTS.danmaku_protect_ms,
+        requeue_danmaku: bool = _TIER_DEFAULTS.requeue_danmaku_replies,
+        danmaku_requeue_percent: int = _TIER_DEFAULTS.danmaku_requeue_percent,
         variables: Mapping[str, str] | None = None,
         context_refresh_s: float = 10.0,
         clock_granularity_min: int = 1,
@@ -129,6 +133,10 @@ class Assembly:
         self._max_tokens = max_tokens
         self._protect_ms = protect_ms
         self._protect_paid = protect_paid
+        self._protect_danmaku = protect_danmaku
+        self._danmaku_protect_ms = danmaku_protect_ms
+        self._requeue_danmaku = requeue_danmaku
+        self._danmaku_requeue_percent = danmaku_requeue_percent
         self._refresh_s = context_refresh_s
         self._clock_granularity_min = clock_granularity_min
         self._selector = selector
@@ -360,6 +368,10 @@ class Assembly:
             gift_battery_medium=self._gift_battery_medium,
             base_instructions=self.build_event_context() or None,
             protect_paid=self._protect_paid,
+            protect_danmaku=self._protect_danmaku,
+            danmaku_protect_ms=self._danmaku_protect_ms,
+            requeue_danmaku=self._requeue_danmaku,
+            danmaku_requeue_percent=self._danmaku_requeue_percent,
         )
         if intent is not None:
             self.intents_submitted += 1
@@ -550,6 +562,10 @@ class Assembly:
         gift_battery_high: int | None = None,
         gift_battery_medium: int | None = None,
         protect_paid: bool | None = None,
+        protect_danmaku: bool | None = None,
+        danmaku_protect_ms: int | None = None,
+        requeue_danmaku: bool | None = None,
+        danmaku_requeue_percent: int | None = None,
     ) -> None:
         """Apply panel edits to the knobs this assembly snapshotted at build.
 
@@ -566,6 +582,14 @@ class Assembly:
             self._gift_battery_medium = gift_battery_medium
         if protect_paid is not None:
             self._protect_paid = protect_paid
+        if protect_danmaku is not None:
+            self._protect_danmaku = protect_danmaku
+        if danmaku_protect_ms is not None:
+            self._danmaku_protect_ms = danmaku_protect_ms
+        if requeue_danmaku is not None:
+            self._requeue_danmaku = requeue_danmaku
+        if danmaku_requeue_percent is not None:
+            self._danmaku_requeue_percent = danmaku_requeue_percent
 
     # ------------------------------------------------------------ health
 

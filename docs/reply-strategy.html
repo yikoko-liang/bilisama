@@ -123,7 +123,7 @@
 <header>
   <h1>一条弹幕进来之后会发生什么</h1>
   <p class="sub">BiliSama 怎么决定回不回观众、先回谁、什么时候开口、被打断了怎么办。</p>
-  <p class="muted">2026-09-30，逐条对照代码核过。行号和完整问题清单见 <code>docs/reply-strategy-map.md</code>。</p>
+  <p class="muted">2026-09-30；小额付费礼物规则更新于 2026-10-10。行号和完整问题清单见 <code>docs/reply-strategy-map.md</code>。</p>
 </header>
 
 <section>
@@ -131,7 +131,7 @@
   <div class="three">
     <div><b>每条都记，不是每条都回</b><span>弹幕、礼物、进房全部写进记忆和面板。回不回是另一回事：弹幕太多时一次只挑一条，关注和点赞从来不回。</span></div>
     <div><b>她只有一张嘴</b><span>同一时间只说一件事，其他的排队。主播在说话、她自己在说话、上一句还没播完，都不开口。</span></div>
-    <div><b>花了钱的更优先，也更耐等</b><span>SC 排第一，普通弹幕靠后。弹幕等 20 秒没轮到就作废，SC 和礼物一直等。被主播打断时，花了钱的会重说一遍，没花钱的就算了。</span></div>
+    <div><b>花了钱的更优先，也更耐等</b><span>SC 排第一，小额付费礼物仍和弹幕同档。SC、上舰和付费礼物没有普通排队有效期，被主播打断后重排；免费或金额为 0 的礼物仍有 20 秒有效期，打断后不重排。</span></div>
   </div>
 </section>
 
@@ -167,7 +167,7 @@
     <div class="stage">
       <div class="name">④ 排队<small>谁先说</small></div>
       <div class="yes"><span class="lab">大多数时候</span>分 6 档：SC → 大礼物 → 上舰 → 中礼物、贵宾进房 → 弹幕、小礼物、普通进房 → 主动找话题、戳一戳。同档先来先说。</div>
-      <div class="no"><span class="lab">没通过</span>等不到就作废：弹幕、小礼物、进房欢迎从发出算 20 秒。SC、上舰、中大礼物不会作废。</div>
+      <div class="no"><span class="lab">没通过</span>等不到就作废：弹幕、免费或金额为 0 的礼物、进房欢迎从发出算 20 秒。SC、上舰和付费礼物（含小额）没有普通排队有效期。</div>
     </div>
     <div class="down">↓</div>
     <div class="stage">
@@ -184,7 +184,7 @@
     <div class="down">↓</div>
     <div class="stage">
       <div class="name">⑦ 被打断<small>主播插话、更重要的事来了</small></div>
-      <div class="yes"><span class="lab">主播插话</span>马上切掉她的声音。花了钱的回去重新排队，等主播说完从头再说一遍；没花钱的就算了。</div>
+      <div class="yes"><span class="lab">主播插话</span>出厂设置下马上切掉她的声音。付费事件回去重新排队，等主播说完再答；普通弹幕默认不补说，可单独开启保护或一次重排。</div>
       <div class="no"><span class="lab">更重要的事来了</span>只有她还没出声时才能插队，把原来那条挤掉。她一开口，谁来都得等她说完，只有主播插话、紧急叫停、说到屏蔽词能打断。</div>
     </div>
     <div class="down">↓</div>
@@ -197,7 +197,7 @@
 
 <section>
   <h2>自己点一下试试</h2>
-  <p class="lede">选一种事件，勾上现场情况，右边会一步步告诉你这条事件走到哪、为什么。规则和上面八步一致，数字取出厂设置（话痨度「中」）。</p>
+  <p class="lede">选一种事件，勾上现场情况，右边会一步步告诉你这条事件走到哪、为什么。规则和上面八步一致，数字取出厂设置（话痨度「中」，付费和普通弹幕保护关闭、普通弹幕重排关闭），不会读取你当前的设置。这里的礼物示例均为付费礼物；小额付费礼物可重排但不保护。</p>
   <div class="sim">
     <div>
       <div class="panel">
@@ -276,7 +276,7 @@
         <li><span class="at">12 秒</span><span>主播说完。再等 0.6 秒。</span></li>
         <li><span class="at">12.6 秒</span><span class="me">从头再谢一遍 SC，把问题答完。</span></li>
       </ol>
-      <p class="moral">如果被打断的是普通弹幕，切掉就算了，不会重说。</p>
+      <p class="moral">普通弹幕出厂不补说；开启重排后可补一次，仍受原有效期限制。这里按出厂设置演示。</p>
     </article>
     <article>
       <h3>冷场了</h3>
@@ -302,15 +302,20 @@
       <tr><td>上舰</td><td>直接回</td><td class="rank">第 3 档</td><td>不作废</td><td><span class="pill ok">重说</span></td><td>舰长、提督、总督一级比一级隆重；不背会员权益</td></tr>
       <tr><td>中礼物（10~100 元）</td><td>攒一次谢</td><td class="rank">第 4 档</td><td>不作废</td><td><span class="pill ok">重说</span></td><td>比小礼物热情，念礼物名，顺着名字接个梗</td></tr>
       <tr><td>贵宾进房</td><td>直接回，每人每场一次</td><td class="rank">第 4 档</td><td>20 秒</td><td><span class="pill stop">算了</span></td><td>按等级表示重视；换着说法，不装熟，不提消费</td></tr>
-      <tr><td>弹幕</td><td>挑着回，占额度</td><td class="rank">第 5 档</td><td>20 秒（存着的不计时）</td><td><span class="pill stop">算了</span></td><td>先想清楚是跟谁说的；提问先用一句话复述再答；多人刷同一句只回共同的；自己能答就答</td></tr>
-      <tr><td>小礼物（10 元以下）</td><td>攒一次谢</td><td class="rank">第 5 档</td><td>20 秒</td><td><span class="pill stop">算了</span></td><td>轻松谢一句，接个小梗，不叫老板</td></tr>
+      <tr><td>弹幕</td><td>挑着回，占额度</td><td class="rank">第 5 档</td><td>到达后 20 秒；放行时至少再给 5 秒</td><td><span class="pill stop">默认不补说</span>，可开启一次重排</td><td>先想清楚是跟谁说的；提问先用一句话复述再答；多人刷同一句只回共同的；自己能答就答</td></tr>
+      <tr><td>小额付费礼物（10 元以下）</td><td>攒一次谢</td><td class="rank">第 5 档</td><td>无普通排队有效期</td><td><span class="pill ok">重说，不保护</span></td><td>轻松谢一句，接个小梗，不叫老板</td></tr>
+      <tr><td>免费或金额为 0 的礼物</td><td>攒一次谢</td><td class="rank">第 5 档</td><td>20 秒</td><td><span class="pill stop">算了，不保护</span></td><td>轻松谢一句，接个小梗，不叫老板</td></tr>
       <tr><td>普通进房</td><td>攒一起欢迎，占额度</td><td class="rank">第 5 档</td><td>20 秒</td><td><span class="pill stop">算了</span></td><td>一个人点名，几个人一句不点名的欢迎，不报人数</td></tr>
       <tr><td>主动找话题</td><td>冷场够久才有，占额度</td><td class="rank">第 6 档</td><td>30 秒</td><td><span class="pill stop">算了</span></td><td>文字模型提前想好的话题</td></tr>
       <tr><td>戳一戳</td><td>面板或桌宠点一下，15 秒冷却</td><td class="rank">第 6 档</td><td>8 秒</td><td><span class="pill stop">算了</span></td><td>很短一句，不写进她的对话历史</td></tr>
       <tr><td>关注、点赞、分享</td><td colspan="5">只记录、面板显示，不回。设置里的开关打开也不会说话。</td></tr>
     </tbody>
   </table>
-  <p class="muted">「付费回复保护」开关（出厂关）打开后，SC 和大礼物在开口后 4 秒内不会被主播插话切掉。本地 s2s 真能做到；DashScope 实测服务端还是会自己切；火山、duplex 没测过。</p>
+  <p class="muted">「付费答谢防打断」出厂关闭，开启后保护 SC 和高额礼物，默认 4 秒。duplex 从实际首播计时，保护本地播放；本地 s2s 还可禁止服务端打断，DashScope 已实测服务端照样会切，火山服务端行为待验证。duplex 在生成完成后被打断的小额礼物重排已于 2026-10-10 03:48 实测通过，用户确认听到第二次答谢；这不代表服务端防打断已实现。</p>
+  <h3>普通弹幕也可以单独设置</h3>
+  <p>在「系统 → 回复策略 → 普通弹幕」中，分别打开「回复开头防打断」或「被打断后重新回复」。两个开关出厂都关；保护开启后默认 2 秒，可设 0–15 秒，0 表示不保护。高级选项可调整补说概率，默认 100%，只影响重排，保护不随机。</p>
+  <p>这些设置只管已经选中的弹幕，不会让所有弹幕都入选。每条弹幕的补说资格只决定一次，最多补说一次，优先级和原有效期不变；再次被打断或等过期就放下。保存后随后创建的回复使用新值，已经排队或开口的沿用原设置。duplex 本地保护不能保证服务端继续输出。</p>
+  <p class="muted">上面的模拟器固定演示出厂设置，未模拟这些开关；免费礼物和进房欢迎不使用普通弹幕设置。操作与验收步骤见 <a href="runbook.md">runbook</a>。</p>
 </section>
 
 <section>
@@ -321,7 +326,7 @@
     <div><b>OpenAI GA</b>和 DashScope 一样等 0.6 秒，也附完整说明。插话多快被发现没量过。</div>
     <div><b>火山</b>等 1.8 秒。<b style="display:inline;color:var(--stop)">完整说明送不过去</b>，她只拿到每类事件的一句话要求（见下方问题 1）。</div>
     <div><b>火山 duplex</b>等 1.8 秒（这个数是借来的，没量过）。先让文字模型写好稿子她再念，说明书给的是写稿的模型。主播插话约 0.85 秒才被发现，比 DashScope 慢半秒，所以有个「扣住开头几百毫秒再播」的旋钮。</div>
-    <div><b>本地 s2s</b>等 1.9 秒，附完整说明。服务端自己先切她再告诉我们。唯一真能做到「付费回复不被插话切掉」的后端。</div>
+    <div><b>本地 s2s</b>等 1.9 秒，附完整说明。服务端自己先切她再告诉我们。除本地保护外，还能关闭服务端的自动打断。</div>
   </div>
 </section>
 
@@ -347,7 +352,7 @@ const EVENTS = {
   q:     { label: '提问弹幕',   ex: '阿强：主播这是什么武器？', kind: 'danmaku', sw: '弹幕', how: '先用一句话复述问题，让只听声音的人知道她在接哪条，再给出答案。' },
   chat:  { label: '闲聊弹幕',   ex: '小鱼（用户等级 12）：今天画面好清楚', kind: 'danmaku', sw: '弹幕', how: '简短说一下对方提到了什么，自然接一句。' },
   junk:  { label: '「666」',    ex: '路人：666', kind: 'danmaku', sw: '弹幕' },
-  giftS: { label: '小礼物连击', ex: '小鱼连点 10 下同一个小礼物，一共 1 元', kind: 'gift', tier: 5, sw: '礼物', how: '轻松谢一句，念礼物名，顺着名字接个小梗，不叫老板，不提价钱。' },
+  giftS: { label: '小额付费礼物', ex: '小鱼连点 10 下同一个付费小礼物，一共 1 元', kind: 'gift', tier: 5, sw: '礼物', how: '轻松谢一句，念礼物名，顺着名字接个小梗，不叫老板，不提价钱。' },
   giftM: { label: '中礼物',     ex: '小鱼送了一个 30 元的礼物', kind: 'gift', tier: 4, sw: '礼物', how: '比小礼物热情，念礼物名，顺着名字接个梗，不提价钱。' },
   giftB: { label: '大礼物',     ex: '小鱼送了一个 200 元的礼物', kind: 'gift', tier: 2, sw: '礼物', how: '惊喜、郑重地谢，念礼物名；不谄媚，不承诺回报，不提价钱。' },
   sc:    { label: 'SC',         ex: '阿强发了 30 元 SC：「主播今天几点下播？」', kind: 'sc', tier: 1, sw: 'SC', how: '先谢，再认真回答「几点下播」；这是主播的私事，交给主播本人确认。不提金额。' },
@@ -371,7 +376,7 @@ const BACKENDS = {
   duplex:    { name: '火山 duplex', quiet: 1.8, detect: '大约 0.85 秒', full: true, ghost: true },
   s2s:       { name: '本地 s2s',  quiet: 1.9, detect: '服务端自己先切', full: true },
 };
-const PAID = new Set(['sc', 'guard', 'giftM', 'giftB']);
+const PAID = new Set(['sc', 'guard', 'giftS', 'giftM', 'giftB']);
 const TIERS = '6 档：SC → 大礼物 → 上舰 → 中礼物、贵宾进房 → 弹幕、小礼物、普通进房 → 主动找话题、戳一戳';
 const QUOTA = '说话额度：弹幕、普通进房、主动找话题共用，最多攒 2 次；冷清时每 8 秒回一次，热闹时每 60 秒回一次。';
 
@@ -428,7 +433,7 @@ function simulate(key, s, bk) {
     }
   } else if (ev.kind === 'gift') {
     add('ok', '③ 攒一次谢', '连击时不是每一下都谢：停手满 1 秒后合并成一次感谢。谢完之后 10 分钟内，同一个人再送同一种礼物不再谢。礼物不占说话额度。', 'safety.py:197-312');
-    const tierName = { 5: '小礼物（10 元以下）', 4: '中礼物（10~100 元）', 2: '大礼物（100 元以上）' }[ev.tier];
+    const tierName = { 5: '小额付费礼物（10 元以下）', 4: '中礼物（10~100 元）', 2: '大礼物（100 元以上）' }[ev.tier];
     add('ok', '③ 按金额分档', `这是${tierName}。分档只用来决定排第几、说得多隆重，金额本身她看不到。`, 'intents.py:276-285');
   } else if (ev.kind === 'sc' || ev.kind === 'guard') {
     add('ok', '③ 直接回', `${ev.sw}不挑、不等窗口、不占额度，直接去排队。30 秒内同一条重复收到只算一次。${ev.kind === 'sc' ? '观众撤回的 SC，如果还在排队会被撤掉；已经在说的会说完。' : ''}`, 'app.py:324-357');

@@ -38,10 +38,12 @@ import os
 import signal
 import sys
 import threading
+import time
 import traceback
 import wave
 import zlib
 from array import array
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -736,6 +738,17 @@ class _VoiceVolume:
         return scaled.tobytes() + block[whole:]
 
 
+@dataclasses.dataclass(slots=True)
+class _LocalPlayback:
+    """The PCM still owed to one reply, including the device's final block."""
+
+    pending: int = 0
+    started: bool = False
+    finished: bool = False
+    ending: bool = False
+    end_at: float = 0.0
+
+
 class _Speaker:
     """Callback-fed playback so the event loop never blocks on audio.
 
@@ -758,6 +771,7 @@ class _Speaker:
         # Before _open(): the stream's first callback may already want it.
         self._volume = _VoiceVolume(volume)
         self._buffer = bytearray()
+        self._init_playback_reports()
         self._dropped_s = 0.0
         self._device = device
         self._lock = threading.Lock()
@@ -789,6 +803,87 @@ class _Speaker:
         self._open()
         if device is None:
             self._last_default_ca_id = _coreaudio_default_output_id()
+
+    def _init_playback_reports(self) -> None:
+        self._playback_parts: deque[tuple[int | None, int]] = deque()
+        self._playback: dict[int, _LocalPlayback] = {}
+        self._playback_settled: deque[int] = deque(maxlen=128)
+        self._playback_reports: deque[tuple[float, int, str, str]] = deque()
+
+    def _consume_playback(self, size: int, start_at: float) -> None:
+        """Attribute a device block under the PCM lock, without calling L3."""
+        offset = 0
+        while size and self._playback_parts:
+            reply_id, length = self._playback_parts.popleft()
+            taken = min(size, length)
+            if length > taken:
+                self._playback_parts.appendleft((reply_id, length - taken))
+            state = self._playback.get(reply_id) if reply_id is not None else None
+            if state is not None and reply_id is not None:
+                if not state.started:
+                    state.started = True
+                    self._playback_reports.append(
+                        (start_at + offset / (2 * _OUTPUT_RATE), reply_id, "started", "")
+                    )
+                state.pending -= taken
+                state.end_at = start_at + (offset + taken) / (2 * _OUTPUT_RATE)
+                self._finish_playback(reply_id, state)
+            size -= taken
+            offset += taken
+
+    def _finish_playback(self, reply_id: int, state: _LocalPlayback) -> None:
+        if state.finished and state.pending == 0 and not state.ending:
+            state.ending = True
+            self._playback_reports.append((state.end_at, reply_id, "ended", ""))
+
+    def _cancel_playback(self, reply_ids: set[int], reason: str) -> None:
+        now = time.monotonic()
+        cancelled = set()
+        for reply_id in reply_ids:
+            if reply_id in self._playback_settled:
+                continue
+            state = self._playback.get(reply_id)
+            if state is not None and state.finished and state.pending == 0 and state.end_at <= now:
+                # The device finished before the loop drained its receipt. A
+                # later clear must not turn that success into a paid retry.
+                continue
+            cancelled.add(reply_id)
+        self._playback_reports = deque(
+            entry for entry in self._playback_reports if entry[1] not in cancelled
+        )
+        self._playback_settled.extend(reply_ids)
+        for reply_id in cancelled:
+            self._playback.pop(reply_id, None)
+            self._playback_reports.append((now, reply_id, "cancelled", reason))
+
+    def _remove_playback_audio(self, reply_ids: set[int]) -> None:
+        kept = bytearray()
+        parts: deque[tuple[int | None, int]] = deque()
+        offset = 0
+        for reply_id, length in self._playback_parts:
+            if reply_id not in reply_ids:
+                kept.extend(self._buffer[offset : offset + length])
+                parts.append((reply_id, length))
+            offset += length
+        self._buffer = kept
+        self._playback_parts = parts
+
+    def take_playback_events(self) -> list[tuple[int, str, str]]:
+        """Drain receipts on the event loop; never invoke it from PortAudio."""
+        now = time.monotonic()
+        result: list[tuple[int, str, str]] = []
+        with self._lock:
+            pending: deque[tuple[float, int, str, str]] = deque()
+            for due, reply_id, state, reason in self._playback_reports:
+                if due > now:
+                    pending.append((due, reply_id, state, reason))
+                    continue
+                result.append((reply_id, state, reason))
+                if state == "ended":
+                    self._playback.pop(reply_id, None)
+                    self._playback_settled.append(reply_id)
+            self._playback_reports = pending
+        return result
 
     def _feed(self, outdata: Any, frames: int, time_info: Any, status: Any) -> None:
         """PortAudio callback: drain jitter-buffered PCM without touching asyncio."""
@@ -825,6 +920,15 @@ class _Speaker:
             # looks one block ahead so it can turn down before a loud word
             # instead of clipping it. The arithmetic runs after the lock.
             ahead = bytes(self._buffer[:need]) if chunk else b""
+            if chunk:
+                # PortAudio's DAC timestamp includes output latency. Do not
+                # start protection while the first block is merely queued.
+                delay = max(
+                    0.0,
+                    float(getattr(time_info, "outputBufferDacTime", 0.0))
+                    - float(getattr(time_info, "currentTime", 0.0)),
+                )
+                self._consume_playback(len(chunk), time.monotonic() + delay)
         if chunk:
             chunk = self._volume.apply(chunk, ahead)
         outdata[: len(chunk)] = chunk
@@ -902,7 +1006,7 @@ class _Speaker:
         over again.
         """
         with self._device_lock:
-            self.flush()
+            self.flush(reason="handoff")
             self._suspended = True
             stream, self._stream = self._stream, None
             if stream is not None:
@@ -1041,7 +1145,7 @@ class _Speaker:
                 return f"默认扬声器设备 {target} 已重新连接"
             return f"默认扬声器已切换到设备 {target}"
 
-    def play(self, pcm: bytes) -> None:
+    def play(self, pcm: bytes, *, handle_id: int | None = None) -> bool:
         if self._stream is None and not self._swapping:
             # Muted run (no sounddevice, or the device refused to start).
             # Buffering here would be worse than useless: nothing drains it,
@@ -1050,15 +1154,22 @@ class _Speaker:
             # is the one exception: the replacement stream drains the buffer
             # moments later, and dropping instead cut a hole mid-sentence
             # while `busy` released the floor early.
-            return
+            return False
         with self._lock:
+            if handle_id is not None and handle_id in self._playback_settled:
+                return False
             if not self._enabled:
-                return
+                return False
             # New PCM after finish_reply() belongs to the NEXT reply: without
             # this reset the previous reply's release latch let this one's
             # first network gap drain everything instead of rebuffering.
             self._reply_finished = False
             self._buffer.extend(pcm)
+            if pcm:
+                self._playback_parts.append((handle_id, len(pcm)))
+                if handle_id is not None:
+                    state = self._playback.setdefault(handle_id, _LocalPlayback())
+                    state.pending += len(pcm)
             over = len(self._buffer) - _MAX_BACKLOG_BYTES
             if over > 0:
                 # Skip forward rather than fall further behind. A co-host that
@@ -1073,6 +1184,18 @@ class _Speaker:
                 over -= over % 2
                 del self._buffer[:over]
                 self._dropped_s += over / 2.0 / _OUTPUT_RATE
+                dropped: set[int] = set()
+                while over and self._playback_parts:
+                    reply_id, length = self._playback_parts.popleft()
+                    taken = min(over, length)
+                    if length > taken:
+                        self._playback_parts.appendleft((reply_id, length - taken))
+                    if reply_id is not None:
+                        dropped.add(reply_id)
+                    over -= taken
+                self._cancel_playback(dropped, "backlog")
+                self._remove_playback_audio(dropped)
+        return bool(pcm)
 
     @property
     def backlog_s(self) -> float:
@@ -1085,24 +1208,29 @@ class _Speaker:
         """Seconds skipped to stay current. Nonzero means the gate leaked."""
         return self._dropped_s
 
-    def flush(self) -> None:
+    def flush(self, *, reply_ids: tuple[int, ...] = (), reason: str = "barge_in") -> None:
         with self._lock:
-            self._buffer.clear()
-            self._primed = False
-            self._reply_finished = False
+            targets = set(reply_ids) if reply_ids else set(self._playback)
+            self._cancel_playback(targets, reason)
+            if not reply_ids:
+                self._buffer.clear()
+                self._playback_parts.clear()
+            else:
+                self._remove_playback_audio(targets)
+            if not self._buffer:
+                self._primed = False
+                self._reply_finished = False
 
-    def finish_reply(self) -> None:
-        """Release a sub-preroll final packet once generation has completed.
-
-        Unconditionally latched: the client's tombstones guarantee no same-
-        reply audio follows ReplyDone, and play() resets the latch the moment
-        the NEXT reply's PCM arrives — so a stray True can only ever release
-        audio early, never hold it hostage.
-        """
+    def finish_reply(self, *, handle_id: int | None = None) -> None:
+        """Release the final packet, then await its actual device playback."""
         with self._lock:
             self._reply_finished = True
             if not self._buffer:
                 self._primed = False
+            state = self._playback.get(handle_id) if handle_id is not None else None
+            if state is not None and handle_id is not None:
+                state.finished = True
+                self._finish_playback(handle_id, state)
 
     @property
     def enabled(self) -> bool:
@@ -1122,10 +1250,8 @@ class _Speaker:
         """Enable playback; disabling also stops already-buffered speech."""
         with self._lock:
             self._enabled = enabled
-            if not enabled:
-                self._buffer.clear()
-                self._primed = False
-                self._reply_finished = False
+        if not enabled:
+            self.flush(reason="output_disabled")
 
     def status(self) -> dict[str, object]:
         """Expose playback continuity counters for the health panel."""
@@ -1157,7 +1283,9 @@ class _Speaker:
     @property
     def busy(self) -> bool:
         with self._lock:
-            return len(self._buffer) > 0
+            return bool(self._buffer) or any(
+                state.end_at > time.monotonic() for state in self._playback.values()
+            )
 
 
 async def _watch_default_output(speaker: _Speaker) -> None:
@@ -1191,6 +1319,8 @@ async def _consume_events(
     link_health: LinkHealth | None = None,
     on_transcript: Callable[[str], None] | None = None,
     output_enabled: Callable[[], bool] | None = None,
+    on_playback_queued: Callable[[int, float], None] | None = None,
+    stop_on_speech: bool = True,
 ) -> None:
     """Print what she says and play what she sends.
 
@@ -1332,7 +1462,12 @@ async def _consume_events(
                 replied = True
                 collected.append(event.pcm)
                 if speaker is not None and (output_enabled is None or output_enabled()):
-                    speaker.play(event.pcm)
+                    if on_playback_queued is None:
+                        speaker.play(event.pcm)
+                    elif speaker.play(event.pcm, handle_id=event.handle.handle_id):
+                        on_playback_queued(
+                            event.handle.handle_id, len(event.pcm) / (2 * _OUTPUT_RATE)
+                        )
             elif isinstance(event, link.SpeechStopped):
                 awaiting = transcribes is not False
             elif isinstance(event, link.SpeechStarted):
@@ -1346,13 +1481,16 @@ async def _consume_events(
                     # its id swallows the turn that is starting.
                     close_turn("no_reply")
                 open_turn()
-                if speaker is not None:
-                    speaker.flush()  # the local half of playback.clear
+                if speaker is not None and stop_on_speech:
+                    speaker.flush()  # Bare links keep their immediate stop path.
             elif isinstance(event, link.ReplyDone):
                 if speaker is not None:
                     # Generation is over: release a sub-preroll tail instead of
                     # holding it hostage to a cushion that will never fill.
-                    speaker.finish_reply()
+                    if on_playback_queued is None:
+                        speaker.finish_reply()
+                    else:
+                        speaker.finish_reply(handle_id=event.handle.handle_id)
                 marker = f"—— 回复结束（{event.status}）——"
                 if stream_text:
                     say(f"\n{marker}")
@@ -2252,10 +2390,12 @@ async def run_director(args: argparse.Namespace) -> int:
             reply_length=settings.interaction.reply_length,
         )
 
+    playback_receipts = provider is ProviderName.VOLCANO_DUPLEX
     scheduler = Scheduler(
         speech,
         floor,
         clock,
+        playback_receipts=playback_receipts,
         # No global cooldown: the pacer's token bucket owns the rate of
         # ordinary speech now, and a fixed post-reply wait on top of it is
         # exactly the dead air the dynamic pacing exists to remove.
@@ -2421,6 +2561,10 @@ async def run_director(args: argparse.Namespace) -> int:
         max_tokens=live_thresholds().max_output_tokens,
         protect_ms=settings.interaction.sc_protect_ms,
         protect_paid=settings.interaction.protect_paid_replies,
+        protect_danmaku=settings.interaction.protect_danmaku_replies,
+        danmaku_protect_ms=settings.interaction.danmaku_protect_ms,
+        requeue_danmaku=settings.interaction.requeue_danmaku_replies,
+        danmaku_requeue_percent=settings.interaction.danmaku_requeue_percent,
         variables=variables,
         clock_granularity_min=settings.memory.clock_granularity_min,
         selector=selector,
@@ -2456,6 +2600,10 @@ async def run_director(args: argparse.Namespace) -> int:
             max_tokens=live.max_output_tokens,
             protect_ms=settings.interaction.sc_protect_ms,
             protect_paid=settings.interaction.protect_paid_replies,
+            protect_danmaku=settings.interaction.protect_danmaku_replies,
+            danmaku_protect_ms=settings.interaction.danmaku_protect_ms,
+            requeue_danmaku=settings.interaction.requeue_danmaku_replies,
+            danmaku_requeue_percent=settings.interaction.danmaku_requeue_percent,
             gift_battery_high=settings.interaction.gift_battery_high,
             gift_battery_medium=settings.interaction.gift_battery_medium,
         )
@@ -2567,7 +2715,7 @@ async def run_director(args: argparse.Namespace) -> int:
             if not settings.audio.output_enabled:
                 with contextlib.suppress(NameError):
                     if broker is not None:
-                        broker.flush()
+                        broker.flush(reason="output_disabled")
             return True
         if path in {
             "speech.volcano_duplex.speech_edge_s",
@@ -2767,6 +2915,15 @@ async def run_director(args: argparse.Namespace) -> int:
     speaker = _Speaker(args.output_device, volume=settings.audio.voice_volume)
     registry.register("audio_output", speaker.status)
 
+    def playback_queued(handle_id: int, audio_s: float) -> None:
+        scheduler.playback_queued(handle_id, audio_s=audio_s)
+
+    def playback_report(handle_id: int, state: str, reason: str = "") -> None:
+        if state == "started":
+            scheduler.playback_started(handle_id)
+        else:
+            scheduler.playback_finished(handle_id, interrupted=state != "ended", reason=reason)
+
     class _LocalPair:
         """The sounddevice ends, parked while a page holds the devices.
 
@@ -2930,9 +3087,8 @@ async def run_director(args: argparse.Namespace) -> int:
                         )
 
             tally = PlaybackTally(on_playback=floor.on_playback, notify=scheduler.notify)
-            # Built after the tally, not before, so on_handoff can name it
-            # outright: a late-bound closure would work at runtime and hide the
-            # dependency, and this file already has enough of those.
+            # Handoff settles both the device's count and the replies whose
+            # terminal receipts disappeared with its socket.
             #
             # create_ui_app wires the announcement and the panel relay; the
             # only thing this end owns is which devices get parked — and that
@@ -2946,17 +3102,50 @@ async def run_director(args: argparse.Namespace) -> int:
             # offset stops the gate CLOSING, and the backlog PlaybackTally
             # exists to prevent comes back. Devices changing hands is exactly
             # "whatever was queued no longer counts".
-            broker = AudioBroker(local=local_pair, on_handoff=tally.cancelled)
+            page_replies: set[int] = set()
 
-            async def on_playback_started(_data: dict[str, Any]) -> None:
-                tally.started()
+            def page_handoff() -> None:
+                for handle_id in tuple(page_replies):
+                    playback_report(handle_id, "cancelled", "handoff")
+                page_replies.clear()
+                tally.cancelled()
 
-            async def on_playback_ended(_data: dict[str, Any]) -> None:
-                tally.ended()
+            broker = AudioBroker(local=local_pair, on_handoff=page_handoff)
+
+            def receipt_id(data: dict[str, Any]) -> int | None:
+                value = data.get("handle_id")
+                return value if type(value) is int and value in page_replies else None
+
+            async def on_playback_started(data: dict[str, Any]) -> None:
+                handle_id = receipt_id(data)
+                if not playback_receipts or handle_id is not None:
+                    tally.started(handle_id)
+
+            async def on_playback_ended(data: dict[str, Any]) -> None:
+                handle_id = receipt_id(data)
+                if not playback_receipts or handle_id is not None:
+                    tally.ended(handle_id)
 
             async def on_playback_cancelled(data: dict[str, Any]) -> None:
-                tally.cancelled()
+                handle_id = receipt_id(data)
+                if playback_receipts and handle_id is None:
+                    return
+                tally.cancelled(handle_id)
                 note_playback_cut(data)
+                if handle_id is not None:
+                    page_replies.discard(handle_id)
+                    playback_report(handle_id, "cancelled", str(data.get("reason", "")))
+
+            async def on_reply_playback_started(data: dict[str, Any]) -> None:
+                handle_id = receipt_id(data)
+                if handle_id is not None:
+                    playback_report(handle_id, "started")
+
+            async def on_reply_playback_ended(data: dict[str, Any]) -> None:
+                handle_id = receipt_id(data)
+                if handle_id is not None:
+                    page_replies.discard(handle_id)
+                    playback_report(handle_id, "ended")
 
             # <data home>/bilisama/skins — user-imported packs, shadowing the
             # packaged ones. The static mount and the picker's listing must
@@ -2983,6 +3172,10 @@ async def run_director(args: argparse.Namespace) -> int:
                     "interaction": {
                         "chattiness": interaction.chattiness.value,
                         "reply_length": interaction.reply_length.value,
+                        "protect_danmaku_replies": interaction.protect_danmaku_replies,
+                        "danmaku_protect_ms": interaction.danmaku_protect_ms,
+                        "requeue_danmaku_replies": interaction.requeue_danmaku_replies,
+                        "danmaku_requeue_percent": interaction.danmaku_requeue_percent,
                         "gift_battery_high": interaction.gift_battery_high,
                         "gift_battery_medium": interaction.gift_battery_medium,
                         "entry_welcome": {
@@ -3370,6 +3563,8 @@ async def run_director(args: argparse.Namespace) -> int:
                         ClientEvent.PLAYBACK_STARTED: on_playback_started,
                         ClientEvent.PLAYBACK_ENDED: on_playback_ended,
                         ClientEvent.PLAYBACK_CANCELLED: on_playback_cancelled,
+                        ClientEvent.PLAYBACK_REPLY_STARTED: on_reply_playback_started,
+                        ClientEvent.PLAYBACK_REPLY_ENDED: on_reply_playback_ended,
                         ClientEvent.APP_QUIT: on_app_quit,
                         ClientEvent.TEST_RUN: on_test_run,
                         ClientEvent.TEST_STOP: on_test_stop,
@@ -3524,12 +3719,14 @@ async def run_director(args: argparse.Namespace) -> int:
             unplayed audio in 48 seconds of wall clock and never recovered. What
             the listener gets is answers to danmaku from two minutes ago.
 
-            A poll rather than a callback because the buffer drains on
-            PortAudio's thread, and hopping threads to announce silence would
-            cost more than looking. 100 ms is well inside one audio block.
+            PortAudio records reply receipts under the PCM lock. Drain those
+            on the event loop every 20 ms so L3 never runs on the audio thread.
             """
             last = False
             while True:
+                if playback_receipts:
+                    for handle_id, state, reason in speaker.take_playback_events():
+                        playback_report(handle_id, state, reason)
                 if broker is not None and not broker.local_is_live:
                     # A page holds the devices, so PlaybackTally is feeding the
                     # gate and this poll must keep its hands off it. Without
@@ -3538,7 +3735,7 @@ async def run_director(args: argparse.Namespace) -> int:
                     # moment the page starts playing, and the gate would read
                     # that as her having finished.
                     last = False
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.02)
                     continue
                 busy = speaker.busy
                 if busy != last:
@@ -3548,28 +3745,42 @@ async def run_director(args: argparse.Namespace) -> int:
                         # State gates release on events, and playback finishing
                         # is not one the link ever sends.
                         scheduler.notify()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.02)
 
         async def drain_controls() -> None:
             while True:
                 clear = await scheduler.controls.get()
-                if speaker is not None:
-                    speaker.flush()
+                if speaker is not None and (
+                    not playback_receipts or broker is None or broker.local_is_live
+                ):
+                    speaker.flush(reply_ids=clear.reply_ids, reason=clear.reason)
                 if broker is not None:
+                    if playback_receipts and not broker.local_is_live:
+                        # A clear can beat ui_feed's first PCM. The page still
+                        # acknowledges that ID, even if it never queued audio.
+                        page_replies.update(clear.reply_ids)
                     # The page's half of the same flush. Its audio sits in a
                     # queue and a schedule this call cannot reach otherwise, so
                     # without it the voice runs on past the text.
-                    broker.flush()
+                    broker.flush(reply_ids=clear.reply_ids, reason=clear.reason)
                 print(f"[打断] playback.clear（{clear.reason}）")
                 # The scheduler decides to interrupt; this is the receipt that
                 # both speakers were actually emptied. The pair is what tells a
                 # barge-in that worked from one that only got as far as the
                 # decision — the two ends are different processes' buffers.
-                log.info("dev_talk.playback_cleared", reason=clear.reason, page=broker is not None)
+                log.info(
+                    "dev_talk.playback_cleared",
+                    reason=clear.reason,
+                    reply_ids=list(clear.reply_ids),
+                    page=broker is not None,
+                )
                 if hub is not None:
                     # The bubble shatters on this; the queue stays single-consumer
                     # here and the hub only gets a copy.
-                    hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reason": clear.reason})
+                    hub.broadcast(
+                        ServerEvent.PLAYBACK_CLEAR,
+                        {"reason": clear.reason, "reply_ids": list(clear.reply_ids)},
+                    )
 
         if use_prompt:
             from prompt_toolkit.patch_stdout import patch_stdout
@@ -3685,6 +3896,8 @@ async def run_director(args: argparse.Namespace) -> int:
                     # 2026-10-05, restart the dead-air clock (proactive.py).
                     on_transcript=on_streamer_transcript,
                     output_enabled=output_enabled,
+                    on_playback_queued=playback_queued if playback_receipts else None,
+                    stop_on_speech=not playback_receipts,
                 ),
                 name="director:play",
             ),
@@ -3752,9 +3965,17 @@ async def run_director(args: argparse.Namespace) -> int:
                             # talking over the streamer.
                             continue
                         if output_enabled():
-                            live_broker.play(ev.pcm)
+                            if playback_receipts and not live_broker.local_is_live:
+                                handle_id = ev.handle.handle_id
+                                page_replies.add(handle_id)
+                                playback_queued(handle_id, len(ev.pcm) / (2 * _OUTPUT_RATE))
+                                live_broker.play(ev.pcm, handle_id=handle_id)
+                            elif not playback_receipts:
+                                live_broker.play(ev.pcm)
                         continue
-                    if isinstance(ev, link.SpeechStarted):
+                    if playback_receipts and isinstance(ev, link.ReplyDone):
+                        live_broker.finish(ev.handle.handle_id)
+                    if isinstance(ev, link.SpeechStarted) and not playback_receipts:
                         # The same instant the local speaker flushes on
                         # (_consume_events). Waiting for the scheduler's
                         # playback.clear to come round would add a whole

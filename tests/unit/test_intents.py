@@ -11,10 +11,15 @@ the intent existed. The scheduler's verdict is the other end of it
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 
+from bilisama.director import intents
+from bilisama.director.intent import Priority
 from bilisama.director.intents import burst_welcome_intent, intent_for
+from bilisama.ingest.bilibili.safety import GiftComboAggregator
 from bilisama.ingest.events import EventKind, Gift, GuardLevel, LiveEvent, Viewer
 
 _BODY = "主播今天玩什么游戏"
@@ -324,9 +329,10 @@ def test_paid_protection_stays_off_unless_the_switch_is_on() -> None:
 
 
 def test_paid_protection_covers_superchat_and_high_gifts_only() -> None:
-    """Plan section 4.2's rule: SC and big gifts. A medium gift rides the
-    VIP_ENTER rung and a guard buy sits below BIG_GIFT, so neither blocks the
-    streamer for a whole window — they keep the requeue and nothing more."""
+    """Plan section 4.2 protects SC and high gifts, regardless of queue order.
+
+    Guard buys and lower-tier paid gifts requeue without a protection window.
+    """
 
     def protected(event: LiveEvent) -> bool:
         intent = intent_for(event, now=0.0, protect_paid=True)
@@ -345,4 +351,154 @@ def test_paid_protection_covers_superchat_and_high_gifts_only() -> None:
     assert protected(_gift(100)) is False, "中额礼物走 VIP_ENTER 档，不保护"
     assert protected(_gift(5)) is False
     assert protected(_danmaku()) is False
-    assert protected(guard) is False, "上舰在 BIG_GIFT 之下，按计划 4.2 只重排队"
+    assert protected(guard) is False, "上舰按计划 4.2 只重排队，优先级不决定保护资格"
+
+
+@pytest.mark.parametrize(
+    ("event", "priority", "expected"),
+    [
+        (_superchat(), Priority.DANMAKU, True),
+        (_gift(1000), Priority.DANMAKU, True),
+        (replace(_danmaku(), kind=EventKind.GUARD_BUY), Priority.SUPERCHAT, False),
+        (replace(_danmaku(), kind=EventKind.VIP_ENTER), Priority.SUPERCHAT, False),
+    ],
+)
+def test_paid_protection_does_not_depend_on_queue_order(
+    monkeypatch: pytest.MonkeyPatch, event: LiveEvent, priority: Priority, expected: bool
+) -> None:
+    """Reordering event lanes must not silently change who gets protection."""
+    monkeypatch.setitem(intents._PRIORITY, event.kind, priority)
+    intent = intent_for(event, now=0.0, protect_paid=True)
+    assert intent is not None
+    assert intent.priority is priority
+    assert intent.injection.reply.protected is expected
+
+
+@pytest.mark.parametrize(
+    ("batteries", "priority", "requeue", "protected"),
+    [
+        (0, Priority.DANMAKU, False, False),
+        (1, Priority.DANMAKU, True, False),
+        (99, Priority.DANMAKU, True, False),
+        (100, Priority.VIP_ENTER, True, False),
+        (999, Priority.VIP_ENTER, True, False),
+        (1000, Priority.BIG_GIFT, True, True),
+    ],
+)
+def test_gift_tier_boundaries_preserve_queue_and_protection_policy(
+    batteries: int, priority: Priority, requeue: bool, protected: bool
+) -> None:
+    intent = intent_for(_gift(batteries), now=0.0, protect_paid=True)
+    assert intent is not None
+    assert intent.priority is priority
+    assert intent.requeue_on_interrupt is requeue
+    assert (intent.expires_at is None) is requeue
+    assert intent.injection.reply.protected is protected
+
+
+@pytest.mark.parametrize("medium", [3, 7])
+def test_paid_protection_uses_the_configured_high_threshold(medium: int) -> None:
+    for batteries, protected in [(6, False), (7, True)]:
+        intent = intent_for(
+            _gift(batteries),
+            now=0.0,
+            protect_paid=True,
+            gift_battery_medium=medium,
+            gift_battery_high=7,
+        )
+        assert intent is not None
+        assert intent.injection.reply.protected is protected
+
+
+def test_a_combined_gift_can_reach_the_protected_tier() -> None:
+    aggregator = GiftComboAggregator()
+    for index in range(10):
+        aggregator.add(replace(_gift(100), event_id=f"gift:{index}"), now=index * 0.01)
+    due = aggregator.peek_due(2.0)
+    assert due is not None
+    _, event = due
+    assert event.gift is not None and event.gift.total_battery == 1000
+    intent = intent_for(event, now=2.0, protect_paid=True)
+    assert intent is not None
+    assert intent.priority is Priority.BIG_GIFT
+    assert intent.requeue_on_interrupt
+    assert intent.injection.reply.protected
+
+
+@pytest.mark.parametrize("protect", [False, True])
+@pytest.mark.parametrize("requeue", [False, True])
+def test_danmaku_protection_and_requeue_are_independent(protect: bool, requeue: bool) -> None:
+    event = replace(_danmaku(), recv_at=7.0)
+    intent = intent_for(
+        event,
+        now=10.0,
+        protect_danmaku=protect,
+        danmaku_protect_ms=1800,
+        requeue_danmaku=requeue,
+    )
+    assert intent is not None
+    assert intent.priority is Priority.DANMAKU
+    assert intent.expires_at == 27.0
+    assert intent.injection.reply.protected is protect
+    assert intent.injection.reply.protect_ms == 1800
+    assert intent.requeue_on_interrupt is requeue
+    assert intent.interrupt_retries_left == (1 if requeue else 0)
+
+
+@pytest.mark.parametrize("percent, expected", [(0, False), (100, True)])
+def test_danmaku_requeue_probability_endpoints_do_not_draw(percent: int, expected: bool) -> None:
+    with patch("random.random", side_effect=AssertionError("端点不需要抽取概率")):
+        intent = intent_for(
+            _danmaku(),
+            now=10.0,
+            requeue_danmaku=True,
+            danmaku_requeue_percent=percent,
+            protect_danmaku=True,
+        )
+    assert intent is not None
+    assert intent.requeue_on_interrupt is expected
+    assert intent.injection.reply.protected
+
+
+@pytest.mark.parametrize("draw, expected", [(0.249, True), (0.25, False)])
+def test_danmaku_probability_is_one_decision_for_this_intent(draw: float, expected: bool) -> None:
+    with patch("random.random", return_value=draw) as random_draw:
+        intent = intent_for(
+            _danmaku(),
+            now=10.0,
+            requeue_danmaku=True,
+            danmaku_requeue_percent=25,
+        )
+    assert intent is not None
+    assert intent.requeue_on_interrupt is expected
+    random_draw.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "kind", [EventKind.GIFT, EventKind.SUPER_CHAT, EventKind.GUARD_BUY, EventKind.VIP_ENTER]
+)
+def test_danmaku_options_do_not_change_other_event_policies(kind: EventKind) -> None:
+    event = LiveEvent(kind=kind, room_id=777, value_cny=1)
+    baseline = intent_for(event, now=10.0)
+    with patch("random.random", side_effect=AssertionError("其他事件不能参加弹幕抽取")):
+        enabled = intent_for(
+            event,
+            now=10.0,
+            protect_danmaku=True,
+            requeue_danmaku=True,
+            danmaku_requeue_percent=50,
+        )
+    assert enabled == baseline
+
+
+def test_disabled_danmaku_requeue_never_draws_and_keeps_old_ttl() -> None:
+    with patch("random.random", side_effect=AssertionError("关闭重排不抽取概率")):
+        intent = intent_for(
+            replace(_danmaku(), recv_at=1.0),
+            now=30.0,
+            danmaku_requeue_percent=50,
+        )
+    assert intent is not None
+    assert not intent.requeue_on_interrupt
+    assert not intent.injection.reply.protected
+    assert intent.expires_at == 35.0

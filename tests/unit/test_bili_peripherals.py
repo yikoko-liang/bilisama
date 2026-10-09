@@ -155,8 +155,8 @@ def _gift_event(coins: int, *, coin_type: str = "gold") -> LiveEvent:
 
 def test_gift_tiers_follow_the_battery_thresholds() -> None:
     """Tiers compare total batteries — the number the viewer sees — and no
-    tier is protected any more: streamer speech always lands, paid safety is
-    the requeue."""
+    tier is protected by default: streamer speech always lands, and every
+    paid tier can requeue."""
     high = intent_for(_gift_event(150_000), now=0.0)  # 1500 batteries
     medium = intent_for(_gift_event(15_000), now=0.0)  # 150 batteries
     light = intent_for(_gift_event(500), now=0.0)  # 5 batteries
@@ -166,7 +166,8 @@ def test_gift_tiers_follow_the_battery_thresholds() -> None:
     assert high.requeue_on_interrupt
     assert medium.priority is Priority.VIP_ENTER, "medium rides the VIP rung"
     assert medium.requeue_on_interrupt and not medium.injection.reply.protected
-    assert light.priority is Priority.DANMAKU and light.expires_at is not None
+    assert light.priority is Priority.DANMAKU and light.expires_at is None
+    assert light.requeue_on_interrupt and not light.injection.reply.protected
     assert free.priority is Priority.DANMAKU and not free.requeue_on_interrupt
 
 

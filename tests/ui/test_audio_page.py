@@ -842,3 +842,154 @@ async def test_the_chain_hands_her_through_untouched_until_she_would_clip(
     )
     assert loud["peak"] <= 0.98 + 1e-6, loud
     assert loud["peak"] >= 0.9, loud
+
+
+async def test_reply_receipts_wait_for_playback_and_the_end_marker(
+    audio_page: Page, harness: Harness
+) -> None:
+    await _ready(audio_page, harness)
+    harness.broker.play(_SEGMENT, handle_id=41)
+    await _until(
+        lambda: harness.count(ClientEvent.PLAYBACK_ENDED) == 1,
+        what="第一段没有播放完成",
+    )
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_STARTED) == [{"handle_id": 41}]
+    assert harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 0
+    harness.broker.play(_SEGMENT, handle_id=41)
+    harness.broker.finish(41)
+    await _until(
+        lambda: harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 1,
+        what="音频已全部播完但没有整轮回执",
+    )
+    ended = harness.payloads(ClientEvent.PLAYBACK_REPLY_ENDED)[0]
+    assert ended["handle_id"] == 41
+    assert ended["played_ms"] >= 390
+    assert harness.count(ClientEvent.PLAYBACK_REPLY_STARTED) == 1
+
+
+async def test_a_targeted_clear_cannot_cut_the_next_reply(
+    audio_page: Page, harness: Harness
+) -> None:
+    await _ready(audio_page, harness)
+    harness.broker.play(b"\x00\x00" * 48000, handle_id=51)
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) == 1, what="音频没有排入播放")
+    harness.broker.flush(reply_ids=(51,), reason="barge_in")
+    harness.broker.play(_SEGMENT, handle_id=52)
+    harness.broker.finish(52)
+    harness.hub.broadcast(ServerEvent.PLAYBACK_CLEAR, {"reply_ids": [51], "reason": "barge_in"})
+    await _until(
+        lambda: harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 1,
+        what="旧清理通知误停新回复",
+    )
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_ENDED)[0]["handle_id"] == 52
+    cancelled = harness.payloads(ClientEvent.PLAYBACK_CANCELLED)
+    assert len(cancelled) == 1
+    assert cancelled[0]["handle_id"] == 51
+    assert cancelled[0]["reason"] == "barge_in"
+
+
+async def test_reply_protection_does_not_start_while_audio_context_is_suspended(
+    audio_page: Page, harness: Harness
+) -> None:
+    await _ready(audio_page, harness)
+    await _wait(audio_page, "window.__contexts.length === 1")
+    await audio_page.evaluate("""async () => {
+      const context = window.__contexts[0];
+      await context.suspend();
+      window.__resume = context.resume.bind(context);
+      context.resume = () => Promise.resolve();
+    }""")
+    harness.broker.play(_SEGMENT, handle_id=61)
+    harness.broker.finish(61)
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) == 1, what="没有收到排队回执")
+    await asyncio.sleep(0.15)
+    assert harness.count(ClientEvent.PLAYBACK_REPLY_STARTED) == 0
+    assert harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 0
+    await audio_page.evaluate("window.__resume()")
+    await _until(
+        lambda: harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 1,
+        what="恢复播放后没有完整回执",
+    )
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_STARTED) == [{"handle_id": 61}]
+
+
+async def test_targeted_clear_preserves_another_reply_already_scheduled(
+    audio_page: Page, harness: Harness
+) -> None:
+    await _ready(audio_page, harness)
+    harness.broker.play(_SEGMENT * 3, handle_id=71)
+    harness.broker.finish(71)
+    harness.broker.play(_SEGMENT, handle_id=72)
+    harness.broker.finish(72)
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) == 2, what="两条回复没有排好")
+    harness.broker.flush(reply_ids=(72,), reason="barge_in")
+    await _until(
+        lambda: harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 1,
+        what="清理另一条回复时误停受保护回复",
+    )
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_ENDED)[0]["handle_id"] == 71
+    assert harness.payloads(ClientEvent.PLAYBACK_CANCELLED)[0]["handle_id"] == 72
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_STARTED) == [{"handle_id": 71}]
+
+
+@pytest.mark.parametrize("hold_started", [False, True])
+async def test_a_clear_after_audio_finished_does_not_requeue_a_delayed_ended_callback(
+    audio_page: Page, harness: Harness, hold_started: bool
+) -> None:
+    await _ready(audio_page, harness)
+    await _wait(audio_page, "window.__contexts.length === 1")
+    await audio_page.evaluate(
+        """(holdStarted) => {
+          const context = window.__contexts[0];
+          const create = context.createBufferSource.bind(context);
+          window.__heldEnds = [];
+          window.__sourceEnds = [];
+          context.createBufferSource = () => {
+            const source = create();
+            const start = source.start.bind(source);
+            source.start = (at) => {
+              window.__sourceEnds.push(at + source.buffer.duration);
+              start(at);
+            };
+            Object.defineProperty(source, "onended", {
+              set(callback) { if (callback) window.__heldEnds.push(callback); },
+            });
+            return source;
+          };
+          if (holdStarted) {
+            const set = window.setTimeout.bind(window);
+            window.setTimeout = (fn, delay, ...args) => delay === 10 ? 0 : set(fn, delay, ...args);
+          }
+        }""",
+        hold_started,
+    )
+    harness.broker.play(_SEGMENT, handle_id=101)
+    harness.broker.play(_SEGMENT, handle_id=101)
+    harness.broker.finish(101)
+    await _until(lambda: harness.count(ClientEvent.PLAYBACK_STARTED) == 2, what="两段音频没有入队")
+    await _wait(
+        audio_page,
+        "window.__sourceEnds.length === 2 && window.__contexts[0].currentTime > "
+        "Math.max(...window.__sourceEnds) + 0.03",
+    )
+    assert harness.count(ClientEvent.PLAYBACK_ENDED) == 0
+    if hold_started:
+        assert harness.count(ClientEvent.PLAYBACK_REPLY_STARTED) == 0
+    harness.broker.flush(reply_ids=(101,), reason="barge_in")
+    await _until(
+        lambda: bool(
+            harness.count(ClientEvent.PLAYBACK_REPLY_ENDED)
+            or harness.count(ClientEvent.PLAYBACK_CANCELLED)
+        ),
+        what="清理之后没有回复结果",
+    )
+    assert harness.count(ClientEvent.PLAYBACK_CANCELLED) == 0
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_ENDED) == [
+        {"handle_id": 101, "played_ms": 500}
+    ]
+    assert harness.payloads(ClientEvent.PLAYBACK_REPLY_STARTED) == [{"handle_id": 101}]
+    assert harness.count(ClientEvent.PLAYBACK_ENDED) == 2
+    await audio_page.evaluate("window.__heldEnds.forEach(callback => callback())")
+    await asyncio.sleep(0.05)
+    assert harness.count(ClientEvent.PLAYBACK_ENDED) == 2
+    assert harness.count(ClientEvent.PLAYBACK_REPLY_ENDED) == 1

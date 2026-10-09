@@ -201,6 +201,11 @@ def test_config_snapshot_editable_set_is_the_honest_live_set() -> None:
         # LIVE with the switch it governs (ledger #91): both reach the Assembly
         # through refresh_interaction_settings and are read per intent.
         "interaction.protect_paid_replies",
+        # The ordinary reply policy shares the live Assembly reload hook.
+        "interaction.protect_danmaku_replies",
+        "interaction.danmaku_protect_ms",
+        "interaction.requeue_danmaku_replies",
+        "interaction.danmaku_requeue_percent",
         "interaction.proactive.max_per_hour",
         "interaction.proactive.wake_interval_s",
         "room.stream_intro",
@@ -713,8 +718,9 @@ class _HalfDeadBroker(AudioBroker):
         send: Callable[[bytes], None],
         close: Callable[[], None] | None = None,
         flush: Callable[[], None] | None = None,
+        marker: Callable[[str, dict[str, object]], None] | None = None,
     ) -> bool:
-        await super().claim(who, send=send, close=close, flush=flush)
+        await super().claim(who, send=send, close=close, flush=flush, marker=marker)
         raise RuntimeError("PortAudio 没关掉")
 
 
@@ -827,3 +833,57 @@ def test_a_cli_provider_override_reaches_the_panels_field_filter() -> None:
     assert "speech.volcano_duplex.reply_hold_ms" in paths, "命令行选的后端，面板看不见它的字段"
     assert "speech.volcano_duplex.event_replies" in paths
     assert "speech.s2s.endpoint" not in paths, "没在跑的后端的字段还铺在面板上"
+
+
+def test_full_audio_queue_closes_instead_of_claiming_a_partial_reply_played() -> None:
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        for _ in range(_AUDIO_QUEUE * 4):
+            broker.play(b"\x11" * 8, handle_id=81)
+        broker.finish(81)
+        while True:
+            packet = ws.receive()
+            if packet["type"] == "websocket.close":
+                assert packet["code"] == 1001
+                break
+            if packet.get("text"):
+                assert json.loads(packet["text"])["event"] != "playback.reply_done"
+
+
+def test_reply_end_marker_follows_its_last_audio_chunk() -> None:
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        broker.play(b"\x11" * 8, handle_id=81)
+        broker.finish(81)
+        assert ws.receive_json() == {"event": "playback.reply", "data": {"handle_id": 81}}
+        assert ws.receive_bytes() == b"\x11" * 8
+        assert ws.receive_json() == {"event": "playback.reply_done", "data": {"handle_id": 81}}
+
+
+def test_targeted_queue_flush_retains_other_reply_identity() -> None:
+    broker = AudioBroker()
+    client, _heard = _audio_app(broker)
+    with client.websocket_connect(f"/{_TOKEN}/audio?role=shell") as ws:
+        broker.play(b"\x11" * 8, handle_id=91)
+        broker.play(b"\x22" * 8, handle_id=92)
+        broker.flush(reply_ids=(91,), reason="barge_in")
+        broker.finish(92)
+        packets = []
+        while True:
+            packet = ws.receive()
+            if packet.get("text"):
+                decoded = json.loads(packet["text"])
+                packets.append(decoded)
+                if decoded["event"] == "playback.reply_done":
+                    break
+            else:
+                packets.append(packet["bytes"])
+        reply_marker = {"event": "playback.reply", "data": {"handle_id": 92}}
+        assert reply_marker in packets
+        assert packets.index(reply_marker) < packets.index(b"\x22" * 8)
+        assert {
+            "event": "playback.clear",
+            "data": {"reply_ids": [91], "reason": "barge_in"},
+        } in packets

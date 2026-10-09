@@ -17,10 +17,11 @@ What it guarantees, and where each promise is tested:
   L1 to stop playback (the clear goes out before anything else, section 2.5
   sequence 3), and requeues protected work. A reply inside its protection
   window survives barge-in (section 2.7: only panic may kill it).
-- Protection lifecycle: a protected reply disarms the provider's own barge-in
-  on dispatch (adapter policy); the scheduler re-arms it on settle AND on the
-  protect_ms hard cap, whichever lands first — forgetting either half was the
-  audit's worst finding (A4).
+- Protection lifecycle: adapters that support it disarm provider barge-in on
+  dispatch. With reply-owned playback receipts, the local protect_ms window
+  starts on first playback and survives generation completion. Other entry
+  points keep their dispatch-based window. Playback/settlement and the cap
+  each end protection once.
 - panic mute: the red button. Kills the active reply even when protected —
   the only thing allowed to — drains the queue with verdicts, and refuses new
   dispatch until released. A panic landing inside the dispatch window is
@@ -71,9 +72,8 @@ _SPEECH_EDGE_GRACE_S = 0.3
 
 # Section 4.11's rule for a send that keeps failing: the bound is a DEADLINE,
 # not a retry counter — "a reply retried eight times across ten seconds is
-# worse than no reply". Paid intents are the only ones that requeue and they
-# carry no expires_at of their own (intents.py:160, deliberately: paid work
-# must not go stale in the queue), so the first failure gives them one.
+# worse than no reply". Paid intents carry no ordinary expiry, so the first
+# failure gives them one. Opted-in danmaku retries keep their original expiry.
 _DISPATCH_RETRY_WINDOW_S = 6.0
 # How many dispatched replies the handle->intent reverse index remembers for
 # the panel. Well past anything in flight; eviction is dispatch order.
@@ -103,10 +103,10 @@ class StreamGuard(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PlaybackClear:
-    """Ask L1 to stop everything queued and roll the avatar back. Emitted the
-    moment an active reply dies; the Electron side (stage 6) consumes it."""
+    """Stop the named attempts, or all playback when reply_ids is empty."""
 
     reason: str
+    reply_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -121,24 +121,45 @@ class _Active:
     # A PlaybackClear already went out for this reply; the late done(cancelled)
     # must not send a second one under a made-up reason (A10).
     cleared: bool = False
+    clear_reason: str = ""
     # The first audio or non-empty text delta flips this. From then on a
     # higher-priority live event QUEUES instead of preempting: cutting a
     # sentence the room already hears mid-word is worse than any priority
     # gap. The streamer's own barge-in and panic are separate hard paths.
     output_started: bool = False
+    audio_generated: bool = False
 
 
 @dataclass(slots=True)
 class _Parked:
     """A reply that finished generating while L1 still held its audio.
 
-    Its verdict is written when the playback drains (spoken@played) or when the
-    grace runs out (spoken@generating) — see _flush_played.
+    The original attempt retains protection and paid retry policy until the
+    player reports a terminal result. Legacy entry points use the floor's
+    aggregate playback state instead — see _flush_played.
     """
 
-    intent: Intent
-    started_at: float
+    active: _Active
     deadline: float
+
+    @property
+    def intent(self) -> Intent:
+        return self.active.intent
+
+    @property
+    def started_at(self) -> float:
+        return self.active.started_at
+
+
+@dataclass(slots=True)
+class _Playback:
+    """Receipts for one attempt, including ones that beat dispatch registration."""
+
+    audio_s: float = 0.0
+    started_at: float | None = None
+    interrupted: bool | None = None
+    reason: str = ""
+    cleared: bool = False
 
 
 @dataclass(slots=True)
@@ -203,6 +224,7 @@ class Scheduler:
         implicit_spoken_sink: Callable[[str], None] | None = None,
         ghostwriter: Callable[[Intent], Awaitable[str | None]] | None = None,
         link_composes_on_demand: bool = True,
+        playback_receipts: bool = False,
     ) -> None:
         self._speech = speech
         self._floor = floor
@@ -251,6 +273,9 @@ class Scheduler:
         # written. At most one at a time in practice: the floor's queued_audio
         # gate holds the next dispatch until this one's audio is gone.
         self._parked: list[_Parked] = []
+        self._playback_receipts = playback_receipts
+        self._playback: OrderedDict[int, _Playback] = OrderedDict()
+        self._closed_playback_ids: deque[int] = deque(maxlen=128)
         self._dispatching = False
         self._panicked = False
         # Set between LinkDown and LinkUp. Work that arrives in that window is
@@ -276,6 +301,82 @@ class Scheduler:
         intent, which is itself the answer (source "voice").
         """
         return self._reply_intents.get(handle_id)
+
+    def playback_queued(self, handle_id: int, *, audio_s: float = 0.0) -> None:
+        """Register each delivered PCM chunk before a page can acknowledge it."""
+        if not self._playback_receipts or handle_id in self._closed_playback_ids:
+            return
+        playback = self._playback.setdefault(handle_id, _Playback())
+        if playback.interrupted is not None:
+            return
+        playback.audio_s += max(0.0, audio_s)
+        # Unowned records are implicit turns or receipts preceding request_reply's
+        # return. Bound those without evicting a paid reply still awaiting playback.
+        if len(self._playback) > 128:
+            for old_id in tuple(self._playback):
+                if self._playback_attempt(old_id) is None:
+                    self._retire_playback(old_id)
+                    break
+        self._wake.set()
+
+    def playback_started(self, handle_id: int) -> None:
+        """Start protection once the output reports its first audible samples."""
+        playback = self._playback.get(handle_id)
+        if playback is None or playback.interrupted is not None or playback.started_at is not None:
+            return
+        playback.started_at = self._clock.monotonic()
+        active = self._playback_attempt(handle_id)
+        if active is not None:
+            self._start_playback_protection(active)
+        self._wake.set()
+
+    def playback_finished(self, handle_id: int, *, interrupted: bool, reason: str = "") -> None:
+        """Accept one terminal receipt; late callbacks cannot revive a reply."""
+        if not self._playback_receipts:
+            return
+        active = self._playback_attempt(handle_id)
+        playback = self._playback.get(handle_id)
+        if playback is None and interrupted and active is not None and active.cleared:
+            # The scheduler can clear before the slower player fanout sees its
+            # first PCM. That player's cancellation still settles this attempt.
+            playback = self._playback.setdefault(handle_id, _Playback())
+        if playback is None or playback.interrupted is not None:
+            return
+        playback.interrupted = interrupted
+        playback.reason = reason
+        if active is not None:
+            if interrupted and (
+                not active.clear_reason or reason not in {"barge_in", "server_cancel"}
+            ):
+                active.clear_reason = reason
+            self._end_protection(active, via="playback")
+            if interrupted and active is self._active and not active.cleared:
+                active.cleared = True
+                self._spawn(self._speech.cancel(active.handle), name="scheduler:playback-cancel")
+        elif not self._dispatching:
+            self._retire_playback(handle_id)
+        self._flush_played()
+        self._wake.set()
+
+    def _playback_attempt(self, handle_id: int) -> _Active | None:
+        if self._active is not None and self._active.handle.handle_id == handle_id:
+            return self._active
+        return next(
+            (
+                parked.active
+                for parked in self._parked
+                if parked.active.handle.handle_id == handle_id
+            ),
+            None,
+        )
+
+    def _retire_playback(self, handle_id: int) -> None:
+        self._playback.pop(handle_id, None)
+        if handle_id not in self._closed_playback_ids:
+            self._closed_playback_ids.append(handle_id)
+
+    def _playback_clear(self, reason: str, handle_id: int) -> PlaybackClear:
+        return PlaybackClear(reason, (handle_id,) if self._playback_receipts else ())
 
     def set_cooldown(self, seconds: float) -> None:
         """Retune the post-reply cooldown live. 0 disables it — the event
@@ -389,11 +490,12 @@ class Scheduler:
         self.controls.put_nowait(PlaybackClear(reason="panic_mute"))
         # The clear above takes the parked replies' audio with it, so no
         # receipt is coming: write what we know rather than wait for it.
-        self._flush_played(played=False)
+        self._flush_played(played=False, reason="panic_mute")
         self._drain_queue(SkipReason.PANIC_MUTE)
         active = self._active
         if active is not None:
             active.cleared = True
+            active.clear_reason = "panic_mute"
             self._spawn(self._speech.cancel(active.handle), name="scheduler:panic-cancel")
         implicit = self._implicit
         if implicit is not None:
@@ -484,7 +586,7 @@ class Scheduler:
         implicit.killed = True
         if clear_playback and not implicit.cleared:
             implicit.cleared = True
-            self.controls.put_nowait(PlaybackClear(reason=_clear_reason(reason)))
+            self.controls.put_nowait(self._playback_clear(_clear_reason(reason), handle.handle_id))
         # `cleared` is set exactly when sound of this turn may have left: the
         # flush just above, or panic's own before it calls here. Otherwise the
         # gate held every frame, and the link may stop it without a cancel.
@@ -618,7 +720,7 @@ class Scheduler:
             if event.handle.implicit:
                 self._open_implicit(event.handle)
         elif isinstance(event, link.ReplyAudioDelta):
-            self._mark_output_started(event.handle)
+            self._mark_output_started(event.handle, audio=True)
         elif isinstance(event, link.ReplyTextDelta):
             self._on_delta(event)
         elif isinstance(event, link.ReplyDone):
@@ -634,6 +736,8 @@ class Scheduler:
             # for a link that may be gone for good just produces stale
             # replies later.
             self._link_down = True
+            if self._playback_receipts:
+                self._flush_played(played=False, reason="link_down")
             self._floor.on_link_lost()
             self._drain_queue(SkipReason.LINK_DOWN)
         elif isinstance(event, link.LinkUp):
@@ -662,6 +766,8 @@ class Scheduler:
 
     def _next_dispatchable(self) -> Intent | None:
         if self._panicked or self._active is not None or self._dispatching:
+            return None
+        if self._playback_receipts and self._parked:
             return None
         if self._link_down:
             return None
@@ -764,10 +870,9 @@ class Scheduler:
             )
             self._free_key(intent)
             if intent.requeue_on_interrupt:
-                # Paid work does not evaporate because one send failed — the
-                # audience watched them pay. Same rule as barge-in (section
-                # 4.2): back in the queue, and the key was freed above so the
-                # resubmission is not eaten as a duplicate.
+                # Retry eligible work after a failed send without spending
+                # its interruption allowance: it never reached generation.
+                # The freed key lets resubmission survive deduplication.
                 #
                 # Bounded, though: the first failure hands the intent the
                 # deadline it never had, later ones inherit it, and once it
@@ -807,10 +912,12 @@ class Scheduler:
 
         active = _Active(intent=intent, handle=handle, started_at=self._clock.monotonic())
         reply = intent.injection.reply
-        if reply.protected:
+        if reply.protected and not self._playback_receipts:
             active.protected_until = self._clock.monotonic() + reply.protect_ms / 1000.0
             self._spawn(self._protection_cap(active), name="scheduler:protect-cap")
         self._active = active
+        if self._playback_receipts:
+            self._start_playback_protection(active)
         # The UI's reverse index: reply.delta frames only carry the handle,
         # and the fanout consumer reads them AFTER this slot may already be
         # cleared — the map is what lets the panel say which danmaku a reply
@@ -848,7 +955,7 @@ class Scheduler:
         if self._floor.streamer_speaking and not self._protection_active(active):
             self._note_barge(active, where="post_dispatch")
             active.cleared = True
-            self.controls.put_nowait(PlaybackClear(reason="barge_in"))
+            self.controls.put_nowait(self._playback_clear("barge_in", active.handle.handle_id))
             self._spawn(self._speech.cancel(handle), name="scheduler:barge-cancel")
             if intent.requeue_on_interrupt:
                 self._settle_active(Outcome.CANCELLED, Phase.DISPATCHED, requeue=True)
@@ -862,10 +969,11 @@ class Scheduler:
 
     # ------------------------------------------------------------ events
 
-    def _mark_output_started(self, handle: link.ReplyHandle) -> None:
+    def _mark_output_started(self, handle: link.ReplyHandle, *, audio: bool = False) -> None:
         active = self._active
         if active is not None and handle is active.handle:
             active.output_started = True
+            active.audio_generated |= audio
 
     async def _with_text(self, intent: Intent) -> ReplySpec | None:
         """The reply to send, with finished words when the link needs them.
@@ -961,7 +1069,7 @@ class Scheduler:
             return
         # A hit mid-stream: kill the sentence and claw back what played.
         active.cleared = True
-        self.controls.put_nowait(PlaybackClear(reason="output_blocked"))
+        self.controls.put_nowait(self._playback_clear("output_blocked", active.handle.handle_id))
         self._spawn(self._speech.cancel(active.handle), name="scheduler:guard-cancel")
         self._settle_active(Outcome.FAILED, Phase.SPEAKING, reason=SkipReason.OUTPUT_BLOCKED)
         if self._on_hit == "mute_all":
@@ -1009,12 +1117,20 @@ class Scheduler:
                     # edge has nothing left to clear it but the timeout.
                     self._floor.expect_speech_edge(_SPEECH_EDGE_GRACE_S)
                 self.controls.put_nowait(
-                    PlaybackClear(reason="panic_mute" if self._panicked else "barge_in")
+                    self._playback_clear(
+                        "panic_mute" if self._panicked else "server_cancel", active.handle.handle_id
+                    )
+                    if self._playback_receipts
+                    else PlaybackClear(reason="panic_mute" if self._panicked else "barge_in")
                 )
                 active.cleared = True
-            reason = SkipReason.PANIC_MUTE if self._panicked else None
+            reason = (
+                SkipReason.PANIC_MUTE
+                if self._panicked or active.clear_reason == "panic_mute"
+                else None
+            )
             if active.intent.requeue_on_interrupt and not self._panicked:
-                self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, requeue=True)
+                self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, reason=reason, requeue=True)
             else:
                 self._settle_active(Outcome.CANCELLED, Phase.SPEAKING, reason=reason)
         else:
@@ -1023,7 +1139,9 @@ class Scheduler:
             # to stop the way every other death does — otherwise a dead
             # session's half sentence plays to the end.
             if not active.cleared:
-                self.controls.put_nowait(PlaybackClear(reason="link_failed"))
+                self.controls.put_nowait(
+                    self._playback_clear("link_failed", active.handle.handle_id)
+                )
                 active.cleared = True
             if active.intent.requeue_on_interrupt and not self._panicked:
                 self._settle_active(Outcome.FAILED, Phase.GENERATING, requeue=True)
@@ -1047,6 +1165,9 @@ class Scheduler:
         client's watchdog suppresses the same one (client.py:294-295) — costs
         one task, not the event loop.
         """
+        if self._playback_receipts:
+            self._barge_in_playback()
+            return
         active = self._active
         if active is None:
             return
@@ -1072,6 +1193,47 @@ class Scheduler:
         self.controls.put_nowait(PlaybackClear(reason="barge_in"))
         self._spawn(self._speech.cancel(active.handle), name="scheduler:barge-cancel")
 
+    def _barge_in_playback(self) -> None:
+        attempts = [parked.active for parked in self._parked]
+        if self._active is not None:
+            attempts.append(self._active)
+        owned = {active.handle.handle_id for active in attempts}
+        for active in attempts:
+            if active.cleared:
+                continue
+            if self._protection_active(active):
+                with bind(intent_id=active.intent.dedup_key or active.intent.source):
+                    log.info(
+                        "scheduler.barge_survived",
+                        source=active.intent.source,
+                        priority=int(active.intent.priority),
+                        waiting_for_playback=active.protected_until is None,
+                        protected_for_ms=max(
+                            0,
+                            int(
+                                (
+                                    (active.protected_until or self._clock.monotonic())
+                                    - self._clock.monotonic()
+                                )
+                                * 1000
+                            ),
+                        ),
+                    )
+                continue
+            self._note_barge(active, where="speech_started")
+            active.cleared = True
+            if active is not self._active:
+                active.handle.stale = True
+            self.controls.put_nowait(self._playback_clear("barge_in", active.handle.handle_id))
+            if active is self._active:
+                self._spawn(self._speech.cancel(active.handle), name="scheduler:barge-cancel")
+        # Removing the unconditional player flush must not make implicit voice
+        # audio uninterruptible. It has no paid policy and needs no extra cancel.
+        for handle_id, playback in self._playback.items():
+            if handle_id not in owned and playback.interrupted is None and not playback.cleared:
+                playback.cleared = True
+                self.controls.put_nowait(self._playback_clear("barge_in", handle_id))
+
     def _note_barge(self, active: _Active, *, where: str) -> None:
         """Name the reply the streamer just talked over.
 
@@ -1093,16 +1255,50 @@ class Scheduler:
                 source=intent.source,
                 priority=int(intent.priority),
                 where=where,
-                requeue=intent.requeue_on_interrupt,
+                requeue=_can_retry_interruption(intent),
                 spoken_ms=self._spoken_ms(active.started_at),
             )
 
     # ------------------------------------------------------------ protection
 
     def _protection_active(self, active: _Active) -> bool:
+        if self._playback_receipts:
+            if (
+                not active.intent.injection.reply.protected
+                or active.intent.injection.reply.protect_ms <= 0
+                or active.protection_ended
+            ):
+                return False
+            # Dispatch has committed a protected reply, but queued audio has not
+            # reached the speaker yet. The receipt watchdog bounds that wait.
+            if active.protected_until is None:
+                return True
         return (
             active.protected_until is not None and self._clock.monotonic() < active.protected_until
         )
+
+    def _start_playback_protection(self, active: _Active) -> None:
+        playback = self._playback.get(active.handle.handle_id)
+        if (
+            playback is None
+            or playback.started_at is None
+            or playback.interrupted is not None
+            or not active.intent.injection.reply.protected
+            or active.protected_until is not None
+            or active.protection_ended
+        ):
+            return
+        active.protected_until = (
+            playback.started_at + active.intent.injection.reply.protect_ms / 1000
+        )
+        with bind(intent_id=active.intent.dedup_key or active.intent.source):
+            log.info(
+                "scheduler.protection_started",
+                source=active.intent.source,
+                handle_id=active.handle.handle_id,
+                protect_ms=active.intent.injection.reply.protect_ms,
+            )
+        self._spawn(self._protection_cap(active), name="scheduler:protect-cap")
 
     async def _protection_cap(self, active: _Active) -> None:
         """The protect_ms hard cap: re-arm provider barge-in even when the
@@ -1111,6 +1307,12 @@ class Scheduler:
         delay = max(0.0, active.protected_until - self._clock.monotonic())
         await self._clock.sleep(delay)
         self._end_protection(active, via="cap")
+        if (
+            self._playback_receipts
+            and self._floor.streamer_speaking
+            and self._playback_attempt(active.handle.handle_id) is active
+        ):
+            self._barge_in_playback()
 
     def _end_protection(self, active: _Active, *, via: str) -> None:
         """Re-arm the provider's own barge-in, once, whichever half gets here first.
@@ -1123,7 +1325,10 @@ class Scheduler:
                 line is what makes 「保护段有没有正常收尾」 answerable without
                 a debugger.
         """
-        if active.protection_ended or active.protected_until is None:
+        if active.protection_ended or (
+            active.protected_until is None
+            and not (self._playback_receipts and active.intent.injection.reply.protected)
+        ):
             return
         active.protection_ended = True
         with bind(intent_id=active.intent.dedup_key or active.intent.source):
@@ -1131,7 +1336,16 @@ class Scheduler:
                 "scheduler.protection_ended",
                 source=active.intent.source,
                 via=via,
-                remaining_ms=max(0, int((active.protected_until - self._clock.monotonic()) * 1000)),
+                remaining_ms=max(
+                    0,
+                    int(
+                        (
+                            (active.protected_until or self._clock.monotonic())
+                            - self._clock.monotonic()
+                        )
+                        * 1000
+                    ),
+                ),
             )
 
         async def rearm() -> None:
@@ -1148,10 +1362,10 @@ class Scheduler:
         active = self._active
         if active is None:
             return
-        if active.output_started:
-            # The room already hears this sentence: live events queue behind
-            # it no matter how they rank. Only the streamer's barge-in and
-            # panic — the hard paths — may still cut it.
+        if active.output_started or (self._playback_receipts and self._protection_active(active)):
+            # Live events wait once output has started or a protected playback
+            # attempt is awaiting its first samples. Its timer/watchdog bounds
+            # that wait; ordinary priority changes cannot bypass protection.
             return
         if int(incoming.priority) <= int(active.intent.priority):
             return
@@ -1165,12 +1379,12 @@ class Scheduler:
                 priority=int(active.intent.priority),
                 winner_source=incoming.source,
                 winner_priority=int(incoming.priority),
-                requeue=active.intent.requeue_on_interrupt,
+                requeue=_can_retry_interruption(active.intent),
                 spoken_ms=self._spoken_ms(active.started_at),
             )
         # The victim may have audio queued at L1; claw it back like any death.
         active.cleared = True
-        self.controls.put_nowait(PlaybackClear(reason="preempted"))
+        self.controls.put_nowait(self._playback_clear("preempted", active.handle.handle_id))
         self._spawn(self._speech.cancel(active.handle), name="scheduler:preempt-cancel")
         intent = active.intent
         if intent.requeue_on_interrupt:
@@ -1191,7 +1405,12 @@ class Scheduler:
             self._drop_queued(entry.intent, reason)
 
     def _requeue(
-        self, intent: Intent, *, item_written: bool, deadline: float | None = None
+        self,
+        intent: Intent,
+        *,
+        item_written: bool,
+        deadline: float | None = None,
+        interrupted: bool = False,
     ) -> None:
         """Put one intent back at the end of its priority band.
 
@@ -1201,7 +1420,9 @@ class Scheduler:
 
         `deadline` overrides expires_at — the dispatch-failure path uses it to
         bound its own retries (section 4.11). An interruption requeue passes
-        nothing: being talked over is not a reason to start a countdown.
+        nothing: being talked over must not renew an ordinary reply's expiry
+        or introduce a new one for paid work. Only `interrupted` spends the
+        optional per-intent retry allowance; failed sends do not.
 
         `item_written` drops the history half. That line is already in the
         conversation and add_context_item dedups nothing (s2s.py:126-142), so
@@ -1215,17 +1436,16 @@ class Scheduler:
         injection = intent.injection
         if item_written and injection.item_text is not None:
             injection = Injection(reply=injection.reply)
+        retries_left = intent.interrupt_retries_left
+        if interrupted and retries_left is not None:
+            assert retries_left > 0
+            retries_left -= 1
         self.submit(
-            Intent(
-                source=intent.source,
-                priority=intent.priority,
+            replace(
+                intent,
                 injection=injection,
-                trusted=intent.trusted,
-                event=intent.event,
-                dedup_key=intent.dedup_key,
-                created_at=intent.created_at,
                 expires_at=intent.expires_at if deadline is None else deadline,
-                requeue_on_interrupt=intent.requeue_on_interrupt,
+                interrupt_retries_left=retries_left,
             )
         )
         self._wake.set()
@@ -1243,10 +1463,36 @@ class Scheduler:
             return
         self._active = None
         self._floor.on_reply_active(False)
+        if outcome is Outcome.CANCELLED:
+            requeue = requeue and _can_retry_interruption(active.intent)
+        if self._playback_receipts:
+            playback = self._playback.get(active.handle.handle_id)
+            if outcome is Outcome.SPOKEN and (active.audio_generated or playback is not None):
+                self._park_for_playback(active)
+                self._flush_played()
+                self._wake.set()
+                return
+            if (
+                self._link_down
+                or bool(
+                    active.clear_reason and active.clear_reason not in {"barge_in", "server_cancel"}
+                )
+            ) or (
+                playback is not None
+                and playback.interrupted
+                and playback.reason not in {"barge_in", "server_cancel"}
+            ):
+                requeue = False
+            self._retire_playback(active.handle.handle_id)
         self._end_protection(active, via="settle")
         intent = active.intent
         self._free_key(intent)
-        parking = not requeue and outcome is Outcome.SPOKEN and self._floor.queued_audio
+        parking = (
+            not self._playback_receipts
+            and not requeue
+            and outcome is Outcome.SPOKEN
+            and self._floor.queued_audio
+        )
         with bind(intent_id=intent.dedup_key or intent.source):
             # debug and deliberately overlapping scheduler.verdict: this is the
             # LINK side of the same moment — whether a PlaybackClear already
@@ -1267,13 +1513,13 @@ class Scheduler:
                 spoken_ms=self._spoken_ms(active.started_at),
             )
         if requeue:
-            # Paid messages must not vanish silently (section 4.2): back into
-            # the queue they go, same priority, new place in line. The dedup
+            # Eligible replies return at the same priority with a new place
+            # in line. Ordinary replies have one interruption retry. The dedup
             # key was freed above, so the resubmission is not eaten (A15).
             # An active reply means dispatch got past both sends, so its
             # history line is already written — carrying it again would say
             # the same paid message arrived twice.
-            self._requeue(intent, item_written=True)
+            self._requeue(intent, item_written=True, interrupted=outcome is Outcome.CANCELLED)
             return
         if parking:
             # The model stopped producing tokens; the audience has not heard it
@@ -1299,21 +1545,24 @@ class Scheduler:
     def _park_for_playback(self, active: _Active) -> None:
         self._parked.append(
             _Parked(
-                intent=active.intent,
-                started_at=active.started_at,
+                active=active,
                 deadline=self._clock.monotonic() + _PLAYBACK_RECEIPT_GRACE_S,
             )
         )
 
+        parked = self._parked[-1]
+
         async def deadline_wake() -> None:
-            # The receipt arrives as notify(); nothing else would wake the loop
-            # to notice that the grace ran out.
-            await self._clock.sleep(_PLAYBACK_RECEIPT_GRACE_S)
-            self._wake.set()
+            while parked in self._parked:
+                deadline = self._playback_deadline(parked)
+                await self._clock.sleep(max(0.0, deadline - self._clock.monotonic()))
+                self._wake.set()
+                if self._clock.monotonic() >= self._playback_deadline(parked):
+                    return
 
         self._spawn(deadline_wake(), name="scheduler:playback-grace")
 
-    def _flush_played(self, *, played: bool | None = None) -> None:
+    def _flush_played(self, *, played: bool | None = None, reason: str = "shutdown") -> None:
         """Write the verdicts held for a playback receipt.
 
         `played` forces the answer for callers who already know it — panic and
@@ -1322,6 +1571,9 @@ class Scheduler:
         the whole thing.
         """
         if not self._parked:
+            return
+        if self._playback_receipts:
+            self._flush_playback_receipts(played=played, reason=reason)
             return
         now = self._clock.monotonic()
         drained = not self._floor.queued_audio
@@ -1344,6 +1596,72 @@ class Scheduler:
                 )
             )
         self._parked = still_waiting
+
+    def _playback_deadline(self, parked: _Parked) -> float:
+        playback = self._playback.get(parked.active.handle.handle_id)
+        if playback is None or playback.started_at is None:
+            return parked.deadline
+        return max(
+            parked.deadline,
+            playback.started_at + playback.audio_s + _PLAYBACK_RECEIPT_GRACE_S,
+        )
+
+    def _flush_playback_receipts(self, *, played: bool | None, reason: str) -> None:
+        for parked in tuple(self._parked):
+            active = parked.active
+            playback = self._playback.get(active.handle.handle_id)
+            interrupted = played is False
+            heard = played is True
+            cause = reason if interrupted else ""
+            if played is None:
+                if playback is not None and playback.interrupted is not None:
+                    interrupted = playback.interrupted
+                    heard = not interrupted
+                    cause = active.clear_reason or playback.reason
+                elif self._clock.monotonic() < self._playback_deadline(parked):
+                    continue
+            self._parked.remove(parked)
+            if not heard:
+                active.handle.stale = True
+                if not interrupted or (played is False and cause != "panic_mute"):
+                    self.controls.put_nowait(
+                        self._playback_clear(cause or "playback_timeout", active.handle.handle_id)
+                    )
+            self._end_protection(
+                active, via="playback" if heard or interrupted else "receipt_timeout"
+            )
+            self._free_key(active.intent)
+            self._retire_playback(active.handle.handle_id)
+            if (
+                interrupted
+                and cause in {"barge_in", "server_cancel"}
+                and _can_retry_interruption(active.intent)
+                and not self._panicked
+                and not self._link_down
+            ):
+                self._requeue(active.intent, item_written=True, interrupted=True)
+                continue
+            skip_reason = {
+                "panic_mute": SkipReason.PANIC_MUTE,
+                "output_disabled": SkipReason.SPEAK_DISABLED,
+                "link_down": SkipReason.LINK_DOWN,
+                "link_failed": SkipReason.LINK_DOWN,
+            }.get(cause)
+            self._emit(
+                Verdict(
+                    intent_id=active.intent.dedup_key or active.intent.source,
+                    source=active.intent.source,
+                    outcome=Outcome.CANCELLED if interrupted else Outcome.SPOKEN,
+                    phase=(
+                        Phase.SPEAKING
+                        if interrupted
+                        else (Phase.PLAYED if heard else Phase.GENERATING)
+                    ),
+                    reason=skip_reason,
+                    waited_s=self._waited_s(active.intent, active.started_at),
+                    spoken_ms=self._spoken_ms(active.started_at),
+                )
+            )
 
     def _waited_s(self, intent: Intent, until: float) -> float:
         """How long this intent waited for its turn, 0 when nobody said when it
@@ -1443,3 +1761,9 @@ def _as_stream_guard(
             return "blocked" if fn(delta) else None
 
     return _Wrapped()
+
+
+def _can_retry_interruption(intent: Intent) -> bool:
+    return intent.requeue_on_interrupt and (
+        intent.interrupt_retries_left is None or intent.interrupt_retries_left > 0
+    )

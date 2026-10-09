@@ -365,12 +365,12 @@ const handlers = {
     }
     bubble.endReply();
   },
-  "playback.clear": () => {
+  "playback.clear": (data) => {
     bubble.shatter();
     // Stop what is already scheduled, and report how much of it was heard.
     // The bubble and the sound have to go together — a shattered bubble over a
     // voice that keeps talking is worse than either alone.
-    audio?.clear();
+    audio?.clear(data);
   },
   "audio.owner": (data) => {
     panel.handleFrame("audio.owner", data);

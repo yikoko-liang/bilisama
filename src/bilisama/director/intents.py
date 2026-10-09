@@ -14,6 +14,7 @@ ghostwriting use the same event serializer below.
 
 from __future__ import annotations
 
+import random
 import re
 
 from bilisama.config.schema import InteractionConfig
@@ -238,18 +239,23 @@ def intent_for(
     gift_battery_medium: int = _TIER_DEFAULTS.gift_battery_medium,
     base_instructions: str | None = None,
     protect_paid: bool = False,
+    protect_danmaku: bool = _TIER_DEFAULTS.protect_danmaku_replies,
+    danmaku_protect_ms: int = _TIER_DEFAULTS.danmaku_protect_ms,
+    requeue_danmaku: bool = _TIER_DEFAULTS.requeue_danmaku_replies,
+    danmaku_requeue_percent: int = _TIER_DEFAULTS.danmaku_requeue_percent,
 ) -> Intent | None:
     """Map one live event to an Intent, or None for kinds that never speak here.
 
     Gifts are tiered by the frontend battery unit — the number a viewer sees
     on the gift panel: a high-tier gift keeps the BIG_GIFT slot; a medium one
-    rides the VIP_ENTER rung. Both survive streamer interruption by
-    requeueing. Whether a paid thank-you may ALSO hold the floor against the
+    rides the VIP_ENTER rung; a small one competes at danmaku priority.
+    Every paid tier survives interruption by requeueing without the ordinary
+    event TTL. Whether a paid thank-you may ALSO hold the floor against the
     streamer for protect_ms is the protect_paid switch ([interaction]
     protect_paid_replies, off by default): on, SC and high-tier gifts — plan
-    section 4.2's rule, priority at or above BIG_GIFT — dispatch protected;
-    everything else, switch or no switch, keeps the requeue and nothing more.
-    Anything smaller competes at danmaku priority and expires like one.
+    section 4.2's rule — dispatch protected. Eligibility is independent of
+    queue priority. Guard buys and lower-tier paid gifts only requeue.
+    Free gifts retain the ordinary event TTL and do not requeue.
 
     Args:
         event: The normalised live event.
@@ -257,11 +263,16 @@ def intent_for(
         max_tokens: Reply length cap, from the reply_length slider upstream.
         protect_ms: The protection window, honoured only when protect_paid is on.
         gift_battery_high: Batteries from which a gift outranks a guard buy.
-        gift_battery_medium: Batteries from which a gift still counts as paid.
+        gift_battery_medium: Batteries from which a gift gets medium-tier priority.
         base_instructions: The event-scoped public context, when the provider
             supports per-reply scoping (Assembly decides; None rides the
             session's own context).
         protect_paid: Arm the window for SC and high-tier gifts (ledger #91).
+        protect_danmaku: Protect every selected ordinary reply independently of requeue.
+        danmaku_protect_ms: The ordinary reply's own protection window.
+        requeue_danmaku: Allow one interruption retry within the original expiry.
+        danmaku_requeue_percent: Chance of selecting this reply for that retry.
+            Drawn once here; retry copies preserve the result.
 
     Returns:
         An Intent, or None when this kind has no speaking path here
@@ -276,15 +287,23 @@ def intent_for(
         log.debug("intents.no_speaking_path", kind=event.kind.value)
         return None
     paid = event.kind in _REQUEUE
+    protection_eligible = event.kind is EventKind.SUPER_CHAT
     if event.kind is EventKind.GIFT:
         batteries = event.gift.total_battery if event.gift is not None else 0
         if batteries >= gift_battery_high:
-            pass  # BIG_GIFT priority; interruption safety comes from requeue
+            protection_eligible = True
         elif batteries >= gift_battery_medium:
             priority = Priority.VIP_ENTER
         else:
             priority = Priority.DANMAKU
-            paid = False
+            paid = event.is_paid
+    is_danmaku = event.kind is EventKind.DANMAKU
+    requeue = paid
+    if is_danmaku:
+        requeue = requeue_danmaku and (
+            danmaku_requeue_percent >= 100
+            or (danmaku_requeue_percent > 0 and random.random() < danmaku_requeue_percent / 100)
+        )
     instruction = _instruction_for(
         event, gift_battery_high=gift_battery_high, gift_battery_medium=gift_battery_medium
     )
@@ -295,13 +314,11 @@ def intent_for(
         instructions=instruction,
         max_tokens=max_tokens,
         write_history=True,
-        # Off by default: the streamer's next word always lands and paid
-        # events survive it via requeue_on_interrupt. On, the scheduler keeps
-        # a protected reply alive through barge-in for protect_ms — and only
-        # s2s disarms the backend's own barge-in to match; validate.py warns
-        # on the others.
-        protected=protect_paid and priority >= Priority.BIG_GIFT,
-        protect_ms=protect_ms,
+        # Queue order and protection eligibility are separate product rules.
+        # Only s2s also disarms server-side barge-in; duplex protection applies
+        # to local playback and cannot guarantee continued server output.
+        protected=protect_danmaku if is_danmaku else protect_paid and protection_eligible,
+        protect_ms=danmaku_protect_ms if is_danmaku else protect_ms,
     )
     # Staleness counts from ARRIVAL, not from when the window happened to
     # close — a reply 50s after the message answers a conversation the room
@@ -317,7 +334,8 @@ def intent_for(
         dedup_key=event.dedup_key,
         created_at=now,
         expires_at=None if paid else max(arrived + _DANMAKU_TTL_S, now + _DISPATCH_FLOOR_S),
-        requeue_on_interrupt=paid,
+        requeue_on_interrupt=requeue,
+        interrupt_retries_left=int(requeue) if is_danmaku else None,
     )
     _log_built(intent, now=now)
     return intent

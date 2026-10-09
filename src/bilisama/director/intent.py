@@ -70,3 +70,5 @@ class Intent:
     created_at: float = 0.0
     expires_at: float | None = None
     requeue_on_interrupt: bool = False
+    # None preserves unlimited paid retries; ordinary danmaku may retry once.
+    interrupt_retries_left: int | None = None

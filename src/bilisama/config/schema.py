@@ -403,15 +403,20 @@ class InteractionConfig(BaseModel):
     # taught without the gate she would read「SKIP」to the audience.
     voice_reply: VoiceReplyMode = Field(VoiceReplyMode.WHEN_ADDRESSED)
     speak: SpeakSwitches = Field(default_factory=SpeakSwitches)
-    # Ledger #91. Off: the streamer's next word always lands, and a paid
-    # thank-you that gets cut off is requeued. On: SC and high-tier gift
-    # replies hold the floor for sc_protect_ms — fully on s2s, which disarms
-    # the backend's own barge-in for that long; on hosted backends only the
-    # scheduler half applies, and validate.py says so.
+    # Ledger #91: only SC and high-tier gifts qualify for protection.
+    # s2s also disarms server-side barge-in. Duplex protects local playback;
+    # it cannot guarantee that the server keeps producing the reply.
     protect_paid_replies: bool = Field(False)
-    # The protection window's length. Honoured only while protect_paid_replies
-    # is on; forwarded unconditionally so flipping the switch needs no rebuild.
+    # Duplex starts this window at the first actual playback receipt; other
+    # providers retain their dispatch-time window. Zero disables protection.
+    # Forwarded even while protection is off so live edits need no rebuild.
     sc_protect_ms: int = Field(4000, ge=0, le=15000)
+    # Ordinary replies have independent opt-ins. Requeue keeps the original
+    # expiry and allows one retry; its probability never controls protection.
+    protect_danmaku_replies: bool = Field(False)
+    danmaku_protect_ms: int = Field(2000, ge=0, le=15000)
+    requeue_danmaku_replies: bool = Field(False)
+    danmaku_requeue_percent: int = Field(100, ge=0, le=100)
     # Tiers in the frontend battery unit — the number a viewer actually sees
     # on the gift panel (wire price 100 == 1 battery == CNY 0.1). validate.py
     # holds medium <= high.

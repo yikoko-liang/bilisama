@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import dataclasses
 import io
 import json
 import logging
@@ -24,7 +25,7 @@ import sys
 import tomllib
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import pytest
 
@@ -314,7 +315,18 @@ def _handoff_problems(tree: ast.AST) -> list[str]:
         if handoff is None:
             problems.append("AudioBroker 少了 on_handoff：页面走了没人清 PlaybackTally")
             continue
-        referenced = {node.id for node in ast.walk(handoff.value) if isinstance(node, ast.Name)}
+        target: ast.AST = handoff.value
+        if isinstance(target, ast.Name):
+            target_name = target.id
+            target = next(
+                (
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == target_name
+                ),
+                target,
+            )
+        referenced = {node.id for node in ast.walk(target) if isinstance(node, ast.Name)}
         if "tally" not in referenced:
             problems.append("on_handoff 没接到 tally 上")
             continue
@@ -749,11 +761,15 @@ class _SilentSpeaker:
     backlog_s = 0.0
     dropped_s = 0.0
 
-    def play(self, pcm: bytes) -> None:
+    def play(self, pcm: bytes, *, handle_id: int | None = None) -> bool:
         self.played.extend(pcm)
+        return bool(pcm)
 
-    def flush(self) -> None:
+    def flush(self, *, reply_ids: tuple[int, ...] = (), reason: str = "barge_in") -> None:
         self.played.clear()
+
+    def take_playback_events(self) -> list[tuple[int, str, str]]:
+        return []
 
     def suspend(self) -> None:
         return None
@@ -761,7 +777,7 @@ class _SilentSpeaker:
     def resume(self) -> None:
         return None
 
-    def finish_reply(self) -> None:
+    def finish_reply(self, *, handle_id: int | None = None) -> None:
         return None
 
     def set_enabled(self, enabled: bool) -> None:
@@ -1527,6 +1543,7 @@ def duplex_panel_box(
         caught["handlers"] = kwargs["handlers"]
         caught["settings"] = kwargs["settings"]
         caught["hub"] = kwargs["hub"]
+        caught["broker"] = kwargs["broker"]
         return object()
 
     monkeypatch.setattr(server_module, "create_ui_app", _catch_app)
@@ -1960,6 +1977,229 @@ async def test_failed_timeout_save_restores_the_running_adapter_and_settings(
         assert after == before
         assert "没改成" in printed and "磁盘满了" in printed
         assert "已保存并生效" not in printed
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_director_playback_does_not_bypass_scheduler_on_speech() -> None:
+    """Hearing the streamer must not erase a protected reply in the sink."""
+    speaker = _SilentSpeaker()
+    handle = _handle()
+    queued: list[tuple[int, float]] = []
+    await dev_talk._consume_events(
+        _feed(
+            [
+                link.ReplyAudioDelta(handle, b"\x01\x00" * 240),
+                link.SpeechStarted(),
+            ]
+        ),
+        cast(dev_talk._Speaker, speaker),
+        None,
+        stop_on_speech=False,
+        on_playback_queued=lambda reply_id, duration: queued.append((reply_id, duration)),
+    )
+    assert speaker.played == b"\x01\x00" * 240
+    assert queued == [(handle.handle_id, 0.01)]
+
+
+async def test_bare_playback_keeps_its_speech_stop_without_scheduler() -> None:
+    speaker = _SilentSpeaker()
+    await dev_talk._consume_events(
+        _feed(
+            [
+                link.ReplyAudioDelta(_handle(), b"\x01\x00" * 240),
+                link.SpeechStarted(),
+            ]
+        ),
+        cast(dev_talk._Speaker, speaker),
+        None,
+    )
+    assert not speaker.played
+
+
+async def test_duplex_sc_protection_and_requeue_through_real_playback_wiring(
+    duplex_panel_box: tuple[Path, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive fan-out, scheduler, broker and UI receipts through run_director."""
+    from bilisama.director import scheduler as scheduler_module
+    from bilisama.director.intent import Intent
+    from bilisama.ui.events import ClientEvent
+    from tests.unit.test_director import _protected_intent, _until
+
+    config_path, caught = duplex_panel_box
+    instances: list[scheduler_module.Scheduler] = []
+    scheduler_type = scheduler_module.Scheduler
+    verdicts: list[Any] = []
+
+    def build_scheduler(*args: Any, **kwargs: Any) -> scheduler_module.Scheduler:
+        original_sink = kwargs["verdict_sink"]
+
+        def record(verdict: Any) -> None:
+            verdicts.append(verdict)
+            original_sink(verdict)
+
+        kwargs["verdict_sink"] = record
+        result = scheduler_type(*args, **kwargs)
+        instances.append(result)
+        return result
+
+    async def draft(_intent: Intent) -> str:
+        return "谢谢你的支持，今晚也一起聊聊。"
+
+    monkeypatch.setattr(scheduler_module, "Scheduler", build_scheduler)
+    task = await _start_panel_director(config_path, caught)
+    scheduler = instances[-1]
+    scheduler._ghostwriter = draft
+    speech = _OfflineDuplex.instances[-1]
+    broker = caught["broker"]
+    handlers = caught["handlers"]
+    markers: list[tuple[str, dict[str, object]]] = []
+    try:
+        await broker.claim(
+            "browser",
+            send=lambda pcm: None,
+            marker=lambda event, data: markers.append((event, data)),
+        )
+        # A page owns the output; the sounddevice sink must not report its copy.
+        monkeypatch.setattr(_SilentSpeaker, "play", lambda *args, **kwargs: False)
+        scheduler.submit(_protected_intent("sc", protect_ms=15000))
+        await _until(lambda: scheduler._active is not None, "SC 没有派发")
+        assert scheduler._active is not None
+        handle = scheduler._active.handle
+        speech._events.put_nowait(link.ReplyAudioDelta(handle, b"\x01\x00" * 240))
+        speech._events.put_nowait(link.ReplyDone(handle, link.ReplyStatus.COMPLETED))
+        await _until(lambda: bool(scheduler._parked) and bool(markers), "生成完成没有进入播放阶段")
+        await handlers[ClientEvent.PLAYBACK_STARTED]({"handle_id": handle.handle_id})
+        await handlers[ClientEvent.PLAYBACK_REPLY_STARTED]({"handle_id": handle.handle_id})
+        speech._events.put_nowait(link.SpeechStarted())
+        await _until(lambda: scheduler._floor.streamer_speaking, "没有收到主播开口")
+        await asyncio.sleep(0.03)
+        assert not any(event == "playback.clear" for event, _data in markers)
+        assert scheduler._parked[0].active.protected_until is not None
+        assert scheduler._parked[0].active.protected_until > scheduler._clock.monotonic() + 14
+        await handlers[ClientEvent.PLAYBACK_ENDED]({"handle_id": handle.handle_id})
+        await handlers[ClientEvent.PLAYBACK_REPLY_ENDED]({"handle_id": handle.handle_id})
+        assert not scheduler._parked
+        assert str(verdicts[-1].phase) == "played"
+
+        # With protection off the same playback path must requeue exactly once.
+        speech._events.put_nowait(link.SpeechStopped())
+        await _until(lambda: not scheduler._floor.streamer_speaking, "没有收到主播停声")
+        scheduler._floor.on_speech_stopped(quiet_s=0)
+        unprotected = dataclasses.replace(
+            _protected_intent("sc2", protect_ms=4000),
+            injection=dataclasses.replace(
+                _protected_intent("sc2", protect_ms=4000).injection,
+                reply=link.ReplySpec(protected=False),
+            ),
+        )
+        scheduler.submit(unprotected)
+        await _until(lambda: scheduler._active is not None, "第二条 SC 没有派发")
+        assert scheduler._active is not None
+        second = scheduler._active.handle
+        speech._events.put_nowait(link.ReplyAudioDelta(second, b"\x01\x00" * 240))
+        speech._events.put_nowait(link.ReplyDone(second, link.ReplyStatus.COMPLETED))
+        await _until(lambda: bool(scheduler._parked), "第二条没有进入播放阶段")
+        speech._events.put_nowait(link.SpeechStarted())
+        await _until(
+            lambda: any(event == "playback.clear" for event, _data in markers),
+            "播放器没有收到停止通知",
+        )
+        payload = {"handle_id": second.handle_id, "reason": "barge_in", "played_ms": 100}
+        await handlers[ClientEvent.PLAYBACK_CANCELLED](payload)
+        await handlers[ClientEvent.PLAYBACK_CANCELLED](payload)
+        assert scheduler.status()["queued"] == 1
+        assert not scheduler._parked
+    finally:
+        await broker.release("browser")
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_danmaku_panel_settings_reach_live_intents_and_reconnecting_pages(
+    duplex_panel_box: tuple[Path, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise persisted startup values and the real panel reload hook."""
+    from bilisama.app import Assembly
+    from bilisama.director.intent import Intent
+    from bilisama.ingest.events import EventKind, LiveEvent, Viewer
+    from bilisama.ui.events import ClientEvent
+
+    config_path, caught = duplex_panel_box
+    config_path.write_text(
+        config_path.read_text().replace(
+            "[interaction]\n",
+            "[interaction]\nprotect_danmaku_replies = true\n"
+            "danmaku_protect_ms = 2300\nrequeue_danmaku_replies = true\n"
+            "danmaku_requeue_percent = 100\n",
+        )
+    )
+    assemblies: list[Assembly] = []
+    intents: list[Intent] = []
+
+    def capture_assembly(**kwargs: Any) -> Assembly:
+        kwargs["submit"] = intents.append
+        assembly = Assembly(**kwargs)
+        assemblies.append(assembly)
+        return assembly
+
+    import bilisama.app as app_module
+
+    monkeypatch.setattr(app_module, "Assembly", capture_assembly)
+    task = await _start_panel_director(config_path, caught)
+    try:
+        assembly = assemblies[-1]
+
+        async def deliver(event_id: str) -> Intent:
+            before = len(intents)
+            # Room 0 follows the console lane without spending crowd tokens.
+            await assembly.on_event(
+                LiveEvent(
+                    kind=EventKind.DANMAKU,
+                    viewer=Viewer(uid=42, name="测试观众"),
+                    text="豆腐，今晚聊什么？",
+                    event_id=event_id,
+                )
+            )
+            assert len(intents) == before + 1
+            return intents[-1]
+
+        initial = await deliver("settings-initial")
+        assert initial.injection.reply.protected
+        assert initial.injection.reply.protect_ms == 2300
+        assert initial.requeue_on_interrupt
+        assert initial.interrupt_retries_left == 1
+
+        async def edit(field: str, value: object) -> None:
+            await caught["handlers"][ClientEvent.PANEL_SET](
+                {"config": {"path": f"interaction.{field}", "value": value}}
+            )
+
+        await edit("danmaku_protect_ms", 3500)
+        await edit("danmaku_requeue_percent", 0)
+        changed = await deliver("settings-changed")
+        assert changed.injection.reply.protected
+        assert changed.injection.reply.protect_ms == 3500
+        assert not changed.requeue_on_interrupt
+        assert initial.injection.reply.protect_ms == 2300
+        assert initial.requeue_on_interrupt
+
+        await edit("protect_danmaku_replies", False)
+        await edit("requeue_danmaku_replies", False)
+        disabled = await deliver("settings-disabled")
+        assert not disabled.injection.reply.protected
+        assert not disabled.requeue_on_interrupt
+
+        replay, queue = caught["hub"].attach()
+        caught["hub"].detach(queue)
+        states = [json.loads(line) for line in replay if json.loads(line)["event"] == "panel.state"]
+        interaction = states[-1]["data"]["interaction"]
+        assert interaction["protect_danmaku_replies"] is False
+        assert interaction["danmaku_protect_ms"] == 3500
+        assert interaction["requeue_danmaku_replies"] is False
+        assert interaction["danmaku_requeue_percent"] == 0
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

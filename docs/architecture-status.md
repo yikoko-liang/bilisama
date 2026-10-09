@@ -1,4 +1,4 @@
-# BiliSama 架构现状梳理（2026-09-03）
+# BiliSama 架构现状梳理（2026-09-03；保护与重排更新于 2026-10-10）
 
 这份文档回答「今天代码长什么样」。它和实施计划分工：计划（`~/.claude/plans/` 下那份，路径见
 CLAUDE.md 的会话上下文）管为什么这么设计、每一轮拍了什么板；这里管每个模块今天实际做到哪、
@@ -151,7 +151,7 @@ default_host、key_env；四条记录在 333-367 行。
 ### 3.1 Intent 与优先级
 
 `Intent`（`director/intent.py:62-74`）是七个来源汇成的一种形状，带 trusted、dedup_key、expires_at、
-requeue_on_interrupt 四个产品规则字段；`Injection` 是「写进历史的 item_text + 描述回复的 ReplySpec」
+requeue_on_interrupt 等产品规则字段；`Injection` 是「写进历史的 item_text + 描述回复的 ReplySpec」
 两半。优先级阶梯（:24-45）：
 
 | 值 | 来源 | 备注 |
@@ -162,7 +162,7 @@ requeue_on_interrupt 四个产品规则字段；`Injection` 是「写进历史�
 | 65 GUARD_BUY | 上舰 | 同上 |
 | 50 VIP_ENTER | 舰队或本房 5 级粉丝牌进房、中档礼物 | |
 | 40 BACKGROUND_RESULT | 后台任务结果 | 有定义无生产者 |
-| 30 DANMAKU | 弹幕、小额礼物、进房欢迎 | 20 秒过期 |
+| 30 DANMAKU | 弹幕、小额礼物、进房欢迎 | 小额付费礼物无普通排队有效期、打断后重排但不保护；免费或金额为 0 的礼物、弹幕和进房欢迎仍有有效期；普通弹幕可单独开启保护或一次重排 |
 | 10 PROACTIVE | 主动话题、戳一戳 | 30 秒过期 |
 
 ### 3.2 SpeakingFloor
@@ -186,8 +186,12 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 - 主播插话（`_barge_in`，:758-798）：发 PlaybackClear、cancel，保护段内不取消；付费意图被打断后
   重排队（:958-1022）。s2s 的 done(cancelled) 先于 speech_started 到，所以 `_on_done` 里用
   `expect_speech_edge` 压住 0.3 秒，防止重排队的意图在两帧之间被再派再杀（:703-756，计划 #29）。
-- 保护段生命周期：dispatch 时起 protect_ms 硬上限任务，settle 和硬上限两处都会 `_end_protection`
-  且只执行一次（:827-870）。`protected` 的唯一生产者是 `intent_for`，由 `[interaction] protect_paid_replies` 开关决定（默认关）。
+- 保护段生命周期：duplex 从实际首播回报开始计时，生成结束后保留原事件与播放归属，收到对应
+  回复编号的播放完成回报后收尾；本地和浏览器播放器都执行调度器的定向清音决定。其他后端
+  保留原有派发计时。`protected` 由 `intent_for` 生成：付费开关管 SC／高额礼物，普通弹幕
+  使用独立开关和时长，两者默认关闭（`scheduler.py` 的 `playback_started`／`playback_finished`）。
+- 普通弹幕可按配置重排一次；概率在创建意图时决定，重排时保留这个结果、优先级和原截止
+  时间，不重复抽取或续期。付费事件继续使用已有规则，不受普通弹幕的概率和次数上限影响。
 - 出口守卫：`_on_delta` 命中敏感词就 PlaybackClear + cancel + FAILED@SPEAKING，`on_hit=mute_all`
   时升级成 panic（:682-701）。
 - 回复完成：文本喂给 spoken_sink 当口癖素材、按 write_history 把 assistant 回复写回历史、起话痨度
@@ -216,7 +220,7 @@ heapq、一个 `_active`、dedup 键从 submit 活到 settle、一个 `controls`
 礼物按电池三档、上舰按舰长 / 提督 / 总督分仪式感、进房对照最近三次不重样。
 
 `intent_for`（:229-313）做映射：礼物按 `total_battery` 分档，高档保 BIG_GIFT、中档降到 VIP_ENTER、
-小额当弹幕；付费事件 `requeue_on_interrupt=True`；`protected` 由 `[interaction] protect_paid_replies` 决定（默认关，开了只保护 SC 和高额礼物，2026-09-03 加）——关着时主播开口是硬上限，付费保护的含义是「回来再说」；弹幕 TTL 20 秒从到达时刻起算。主播自己的弹幕走
+小额保持弹幕优先级 30。小额付费礼物按 `LiveEvent.is_paid` 判定，`requeue_on_interrupt=True`，无普通排队有效期但不保护；免费或金额为 0 的礼物仍不重排、保留 20 秒有效期。其余付费事件沿用原重排规则；`[interaction] protect_paid_replies` 默认关，开了只保护 SC 和高额礼物。普通弹幕另有 `protect_danmaku_replies`／`danmaku_protect_ms` 和 `requeue_danmaku_replies`／`danmaku_requeue_percent`：两个开关默认关，时长默认 2000 毫秒，补说概率默认 100%。补说最多一次，仍以到达后 20 秒和选中放行后 5 秒中较晚者作为截止时间；热更新只影响随后创建的回复。主播自己的弹幕走
 `anchor_danmaku_context_item`（:106-122）只写上下文不回复。
 
 这里的逐类规则和 `config/personas/live/event_responses.md` 有意重叠，代码注释明说要靠人手保持同步，
@@ -580,7 +584,7 @@ import」。
 | 上下文管理 | 静态前缀加动态尾段、变了才推、语音规则和事件规则分作用域、回复按后端决定要不要镜像写回历史（旁路要、正路不要，#102）、主播弹幕当共享上下文；她自起的回复说完的话和不接时的场景备注都进冷场话题的对话列表（2026-09-09） | 侧路调用不复用直播会话前缀缓存（#71，本质是架构决定）；主播说过什么在 s2s 产品路径上只剩十字备注 |
 | 主动性 | 完成，接了房间活跃度、预算、让路、无侧路模型的兜底 | 戳桌宠绕过所有 speak 开关（#48） |
 | 直播互动 | 完成并真房间验过：解析预算、付费侧袋、连击聚合、三态打分、单赢家窗口、延迟池、进房合并、VIP 提升、SC 撤回 | 出厂敏感词表是占位（#92）；follow / like / share 前端已置灰但后端无发声意图（#50）；msg_type 4/5/6 待真房间验证、blivedm 到期 2026-11-13（#95） |
-| 打断判停 | VAD 和判停全在语音后端，P2 不跑 VAD；打断链是 SpeechStarted → cancel + PlaybackClear → 音频队列 flush 标记 → 页面 stopEverything → playback.cancelled；付费保护只在 s2s 真生效，DashScope 探明不可行，付费事件改成靠重排队；回声消除靠 Chromium，真机三组对照 0 次自我打断；她自起的回复过语音门（3.6），出口守卫和紧急闭嘴对它生效（2026-09-09） | 投机静默窗取常量而不是计划写的分支值（#33）；`audio.echo_guard` 那个能量门没写；延迟基线没量（#16）；受保护段由 `protect_paid_replies` 开关控制（默认关），只有 s2s 能真挡住打断，云端由 `config validate` 提醒（#91 已关）；记号回复留在服务端历史（#97），火山的事件回复可能念出记号（#98） |
+| 打断判停 | duplex 使用本地声音检测补充服务端判停信号；打断由调度器统一决定，播放器按回复编号清音并回报完成／取消。duplex 的付费与普通弹幕保护从实际首播计时，付费事件可在播放被切后重排；普通弹幕可独立开启一次补说，默认关闭。s2s 另有服务端保护能力 | duplex 本地保护不能保证服务端继续生成；其他云端的服务端防打断能力仍按各家验证结论。语音门和保护独立，识别为对她说话不自动解除保护；其他欠账见 #33、#97、#98 |
 | 工具调用接口 | 只有收的一半：L2 能收 `ToolCall`（`client.py:541-551`），`dialect.tool_spec` 能翻译两种声明格式 | `tools/` 空包；`ToolRegistry`、`ToolSpec`、`get_stream_status` 不存在；`static_prefix` 的 `tool_block` 无调用方；pin/unpin（#21）和 BackgroundRunner（#64）没开工 |
 | 统一可配置参数 | 完成：单一 toml、profile 覆盖层、用户层、面板热改、114 字段、14 条校验、125 条元数据、v1→v4 迁移 | 一批「配了没人读」的字段（9.5 节）；密钥没有非终端入口；装机后随包配置找不到（#43、#55） |
 | 底层语音原子能力 | 已有：16k/20ms 采集、本地噪声门、Chromium 回声消除、回声探针、16k→24k 重采样、24k 播放（页面或本机 `_Speaker` 带 10 秒缓冲上限）、按段计数的播放回执、CoreAudio 默认输出跟随、设备归属仲裁 | 自研 TTS 链整条没有（TTSEngine / tagparser / chunker / mux）；形象驱动没有；说话动画是伪脉冲，`voice.level` 无生产者（#75）；`custom_tts.voice` 是假音色框（#66） |
@@ -589,8 +593,10 @@ import」。
 
 编号都指向计划 §16.8。
 
-- 受保护段：2026-09-03 加了 `[interaction] protect_paid_replies` 开关（默认关），开着时 SC 和高额礼物的答谢在
-  `sc_protect_ms` 内不被打断；只有 s2s 能真挡住，云端由 `config validate` 提醒（#91 已关）。
+- 受保护段：付费与普通弹幕使用独立开关，默认都关。duplex 的本地保护覆盖实际播放阶段，
+  不再随生成结束提前解除；服务端防打断仍未实现。s2s 有服务端保护能力，DashScope 已测得
+  服务端仍会取消。2026-10-10 03:48 已实测小额付费礼物在生成结束、播放未结束时被主播
+  打断后重排，同一事件重新派发并收到 `spoken@played`，用户确认听到了第二次答谢（#91）。
 - 出厂敏感词表是占位，上线前必须换（#92）。
 - 一批代码注释与文案漂移（#93）：2026-09-03 已修——`events.py` 的四个「NO CONSUMER YET」、「四个随包人设」的
   文案、`dev_talk.py` 模块头、`test_dependency_direction.py` 文件头、几处跨文件行号引用。

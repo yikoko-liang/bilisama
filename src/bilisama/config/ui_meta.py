@@ -156,8 +156,7 @@ UI_META: dict[str, FieldMeta] = {
     # sends people tuning it when something else is wrong.
     "audio.echo_guard": FieldMeta(
         label="抢跑静音",
-        hint="这个开关现在没人读。打断走的是「她一听见你说话就把播放队列清空」那条路，"
-        "不是压音量",
+        hint="这个开关现在没人读。播放是否清空由打断和回复保护规则决定，不通过这个开关压音量",
         audience=Audience.OPERATOR,
         reload=Reload.RESTART,
         group="音频",
@@ -345,8 +344,8 @@ UI_META: dict[str, FieldMeta] = {
     "interaction.protect_paid_replies": FieldMeta(
         label="付费答谢防打断",
         hint=(
-            "开着时，SC 和高额礼物的答谢在保护时长内不被主播打断；只有本地语音引擎能真挡住，"
-            "云端后端照样会被打断，断了重新排队"
+            "保护 SC 和高额礼物的答谢。duplex 只保护本地播放，服务端仍可能停止输出；"
+            "s2s 可关闭服务端打断，其他后端仍可能被打断。上舰、中额和小额付费礼物只重排队"
         ),
         audience=Audience.STREAMER,
         reload=Reload.LIVE,
@@ -355,12 +354,49 @@ UI_META: dict[str, FieldMeta] = {
     ),
     "interaction.sc_protect_ms": FieldMeta(
         label="付费答谢保护时长",
-        hint="防打断开着时一条答谢最多保护这么久，到点自动放开；关着时这个数不起作用",
+        hint=(
+            "duplex 从实际开始播放计时，其他后端仍从派发成功计时；到点放开。"
+            "防打断关闭或时长为 0 时不保护"
+        ),
         unit="ms",
         audience=Audience.OPERATOR,
         reload=Reload.LIVE,
         group="互动",
         order=3,
+    ),
+    "interaction.protect_danmaku_replies": FieldMeta(
+        label="普通弹幕回复开头防打断",
+        hint=("不改变弹幕筛选，与付费答谢保护无关。" "duplex 只保护本地播放，服务端仍可能停止输出"),
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=6,
+    ),
+    "interaction.danmaku_protect_ms": FieldMeta(
+        label="普通弹幕保护时长",
+        hint="duplex 从实际开始播放计时；其他后端从派发成功计时。防打断关闭或时长为 0 时不保护",
+        unit="ms",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=6,
+    ),
+    "interaction.requeue_danmaku_replies": FieldMeta(
+        label="普通弹幕被打断后重新回复",
+        hint="每条最多补说一次，重新组织回答；超过原有有效期后不再回复，不影响弹幕筛选",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=7,
+    ),
+    "interaction.danmaku_requeue_percent": FieldMeta(
+        label="普通弹幕重新回复的概率",
+        hint="只控制重排，不控制保护。100% 表示符合条件的都安排重排，不保证全部播完；0% 不重排",
+        unit="%",
+        audience=Audience.STREAMER,
+        reload=Reload.LIVE,
+        group="互动",
+        order=7,
     ),
     "interaction.entry_welcome": FieldMeta(label="进房欢迎", group="互动", order=8),
     "interaction.entry_welcome.ordinary": FieldMeta(

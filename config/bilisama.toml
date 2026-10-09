@@ -149,9 +149,20 @@ chattiness = "medium"                   # 说话频率的相对档位；实际�
 reply_length = "low"                    # 每句说多长，独立于说话频率；low 一句短话
 voice_reply = "when_addressed"          # 主播说话时接不接：always 每句都接；when_addressed 只接对她说的——
                                         # 她先听出主播在跟谁说，对观众讲、念弹幕、自言自语、连麦时不开口
-protect_paid_replies = false            # 开着时 SC 和高额礼物的答谢在下面的时长内不被主播打断；只有本地引擎能真挡住，
-                                        # 云端照样会断、断了重排队（config validate 会提醒）。关着时主播随时可打断，付费靠重排队防丢
-sc_protect_ms = 4000                    # 上面开关开着时的保护时长（毫秒），到点自动放开；关着时不起作用
+# Protection covers SC and high-tier gifts only. Duplex protects local playback,
+# not continued server output; only s2s also disarms server-side barge-in.
+protect_paid_replies = false
+# Duplex counts from actual playback start; other providers keep dispatch-time
+# timing. The window is in milliseconds; 0 or the switch above off disables it.
+sc_protect_ms = 4000
+# Ordinary danmaku opts in separately; these do not change event selection.
+protect_danmaku_replies = false
+# Duplex counts from actual playback. Zero disables protection.
+danmaku_protect_ms = 2000
+# At most one retry, within the original expiry. Probability applies only to
+# requeue; 100 admits every eligible reply, 0 admits none.
+requeue_danmaku_replies = false
+danmaku_requeue_percent = 100
 gift_battery_high = 1000                # 高额礼物门槛，单位电池（观众礼物面板上的数，1 电池 = 0.1 元）
 gift_battery_medium = 100               # 中额礼物门槛，同上；不得高于高额门槛
 burst_uniques = 5                       # 以下三项仅兼容旧配置；动态进房合并不再读取

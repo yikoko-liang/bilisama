@@ -525,6 +525,7 @@ def _bare_speaker(stream: object | None) -> dev_talk._Speaker:
 
     speaker = _Speaker.__new__(_Speaker)
     speaker._buffer = bytearray()
+    speaker._init_playback_reports()
     speaker._dropped_s = 0.0
     speaker._lock = threading.Lock()
     speaker._device_lock = threading.Lock()
@@ -1237,3 +1238,79 @@ def test_resume_refreshes_the_table_when_the_default_moved_meanwhile(
 def test_coreaudio_reports_a_real_default_output_on_this_mac() -> None:
     device_id = dev_talk._coreaudio_default_output_id()
     assert isinstance(device_id, int) and device_id > 0
+
+
+def test_local_reply_receipts_wait_for_actual_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Queueing PCM must not start paid protection before PortAudio consumes it."""
+    speaker = _bare_speaker(object())
+    now = [10.0]
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    assert speaker.play(b"\x01\x00" * 240, handle_id=91)
+    speaker.finish_reply(handle_id=91)
+    assert speaker.take_playback_events() == []
+    output = bytearray(480)
+    speaker._feed(output, 240, None, None)
+    assert speaker.take_playback_events() == [(91, "started", "")]
+    now[0] += 0.02
+    assert speaker.take_playback_events() == [(91, "ended", "")]
+    assert speaker.take_playback_events() == []
+
+
+def test_local_targeted_cut_keeps_other_reply_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    speaker = _bare_speaker(object())
+    monkeypatch.setattr("time.monotonic", lambda: 10.0)
+    speaker.play(b"\x01\x00" * 240, handle_id=91)
+    speaker.play(b"\x02\x00" * 240, handle_id=92)
+    speaker.flush(reply_ids=(91,), reason="barge_in")
+    speaker.flush(reply_ids=(91,), reason="barge_in")
+    assert speaker.take_playback_events() == [(91, "cancelled", "barge_in")]
+    speaker.finish_reply(handle_id=92)
+    output = bytearray(480)
+    speaker._feed(output, 240, None, None)
+    assert bytes(output) == b"\x02\x00" * 240
+    assert speaker.take_playback_events() == [(92, "started", "")]
+
+
+def test_local_cut_drops_pending_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    speaker = _bare_speaker(object())
+    now = [10.0]
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    speaker.play(b"\x01\x00" * 240, handle_id=91)
+    speaker.finish_reply(handle_id=91)
+    speaker._feed(bytearray(480), 240, None, None)
+    speaker.flush(reply_ids=(91,), reason="panic_mute")
+    now[0] += 1
+    assert speaker.take_playback_events() == [(91, "cancelled", "panic_mute")]
+
+
+def test_local_clear_before_pcm_does_not_reopen_cancelled_reply() -> None:
+    speaker = _bare_speaker(object())
+    speaker.flush(reply_ids=(91,), reason="barge_in")
+    speaker.flush(reply_ids=(91,), reason="barge_in")
+    assert speaker.take_playback_events() == [(91, "cancelled", "barge_in")]
+    assert not speaker.play(b"\x01\x00" * 240, handle_id=91)
+    assert not speaker.busy
+    assert speaker.play(b"\x02\x00" * 240, handle_id=92)
+
+
+def test_local_backlog_drop_retires_the_whole_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    speaker = _bare_speaker(object())
+    monkeypatch.setattr(dev_talk, "_MAX_BACKLOG_BYTES", 64)
+    speaker.play(b"\x01\x00" * 48, handle_id=7)
+    assert speaker.take_playback_events() == [(7, "cancelled", "backlog")]
+    assert not speaker.busy
+    assert not speaker.play(b"\x01\x00" * 8, handle_id=7)
+    assert speaker.play(b"\x02\x00" * 8, handle_id=8)
+    assert bytes(speaker._buffer) == b"\x02\x00" * 8
+
+
+def test_local_clear_preserves_audio_already_finished(monkeypatch: pytest.MonkeyPatch) -> None:
+    speaker = _bare_speaker(object())
+    now = [10.0]
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    speaker.play(b"\x01\x00" * 240, handle_id=91)
+    speaker.finish_reply(handle_id=91)
+    speaker._feed(bytearray(480), 240, None, None)
+    now[0] += 0.02
+    speaker.flush(reply_ids=(91,), reason="barge_in")
+    assert speaker.take_playback_events() == [(91, "started", ""), (91, "ended", "")]

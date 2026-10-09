@@ -48,6 +48,8 @@ def test_client_vocabulary_is_pinned() -> None:
         "console.line",
         "playback.started",
         "playback.ended",
+        "playback.reply_started",
+        "playback.reply_ended",
         "playback.cancelled",
         "audio.ask",
         "audio.report",

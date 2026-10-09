@@ -873,3 +873,43 @@ async def test_event_contract_uses_one_available_channel(
     reply = kit.intents[0].injection.reply
     assert (reply.base_instructions or "").count(rules) == int(scoped)
     assert (reply.instructions or "").count(rules) == int(not scoped and composes)
+
+
+async def test_danmaku_interruption_policy_changes_only_for_new_replies(tmp_path: Path) -> None:
+    """Live edits must reach the next event without changing queued replies."""
+    kit = build_assembly_kit(tmp_path)
+    try:
+        await kit.assembly.on_event(_event("原来的弹幕"))
+        original = kit.intents[-1]
+        assert not original.injection.reply.protected
+        assert not original.requeue_on_interrupt
+
+        kit.assembly.configure_interaction(
+            protect_danmaku=True,
+            danmaku_protect_ms=2300,
+            requeue_danmaku=True,
+            danmaku_requeue_percent=100,
+        )
+        await kit.assembly.on_event(_event("现在的弹幕"))
+        selected = kit.intents[-1]
+        assert selected.injection.reply.protected
+        assert selected.injection.reply.protect_ms == 2300
+        assert selected.requeue_on_interrupt
+        assert selected.interrupt_retries_left == 1
+        assert selected.expires_at is not None
+        assert not original.requeue_on_interrupt
+
+        kit.assembly.configure_interaction(danmaku_requeue_percent=0)
+        await kit.assembly.on_event(_event("概率为零"))
+        zero_probability = kit.intents[-1]
+        assert not zero_probability.requeue_on_interrupt
+        assert zero_probability.injection.reply.protected
+
+        kit.assembly.configure_interaction(protect_danmaku=False, requeue_danmaku=False)
+        await kit.assembly.on_event(_event("关闭两个开关"))
+        disabled = kit.intents[-1]
+        assert not disabled.injection.reply.protected
+        assert not disabled.requeue_on_interrupt
+        assert selected.injection.reply.protected and selected.requeue_on_interrupt
+    finally:
+        kit.store.close()

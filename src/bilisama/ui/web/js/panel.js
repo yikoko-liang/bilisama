@@ -132,6 +132,13 @@ export function createPanel({ send }) {
   const roomEventsEl = document.getElementById("room-events");
   const chattinessSel = document.getElementById("chattiness");
   const replyLengthSel = document.getElementById("reply-length");
+  const danmakuProtectToggle = document.getElementById("danmaku-protect-enabled");
+  const danmakuProtectDuration = document.getElementById("danmaku-protect-duration");
+  const danmakuProtectSeconds = document.getElementById("danmaku-protect-seconds");
+  const danmakuProtectValue = document.getElementById("danmaku-protect-value");
+  const danmakuRequeueToggle = document.getElementById("danmaku-requeue-enabled");
+  const danmakuRequeuePercent = document.getElementById("danmaku-requeue-percent");
+  const danmakuRequeueValue = document.getElementById("danmaku-requeue-value");
   const giftMediumInput = document.getElementById("gift-medium");
   const giftHighInput = document.getElementById("gift-high");
   const entryGroupBoxes = [...document.querySelectorAll("[data-entry-group]")];
@@ -375,7 +382,9 @@ export function createPanel({ send }) {
   const sendConfig = (path, value) => {
     if (!send("panel.set", { config: { path, value } })) {
       feedEntry({ kind: "system", text: "连接断开，这条修改没发出去" });
+      return false;
     }
+    return true;
   };
 
   inputToggle?.addEventListener("change", () => {
@@ -410,6 +419,69 @@ export function createPanel({ send }) {
   replyLengthSel?.addEventListener("change", () => {
     sendConfig("interaction.reply_length", replyLengthSel.value);
   });
+  const danmakuState = {};
+  const danmakuDragging = new Set();
+  const showDanmakuControls = () => {
+    if (danmakuProtectSeconds) {
+      danmakuProtectSeconds.disabled = !danmakuProtectToggle?.checked;
+      if (danmakuProtectDuration) danmakuProtectDuration.hidden = danmakuProtectSeconds.disabled;
+      if (danmakuProtectValue) danmakuProtectValue.textContent = `${Number(danmakuProtectSeconds.value)} 秒`;
+    }
+    if (danmakuRequeuePercent) {
+      danmakuRequeuePercent.disabled = !danmakuRequeueToggle?.checked;
+      if (danmakuRequeueValue) danmakuRequeueValue.textContent = `${danmakuRequeuePercent.value}%`;
+    }
+  };
+  const applyDanmakuState = (interaction) => {
+    // Partial panel frames must not reset settings from a previous full echo.
+    for (const [field, control] of [
+      ["protect_danmaku_replies", danmakuProtectToggle],
+      ["requeue_danmaku_replies", danmakuRequeueToggle],
+    ]) {
+      if (!control || typeof interaction[field] !== "boolean") continue;
+      danmakuState[field] = interaction[field];
+      control.checked = interaction[field];
+    }
+    for (const [field, control, divisor] of [
+      ["danmaku_protect_ms", danmakuProtectSeconds, 1000],
+      ["danmaku_requeue_percent", danmakuRequeuePercent, 1],
+    ]) {
+      if (!control || !Number.isFinite(interaction[field])) continue;
+      danmakuState[field] = interaction[field];
+      if (!danmakuDragging.has(field)) control.value = String(interaction[field] / divisor);
+    }
+    showDanmakuControls();
+  };
+  for (const [field, control] of [
+    ["protect_danmaku_replies", danmakuProtectToggle],
+    ["requeue_danmaku_replies", danmakuRequeueToggle],
+  ]) {
+    control?.addEventListener("change", () => {
+      showDanmakuControls();
+      if (!sendConfig(`interaction.${field}`, control.checked)) applyDanmakuState(danmakuState);
+    });
+  }
+  for (const [field, control, multiplier] of [
+    ["danmaku_protect_ms", danmakuProtectSeconds, 1000],
+    ["danmaku_requeue_percent", danmakuRequeuePercent, 1],
+  ]) {
+    control?.addEventListener("input", () => {
+      danmakuDragging.add(field);
+      showDanmakuControls();
+    });
+    for (const event of ["pointercancel", "blur"]) {
+      control?.addEventListener(event, () => {
+        if (danmakuDragging.delete(field)) applyDanmakuState(danmakuState);
+      });
+    }
+    control?.addEventListener("change", () => {
+      danmakuDragging.delete(field);
+      const value = Math.round(Number(control.value) * multiplier);
+      showDanmakuControls();
+      if (!sendConfig(`interaction.${field}`, value)) applyDanmakuState(danmakuState);
+    });
+  }
+
   const giftEdit = (input, path) => {
     input?.addEventListener("change", () => {
       const value = Number(input.value);
@@ -543,6 +615,7 @@ export function createPanel({ send }) {
       showVoiceVolume();
     }
     const interaction = state.interaction ?? {};
+    applyDanmakuState(interaction);
     if (chattinessSel && document.activeElement !== chattinessSel) {
       chattinessSel.value = interaction.chattiness ?? "medium";
     }
@@ -1721,6 +1794,7 @@ export function createPanel({ send }) {
       // dev-talk is back on the toml's values, so refetch instead of trusting
       // what is on screen.
       configLoaded = false;
+      danmakuDragging.clear();
       if (isOpen) loadConfig(true);
     },
   };

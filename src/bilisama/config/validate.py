@@ -334,18 +334,30 @@ def check(s: Settings, *, config_dir: Path | None = None) -> list[ConfigProblem]
     # hosted.py warns once) and volcano has no such switch at all. There the
     # window is half a promise — she still gets cut off, and the requeue is
     # what actually saves the thank-you — so say so rather than let the switch
-    # look like it works.
+    # look like it works. Duplex also protects reply-owned local playback,
+    # independently of whether the server continues producing its response.
     if s.interaction.protect_paid_replies and s.speech.provider is not ProviderName.S2S:
         problems.append(
             ConfigProblem(
                 field="interaction.protect_paid_replies",
                 message=(
-                    f"付费答谢防打断只有本地语音引擎（s2s）能真挡住：{s.speech.provider.value} "
-                    "的判停会照样打断她，这个开关在这条路上只剩「被打断后重新排队」那一半。"
+                    (
+                        "duplex 的付费答谢防打断只保护本地播放，不能阻止服务端自行停止生成；"
+                        "被打断后的重排规则独立于这个开关。"
+                    )
+                    if s.speech.provider is ProviderName.VOLCANO_DUPLEX
+                    else (
+                        f"付费答谢防打断只有本地语音引擎（s2s）能真挡住：{s.speech.provider.value} "
+                        "的判停会照样打断她，这个开关在这条路上只剩「被打断后重新排队」那一半。"
+                    )
                 ),
                 fix=(
-                    "接受这个效果就不用改；想真挡住，把 [speech] provider 换成 s2s，"
-                    "或者关掉这个开关。"
+                    "需要本地播放保护可保持开启；不需要时关闭即可。"
+                    if s.speech.provider is ProviderName.VOLCANO_DUPLEX
+                    else (
+                        "接受这个效果就不用改；想真挡住，把 [speech] provider 换成 s2s，"
+                        "或者关掉这个开关。"
+                    )
                 ),
                 fatal=False,
             )

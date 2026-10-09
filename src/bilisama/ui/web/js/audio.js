@@ -110,7 +110,14 @@ export function createAudio({ onOwner, onNotice = () => {} }) {
   // `currentTime` means we fell behind and the queue has drained.
   let nextStart = 0;
   let live = []; // scheduled sources, so a barge-in can stop them all
-  let playedMs = 0; // of the current utterance, for playback.cancelled
+  let playedMs = 0; // legacy audio without a reply ID
+  let receivingReply = null;
+  const replies = new Map();
+  const settled = new Set();
+  const rememberSettled = (id) => {
+    settled.add(id);
+    if (settled.size > 256) settled.delete(settled.values().next().value);
+  };
   let analyser = null; // input level, for the panel's meter
   let wantedInput = undefined; // deviceId the streamer picked, if any
   let voice = null; // createVoiceChain, built with the context
@@ -177,7 +184,17 @@ export function createAudio({ onOwner, onNotice = () => {} }) {
         // and start playing again, which is the beat of voice the streamer
         // heard carrying on after the text had stopped.
         try {
-          if (JSON.parse(message.data).event === "playback.clear") stopEverything();
+          const { event, data = {} } = JSON.parse(message.data);
+          if (event === "playback.clear") stopEverything(data);
+          else if (event === "playback.reply") {
+            receivingReply = Number.isInteger(data.handle_id) ? data.handle_id : null;
+          } else if (event === "playback.reply_done") {
+            const reply = replies.get(data.handle_id);
+            if (reply) {
+              reply.done = true;
+              finishReply(data.handle_id);
+            }
+          }
         } catch {
           // Not ours; a socket that only ever carries our own frames should
           // still not die on one it cannot read.
@@ -191,6 +208,7 @@ export function createAudio({ onOwner, onNotice = () => {} }) {
       // and running it for a socket that was already replaced tears down the
       // live one's capture chain.
       if (socket !== ws) return;
+      stopEverything({ reason: "audio_handoff" });
       stopCapture();
       onOwner(null);
       if (closed) return;
@@ -295,34 +313,107 @@ export function createAudio({ onOwner, onNotice = () => {} }) {
     stream = null;
   }
 
-  function stopEverything() {
-    // Buffers that finished were credited by their onended. The one playing
-    // right now was not, and it is exactly the one a barge-in cuts — so a cut
-    // anywhere inside the first buffer used to report "nothing heard". Credit
-    // the part of it that already left the speaker.
+  function finishReply(id) {
+    const reply = replies.get(id);
+    if (!reply || !reply.done || reply.pending !== 0 || !reply.started) return;
+    report("playback.reply_ended", { handle_id: id, played_ms: Math.round(reply.playedMs) });
+    replies.delete(id);
+    rememberSettled(id);
+  }
+
+  function observeStart(entry) {
+    const reply = replies.get(entry.id);
+    if (!reply || reply.started || !live.includes(entry)) return;
+    // Scheduling a source is not playback: the AudioContext can be suspended,
+    // and earlier audio may still occupy the speaker. Read its running clock.
+    if (context.currentTime < entry.start) {
+      entry.timer = setTimeout(() => observeStart(entry), 10);
+      return;
+    }
+    reply.started = true;
+    report("playback.reply_started", { handle_id: entry.id });
+  }
+
+  function finishSegment(entry) {
+    // A stop can settle a completed buffer before its queued onended runs.
+    if (!live.includes(entry)) return;
+    const reply = replies.get(entry.id);
+    if (reply && !reply.started) observeStart(entry);
+    clearTimeout(entry.timer);
+    entry.source.onended = null;
+    live = live.filter((item) => item !== entry);
+    if (reply) {
+      reply.pending -= 1;
+      reply.playedMs += entry.duration * 1000;
+    } else playedMs += entry.duration * 1000;
+    if (!live.length) voice.attach();
+    report("playback.ended", entry.id === null ? {} : { handle_id: entry.id });
+    if (reply) finishReply(entry.id);
+  }
+
+  function stopEverything({ reply_ids: ids = [], reason = "barge_in" } = {}) {
+    const targets = new Set(ids.filter(Number.isInteger));
+    const all = targets.size === 0;
     const now = context ? context.currentTime : 0;
-    let partialS = 0;
-    live.forEach(({ start, duration }) => {
-      if (start < now) partialS += Math.min(now, start + duration) - start;
-    });
-    const heard = Math.round(playedMs + partialS * 1000);
-    live.forEach(({ source }) => {
-      source.onended = null; // no ended receipts for what nobody heard
-      try {
-        source.stop();
-      } catch {
-        // Already finished between the barge-in and this loop.
+    const completed = new Set();
+    for (const [id, reply] of replies) {
+      if (!reply.done || (!all && !targets.has(id))) continue;
+      const remaining = live.filter((entry) => entry.id === id);
+      if (remaining.every((entry) => entry.start + entry.duration <= now)) {
+        completed.add(id);
+        remaining.forEach(finishSegment);
+        finishReply(id);
       }
-    });
-    live = [];
-    nextStart = 0;
-    playedMs = 0;
-    voice?.attach(); // quiet now, if the limiter was waiting for that
-    report("playback.cancelled", { played_ms: heard });
+    }
+    const stopping = live.filter((entry) => all || targets.has(entry.id));
+    const heard = new Map();
+    for (const [id, reply] of replies) {
+      if (all || targets.has(id)) heard.set(id, reply.playedMs);
+    }
+    let legacyHeard = playedMs;
+    for (const entry of stopping) {
+      const partialMs = Math.max(0, Math.min(now - entry.start, entry.duration)) * 1000;
+      if (entry.id === null) legacyHeard += partialMs;
+      else heard.set(entry.id, (heard.get(entry.id) ?? 0) + partialMs);
+      clearTimeout(entry.timer);
+      entry.source.onended = null;
+      try {
+        entry.source.stop();
+      } catch {
+        // Already finished between the clear and this loop.
+      }
+    }
+    live = live.filter((entry) => !stopping.includes(entry));
+    nextStart = live.length ? Math.max(...live.map((entry) => entry.start + entry.duration)) : 0;
+    if (all) playedMs = 0;
+    for (const id of targets) {
+      // A clear can overtake the first PCM on the control socket. Retire the
+      // ID now so that late audio cannot start playing again.
+      if (!heard.has(id)) heard.set(id, 0);
+    }
+    for (const [id, duration] of heard) {
+      if (!settled.has(id)) {
+        report("playback.cancelled", { handle_id: id, played_ms: Math.round(duration), reason });
+        rememberSettled(id);
+      }
+      replies.delete(id);
+    }
+    if (
+      all &&
+      (stopping.some((entry) => entry.id === null) || (heard.size === 0 && completed.size === 0))
+    ) {
+      report("playback.cancelled", { played_ms: Math.round(legacyHeard), reason });
+    }
+    voice?.attach();
   }
 
   function schedule(samples) {
-    if (!samples.length) return;
+    if (!samples.length || settled.has(receivingReply)) return;
+    const id = receivingReply;
+    if (id !== null && !replies.has(id)) {
+      replies.set(id, { pending: 0, started: false, done: false, playedMs: 0 });
+    }
+    const reply = replies.get(id);
     ensureContext();
     // Autoplay policy parks a context until a gesture. In the shell there is
     // rarely one before she first speaks, so ask every time — resume() on a
@@ -348,17 +439,18 @@ export function createAudio({ onOwner, onNotice = () => {} }) {
     const start = Math.max(nextStart, context.currentTime + 0.05);
     source.start(start);
     nextStart = start + buffer.duration;
-    live.push({ source, start, duration: buffer.duration });
+    const entry = { source, start, duration: buffer.duration, id, timer: null };
+    live.push(entry);
+    if (reply) {
+      reply.pending += 1;
+      if (reply.pending === 1 && !reply.started) observeStart(entry);
+    }
     // Per SEGMENT, both of them. One reply plays as many buffers, and the
     // instant between two of them is not the end of speaking — reading it as
     // one is how the backlog comes back (ledger #41).
-    report("playback.started");
-    source.onended = () => {
-      live = live.filter((entry) => entry.source !== source);
-      playedMs += buffer.duration * 1000;
-      if (!live.length) voice.attach(); // her turn has drained: a quiet moment
-      report("playback.ended");
-    };
+    const receipt = id === null ? {} : { handle_id: id };
+    report("playback.started", receipt);
+    source.onended = () => finishSegment(entry);
   }
 
   open();

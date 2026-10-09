@@ -176,11 +176,29 @@
         </article>
 
         <article class="setting-card">
-          <div class="setting-head"><div><h2>回复策略</h2><p>这两项调整后，下一条回复起立即使用。</p></div></div>
+          <div class="setting-head"><div><h2>回复策略</h2><p>调整后立即生效；普通弹幕设置用于之后选中的回复。</p></div></div>
           <div class="form-grid two">
             <label><span>话痨程度</span><select id="chattiness"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
             <label><span>回复长度</span><select id="reply-length"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
           </div>
+          <details id="danmaku-reply-settings" class="advanced"><summary>普通弹幕</summary>
+            <div class="danmaku-settings">
+              <p class="muted">不改变弹幕筛选，只决定入选回复被打断时怎么处理。</p>
+              <label class="check-line"><input id="danmaku-protect-enabled" type="checkbox"> 回复开头防打断</label>
+              <label id="danmaku-protect-duration" class="range-field" hidden><span>保护时长 <b id="danmaku-protect-value">2 秒</b></span>
+                <input id="danmaku-protect-seconds" type="range" min="0" max="15" step="0.1" value="2" disabled>
+                <small>duplex 从实际开始播放计时，只保护本地播放，服务端仍可能停止输出；0 秒不保护。</small>
+              </label>
+              <label class="check-line"><input id="danmaku-requeue-enabled" type="checkbox"> 被打断后重新回复</label>
+              <p class="muted">重新组织回答，每条最多补说一次；超过原有有效期就放下。</p>
+              <details id="danmaku-requeue-advanced" class="advanced"><summary>高级：重新回复的概率</summary>
+                <label class="range-field"><span>重新回复的概率 <b id="danmaku-requeue-value">100%</b></span>
+                  <input id="danmaku-requeue-percent" type="range" min="0" max="100" step="1" value="100" disabled>
+                  <small>100% 表示符合条件的都安排重排，不保证全部播完。只影响重新回复，不影响防打断。</small>
+                </label>
+              </details>
+            </div>
+          </details>
           <details class="advanced"><summary>礼物与欢迎</summary>
             <div class="advanced-grid">
               <label><span>中额礼物门槛（电池）</span><input id="gift-medium" type="number" min="1" step="1"></label>

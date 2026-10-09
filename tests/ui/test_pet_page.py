@@ -85,7 +85,11 @@ class Harness:
                 "provider": "s2s",
                 "room_connected": False,
                 "avatar": self.avatar,
-                "panel": {"panicked": False, "speak": {"danmaku": True, "gift": False}},
+                "panel": {
+                    "panicked": False,
+                    "speak": {"danmaku": True, "gift": False},
+                    "interaction": self.settings.interaction.model_dump(mode="json"),
+                },
             },
             **self.hello_override,
         }
@@ -166,6 +170,7 @@ def _build_server(hub: UiHub, harness_ref: list[Harness], port: int = 0) -> UiSe
                 {
                     "panicked": False,
                     "speak": {n: bool(getattr(speak, n)) for n in type(speak).model_fields},
+                    "interaction": settings.interaction.model_dump(mode="json"),
                     # The audio trio rides the same echo so the pet's quick
                     # keys are observable end-to-end (their ack gate lifts on
                     # this frame).
@@ -1979,3 +1984,138 @@ async def test_her_volume_slider_saves_through_the_panel_and_reads_back(
         {"audio": {"input_enabled": True, "output_enabled": True, "voice_volume": 140}},
     )
     await _wait(page, "document.getElementById('voice-volume-value').textContent === '140%'")
+
+
+async def test_danmaku_reply_controls_edit_independent_live_settings(
+    page: Page, harness: Harness
+) -> None:
+    def requeue_enabled() -> bool:
+        return harness.settings.interaction.requeue_danmaku_replies
+
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("#danmaku-reply-settings > summary")
+    assert not await page.is_checked("#danmaku-protect-enabled")
+    assert not await page.is_checked("#danmaku-requeue-enabled")
+    assert await page.is_disabled("#danmaku-protect-seconds")
+    assert await page.is_disabled("#danmaku-requeue-percent")
+    assert await page.input_value("#danmaku-protect-seconds") == "2"
+    assert await page.input_value("#danmaku-requeue-percent") == "100"
+
+    await page.check("#danmaku-protect-enabled")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda data: data.get("config")
+        == {"path": "interaction.protect_danmaku_replies", "value": True},
+    )
+    assert harness.settings.interaction.protect_danmaku_replies is True
+    assert requeue_enabled() is False
+    assert not await page.is_disabled("#danmaku-protect-seconds")
+    assert await page.is_disabled("#danmaku-requeue-percent")
+    await page.locator("#danmaku-protect-seconds").fill("3.5")
+    await page.locator("#danmaku-protect-seconds").dispatch_event("change")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda data: data.get("config")
+        == {"path": "interaction.danmaku_protect_ms", "value": 3500},
+    )
+    assert harness.settings.interaction.danmaku_protect_ms == 3500
+    assert await page.text_content("#danmaku-protect-value") == "3.5 秒"
+
+    await page.check("#danmaku-requeue-enabled")
+    await page.click("#danmaku-requeue-advanced > summary")
+    await page.locator("#danmaku-requeue-percent").fill("35")
+    await page.locator("#danmaku-requeue-percent").dispatch_event("change")
+    await _wait_for_call(
+        harness,
+        ClientEvent.PANEL_SET,
+        lambda data: data.get("config")
+        == {"path": "interaction.danmaku_requeue_percent", "value": 35},
+    )
+    assert requeue_enabled() is True
+    assert harness.settings.interaction.danmaku_requeue_percent == 35
+    assert await page.text_content("#danmaku-requeue-value") == "35%"
+    await page.uncheck("#danmaku-requeue-enabled")
+    await _wait(page, "document.getElementById('danmaku-requeue-percent').disabled")
+    assert await page.input_value("#danmaku-requeue-percent") == "35"
+    assert await page.is_checked("#danmaku-protect-enabled")
+
+
+async def test_danmaku_reply_controls_accept_feedback_and_reconnect(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("#danmaku-reply-settings > summary")
+    harness.settings.interaction.protect_danmaku_replies = True
+    harness.settings.interaction.danmaku_protect_ms = 4500
+    harness.settings.interaction.requeue_danmaku_replies = True
+    harness.settings.interaction.danmaku_requeue_percent = 70
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {"interaction": harness.settings.interaction.model_dump(mode="json")},
+    )
+    await _wait(page, "document.getElementById('danmaku-protect-seconds').value === '4.5'")
+    assert await page.is_checked("#danmaku-protect-enabled")
+    assert await page.is_checked("#danmaku-requeue-enabled")
+    assert await page.input_value("#danmaku-requeue-percent") == "70"
+    # Unrelated state frames must not undo a previously confirmed setting.
+    harness.hub.broadcast(ServerEvent.PANEL_STATE, {"panicked": False})
+    harness.hub.broadcast(ServerEvent.EVENT_FEED, {"kind": "system", "text": "其他设置已更新"})
+    await _wait(page, "document.getElementById('timeline').textContent.includes('其他设置已更新')")
+    assert await page.input_value("#danmaku-protect-seconds") == "4.5"
+    assert await page.is_checked("#danmaku-requeue-enabled")
+
+    harness.settings.interaction.protect_danmaku_replies = False
+    harness.settings.interaction.requeue_danmaku_replies = False
+    harness.settings.interaction.danmaku_protect_ms = 1200
+    harness.settings.interaction.danmaku_requeue_percent = 10
+    port = harness.port
+    await harness.server.stop()
+    _build_server(harness.hub, [harness], port=port)
+    for _ in range(200):
+        if harness.server.started:
+            break
+        await asyncio.sleep(0.01)
+    await _wait(
+        page,
+        "document.getElementById('danmaku-protect-seconds').value === '1.2'"
+        " && document.getElementById('danmaku-requeue-percent').value === '10'",
+        timeout_ms=15000,
+    )
+    assert not await page.is_checked("#danmaku-protect-enabled")
+    assert not await page.is_checked("#danmaku-requeue-enabled")
+    assert await page.is_disabled("#danmaku-protect-seconds")
+    assert await page.is_disabled("#danmaku-requeue-percent")
+
+
+async def test_danmaku_controls_restore_confirmed_values_after_cancel_or_disconnect(
+    page: Page, harness: Harness
+) -> None:
+    await _wait(page, "document.title.includes('豆腐')")
+    await page.click("#corner")
+    await page.click("#danmaku-reply-settings > summary")
+    harness.settings.interaction.protect_danmaku_replies = True
+    harness.hub.broadcast(
+        ServerEvent.PANEL_STATE,
+        {"interaction": harness.settings.interaction.model_dump(mode="json")},
+    )
+    await _wait(page, "!document.getElementById('danmaku-protect-seconds').disabled")
+    await page.eval_on_selector(
+        "#danmaku-protect-seconds",
+        "el => { el.value = '8'; el.dispatchEvent(new Event('input')); }",
+    )
+    assert await page.text_content("#danmaku-protect-value") == "8 秒"
+    await page.locator("#danmaku-protect-seconds").dispatch_event("pointercancel")
+    assert await page.input_value("#danmaku-protect-seconds") == "2"
+    assert not any(data.get("config") for event, data in harness.calls)
+
+    await harness.server.stop()
+    await page.click("#danmaku-protect-enabled")
+    assert await page.is_checked("#danmaku-protect-enabled")
+    assert not await page.is_disabled("#danmaku-protect-seconds")
+    await _wait(
+        page, "document.getElementById('timeline').textContent.includes('这条修改没发出去')"
+    )

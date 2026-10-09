@@ -85,8 +85,10 @@ class AudioBroker:
         "_flush",
         "_local",
         "_lock",
+        "_marker",
         "_on_handoff",
         "_owner",
+        "_reply_id",
         "_send",
     )
 
@@ -116,6 +118,8 @@ class AudioBroker:
         self._local = local
         self._announce = announce
         self._on_handoff = on_handoff
+        self._marker: Callable[[str, dict[str, object]], None] | None = None
+        self._reply_id: int | None = None
         self._owner: AudioOwner | None = None
         self._send: Callable[[bytes], None] | None = None
         self._close: Callable[[], None] | None = None
@@ -146,6 +150,7 @@ class AudioBroker:
         send: Callable[[bytes], None],
         close: Callable[[], None] | None = None,
         flush: Callable[[], None] | None = None,
+        marker: Callable[[str, dict[str, object]], None] | None = None,
     ) -> bool:
         """Hand the devices to a page, if it outranks whoever has them.
 
@@ -158,6 +163,7 @@ class AudioBroker:
                 goes on claiming to hold devices it lost.
             flush: How to drop everything queued for this client and tell it to
                 stop playing. See flush().
+            marker: Ordered reply boundaries and targeted stops on the audio socket.
 
         Returns:
             True if the caller now owns the devices. False means someone
@@ -173,6 +179,8 @@ class AudioBroker:
             self._send = send
             self._close = close
             self._flush = flush
+            self._marker = marker
+            self._reply_id = None
             if not first:
                 # A handover, whether or not the loser left a close callback.
                 self._handoff()
@@ -196,13 +204,15 @@ class AudioBroker:
             self._send = None
             self._close = None
             self._flush = None
+            self._marker = None
+            self._reply_id = None
             self._handoff()
             if self._local is not None:
                 await self._local.resume()
             log.info("audio.released", who=who)
             self._notify()
 
-    def flush(self) -> None:
+    def flush(self, *, reply_ids: tuple[int, ...] = (), reason: str = "barge_in") -> None:
         """Barge-in: drop what is queued and tell the page to stop.
 
         The control socket already carries playback.clear, and on its own that
@@ -215,10 +225,17 @@ class AudioBroker:
         So the stop travels with the audio: everything queued goes, and the
         marker behind it is ordered after every sample already in flight.
         """
-        if self._flush is not None:
+        if self._marker is not None and (reply_ids or reason != "barge_in"):
+            self._marker("playback.clear", {"reply_ids": list(reply_ids), "reason": reason})
+        elif self._flush is not None:
             self._flush()
 
-    def play(self, pcm: bytes) -> None:
+    def finish(self, handle_id: int) -> None:
+        """Order the end of this reply after its last audio chunk."""
+        if self._marker is not None:
+            self._marker("playback.reply_done", {"handle_id": handle_id})
+
+    def play(self, pcm: bytes, *, handle_id: int | None = None) -> None:
         """Send one downlink chunk to the owner, or drop it.
 
         Dropping is right during the gap between a tab closing and the local
@@ -226,6 +243,9 @@ class AudioBroker:
         would only play them late.
         """
         if self._send is not None:
+            if self._marker is not None and handle_id != self._reply_id:
+                self._marker("playback.reply", {"handle_id": handle_id})
+                self._reply_id = handle_id
             self._send(pcm)
 
     def announce_through(self, announce: Callable[[AudioOwner | None], None]) -> None:
@@ -261,7 +281,7 @@ class PlaybackTally:
     segment and opens only when the last one is done.
     """
 
-    __slots__ = ("_notify", "_on_playback", "_outstanding")
+    __slots__ = ("_cancelled", "_counts", "_notify", "_on_playback", "_outstanding")
 
     def __init__(
         self,
@@ -278,6 +298,8 @@ class PlaybackTally:
         self._on_playback = on_playback
         self._notify = notify
         self._outstanding = 0
+        self._counts: dict[int | None, int] = {}
+        self._cancelled: deque[int] = deque(maxlen=256)
 
     @property
     def outstanding(self) -> int:
@@ -299,26 +321,40 @@ class PlaybackTally:
         """
         return self._outstanding > 0
 
-    def started(self) -> None:
+    def started(self, handle_id: int | None = None) -> None:
+        if handle_id is not None and handle_id in self._cancelled:
+            return
+        self._counts[handle_id] = self._counts.get(handle_id, 0) + 1
         self._outstanding += 1
         if self._outstanding == 1:
             self._on_playback(True)
 
-    def ended(self) -> None:
-        # Clamped: a receipt for a segment that was already cancelled would
-        # otherwise drive the count negative and wedge the gate shut.
-        self._outstanding = max(0, self._outstanding - 1)
+    def ended(self, handle_id: int | None = None) -> None:
+        count = self._counts.get(handle_id, 0)
+        if count == 0:
+            return
+        if count == 1:
+            self._counts.pop(handle_id)
+        else:
+            self._counts[handle_id] = count - 1
+        self._outstanding -= 1
         if self._outstanding == 0:
             self._on_playback(False)
             self._notify()
 
-    def cancelled(self) -> None:
-        """A barge-in took everything scheduled. Nothing is outstanding now."""
-        if self._outstanding == 0:
-            return
-        self._outstanding = 0
-        self._on_playback(False)
-        self._notify()
+    def cancelled(self, handle_id: int | None = None) -> None:
+        """Discard only this reply; absent IDs retain the legacy all-clear."""
+        if handle_id is not None:
+            self._cancelled.append(handle_id)
+            removed = self._counts.pop(handle_id, 0)
+        else:
+            self._cancelled.extend(key for key in self._counts if key is not None)
+            removed = self._outstanding
+            self._counts.clear()
+        self._outstanding -= removed
+        if removed and self._outstanding == 0:
+            self._on_playback(False)
+            self._notify()
 
 
 # One envelope point per 20 ms. The trick that makes this cheap: buckets are a

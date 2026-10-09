@@ -78,6 +78,9 @@ class ClientEvent(StrEnum):
     # segments instead.
     PLAYBACK_STARTED = "playback.started"
     PLAYBACK_ENDED = "playback.ended"
+    # Reply receipts identify actual playback, beyond per-segment scheduling.
+    PLAYBACK_REPLY_STARTED = "playback.reply_started"
+    PLAYBACK_REPLY_ENDED = "playback.reply_ended"
     # Answer to playback.clear. played_ms is the number stage 5 needs to trim a
     # remembered reply down to what the audience actually heard.
     PLAYBACK_CANCELLED = "playback.cancelled"

@@ -727,6 +727,9 @@ input.cfg-edit:focus {
 .room-event .when { color: var(--ink-faint); font-variant-numeric: tabular-nums; }
 
 .advanced summary { cursor: pointer; font-size: 12.5px; color: var(--ink-dim); margin-top: 8px; }
+.danmaku-settings { display: grid; gap: 10px; margin: 12px 0; }
+.danmaku-settings p { margin: 0; font-size: 12px; line-height: 1.6; }
+.danmaku-settings .advanced > .range-field { margin-top: 10px; }
 .advanced-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; font-size: 12.5px; }
 .advanced-grid label > span { display: block; margin-bottom: 4px; color: var(--ink-dim); }
 .advanced-grid input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--panel-edge); border-radius: var(--radius-s); background: var(--panel); color: var(--ink); }
